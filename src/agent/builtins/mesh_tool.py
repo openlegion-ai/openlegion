@@ -1,6 +1,6 @@
 """Mesh interaction tools: shared state, fleet awareness, artifacts.
 
-Framework-level skills available to every agent. Agents coordinate through
+Framework-level tools available to every agent. Agents coordinate through
 the shared blackboard (not through direct conversations with each other).
 """
 
@@ -10,7 +10,7 @@ import json
 import time
 from pathlib import Path
 
-from src.agent.skills import skill
+from src.agent.tools import tool
 from src.shared.paths import resolve_under_root
 from src.shared.utils import dumps_safe, sanitize_for_prompt, setup_logging
 
@@ -20,7 +20,7 @@ _NOTIFY_COOLDOWNS: dict[str, float] = {}
 _NOTIFY_COOLDOWN_SECONDS = 120  # 2 minutes between similar notifications
 
 
-@skill(
+@tool(
     name="notify_user",
     description=(
         "Send a notification to the user across all connected channels "
@@ -65,7 +65,7 @@ async def notify_user(message: str, *, mesh_client=None, workspace_manager=None)
         return {"error": f"Failed to notify user: {e}"}
 
 
-@skill(
+@tool(
     name="list_agents",
     description=(
         "List agents in your project (or just yourself if standalone). Returns "
@@ -137,7 +137,7 @@ def _sanitize_value(value):
     return value
 
 
-@skill(
+@tool(
     name="read_blackboard",
     description=(
         "Read a value from the shared blackboard. Returns the full value "
@@ -170,7 +170,7 @@ async def read_blackboard(key: str, *, mesh_client=None) -> dict:
         return {"error": f"Failed to read '{key}': {e}"}
 
 
-@skill(
+@tool(
     name="write_blackboard",
     description=(
         "Write a value to the shared blackboard for OTHER AGENTS to read. "
@@ -212,7 +212,7 @@ async def write_blackboard(key: str, value: str, *, mesh_client=None) -> dict:
         return {"error": f"Failed to write '{key}': {e}"}
 
 
-@skill(
+@tool(
     name="list_blackboard",
     description=(
         "Discover what's on the shared blackboard by listing entries matching a key "
@@ -254,7 +254,7 @@ async def list_blackboard(prefix: str = "", *, mesh_client=None) -> dict:
         return {"error": f"Failed to list '{prefix}': {e}"}
 
 
-@skill(
+@tool(
     name="publish_event",
     description=(
         "Broadcast a one-time signal to other agents via pub/sub. Subscribed "
@@ -290,7 +290,7 @@ async def publish_event(
         return {"error": f"Failed to publish to '{topic}': {e}"}
 
 
-@skill(
+@tool(
     name="subscribe_event",
     description=(
         "Subscribe to a pub/sub topic for one-time signals. Once subscribed, "
@@ -320,7 +320,7 @@ async def subscribe_event(topic: str, *, mesh_client=None) -> dict:
         return {"error": f"Failed to subscribe to '{topic}': {e}"}
 
 
-@skill(
+@tool(
     name="watch_blackboard",
     description=(
         "Watch blackboard keys matching a glob pattern. When any matching "
@@ -350,7 +350,7 @@ async def watch_blackboard(pattern: str, *, mesh_client=None) -> dict:
         return {"error": f"Failed to watch '{pattern}': {e}"}
 
 
-@skill(
+@tool(
     name="claim_task",
     description=(
         "Atomically claim a task from the shared blackboard. Reads the current "
@@ -389,7 +389,7 @@ async def claim_task(key: str, claim_value: str, *, mesh_client=None) -> dict:
         return {"error": f"Failed to claim '{key}': {e}"}
 
 
-@skill(
+@tool(
     name="save_artifact",
     description=(
         "Save a deliverable file (report, export, code) to your workspace "
@@ -466,7 +466,7 @@ async def save_artifact(
     return result
 
 
-@skill(
+@tool(
     name="set_cron",
     description=(
         "Schedule a recurring job. Three modes:\n"
@@ -569,7 +569,7 @@ async def set_cron(
         return {"error": f"Failed to create cron job: {e}"}
 
 
-@skill(
+@tool(
     name="list_cron",
     description=(
         "List your scheduled cron jobs. Returns each job's ID, schedule, "
@@ -587,7 +587,7 @@ async def list_cron(*, mesh_client=None) -> dict:
         return {"error": f"Failed to list cron jobs: {e}"}
 
 
-@skill(
+@tool(
     name="remove_cron",
     description="Remove one of your scheduled cron jobs by its ID.",
     parameters={
@@ -607,7 +607,7 @@ async def remove_cron(job_id: str, *, mesh_client=None) -> dict:
         return {"error": f"Failed to remove cron job: {e}"}
 
 
-@skill(
+@tool(
     name="spawn_fleet_agent",
     description=(
         "Spawn a new agent in its own isolated container with independent tools, "
@@ -648,7 +648,7 @@ async def spawn_agent(
         return {"error": f"Failed to spawn agent: {e}"}
 
 
-@skill(
+@tool(
     name="read_agent_history",
     description=(
         "Read another agent's workspace daily logs to understand their recent "
@@ -673,7 +673,7 @@ async def read_agent_history(agent_id: str, *, mesh_client=None) -> dict:
         return {"error": f"Failed to read history of '{agent_id}': {e}"}
 
 
-@skill(
+@tool(
     name="get_agent_profile",
     description=(
         "Read another agent's public profile — mesh-verified metadata plus "
@@ -701,7 +701,7 @@ async def get_agent_profile(agent_id: str, *, mesh_client=None) -> dict:
         return {"error": f"Failed to read profile of '{agent_id}': {e}"}
 
 
-@skill(
+@tool(
     name="update_workspace",
     description=(
         "Update a workspace file to improve across sessions. These persist and "

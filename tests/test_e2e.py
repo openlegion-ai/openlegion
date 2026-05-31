@@ -1,7 +1,7 @@
 """End-to-end test: mesh server + Docker agent container + real LLM.
 
 Tests the full data path:
-  mesh server -> agent container -> LLM proxy -> skills -> result
+  mesh server -> agent container -> LLM proxy -> tools -> result
 
 Requires:
   - Docker running and accessible
@@ -100,11 +100,11 @@ def e2e_stack(tmp_path_factory):
         pytest.fail("Mesh server failed to start")
 
     # Now start the agent container (mesh is ready to accept registration)
-    skills_dir = os.path.abspath("skills/research")
+    tools_dir = os.path.abspath("agent_tools/research")
     url = cm.start_agent(
         agent_id="research",
         role="research",
-        skills_dir=skills_dir,
+        tools_dir=tools_dir,
         system_prompt=(
             "You are a research specialist. Your job is to gather comprehensive "
             "information about companies using available tools. "
@@ -181,13 +181,13 @@ def test_agent_registered_with_mesh(e2e_stack):
 @skip_no_docker
 @skip_no_key
 def test_agent_has_capabilities(e2e_stack):
-    """Verify the agent exposes its built-in skill definitions."""
+    """Verify the agent exposes its built-in tool definitions."""
     url = e2e_stack["agent_url"]
     r = httpx.get(f"{url}/capabilities", timeout=5)
     assert r.status_code == 200
     caps = r.json()
-    assert "read_file" in caps["skills"]
-    assert "run_command" in caps["skills"]
-    assert "http_request" in caps["skills"]
+    assert "read_file" in caps["tools"]
+    assert "run_command" in caps["tools"]
+    assert "http_request" in caps["tools"]
 
 

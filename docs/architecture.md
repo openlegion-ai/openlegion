@@ -95,7 +95,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server (28 
 |--------|---------------|
 | `__main__.py` | Container entry point; reads env config, wires components, starts server. Requires `AGENT_ID` / `AGENT_ROLE` / `MESH_URL`. |
 | `loop.py` | Bounded execution loop. Task: 20 iterations. Chat: 30 tool rounds per turn, 200 total rounds. Heartbeat: 12 iterations. Session continues cap at 5 (`_MAX_SESSION_CONTINUES`). Env-var bounds clamped via `_clamp_env()`. |
-| `skills.py` | Skill discovery and registry; `@skill` decorator system. |
+| `tools.py` | Tool discovery and registry; `@tool` decorator system. |
 | `mcp_client.py` | MCP server lifecycle management and tool routing. |
 | `memory.py` | SQLite + sqlite-vec + FTS5 hierarchical memory (`EMBEDDING_DIM=1536`, weighted 0.7 vector / 0.3 keyword with salience decay). |
 | `workspace.py` | Persistent markdown workspace. Scaffold files (`_SCAFFOLD_FILES`): `INSTRUCTIONS.md`, `SOUL.md`, `USER.md`, `MEMORY.md`, `HEARTBEAT.md`, `INTERFACE.md`. `TEAM.md` / `SYSTEM.md` are read-only bootstrap inclusions, not writable scaffolds. (Pre-rename `PROJECT.md` files are migrated to `TEAM.md` once at startup by `team_migration.py`; the bootstrap loader itself reads only `TEAM.md`/`team.md`.) |
@@ -113,7 +113,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server (28 
 | `exec_tool.py` | Shell execution scoped to `/data` (`_MAX_TIMEOUT=300`). |
 | `file_tool.py` | File I/O with two-stage path traversal protection (`..` rejected lexically, then walked with `is_symlink` checks). |
 | `http_tool.py` | HTTP requests with `$CRED{}` handle substitution and SSRF protection (DNS pinning, IP blocking incl. CGNAT/6to4/Teredo). |
-| `browser_tool.py` | Browser automation via per-agent Camoufox (24 `@skill` tools — navigation, interaction, inspection, file transfer, CAPTCHA + handoff). |
+| `browser_tool.py` | Browser automation via per-agent Camoufox (24 `@tool` tools — navigation, interaction, inspection, file transfer, CAPTCHA + handoff). |
 | `mesh_tool.py` | Blackboard (with `sanitize_for_prompt()`), PubSub, `notify_user`, `list_agents`, artifacts, cron, spawn. |
 | `memory_tool.py` | Memory search with hierarchical fallback, memory save. |
 | `coordination_tool.py` | `hand_off`, `check_inbox`, `update_status`, `complete_task`. Origin-propagating; legacy v1 path uses blackboard, V2 path uses durable task records. |
@@ -122,7 +122,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server (28 
 | `image_gen_tool.py` | Image generation via Gemini or OpenAI DALL-E 3 (routed through the mesh proxy with fixed-price cost tracking). |
 | `subagent_tool.py` | In-process subagents (`MAX_DEPTH=2`, `MAX_CONCURRENT=3`, `MAX_TTL=600s`). |
 | `introspect_tool.py` | Runtime state query — permissions, budget, fleet, cron, health. |
-| `skill_tool.py` | Self-authoring with AST validation. Forbidden imports/calls/attrs prevent `eval`, `exec`, `open`, `__subclasses__`, etc. |
+| `tool_authoring.py` | Self-authoring with AST validation. Forbidden imports/calls/attrs prevent `eval`, `exec`, `open`, `__subclasses__`, etc. |
 | `fleet_tool.py` | Operator-only fleet management — `list_templates`, `apply_template` (per-slot creation, not atomic across slots). |
 | `operator_tools.py` | Operator-only orchestration — `edit_agent` (single tool; all fields apply immediately and emit an undo receipt: 5-min for soft fields, 30-min for hard fields), `undo_change`, deprecated `confirm_edit` no-op stub (kept for in-flight LLM conversations), `inspect_agents`, `inspect_teams` (alias `inspect_projects`), team/agent CRUD via `create_team` / `add_agents_to_team` / … (legacy `*_project` names still callable). |
 | `wallet_tool.py` | Wallet operations — get address, get balance, read contract, transfer, execute (Ethereum + Solana). |
@@ -300,7 +300,7 @@ Dockerfiles live at the repo root: `Dockerfile.agent` (python:3.12-slim, non-roo
 ## Key Invariants
 
 1. **Agents never hold API keys** — all calls route through the mesh credential vault.
-2. **No `eval()` / `exec()` on untrusted input** — skill self-authoring uses AST validation (forbidden imports/calls/attrs).
+2. **No `eval()` / `exec()` on untrusted input** — tool self-authoring uses AST validation (forbidden imports/calls/attrs).
 3. **Permission checks before every cross-boundary operation** — default deny.
 4. **Path traversal protection** — agent file operations confined to `/data` (two-stage: lexical `..` reject, then walk with `is_symlink` check).
 5. **Bounded execution** — 20 task iterations, 30 tool rounds per chat turn, 200 total chat rounds, **5 session continues max** (`_MAX_SESSION_CONTINUES`). Context compaction triggers at 0.70 fullness, not on a fixed round count; empty summary falls back to hard prune.

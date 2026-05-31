@@ -11,7 +11,7 @@ import random
 import time
 from urllib.parse import urlparse
 
-from src.agent.skills import skill
+from src.agent.tools import tool
 
 # ``_redact_credentials`` is re-exported here (via the aliased import) so
 # existing callers that imported it from this module — e.g. ``tests/test_builtins.py``
@@ -40,7 +40,7 @@ async def _browser_command(mesh_client, action: str, params: dict | None = None)
         return {"error": _deep_redact(str(e))}
 
 
-@skill(
+@tool(
     name="browser_navigate",
     description=(
         "Navigate your browser to a URL and return the page text. "
@@ -132,7 +132,7 @@ def _pick_warmup_search_engine(rng: random.Random | None = None) -> str:
     Exposed for testability — operators inspecting warmup behavior on
     stealth canaries can replay the same RNG seed to get a deterministic
     engine choice. Default ``rng`` uses the global ``random`` module
-    state, which is shared across all skills in the agent process.
+    state, which is shared across all tools in the agent process.
     """
     rng = rng or random
     urls = [u for u, _ in _WARMUP_SEARCH_ENGINES]
@@ -193,7 +193,7 @@ def _warmup_apex_url(target_url: str) -> str | None:
     return f"{scheme}://{host}/"
 
 
-@skill(
+@tool(
     name="browser_warmup",
     description=(
         "Pre-task warmup: navigate to a search engine and the target's home "
@@ -393,7 +393,7 @@ async def browser_warmup(
     }
 
 
-@skill(
+@tool(
     name="browser_get_elements",
     description=(
         "Get all interactive elements on the current page with ref IDs you "
@@ -496,7 +496,7 @@ async def browser_get_elements(
     return await _browser_command(mesh_client, "snapshot", payload)
 
 
-@skill(
+@tool(
     name="browser_wait_for",
     description=(
         "Wait for a CSS selector to appear (or disappear) on the current page. "
@@ -542,7 +542,7 @@ async def browser_wait_for(
     )
 
 
-@skill(
+@tool(
     name="browser_screenshot",
     description=(
         "Take a screenshot of the current page. Returns a visual image you "
@@ -642,7 +642,7 @@ async def browser_screenshot(
     return result
 
 
-@skill(
+@tool(
     name="browser_click",
     description=(
         "Click an element on the current page. Preferred: use ref from "
@@ -721,7 +721,7 @@ async def browser_click(
     return await _browser_command(mesh_client, "click", cmd)
 
 
-@skill(
+@tool(
     name="browser_click_xy",
     description=(
         "Click at viewport-relative CSS pixel coordinates (x, y). Useful "
@@ -777,7 +777,7 @@ async def browser_click_xy(
     )
 
 
-@skill(
+@tool(
     name="browser_type",
     description=(
         "Type text into a form field on the current page. Optionally clears the "
@@ -860,7 +860,7 @@ async def browser_type(
     return await _browser_command(mesh_client, "type", cmd)
 
 
-@skill(
+@tool(
     name="browser_hover",
     description=(
         "Move the mouse over an element without clicking it. "
@@ -896,7 +896,7 @@ async def browser_hover(
     )
 
 
-@skill(
+@tool(
     name="browser_scroll",
     description=(
         "Scroll the browser page. Supports scrolling by direction (up/down) "
@@ -949,7 +949,7 @@ async def browser_scroll(
     return await _browser_command(mesh_client, "scroll", params)
 
 
-@skill(
+@tool(
     name="browser_reset",
     description=(
         "Reset the browser by closing the current session and starting fresh. "
@@ -964,7 +964,7 @@ async def browser_reset(*, mesh_client=None) -> dict:
     return await _browser_command(mesh_client, "reset")
 
 
-@skill(
+@tool(
     name="browser_press_key",
     description=(
         "Press a keyboard key or shortcut. Use this to dismiss modals (Escape), "
@@ -992,7 +992,7 @@ async def browser_press_key(key: str, *, mesh_client=None) -> dict:
     return await _browser_command(mesh_client, "press_key", {"key": key})
 
 
-@skill(
+@tool(
     name="browser_go_back",
     description=(
         "Navigate back in browser history (like clicking the Back button). "
@@ -1006,7 +1006,7 @@ async def browser_go_back(*, mesh_client=None) -> dict:
     return await _browser_command(mesh_client, "go_back")
 
 
-@skill(
+@tool(
     name="browser_go_forward",
     description=(
         "Navigate forward in browser history (like clicking the Forward button). "
@@ -1020,7 +1020,7 @@ async def browser_go_forward(*, mesh_client=None) -> dict:
     return await _browser_command(mesh_client, "go_forward")
 
 
-@skill(
+@tool(
     name="browser_switch_tab",
     description=(
         "List all open browser tabs, or switch to a specific tab. "
@@ -1048,7 +1048,7 @@ async def browser_switch_tab(tab_index: int = -1, *, mesh_client=None) -> dict:
     )
 
 
-@skill(
+@tool(
     name="browser_find_text",
     description=(
         "Find elements on the current page whose accessible name contains "
@@ -1091,7 +1091,7 @@ async def browser_find_text(
     )
 
 
-@skill(
+@tool(
     name="browser_fill_form",
     description=(
         "Fill multiple form fields by their visible labels in one call. "
@@ -1172,7 +1172,7 @@ async def browser_fill_form(
     )
 
 
-@skill(
+@tool(
     name="browser_open_tab",
     description=(
         "Open a URL in a new browser tab. The new tab becomes the active "
@@ -1217,7 +1217,7 @@ async def browser_open_tab(
     )
 
 
-@skill(
+@tool(
     name="browser_inspect_requests",
     description=(
         "List recent network requests from the current browser context "
@@ -1274,7 +1274,7 @@ async def browser_inspect_requests(
     )
 
 
-@skill(
+@tool(
     name="browser_detect_captcha",
     description=(
         "Detect CAPTCHAs (reCAPTCHA, hCaptcha, Cloudflare Turnstile, etc.) "
@@ -1314,7 +1314,7 @@ def _upload_max_bytes() -> int:
 _UPLOAD_MAX_FILES = 5
 
 
-@skill(
+@tool(
     name="browser_upload_file",
     description=(
         "Upload one or more workspace files to a file-input element. "
@@ -1425,7 +1425,7 @@ async def browser_upload_file(
         return {"error": _deep_redact(str(e))}
 
 
-@skill(
+@tool(
     name="browser_solve_captcha",
     description=(
         "Explicitly request a CAPTCHA solve on the current page. Use "
@@ -1436,7 +1436,7 @@ async def browser_upload_file(
         "``solved`` / ``timeout`` / ``rejected`` / ``no_solver`` / "
         "``rate_limited`` / ``cost_cap`` / ``captcha_during_solve``. "
         "When ``next_action == \"request_captcha_help\"`` you should "
-        "follow up with the ``request_captcha_help`` skill. "
+        "follow up with the ``request_captcha_help`` tool. "
         "``target_ref`` is reserved for multi-captcha pages — accepted "
         "but currently logged + ignored (top visible widget is solved)."
     ),
@@ -1494,7 +1494,7 @@ async def browser_solve_captcha(
     return await _browser_command(mesh_client, "solve_captcha", params)
 
 
-@skill(
+@tool(
     name="request_captcha_help",
     description=(
         "Ask the user to clear a CAPTCHA via the live browser viewer in "
@@ -1587,7 +1587,7 @@ async def request_captcha_help(
     return result
 
 
-@skill(
+@tool(
     name="request_browser_login",
     description=(
         "Ask the user to log in to a website through a live browser view "
@@ -1696,7 +1696,7 @@ async def request_browser_login(
     return result
 
 
-@skill(
+@tool(
     name="browser_download",
     description=(
         "Trigger a download by clicking the given ref and save the result "

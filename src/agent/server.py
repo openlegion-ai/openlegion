@@ -5,7 +5,7 @@ Exposes endpoints for the mesh to interact with:
   POST /cancel   - cancel current task
   GET  /status   - agent health check
   GET  /result   - last task result
-  GET  /capabilities - list available skills and tool definitions
+  GET  /capabilities - list available tools and tool definitions
   POST /invoke   - execute a named tool directly (no LLM)
   GET  /workspace - list workspace files
   GET  /workspace/{filename} - read workspace file
@@ -258,11 +258,11 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         result: dict[str, Any] = {
             "agent_id": loop.agent_id,
             "role": loop.role,
-            "skills": loop.skills.list_skills(exclude=exc, allowed=alw),
-            "tool_definitions": loop.skills.get_tool_definitions(exclude=exc, allowed=alw),
-            "tool_sources": loop.skills.get_tool_sources(exclude=exc, allowed=alw),
+            "tools": loop.tools.list_tools(exclude=exc, allowed=alw),
+            "tool_definitions": loop.tools.get_tool_definitions(exclude=exc, allowed=alw),
+            "tool_sources": loop.tools.get_tool_sources(exclude=exc, allowed=alw),
         }
-        mcp_client = getattr(loop.skills, "_mcp_client", None)
+        mcp_client = getattr(loop.tools, "_mcp_client", None)
         if mcp_client is not None:
             result["mcp_servers"] = mcp_client.list_server_statuses()
             result["mcp_tool_to_server"] = mcp_client.get_tool_to_server()
@@ -294,7 +294,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             raise HTTPException(403, f"Tool '{name}' is not available to this agent")
 
         try:
-            result = await loop.skills.execute(
+            result = await loop.tools.execute(
                 name, params,
                 mesh_client=loop.mesh_client,
                 workspace_manager=loop.workspace,
@@ -542,7 +542,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         """Write content to a workspace file.
 
         This endpoint is for mesh host / dashboard use only (human-initiated
-        edits). Agent-side writes go through the update_workspace skill which
+        edits). Agent-side writes go through the update_workspace tool which
         enforces its own allowlist and versioning. We require X-Mesh-Internal
         header to prevent agents from calling their own endpoint via
         http_request or exec+curl.

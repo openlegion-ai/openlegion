@@ -1,4 +1,4 @@
-"""Tests for the operator read_peer_artifact / list_peer_artifacts skills.
+"""Tests for the operator read_peer_artifact / list_peer_artifacts tools.
 
 These two tools close operator bug 6: peer artifacts live on each
 agent's private /data volume, so save_artifact mirrors metadata to the
@@ -16,7 +16,7 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _set_operator_env(monkeypatch):
-    """The skills require ALLOWED_TOOLS to be set (defence-in-depth)."""
+    """The tools require ALLOWED_TOOLS to be set (defence-in-depth)."""
     monkeypatch.setenv(
         "ALLOWED_TOOLS",
         "read_peer_artifact,list_peer_artifacts,read_agent_config",
@@ -49,7 +49,7 @@ async def test_list_peer_artifacts_happy_path():
 
 @pytest.mark.asyncio
 async def test_list_peer_artifacts_blocked_for_non_operator(monkeypatch):
-    """Non-operator agents (no ALLOWED_TOOLS) are denied at the skill layer."""
+    """Non-operator agents (no ALLOWED_TOOLS) are denied at the tool layer."""
     from src.agent.builtins.operator_tools import list_peer_artifacts
 
     monkeypatch.delenv("ALLOWED_TOOLS", raising=False)
@@ -140,7 +140,7 @@ async def test_read_peer_artifact_binary_base64():
 
 @pytest.mark.asyncio
 async def test_read_peer_artifact_blocked_for_non_operator(monkeypatch):
-    """Non-operator agents are denied at the skill layer."""
+    """Non-operator agents are denied at the tool layer."""
     from src.agent.builtins.operator_tools import read_peer_artifact
 
     monkeypatch.delenv("ALLOWED_TOOLS", raising=False)

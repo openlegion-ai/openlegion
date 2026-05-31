@@ -80,9 +80,9 @@ class TestEnsureOperatorCreates(_TempConfigMixin):
         assert perms["permissions"]["operator"]["can_use_browser"] is True
         assert perms["permissions"]["operator"]["can_use_internet"] is True
 
-        # Check skills dir created
-        skills_dir = Path(self._tmpdir) / "skills" / "operator"
-        assert skills_dir.is_dir()
+        # Check tools dir created
+        tools_dir = Path(self._tmpdir) / "agent_tools" / "operator"
+        assert tools_dir.is_dir()
 
 
 class TestEnsureOperatorNoop(_TempConfigMixin):
@@ -360,7 +360,7 @@ class TestOperatorConstants:
         back-compat cleanup (config edits now apply immediately via
         edit_agent with a built-in undo receipt, so there is nothing
         to propose or confirm). Neither name is registered as a
-        @skill anymore.
+        @tool anymore.
         """
         from src.cli.config import _OPERATOR_ALLOWED_TOOLS
         assert "edit_agent" in _OPERATOR_ALLOWED_TOOLS

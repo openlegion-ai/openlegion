@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from src.agent.llm import LLMClient
     from src.agent.memory import MemoryStore
     from src.agent.mesh_client import MeshClient
-    from src.agent.skills import SkillRegistry
+    from src.agent.tools import ToolRegistry
     from src.agent.workspace import WorkspaceManager
     from src.shared.types import MessageOrigin
 
@@ -159,7 +159,7 @@ _RUNTIME_GATE_TOOLS: dict[str, frozenset[str]] = {
 # read-only — needed so any agent can pick up back-edge events during
 # its heartbeat tick instead of waiting until the next /chat turn.
 # ``workflow_snapshot`` and ``await_task_event`` are operator-tier reads
-# (the skills self-reject for non-operator callers via ``_is_operator``);
+# (the tools self-reject for non-operator callers via ``_is_operator``);
 # adding them here lets operator's heartbeat surface workflow state
 # without dropping out to a full /chat turn.
 _HEARTBEAT_TOOLS = frozenset({
@@ -315,7 +315,7 @@ class AgentLoop:
         agent_id: str,
         role: str,
         memory: MemoryStore,
-        skills: SkillRegistry,
+        tools: ToolRegistry,
         llm: LLMClient,
         mesh_client: MeshClient,
         workspace: WorkspaceManager | None = None,
@@ -366,7 +366,7 @@ class AgentLoop:
         self.agent_id = agent_id
         self.role = role
         self.memory = memory
-        self.skills = skills
+        self.tools = tools
         self.llm = llm
         self.mesh_client = mesh_client
         self.workspace = workspace
@@ -398,7 +398,7 @@ class AgentLoop:
         self._goals_cache: dict | None | object = AgentLoop._GOALS_NOT_FETCHED
         self._goals_cache_ts: float = 0
         self._loop_detector = ToolLoopDetector(
-            exempt_tools=skills.get_loop_exempt_tools(),
+            exempt_tools=tools.get_loop_exempt_tools(),
         )
         # When an explicit allowlist is provided (e.g. operator agent),
         # only those tools are exposed and exclude is ignored.
@@ -434,13 +434,13 @@ class AgentLoop:
             self._disabled_gates.add("browser")
         self._runtime_disabled_tools: frozenset[str] = frozenset()
         self._recompute_runtime_disabled()
-        self._skills_reloaded: bool = False
+        self._tools_reloaded: bool = False
         self._is_operator: bool = allowed_tools is not None
         self._operator_playbook_state: dict[str, int] = {}  # playbook -> turns since trigger
         self._last_active_playbooks: list[str] = []
         self._operator_playbook_scan_idx: int = 0
         # Reference to the active messages list — set during tool execution
-        # so skills.execute() can inject it into provenance-gated tools.
+        # so tools.execute() can inject it into provenance-gated tools.
         self._current_messages: list[dict] = []
         # Liveness signal (Bug 1): single-task asyncio model means no lock
         # needed — the loop only ticks one iteration at a time. The
@@ -459,8 +459,8 @@ class AgentLoop:
         self._iterations_since_boot += 1
 
     @property
-    def _skill_filter_kw(self) -> dict:
-        """Build kwargs dict for SkillRegistry filter methods.
+    def _tool_filter_kw(self) -> dict:
+        """Build kwargs dict for ToolRegistry filter methods.
 
         Returns ``{"exclude": ..., "allowed": ...}`` only including keys whose
         values are not None, so callers that don't yet accept ``allowed`` (e.g.
@@ -928,7 +928,7 @@ class AgentLoop:
                     if warning:
                         effective_system = system_prompt + f"\n\n## {warning}"
 
-                available_tools = self.skills.get_tool_definitions(**self._skill_filter_kw) or None
+                available_tools = self.tools.get_tool_definitions(**self._tool_filter_kw) or None
                 llm_response = await _llm_call_with_retry(
                     self.llm.chat,
                     system=effective_system,
@@ -1040,9 +1040,9 @@ class AgentLoop:
                             tool_msg["_origin"] = f"agent:{_from}"
                         messages.append(tool_msg)
 
-                    # Rebuild system prompt after skill hot-reload
-                    if self._skills_reloaded:
-                        self._skills_reloaded = False
+                    # Rebuild system prompt after tool hot-reload
+                    if self._tools_reloaded:
+                        self._tools_reloaded = False
                         system_prompt = self._build_system_prompt(
                             assignment, introspect_data=introspect_data,
                         )
@@ -1186,7 +1186,7 @@ class AgentLoop:
                     # and bumps the counter to 2 before this branch runs.
                     # That contract is fragile — the nudge is gated on
                     # ``available_tools`` (line ~890) and silently skips
-                    # whenever tools are empty/None (skill-filter quirks,
+                    # whenever tools are empty/None (tool-filter quirks,
                     # runtime-disabled tools, hot-reload races). Operator
                     # hit a trend-scout task that fell straight through
                     # with iterations_executed=1 and got marked done despite
@@ -1637,24 +1637,24 @@ class AgentLoop:
             success=False,
         )
 
-    async def _maybe_reload_skills(self, result: Any) -> None:
-        """If a tool returned reload_requested, hot-reload the skill registry.
+    async def _maybe_reload_tools(self, result: Any) -> None:
+        """If a tool returned reload_requested, hot-reload the tool registry.
 
-        Sets ``_skills_reloaded`` so callers can rebuild system prompts
+        Sets ``_tools_reloaded`` so callers can rebuild system prompts
         with updated tool descriptions.  Re-registers with the mesh so the
         dashboard receives an ``agent_state: registered`` event and can
         refresh the capabilities view in real time.
         """
         if isinstance(result, dict) and result.get("reload_requested"):
-            count = self.skills.reload()
-            self._skills_reloaded = True
-            logger.info(f"Hot-reloaded skills: {count} available")
+            count = self.tools.reload()
+            self._tools_reloaded = True
+            logger.info(f"Hot-reloaded tools: {count} available")
             try:
                 await self.mesh_client.register(
-                    capabilities=self.skills.list_skills(),
+                    capabilities=self.tools.list_tools(),
                 )
             except Exception as e:
-                logger.warning("Failed to re-register after skill reload: %s", e)
+                logger.warning("Failed to re-register after tool reload: %s", e)
 
     @staticmethod
     def _collect_tool_names(messages: list[dict]) -> list[str]:
@@ -2096,8 +2096,8 @@ class AgentLoop:
                     # forced to produce a text-only response.
                     iter_tools = (
                         None if _remaining == 1
-                        else self.skills.get_tool_definitions(
-                            **self._skill_filter_kw,
+                        else self.tools.get_tool_definitions(
+                            **self._tool_filter_kw,
                         ) or None
                     )
 
@@ -2256,9 +2256,9 @@ class AgentLoop:
                             hb_tool_msg["_origin"] = f"agent:{_hb_from}"
                         messages.append(hb_tool_msg)
 
-                    # Clear reload flag if set (heartbeat rarely creates skills,
+                    # Clear reload flag if set (heartbeat rarely creates tools,
                     # but the flag must be consumed to avoid stale state).
-                    self._skills_reloaded = False
+                    self._tools_reloaded = False
 
                     # Trim if context grows large
                     messages = self._trim_context(messages, max_tokens=_FALLBACK_MAX_TOKENS)
@@ -3042,7 +3042,7 @@ class AgentLoop:
 
         try:
             result = await asyncio.wait_for(
-                self.skills.execute(
+                self.tools.execute(
                     tool_call.name,
                     tool_call.arguments,
                     mesh_client=self.mesh_client,
@@ -3075,7 +3075,7 @@ class AgentLoop:
                 )
             try:
                 await self._learn(tool_call.name, tool_call.arguments, result)
-                await self._maybe_reload_skills(result)
+                await self._maybe_reload_tools(result)
             except Exception as learn_err:
                 logger.warning("Post-tool learning failed for %s: %s", tool_call.name, learn_err)
 
@@ -3136,10 +3136,10 @@ class AgentLoop:
         i = 0
         n = len(tool_calls)
         while i < n:
-            safe = self.skills.is_parallel_safe(tool_calls[i].name)
+            safe = self.tools.is_parallel_safe(tool_calls[i].name)
             j = i + 1
             if safe:
-                while j < n and self.skills.is_parallel_safe(tool_calls[j].name):
+                while j < n and self.tools.is_parallel_safe(tool_calls[j].name):
                     j += 1
             batches.append((i, j, safe and (j - i) > 1))
             i = j
@@ -3430,7 +3430,7 @@ class AgentLoop:
                     elif _task_left <= self._TASK_CONVERGENCE_NUDGE_REMAINING:
                         _round_system = system + self._TASK_CONVERGENCE_SOFT_SUFFIX
                 _iter_tools = (
-                    self.skills.get_tool_definitions(**self._skill_filter_kw) or None
+                    self.tools.get_tool_definitions(**self._tool_filter_kw) or None
                 )
                 llm_response = await _llm_call_with_retry(
                     self.llm.chat,
@@ -3690,10 +3690,10 @@ class AgentLoop:
                             introspect_data=self._introspect_cache,
                         )
 
-                # If skills were hot-reloaded during tool execution,
+                # If tools were hot-reloaded during tool execution,
                 # rebuild the system prompt so tool descriptions stay in sync.
-                if self._skills_reloaded:
-                    self._skills_reloaded = False
+                if self._tools_reloaded:
+                    self._tools_reloaded = False
                     system = self._build_chat_system_prompt(
                         goals=self._goals_cache if self._goals_cache is not self._GOALS_NOT_FETCHED else None,
                         fleet_roster=self._fleet_roster,
@@ -4120,7 +4120,7 @@ class AgentLoop:
                 parts.append(f"## Learnings from Past Sessions\n\n{learnings}")  # pre-sanitized
 
         has_browser = (
-            "browser_navigate" in self.skills.skills
+            "browser_navigate" in self.tools.tools
             and (
                 (self._allowed_tools is not None and "browser_navigate" in self._allowed_tools)
                 or (
@@ -4229,7 +4229,7 @@ class AgentLoop:
             role=self.role,
             state=self.state,
             current_task=self.current_task,
-            capabilities=self.skills.list_skills(**self._skill_filter_kw),
+            capabilities=self.tools.list_tools(**self._tool_filter_kw),
             uptime_seconds=time.time() - self._start_time,
             tasks_completed=self.tasks_completed,
             tasks_failed=self.tasks_failed,
@@ -4323,7 +4323,7 @@ class AgentLoop:
                 llm_response = None
                 used_streaming = False
                 any_text_streamed = False
-                tools = self.skills.get_tool_definitions(**self._skill_filter_kw) or None
+                tools = self.tools.get_tool_definitions(**self._tool_filter_kw) or None
                 try:
                     async for event in self.llm.chat_stream(
                         system=system, messages=self._chat_messages, tools=tools,
@@ -4534,9 +4534,9 @@ class AgentLoop:
                             introspect_data=self._introspect_cache,
                         )
 
-                # Rebuild system prompt after skill hot-reload
-                if self._skills_reloaded:
-                    self._skills_reloaded = False
+                # Rebuild system prompt after tool hot-reload
+                if self._tools_reloaded:
+                    self._tools_reloaded = False
                     system = self._build_chat_system_prompt(
                         goals=self._goals_cache if self._goals_cache is not self._GOALS_NOT_FETCHED else None,
                         fleet_roster=self._fleet_roster,

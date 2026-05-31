@@ -55,12 +55,12 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None, *, real_memory: b
         memory.get_tool_history = MagicMock(return_value=[])
         memory._run_db = AsyncMock(return_value=None)
 
-    skills = MagicMock()
-    skills.get_tool_definitions = MagicMock(return_value=[])
-    skills.get_descriptions = MagicMock(return_value="- no tools")
-    skills.list_skills = MagicMock(return_value=[])
-    skills.is_parallel_safe = MagicMock(return_value=True)
-    skills.get_loop_exempt_tools = MagicMock(return_value=frozenset())
+    tools = MagicMock()
+    tools.get_tool_definitions = MagicMock(return_value=[])
+    tools.get_descriptions = MagicMock(return_value="- no tools")
+    tools.list_tools = MagicMock(return_value=[])
+    tools.is_parallel_safe = MagicMock(return_value=True)
+    tools.get_loop_exempt_tools = MagicMock(return_value=frozenset())
 
     llm = MagicMock()
     if llm_responses:
@@ -79,7 +79,7 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None, *, real_memory: b
         agent_id="test_agent",
         role="research",
         memory=memory,
-        skills=skills,
+        tools=tools,
         llm=llm,
         mesh_client=mesh_client,
     )
@@ -122,10 +122,10 @@ async def test_task_nudge_fires_when_tools_available():
         LLMResponse(content='{"result": {"answer": "42"}}', tokens_used=70),
     ]
     loop = _make_loop(responses)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "web_search"}}]
     )
-    loop.skills.execute = AsyncMock(return_value={"results": ["r1"]})
+    loop.tools.execute = AsyncMock(return_value={"results": ["r1"]})
     assignment = TaskAssignment(
         workflow_id="wf1", step_id="s1", task_type="research", input_data={"query": "test"}
     )
@@ -160,7 +160,7 @@ async def test_lazy_completion_guard_fails_text_only_after_nudge():
     loop = _make_loop(responses)
     # Tools must be available so the iter-0 nudge fires (and so the
     # LLM had every opportunity to call one).
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "web_search"}}]
     )
     assignment = TaskAssignment(
@@ -201,7 +201,7 @@ async def test_lazy_guard_allows_structured_final_after_nudge():
         ),
     ]
     loop = _make_loop(responses)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "web_search"}}]
     )
     assignment = TaskAssignment(
@@ -229,7 +229,7 @@ async def test_lazy_guard_rejects_empty_dict_result():
         LLMResponse(content='{"result": {}}', tokens_used=30),
     ]
     loop = _make_loop(responses)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "web_search"}}]
     )
     assignment = TaskAssignment(
@@ -252,7 +252,7 @@ async def test_lazy_guard_rejects_scalar_result_chatter():
         LLMResponse(content='{"result": "I will do it now"}', tokens_used=30),
     ]
     loop = _make_loop(responses)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "web_search"}}]
     )
     assignment = TaskAssignment(
@@ -290,10 +290,10 @@ async def test_lazy_guard_survives_message_compaction():
         LLMResponse(content='{"result": {"summary": "found 3"}}', tokens_used=40),
     ]
     loop = _make_loop(responses)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "web_search"}}]
     )
-    loop.skills.execute = AsyncMock(return_value={"results": ["r1", "r2", "r3"]})
+    loop.tools.execute = AsyncMock(return_value={"results": ["r1", "r2", "r3"]})
 
     # Stub maybe_compact to wipe message history right after the tool
     # iteration runs — proves the counter is independent of `messages`.
@@ -388,10 +388,10 @@ async def test_lazy_guard_explained_deferral_closes_done():
         ),
     ]
     loop = _make_loop(responses)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "read_blackboard"}}]
     )
-    loop.skills.execute = AsyncMock(return_value={"value": "pending"})
+    loop.tools.execute = AsyncMock(return_value={"value": "pending"})
     assignment = TaskAssignment(
         workflow_id="wf1", step_id="s1", task_type="research",
         input_data={"query": "test"},
@@ -424,10 +424,10 @@ async def test_lazy_guard_read_only_empty_text_still_fails():
         LLMResponse(content="   ", tokens_used=30),
     ]
     loop = _make_loop(responses)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "read_blackboard"}}]
     )
-    loop.skills.execute = AsyncMock(return_value={"value": "pending"})
+    loop.tools.execute = AsyncMock(return_value={"value": "pending"})
     assignment = TaskAssignment(
         workflow_id="wf1", step_id="s1", task_type="research",
         input_data={"query": "test"},
@@ -483,7 +483,7 @@ async def test_iter0_structured_final_with_tools_skips_nudge():
     loop = _make_loop([structured_only])
     # Tools available — the OLD code would nudge here. New code detects
     # structured-final and skips the nudge.
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "web_search"}}]
     )
     assignment = TaskAssignment(
@@ -514,10 +514,10 @@ async def test_lazy_guard_passes_iter0_with_one_tool_call():
         LLMResponse(content="Done — see search results.", tokens_used=40),
     ]
     loop = _make_loop(responses)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "web_search"}}]
     )
-    loop.skills.execute = AsyncMock(return_value={"results": ["r1"]})
+    loop.tools.execute = AsyncMock(return_value={"results": ["r1"]})
     assignment = TaskAssignment(
         workflow_id="wf1", step_id="s1", task_type="research",
         input_data={"query": "test"},
@@ -555,10 +555,10 @@ async def test_tool_calling_message_roles():
     final_response = LLMResponse(content='{"result": {"found": true}}', tokens_used=30)
 
     loop = _make_loop([tool_call_response, final_response])
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "web_search"}}]
     )
-    loop.skills.execute = AsyncMock(return_value={"results": ["r1"]})
+    loop.tools.execute = AsyncMock(return_value={"results": ["r1"]})
 
     original_chat = loop.llm.chat
 
@@ -597,8 +597,8 @@ async def test_max_iterations_reached():
     ]
 
     loop = _make_loop(responses)
-    loop.skills.get_tool_definitions = MagicMock(return_value=[{"type": "function", "function": {"name": "search"}}])
-    loop.skills.execute = AsyncMock(return_value={"result": "ok"})
+    loop.tools.get_tool_definitions = MagicMock(return_value=[{"type": "function", "function": {"name": "search"}}])
+    loop.tools.execute = AsyncMock(return_value={"result": "ok"})
 
     assignment = TaskAssignment(
         workflow_id="wf1", step_id="s1", task_type="research", input_data={}
@@ -772,7 +772,7 @@ async def test_llm_retry_in_chat_mode():
 
     loop = _make_loop()
     loop.llm.chat = AsyncMock(side_effect=responses)
-    loop.skills.get_tool_definitions = MagicMock(return_value=[])
+    loop.tools.get_tool_definitions = MagicMock(return_value=[])
 
     with patch("src.agent.loop.asyncio.sleep", new_callable=AsyncMock):
         result = await loop.chat("Hi")
@@ -789,7 +789,7 @@ async def test_silent_reply_token_returns_empty():
     """When LLM returns __SILENT__, chat() should return empty string response."""
     silent_response = LLMResponse(content="__SILENT__", tokens_used=10)
     loop = _make_loop([silent_response])
-    loop.skills.get_tool_definitions = MagicMock(return_value=[])
+    loop.tools.get_tool_definitions = MagicMock(return_value=[])
 
     result = await loop.chat("heartbeat ping")
     assert result["response"] == ""
@@ -800,7 +800,7 @@ async def test_silent_reply_token_with_whitespace():
     """__SILENT__ with surrounding whitespace should still be detected."""
     silent_response = LLMResponse(content="  __SILENT__  \n", tokens_used=10)
     loop = _make_loop([silent_response])
-    loop.skills.get_tool_definitions = MagicMock(return_value=[])
+    loop.tools.get_tool_definitions = MagicMock(return_value=[])
 
     result = await loop.chat("cron tick")
     assert result["response"] == ""
@@ -811,7 +811,7 @@ async def test_non_silent_reply_passes_through():
     """Normal LLM responses should pass through unchanged."""
     normal_response = LLMResponse(content="Hello, how can I help?", tokens_used=20)
     loop = _make_loop([normal_response])
-    loop.skills.get_tool_definitions = MagicMock(return_value=[])
+    loop.tools.get_tool_definitions = MagicMock(return_value=[])
 
     result = await loop.chat("hi")
     assert result["response"] == "Hello, how can I help?"
@@ -843,10 +843,10 @@ async def test_silent_token_after_tool_rounds_exhausted():
     # the deliberate ``__SILENT__`` reply.
     responses.append(LLMResponse(content="__SILENT__", tokens_used=10))
     loop.llm.chat = AsyncMock(side_effect=responses)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "search"}}]
     )
-    loop.skills.execute = AsyncMock(return_value={"result": "ok"})
+    loop.tools.execute = AsyncMock(return_value={"result": "ok"})
 
     result = await loop.chat("do something")
     assert result["response"] == ""
@@ -879,7 +879,7 @@ async def test_steer_to_idle_merges_with_next_message():
     loop = _make_loop([
         LLMResponse(content="Got it with context", tokens_used=50),
     ])
-    loop.skills.get_tool_definitions = MagicMock(return_value=[])
+    loop.tools.get_tool_definitions = MagicMock(return_value=[])
 
     # Inject steer while idle
     await loop.inject_steer("extra context here")
@@ -905,10 +905,10 @@ async def test_steer_injection_between_tool_rounds():
     captured_messages = []
 
     loop = _make_loop([tool_response, final_response])
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "search"}}]
     )
-    loop.skills.execute = AsyncMock(return_value={"result": "ok"})
+    loop.tools.execute = AsyncMock(return_value={"result": "ok"})
 
     original_chat = loop.llm.chat
 
@@ -920,14 +920,14 @@ async def test_steer_injection_between_tool_rounds():
 
     # Inject steer after first tool call starts
     # We need to inject before the second LLM call
-    original_execute = loop.skills.execute
+    original_execute = loop.tools.execute
 
     async def execute_with_steer(*args, **kwargs):
         # Inject steer message during tool execution
         await loop.inject_steer("stop, do this instead")
         return await original_execute(*args, **kwargs)
 
-    loop.skills.execute = execute_with_steer
+    loop.tools.execute = execute_with_steer
 
     result = await loop.chat("start task")
     assert result["response"] == "Redirected!"
@@ -945,7 +945,7 @@ async def test_multiple_steers_combined():
     loop = _make_loop([
         LLMResponse(content="Acknowledged all", tokens_used=50),
     ])
-    loop.skills.get_tool_definitions = MagicMock(return_value=[])
+    loop.tools.get_tool_definitions = MagicMock(return_value=[])
 
     # Queue multiple steer messages while idle
     await loop.inject_steer("first update")
@@ -1107,8 +1107,8 @@ class TestToolMemory:
         )
         final_response = LLMResponse(content="Done", tokens_used=20)
         loop = _make_loop([tool_response, final_response], real_memory=True)
-        loop.skills.execute = AsyncMock(return_value={"exit_code": 0})
-        loop.skills.get_tool_definitions = MagicMock(
+        loop.tools.execute = AsyncMock(return_value={"exit_code": 0})
+        loop.tools.get_tool_definitions = MagicMock(
             return_value=[{"type": "function", "function": {"name": "exec"}}]
         )
 
@@ -1171,11 +1171,11 @@ async def test_tool_result_sanitized_in_execute_task():
     captured_messages = []
 
     loop = _make_loop([tool_call_response, final_response])
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "web_search"}}]
     )
     # Return a string (non-dict) with invisible characters — goes through str() path
-    loop.skills.execute = AsyncMock(return_value="clean\u200Bvalue\u202Ehere")
+    loop.tools.execute = AsyncMock(return_value="clean\u200Bvalue\u202Ehere")
 
     original_chat = loop.llm.chat
 
@@ -1210,11 +1210,11 @@ async def test_tool_result_sanitized_in_chat():
     captured_messages = []
 
     loop = _make_loop([tool_call_response, final_response])
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "exec"}}]
     )
     # Return a string (non-dict) with invisible characters — goes through str() path
-    loop.skills.execute = AsyncMock(return_value="out\x00put\uFEFF")
+    loop.tools.execute = AsyncMock(return_value="out\x00put\uFEFF")
 
     original_chat = loop.llm.chat
 
@@ -1238,7 +1238,7 @@ async def test_memory_autoload_sanitized_in_chat():
     """Workspace search snippets with invisible chars are sanitized before entering LLM context."""
     normal_response = LLMResponse(content="Got it", tokens_used=30)
     loop = _make_loop([normal_response])
-    loop.skills.get_tool_definitions = MagicMock(return_value=[])
+    loop.tools.get_tool_definitions = MagicMock(return_value=[])
 
     # Set up workspace with search results containing invisible chars
     loop.workspace = MagicMock()
@@ -1325,10 +1325,10 @@ async def test_task_loop_detection_warns():
     responses = [tool_call, tool_call, tool_call, final]
 
     loop = _make_loop(responses)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "search"}}]
     )
-    loop.skills.execute = AsyncMock(return_value={"result": "same"})
+    loop.tools.execute = AsyncMock(return_value={"result": "same"})
 
     captured_messages = []
     original_chat = loop.llm.chat
@@ -1364,7 +1364,7 @@ async def test_task_loop_detection_blocks():
     responses = [tool_call] * 6 + [final]
 
     loop = _make_loop(responses)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "search"}}]
     )
     execute_count = 0
@@ -1374,7 +1374,7 @@ async def test_task_loop_detection_blocks():
         execute_count += 1
         return {"result": "same"}
 
-    loop.skills.execute = counting_execute
+    loop.tools.execute = counting_execute
 
     assignment = TaskAssignment(
         workflow_id="wf1", step_id="s1", task_type="research", input_data={}
@@ -1398,10 +1398,10 @@ async def test_task_loop_detection_terminates():
     responses = [tool_call] * 20
 
     loop = _make_loop(responses)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "search"}}]
     )
-    loop.skills.execute = AsyncMock(return_value={"result": "same"})
+    loop.tools.execute = AsyncMock(return_value={"result": "same"})
 
     assignment = TaskAssignment(
         workflow_id="wf1", step_id="s1", task_type="research", input_data={}
@@ -1423,10 +1423,10 @@ async def test_chat_loop_detection_warns():
     responses = [tool_call, tool_call, tool_call, final]
 
     loop = _make_loop(responses)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "exec"}}]
     )
-    loop.skills.execute = AsyncMock(return_value={"error": "command not found"})
+    loop.tools.execute = AsyncMock(return_value={"error": "command not found"})
 
     result = await loop.chat("run it")
     assert result["response"] == "Done"
@@ -1447,10 +1447,10 @@ async def test_chat_loop_detection_terminates():
     responses = [tool_call] * 20
 
     loop = _make_loop(responses)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "exec"}}]
     )
-    loop.skills.execute = AsyncMock(return_value={"error": "command not found"})
+    loop.tools.execute = AsyncMock(return_value={"error": "command not found"})
 
     result = await loop.chat("run it")
     assert "Stopped" in result["response"]
@@ -1469,10 +1469,10 @@ async def test_detector_reset_on_new_task():
 
     # First task: 3 identical calls (builds up warn state)
     loop = _make_loop([tool_call, tool_call, tool_call, final, tool_call, final])
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "search"}}]
     )
-    loop.skills.execute = AsyncMock(return_value={"result": "same"})
+    loop.tools.execute = AsyncMock(return_value={"result": "same"})
 
     assignment = TaskAssignment(
         workflow_id="wf1", step_id="s1", task_type="research", input_data={}
@@ -1514,10 +1514,10 @@ async def test_detector_reset_on_chat_reset():
 
     # First chat: 3 identical calls (builds up warn state)
     loop = _make_loop([tool_call, tool_call, tool_call, final, tool_call, final])
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "exec"}}]
     )
-    loop.skills.execute = AsyncMock(return_value={"error": "command not found"})
+    loop.tools.execute = AsyncMock(return_value={"error": "command not found"})
 
     await loop.chat("run it")
 
@@ -1552,7 +1552,7 @@ async def test_task_terminate_mid_batch_blocks_tool():
     responses = [two_tools] * 6 + [final]
 
     loop = _make_loop(responses)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "search"}}]
     )
     execute_count = 0
@@ -1562,7 +1562,7 @@ async def test_task_terminate_mid_batch_blocks_tool():
         execute_count += 1
         return {"result": "same"}
 
-    loop.skills.execute = counting_execute
+    loop.tools.execute = counting_execute
 
     assignment = TaskAssignment(
         workflow_id="wf1", step_id="s1", task_type="research", input_data={}
@@ -1612,10 +1612,10 @@ class TestLogChatTurn:
         )
         final = LLMResponse(content="Found it!", tokens_used=20)
         loop = factory([tool_response, final])
-        loop.skills.get_tool_definitions = MagicMock(
+        loop.tools.get_tool_definitions = MagicMock(
             return_value=[{"type": "function", "function": {"name": "web_search"}}]
         )
-        loop.skills.execute = AsyncMock(return_value={"results": ["r1"]})
+        loop.tools.execute = AsyncMock(return_value={"results": ["r1"]})
 
         await loop.chat("find something")
 
@@ -1629,7 +1629,7 @@ class TestLogChatTurn:
         """_log_chat_turn strips auto-loaded memory context from user summary."""
         factory, workspace = workspace_loop
         loop = factory([LLMResponse(content="Understood", tokens_used=20)])
-        loop.skills.get_tool_definitions = MagicMock(return_value=[])
+        loop.tools.get_tool_definitions = MagicMock(return_value=[])
 
         msg = "Do the task\n[Relevant memory auto-loaded]\nSome old context here"
         await loop.chat(msg)
@@ -1643,7 +1643,7 @@ class TestLogChatTurn:
         """__SILENT__ responses (empty string) should not be logged."""
         factory, workspace = workspace_loop
         loop = factory([LLMResponse(content="__SILENT__", tokens_used=10)])
-        loop.skills.get_tool_definitions = MagicMock(return_value=[])
+        loop.tools.get_tool_definitions = MagicMock(return_value=[])
 
         await loop.chat("heartbeat ping")
 
@@ -1663,10 +1663,10 @@ class TestTaskCompletionLogging:
         )
         final = LLMResponse(content='{"result": {"done": true}}', tokens_used=30)
         loop = factory([tool_response, final])
-        loop.skills.get_tool_definitions = MagicMock(
+        loop.tools.get_tool_definitions = MagicMock(
             return_value=[{"type": "function", "function": {"name": "exec"}}]
         )
-        loop.skills.execute = AsyncMock(return_value={"exit_code": 0})
+        loop.tools.execute = AsyncMock(return_value={"exit_code": 0})
 
         assignment = TaskAssignment(
             workflow_id="wf1", step_id="s1", task_type="research",
@@ -1694,10 +1694,10 @@ class TestTaskCompletionLogging:
             for i in range(25)
         ]
         loop = factory(responses)
-        loop.skills.get_tool_definitions = MagicMock(
+        loop.tools.get_tool_definitions = MagicMock(
             return_value=[{"type": "function", "function": {"name": "search"}}]
         )
-        loop.skills.execute = AsyncMock(return_value={"result": "ok"})
+        loop.tools.execute = AsyncMock(return_value={"result": "ok"})
 
         assignment = TaskAssignment(
             workflow_id="wf1", step_id="s1", task_type="analysis",
@@ -1912,7 +1912,7 @@ class TestStandaloneBlackboardIsolation:
         loop = AgentLoop(
             agent_id="test", role="helper",
             memory=MagicMock(get_tool_history=MagicMock(return_value=[])),
-            skills=MagicMock(), llm=MagicMock(), mesh_client=mesh,
+            tools=MagicMock(), llm=MagicMock(), mesh_client=mesh,
         )
         assert loop._excluded_tools == _BLACKBOARD_TOOLS
 
@@ -1923,7 +1923,7 @@ class TestStandaloneBlackboardIsolation:
         loop = AgentLoop(
             agent_id="test", role="helper",
             memory=MagicMock(get_tool_history=MagicMock(return_value=[])),
-            skills=MagicMock(), llm=MagicMock(), mesh_client=mesh,
+            tools=MagicMock(), llm=MagicMock(), mesh_client=mesh,
         )
         assert loop._excluded_tools is None
 
@@ -1972,8 +1972,8 @@ class TestStandaloneBlackboardIsolation:
     def test_standalone_get_status_excludes_blackboard(self):
         """get_status capabilities list excludes blackboard tools for standalone."""
         loop = self._make_standalone_loop()
-        # Use a real SkillRegistry-like mock that respects exclude
-        loop.skills.list_skills = MagicMock(
+        # Use a real ToolRegistry-like mock that respects exclude
+        loop.tools.list_tools = MagicMock(
             side_effect=lambda exclude=None: (
                 [n for n in ["memory_save", "read_blackboard", "notify_user"]
                  if not exclude or n not in exclude]
@@ -2050,7 +2050,7 @@ async def test_steer_appended_correctly_to_multimodal_content():
 async def test_run_tool_pops_image_and_returns_multimodal_content():
     """When a tool result contains _image, _run_tool returns multimodal content."""
     loop = _make_loop()
-    loop.skills.execute = AsyncMock(return_value={
+    loop.tools.execute = AsyncMock(return_value={
         "status": "screenshot captured",
         "_image": {"data": "iVBORw0KGgo=", "media_type": "image/png"},
     })
@@ -2077,7 +2077,7 @@ async def test_run_tool_pops_image_and_returns_multimodal_content():
 async def test_run_tool_no_image_returns_plain_string():
     """Normal tool results (no _image) return a plain string."""
     loop = _make_loop()
-    loop.skills.execute = AsyncMock(return_value={"result": "ok"})
+    loop.tools.execute = AsyncMock(return_value={"result": "ok"})
 
     content, result_dict = await loop._run_tool(
         ToolCallInfo(name="web_search", arguments={"q": "test"})
@@ -2092,7 +2092,7 @@ async def test_run_tool_image_not_in_serialized_result():
     """The serialized result_str must not contain the base64 image data."""
     loop = _make_loop()
     image_b64 = "A" * 1000  # large payload
-    loop.skills.execute = AsyncMock(return_value={
+    loop.tools.execute = AsyncMock(return_value={
         "status": "screenshot captured",
         "_image": {"data": image_b64, "media_type": "image/png"},
     })
@@ -2121,10 +2121,10 @@ async def test_task_mode_appends_multimodal_content():
     final_response = LLMResponse(content='{"result": {"seen": true}}', tokens_used=30)
 
     loop = _make_loop([tool_call_response, final_response])
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "browser_screenshot"}}]
     )
-    loop.skills.execute = AsyncMock(return_value={
+    loop.tools.execute = AsyncMock(return_value={
         "status": "screenshot captured",
         "_image": {"data": "iVBORw0KGgo=", "media_type": "image/png"},
     })
@@ -2364,10 +2364,10 @@ async def test_heartbeat_with_tool_calls():
     final_response = LLMResponse(content="Done", tokens_used=30)
 
     loop = _make_loop([tool_call_response, final_response])
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "notify_user"}}]
     )
-    loop.skills.execute = AsyncMock(return_value={"sent": True})
+    loop.tools.execute = AsyncMock(return_value={"sent": True})
     loop.mesh_client.introspect = AsyncMock(return_value={})
     loop.workspace = MagicMock()
     loop.workspace.get_bootstrap_content = MagicMock(return_value="")
@@ -2463,8 +2463,8 @@ async def test_heartbeat_max_iterations():
 
     loop = _make_loop([])  # responses unused — overridden by side_effect
     loop.llm.chat = AsyncMock(side_effect=_smart_llm)
-    loop.skills.get_tool_definitions = MagicMock(return_value=tool_defs)
-    loop.skills.execute = AsyncMock(return_value={"result": "ok"})
+    loop.tools.get_tool_definitions = MagicMock(return_value=tool_defs)
+    loop.tools.execute = AsyncMock(return_value={"result": "ok"})
     loop.mesh_client.introspect = AsyncMock(return_value={})
 
     result = await loop.execute_heartbeat("infinite loop")
@@ -2500,8 +2500,8 @@ async def test_heartbeat_windup_nudge_messages():
 
     loop = _make_loop([])
     loop.llm.chat = AsyncMock(side_effect=_capture_llm)
-    loop.skills.get_tool_definitions = MagicMock(return_value=tool_defs)
-    loop.skills.execute = AsyncMock(return_value={"result": "ok"})
+    loop.tools.get_tool_definitions = MagicMock(return_value=tool_defs)
+    loop.tools.execute = AsyncMock(return_value={"result": "ok"})
     loop.mesh_client.introspect = AsyncMock(return_value={})
 
     await loop.execute_heartbeat("go")
@@ -2539,8 +2539,8 @@ async def test_heartbeat_forced_wrapup_on_unexpected_tool_calls():
 
     loop = _make_loop([])
     loop.llm.chat = AsyncMock(side_effect=_stubborn_llm)
-    loop.skills.get_tool_definitions = MagicMock(return_value=tool_defs)
-    loop.skills.execute = AsyncMock(return_value={"result": "ok"})
+    loop.tools.get_tool_definitions = MagicMock(return_value=tool_defs)
+    loop.tools.execute = AsyncMock(return_value={"result": "ok"})
     loop.mesh_client.introspect = AsyncMock(return_value={})
 
     result = await loop.execute_heartbeat("go")
@@ -2570,8 +2570,8 @@ async def test_heartbeat_forced_wrapup_empty_content():
 
     loop = _make_loop([])
     loop.llm.chat = AsyncMock(side_effect=_empty_llm)
-    loop.skills.get_tool_definitions = MagicMock(return_value=tool_defs)
-    loop.skills.execute = AsyncMock(return_value={"result": "ok"})
+    loop.tools.get_tool_definitions = MagicMock(return_value=tool_defs)
+    loop.tools.execute = AsyncMock(return_value={"result": "ok"})
     loop.mesh_client.introspect = AsyncMock(return_value={})
 
     result = await loop.execute_heartbeat("go")
@@ -2598,10 +2598,10 @@ async def test_heartbeat_sets_contextvar():
     final_response = LLMResponse(content="done", tokens_used=10)
 
     loop = _make_loop([tool_call_response, final_response])
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "notify_user"}}]
     )
-    loop.skills.execute = spy_execute
+    loop.tools.execute = spy_execute
     loop.mesh_client.introspect = AsyncMock(return_value={})
 
     await loop.execute_heartbeat("check")
@@ -2807,8 +2807,8 @@ async def test_heartbeat_standalone_no_check_inbox():
 
 
 @pytest.mark.asyncio
-async def test_skills_reload_rebuilds_system_prompt():
-    """After reload_skills, the system prompt is rebuilt with new tool descriptions."""
+async def test_tools_reload_rebuilds_system_prompt():
+    """After reload_tools, the system prompt is rebuilt with new tool descriptions."""
     systems_seen = []
     call_count = 0
 
@@ -2817,11 +2817,11 @@ async def test_skills_reload_rebuilds_system_prompt():
         call_count += 1
         systems_seen.append(system)
         if call_count == 1:
-            # First call: LLM calls reload_skills
+            # First call: LLM calls reload_tools
             from src.shared.types import ToolCallInfo
             return LLMResponse(
                 content="",
-                tool_calls=[ToolCallInfo(name="reload_skills", arguments={})],
+                tool_calls=[ToolCallInfo(name="reload_tools", arguments={})],
                 tokens_used=10,
             )
         # Second call: LLM gives final answer
@@ -2830,8 +2830,8 @@ async def test_skills_reload_rebuilds_system_prompt():
     loop = _make_loop([])
     loop.llm.chat = AsyncMock(side_effect=_tracking_llm)
 
-    # Inject a mock skill to appear after reload
-    original_reload = loop.skills.reload
+    # Inject a mock tool to appear after reload
+    original_reload = loop.tools.reload
 
     def _mock_reload():
         count = original_reload()
@@ -2839,14 +2839,14 @@ async def test_skills_reload_rebuilds_system_prompt():
         # The next get_descriptions() call will rebuild.
         return count
 
-    loop.skills.reload = _mock_reload
+    loop.tools.reload = _mock_reload
 
     await loop.chat("test reload")
 
     # System prompt should have been rebuilt after reload
     assert len(systems_seen) >= 2
     # The flag should be consumed (not stuck True)
-    assert loop._skills_reloaded is False
+    assert loop._tools_reloaded is False
 
 
 # ── Seam follow-up Fix 3: loop catches LLMAuthError / LLMConfigError ──
@@ -3534,10 +3534,10 @@ class TestOutboundEffectLazyGuard:
             _resp(""),                               # empty-compose retry: empty
         ]
         loop = _make_loop(responses)
-        loop.skills.get_tool_definitions = MagicMock(
+        loop.tools.get_tool_definitions = MagicMock(
             return_value=[{"name": "check_inbox"}]
         )
-        loop.skills.execute = AsyncMock(return_value={"events": []})
+        loop.tools.execute = AsyncMock(return_value={"events": []})
         loop._auto_close_task = AsyncMock(return_value=None)
 
         result = await loop.chat("hi", task_id="t-ghost")
@@ -3584,10 +3584,10 @@ class TestOutboundEffectLazyGuard:
             _resp("Reviewed the blackboard; no action needed because X."),
         ]
         loop = _make_loop(responses)
-        loop.skills.get_tool_definitions = MagicMock(
+        loop.tools.get_tool_definitions = MagicMock(
             return_value=[{"name": "read_blackboard"}]
         )
-        loop.skills.execute = AsyncMock(return_value={"value": "pending"})
+        loop.tools.execute = AsyncMock(return_value={"value": "pending"})
         loop._auto_close_task = AsyncMock(return_value=None)
 
         result = await loop.chat("hi", task_id="t-deferral")
@@ -3659,7 +3659,7 @@ class TestChatAutoCloseErrorPropagation:
                 allowed_models={"openai/gpt-5", "openai/gpt-5-mini"},
             ),
         )
-        loop.skills.get_tool_definitions = MagicMock(return_value=[])
+        loop.tools.get_tool_definitions = MagicMock(return_value=[])
 
         # Spy on mesh_client.set_task_status — the terminal sink of the
         # propagation chain. The mesh-side handler reads the ``error``
@@ -3847,7 +3847,7 @@ class TestChatExceptionPathsFinalizeCleanly:
 
         loop = _make_loop()
         loop.workspace = WorkspaceManager(workspace_dir=str(tmp_path))
-        loop.skills.get_tool_definitions = MagicMock(return_value=[])
+        loop.tools.get_tool_definitions = MagicMock(return_value=[])
         # First call: LLMConfigError mid-turn. Before this point a partial
         # MAY exist on disk if a prior round wrote one — simulate that
         # case so we verify supersedence.
@@ -3897,7 +3897,7 @@ class TestChatExceptionPathsFinalizeCleanly:
 
         loop = _make_loop()
         loop.workspace = WorkspaceManager(workspace_dir=str(tmp_path))
-        loop.skills.get_tool_definitions = MagicMock(return_value=[])
+        loop.tools.get_tool_definitions = MagicMock(return_value=[])
         loop.llm.chat_stream = MagicMock(
             side_effect=RuntimeError("kaboom"),
         )
@@ -3943,8 +3943,8 @@ def _empty_after_tools_loop(final_responses):
     tool_call = ToolCallInfo(name="search", arguments={"q": "x"})
     responses = [_resp("", tool_calls=[tool_call])] + list(final_responses)
     loop = _make_loop(responses)
-    loop.skills.get_tool_definitions = MagicMock(return_value=[{"name": "search"}])
-    loop.skills.execute = AsyncMock(return_value={"ok": True})
+    loop.tools.get_tool_definitions = MagicMock(return_value=[{"name": "search"}])
+    loop.tools.execute = AsyncMock(return_value={"ok": True})
     return loop
 
 
@@ -3995,8 +3995,8 @@ async def test_empty_chat_tool_limit_reached_is_rescued():
         _resp(""),  # force-final compose: empty
     ]
     loop.llm.chat = AsyncMock(side_effect=responses)
-    loop.skills.get_tool_definitions = MagicMock(return_value=[{"name": "search"}])
-    loop.skills.execute = AsyncMock(return_value={"ok": True})
+    loop.tools.get_tool_definitions = MagicMock(return_value=[{"name": "search"}])
+    loop.tools.execute = AsyncMock(return_value={"ok": True})
     result = await loop.chat("ping")
     assert result.get("tool_limit_reached") is True
     assert result["response"].strip() != ""
@@ -4053,8 +4053,8 @@ async def test_stream_empty_after_tools_emits_marker_text_event():
     # Force the non-streaming fallback path: chat_stream raises so the
     # loop falls back to ``self.llm.chat`` (our AsyncMock side_effect).
     loop.llm.chat_stream = MagicMock(side_effect=RuntimeError("no stream"))
-    loop.skills.get_tool_definitions = MagicMock(return_value=[{"name": "search"}])
-    loop.skills.execute = AsyncMock(return_value={"ok": True})
+    loop.tools.get_tool_definitions = MagicMock(return_value=[{"name": "search"}])
+    loop.tools.execute = AsyncMock(return_value={"ok": True})
     events = [ev async for ev in loop.chat_stream("ping")]
     text_events = [e for e in events if e.get("type") == "text_delta"]
     done_events = [e for e in events if e.get("type") == "done"]
@@ -4075,8 +4075,8 @@ async def test_stream_empty_after_tools_retry_succeeds_emits_recovered_text():
     ]
     loop = _make_loop(responses)
     loop.llm.chat_stream = MagicMock(side_effect=RuntimeError("no stream"))
-    loop.skills.get_tool_definitions = MagicMock(return_value=[{"name": "search"}])
-    loop.skills.execute = AsyncMock(return_value={"ok": True})
+    loop.tools.get_tool_definitions = MagicMock(return_value=[{"name": "search"}])
+    loop.tools.execute = AsyncMock(return_value={"ok": True})
     events = [ev async for ev in loop.chat_stream("ping")]
     text_events = [e for e in events if e.get("type") == "text_delta"]
     done_events = [e for e in events if e.get("type") == "done"]
@@ -4102,8 +4102,8 @@ async def test_empty_compose_retry_reraises_auth_error():
         LLMAuthError("credentials revoked", provider="anthropic"),
     ]
     loop = _make_loop(responses)
-    loop.skills.get_tool_definitions = MagicMock(return_value=[{"name": "search"}])
-    loop.skills.execute = AsyncMock(return_value={"ok": True})
+    loop.tools.get_tool_definitions = MagicMock(return_value=[{"name": "search"}])
+    loop.tools.execute = AsyncMock(return_value={"ok": True})
     result = await loop._chat_inner("ping")
     assert result.get("auth_failure") is True
     # Must NOT be papered over as a successful "(no response)" marker.

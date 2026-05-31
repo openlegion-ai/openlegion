@@ -1,6 +1,6 @@
 # Agent Tools Reference
 
-Agents interact with their environment through **skills** -- Python functions registered via the `@skill` decorator. Skills are auto-discovered at startup from built-in modules and custom skill directories.
+Agents interact with their environment through **tools** -- Python functions registered via the `@tool` decorator. Tools are auto-discovered at startup from built-in modules and custom tool directories.
 
 ## Built-in Tools
 
@@ -122,11 +122,11 @@ An OS-level device profile is selected by `BROWSER_DEVICE_PROFILE` (`desktop-win
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `create_skill` | `name`, `code` | Write a new Python skill at runtime. Source is AST-validated before being written — see "AST validation" below. `_MAX_SKILL_SIZE=10_000` bytes. Skills land in `/data/custom_skills`. Call `reload_skills` to activate. |
-| `reload_skills` | -- | Hot-reload all skills from disk |
+| `create_tool` | `name`, `code` | Write a new Python tool at runtime. Source is AST-validated before being written — see "AST validation" below. `_MAX_TOOL_SIZE=10_000` bytes. Tools land in `/data/custom_tools`. Call `reload_tools` to activate. |
+| `reload_tools` | -- | Hot-reload all tools from disk |
 | `spawn_fleet_agent` | `role`, `system_prompt` (default ""), `ttl` (default 3600s) | Spawn a new agent in its own isolated container with independent tools, memory, and environment. The agent joins the fleet as a peer. Permission gate: `permissions.can_spawn` (operator cannot grant this). |
 
-**AST validation for `create_skill`.** The submitted source is parsed and rejected if it touches any of:
+**AST validation for `create_tool`.** The submitted source is parsed and rejected if it touches any of:
 - `_FORBIDDEN_IMPORTS` (23 modules): `os`, `subprocess`, `shutil`, `ctypes`, `importlib`, `socket`, `sys`, `signal`, `multiprocessing`, `threading`, `pathlib`, `io`, `tempfile`, `pty`, `code`, `gc`, `inspect`, `pickle`, `shelve`, `http`, `asyncio`, `resource`, `builtins`.
 - `_FORBIDDEN_CALLS` (16): `eval`, `exec`, `__import__`, `compile`, `globals`, `locals`, `getattr`, `setattr`, `delattr`, `breakpoint`, `open`, `type`, `vars`, `dir`, `memoryview`, `super`.
 - `_FORBIDDEN_ATTRS` (11): `__builtins__`, `__import__`, `__subclasses__`, `__class__`, `__bases__`, `__mro__`, `__globals__`, `__code__`, `__reduce__`, `__dict__`, `builtins`.
@@ -135,7 +135,7 @@ An OS-level device profile is selected by `BROWSER_DEVICE_PROFILE` (`desktop-win
 
 Lightweight subagents that run inside the same process as the parent agent, sharing LLM and mesh clients but with their own memory and workspace.
 
-**Limits:** Max 3 concurrent subagents, max depth 2 (no grandchildren), default TTL 300s (max TTL 600s), max 10 iterations per subagent. Subagents cannot use `create_skill`, `reload_skills`, `spawn_subagent`, or `wait_for_subagent` (prevents recursion and nesting). Results are written to blackboard at `subagent_results/{parent_id}/{subagent_id}`.
+**Limits:** Max 3 concurrent subagents, max depth 2 (no grandchildren), default TTL 300s (max TTL 600s), max 10 iterations per subagent. Subagents cannot use `create_tool`, `reload_tools`, `spawn_subagent`, or `wait_for_subagent` (prevents recursion and nesting). Results are written to blackboard at `subagent_results/{parent_id}/{subagent_id}`.
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
@@ -250,14 +250,14 @@ stale LLM prompt fails fast and retries on the canonical name.
 
 Agents can also use tools from external MCP (Model Context Protocol) servers. These are configured per-agent in `config/agents.yaml` and discovered automatically at startup. See [MCP Integration](mcp.md) for details.
 
-## Custom Skills
+## Custom Tools
 
-Agents can create and load custom skills at runtime:
+Agents can create and load custom tools at runtime:
 
 ```python
-from src.agent.skills import skill
+from src.agent.tools import tool
 
-@skill(
+@tool(
     name="analyze_csv",
     description="Parse and analyze a CSV file",
     parameters={
@@ -272,7 +272,7 @@ async def analyze_csv(path: str, query: str, *, workspace_manager=None) -> dict:
 
 ### Auto-Injected Dependencies
 
-Skills can request these keyword-only arguments (auto-injected by SkillRegistry):
+Tools can request these keyword-only arguments (auto-injected by ToolRegistry):
 
 | Argument | Type | Provides |
 |----------|------|----------|

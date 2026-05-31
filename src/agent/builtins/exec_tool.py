@@ -9,13 +9,13 @@ from __future__ import annotations
 import asyncio
 import os
 
-from src.agent.skills import skill
+from src.agent.tools import tool
 
 _MAX_OUTPUT = 100_000
 _MAX_TIMEOUT = 300
 
 
-@skill(
+@tool(
     name="run_command",
     description=(
         "Run a shell command in your Linux environment and return stdout+stderr. "

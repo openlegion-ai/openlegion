@@ -126,10 +126,10 @@ def _make_loop(tmp_path, *, chat_messages=None):
 
     llm = MagicMock()
     llm.model = "openai/gpt-4o-mini"
-    skills = MagicMock()
-    skills.get_tool_definitions.return_value = []
-    skills.get_descriptions.return_value = ""
-    skills.get_loop_exempt_tools.return_value = set()
+    tools = MagicMock()
+    tools.get_tool_definitions.return_value = []
+    tools.get_descriptions.return_value = ""
+    tools.get_loop_exempt_tools.return_value = set()
     mesh_client = MagicMock()
     mesh_client.is_standalone = False
     mesh_client.list_agents = AsyncMock(return_value={})
@@ -138,7 +138,7 @@ def _make_loop(tmp_path, *, chat_messages=None):
         agent_id="test-agent",
         role="tester",
         memory=memory,
-        skills=skills,
+        tools=tools,
         llm=llm,
         mesh_client=mesh_client,
         workspace=None,
@@ -224,10 +224,10 @@ async def test_no_restore_without_memory(tmp_path):
     """If memory store is None, restore is a no-op."""
     from src.agent.loop import AgentLoop
 
-    skills = MagicMock()
-    skills.get_tool_definitions.return_value = []
-    skills.get_descriptions.return_value = ""
-    skills.get_loop_exempt_tools.return_value = set()
+    tools = MagicMock()
+    tools.get_tool_definitions.return_value = []
+    tools.get_descriptions.return_value = ""
+    tools.get_loop_exempt_tools.return_value = set()
     mesh_client = MagicMock()
     mesh_client.is_standalone = False
 
@@ -235,7 +235,7 @@ async def test_no_restore_without_memory(tmp_path):
         agent_id="test-agent",
         role="tester",
         memory=None,
-        skills=skills,
+        tools=tools,
         llm=MagicMock(),
         mesh_client=mesh_client,
         workspace=None,

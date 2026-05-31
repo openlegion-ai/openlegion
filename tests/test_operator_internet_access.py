@@ -383,7 +383,7 @@ def _build_loop(monkeypatch, *, allowed_tools=None, internet_env=None):
     mesh_client.agent_id = "operator"
     loop = AgentLoop.__new__(AgentLoop)
     # Manually run only the bits we need from __init__ to keep this a
-    # unit test (the full __init__ pulls in workspace/skills/etc.).
+    # unit test (the full __init__ pulls in workspace/tools/etc.).
     loop._allowed_tools = (
         frozenset(allowed_tools) if allowed_tools is not None else None
     )
@@ -395,14 +395,14 @@ def _build_loop(monkeypatch, *, allowed_tools=None, internet_env=None):
     return loop
 
 
-def test_skill_filter_kw_no_runtime_disabled_uses_static_allowlist(monkeypatch):
+def test_tool_filter_kw_no_runtime_disabled_uses_static_allowlist(monkeypatch):
     loop = _build_loop(monkeypatch, allowed_tools={"hand_off", "http_request"})
-    kw = type(loop)._skill_filter_kw.fget(loop)
+    kw = type(loop)._tool_filter_kw.fget(loop)
     assert "exclude" not in kw  # operator path has no exclude set
     assert kw["allowed"] == frozenset({"hand_off", "http_request"})
 
 
-def test_skill_filter_kw_runtime_disabled_subtracts_from_allowed(monkeypatch):
+def test_tool_filter_kw_runtime_disabled_subtracts_from_allowed(monkeypatch):
     """Operator with internet off — ``http_request`` and ``web_search``
     are subtracted from the static allowlist."""
     loop = _build_loop(
@@ -410,7 +410,7 @@ def test_skill_filter_kw_runtime_disabled_subtracts_from_allowed(monkeypatch):
         allowed_tools={"hand_off", "http_request", "web_search", "edit_agent"},
         internet_env="false",
     )
-    kw = type(loop)._skill_filter_kw.fget(loop)
+    kw = type(loop)._tool_filter_kw.fget(loop)
     assert kw["allowed"] == frozenset({"hand_off", "edit_agent"})
 
 
@@ -422,30 +422,30 @@ def test_set_runtime_disabled_tools_flips_at_runtime(monkeypatch):
         allowed_tools={"hand_off", "http_request", "web_search"},
     )
     # Initially all three exposed.
-    assert "http_request" in type(loop)._skill_filter_kw.fget(loop)["allowed"]
+    assert "http_request" in type(loop)._tool_filter_kw.fget(loop)["allowed"]
     # Disable.
     from src.agent.loop import AgentLoop
     AgentLoop.set_runtime_disabled_tools(
         loop, {"http_request", "web_search"},
     )
-    after = type(loop)._skill_filter_kw.fget(loop)["allowed"]
+    after = type(loop)._tool_filter_kw.fget(loop)["allowed"]
     assert "http_request" not in after
     assert "web_search" not in after
     assert "hand_off" in after
     # Re-enable.
     AgentLoop.set_runtime_disabled_tools(loop, [])
-    restored = type(loop)._skill_filter_kw.fget(loop)["allowed"]
+    restored = type(loop)._tool_filter_kw.fget(loop)["allowed"]
     assert "http_request" in restored
     assert "web_search" in restored
 
 
-def test_skill_filter_kw_worker_path_unions_runtime_disabled(monkeypatch):
+def test_tool_filter_kw_worker_path_unions_runtime_disabled(monkeypatch):
     """Non-operator agents have ``_allowed_tools=None``; the runtime
     filter folds into ``exclude`` so the global tool surface narrows."""
     loop = _build_loop(monkeypatch, allowed_tools=None)
     loop._excluded_tools = frozenset({"unused"})
     from src.agent.loop import AgentLoop
     AgentLoop.set_runtime_disabled_tools(loop, {"http_request"})
-    kw = type(loop)._skill_filter_kw.fget(loop)
+    kw = type(loop)._tool_filter_kw.fget(loop)
     assert kw["exclude"] == frozenset({"unused", "http_request"})
     assert "allowed" not in kw

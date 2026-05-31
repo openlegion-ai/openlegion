@@ -89,11 +89,11 @@ def chat_stack(tmp_path_factory):
             pass
         time.sleep(0.5)
 
-    # Start agent with no custom skills (builtins only)
+    # Start agent with no custom tools (builtins only)
     url = cm.start_agent(
         agent_id="chatbot",
         role="assistant",
-        skills_dir="",
+        tools_dir="",
         system_prompt=(
             "You are a helpful assistant with access to shell commands, "
             "file operations, and HTTP tools. Use them when asked."
@@ -190,11 +190,11 @@ def test_chat_has_builtin_tools(chat_stack):
     r = httpx.get(f"{url}/capabilities", timeout=5)
     assert r.status_code == 200
     caps = r.json()
-    assert "run_command" in caps["skills"]
-    assert "read_file" in caps["skills"]
-    assert "write_file" in caps["skills"]
-    assert "http_request" in caps["skills"]
-    assert "browser_navigate" in caps["skills"]
+    assert "run_command" in caps["tools"]
+    assert "read_file" in caps["tools"]
+    assert "write_file" in caps["tools"]
+    assert "http_request" in caps["tools"]
+    assert "browser_navigate" in caps["tools"]
 
 
 @skip_no_docker

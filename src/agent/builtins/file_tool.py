@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.agent.skills import skill
+from src.agent.tools import tool
 
 _ALLOWED_ROOT = "/data"
 _MAX_READ = 500_000
@@ -83,7 +83,7 @@ def _is_protected_workspace_file(resolved: Path) -> bool:
     return relative.name in _PROTECTED_WORKSPACE_FILES and len(relative.parts) == 1
 
 
-@skill(
+@tool(
     name="read_file",
     description=(
         "Read a file's text content from the /data directory. Returns the "
@@ -133,7 +133,7 @@ def read_file(path: str, offset: int = 0, limit: int = 0) -> dict:
     return {"content": content, "size": file_size, "truncated": file_size > _MAX_READ}
 
 
-@skill(
+@tool(
     name="write_file",
     description=(
         "Write content to a file in the /data directory. Overwrites the file "
@@ -175,7 +175,7 @@ def write_file(path: str, content: str, append: bool = False) -> dict:
     return {"path": str(safe), "bytes_written": len(content.encode())}
 
 
-@skill(
+@tool(
     name="list_files",
     description=(
         "List files and directories in /data. Returns names, sizes, and types "

@@ -524,7 +524,7 @@ def _add_agent_to_config(
     entry: dict = {
         "role": role,
         "model": model,
-        "skills_dir": f"./skills/{name}",
+        "tools_dir": f"./agent_tools/{name}",
     }
     if initial_instructions:
         entry["initial_instructions"] = initial_instructions
@@ -696,12 +696,12 @@ def _validate_agent_name(name: str) -> str:
 def _create_agent(
     name: str, description: str, model: str,
 ) -> None:
-    """Create an agent: config, permissions, skills directory."""
+    """Create an agent: config, permissions, tools directory."""
     name = _validate_agent_name(name)
     _add_agent_to_config(name, description, model)
     _add_agent_permissions(name)
-    skills_dir = PROJECT_ROOT / "skills" / name
-    skills_dir.mkdir(parents=True, exist_ok=True)
+    tools_dir = PROJECT_ROOT / "agent_tools" / name
+    tools_dir.mkdir(parents=True, exist_ok=True)
 
 
 def _suppress_host_logs() -> None:
@@ -1349,14 +1349,14 @@ def _apply_template(
             forbidden=agent_def.get("forbidden") or [],
         )
         _add_agent_permissions(agent_name, permissions=agent_permissions, from_template=True)
-        skills_dir = PROJECT_ROOT / "skills" / agent_name
-        skills_dir.mkdir(parents=True, exist_ok=True)
+        tools_dir = PROJECT_ROOT / "agent_tools" / agent_name
+        tools_dir.mkdir(parents=True, exist_ok=True)
         created.append(agent_name)
 
     return created
 
 
-def _load_skill_templates() -> list[dict]:
+def _load_tool_templates() -> list[dict]:
     """Load individual agent role templates from team templates.
 
     Returns a flat list of agent definitions extracted from all team templates,
@@ -1386,7 +1386,7 @@ def _load_skill_templates() -> list[dict]:
 def _create_agent_from_template(
     name: str, template_id: str, model: str,
 ) -> None:
-    """Create an agent applying a skill template's config.
+    """Create an agent applying a tool template's config.
 
     *template_id* has the form ``"team/agent_name"`` (e.g. ``"devteam/engineer"``).
     """
@@ -1473,8 +1473,8 @@ def _create_agent_from_template(
         forbidden=agent_def.get("forbidden") or [],
     )
     _add_agent_permissions(name, permissions=agent_permissions, from_template=True)
-    skills_dir = PROJECT_ROOT / "skills" / name
-    skills_dir.mkdir(parents=True, exist_ok=True)
+    tools_dir = PROJECT_ROOT / "agent_tools" / name
+    tools_dir.mkdir(parents=True, exist_ok=True)
 
 
 def _default_description(name: str) -> str:
@@ -1711,7 +1711,7 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "list_templates", "apply_template", "hand_off", "check_inbox",
     # Workflow awareness — operator-only chain inspection + single-task
     # blocking primitive (see _HEARTBEAT_TOOLS in src/agent/loop.py for
-    # the heartbeat surface; both skills self-reject for non-operators).
+    # the heartbeat surface; both tools self-reject for non-operators).
     "workflow_snapshot", "await_task_event",
     # Configuration edits — edit_agent applies every field immediately
     # and emits an undo receipt (5min for soft fields, 30min for hard).
@@ -2174,5 +2174,5 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
     perms = _load_permissions()
     perms["permissions"][_OPERATOR_AGENT_ID]["can_message"] = ["*"]
     _save_permissions(perms)
-    skills_dir = PROJECT_ROOT / "skills" / _OPERATOR_AGENT_ID
-    skills_dir.mkdir(parents=True, exist_ok=True)
+    tools_dir = PROJECT_ROOT / "agent_tools" / _OPERATOR_AGENT_ID
+    tools_dir.mkdir(parents=True, exist_ok=True)

@@ -1826,12 +1826,12 @@ class TestFormatActivityForUserEventTypeMapping:
         )
 
 
-def _enumerate_skill_tool_names() -> set[str]:
+def _enumerate_tool_authoring_names() -> set[str]:
     """Walk ``src/agent/builtins/*.py`` and collect ``name="..."`` entries.
 
     Mirrors what ``test_verb_for_tool_map_completeness`` needs without
     importing the modules (some have side-effecting imports). The
-    convention in this repo is `@skill(name="<tool>", ...)` with
+    convention in this repo is `@tool(name="<tool>", ...)` with
     ``name=`` on its own line — we tolerate inline whitespace.
     """
     builtins_dir = _REPO_ROOT / "src/agent/builtins"
@@ -1899,14 +1899,14 @@ _VERB_FOR_TOOL_FALLBACK_OK = frozenset({
     "vault_generate_secret",
     "vault_list",
     "request_credential",
-    # Skill self-authoring.
-    "create_skill",
-    "reload_skills",
+    # Tool self-authoring.
+    "create_tool",
+    "reload_tools",
     "update_workspace",
     # Misc / external integrations.
     "post_tweet",
     "save_artifact",
-    # Test fixture in tests/test_skills.py — not a real builtin but
+    # Test fixture in tests/test_tools.py — not a real builtin but
     # shows up because the loader picks any name="..." entry.
     "my_tool",
     # Browser tools that aren't user-facing in the activity feed
@@ -1955,12 +1955,12 @@ _VERB_FOR_TOOL_FALLBACK_OK = frozenset({
 
 
 class TestVerbForToolCompleteness:
-    """Every ``@skill`` builtin either has an explicit ``verbForTool``
+    """Every ``@tool`` builtin either has an explicit ``verbForTool``
     entry or is on the fallback allowlist."""
 
     def test_every_builtin_tool_is_mapped_or_allowlisted(self):
         """No builtin slips through both the verb map and the allowlist."""
-        all_tools = _enumerate_skill_tool_names()
+        all_tools = _enumerate_tool_authoring_names()
         # Pull the verbForTool map body so we look for explicit keys
         # (substring match against the JS object literal).
         m = re.search(

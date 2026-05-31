@@ -609,23 +609,23 @@ class TestAttachIdempotent:
 
 
 # ───────────────────────────────────────────────────────────────────────
-# 12. Skill registration sanity check
+# 12. Tool registration sanity check
 # ───────────────────────────────────────────────────────────────────────
 
 
-class TestSkillRegistration:
-    def test_skill_present_with_correct_name_and_params(self):
+class TestToolRegistration:
+    def test_tool_present_with_correct_name_and_params(self):
         from src.agent.builtins import browser_tool
 
         fn = getattr(browser_tool, "browser_inspect_requests", None)
         assert fn is not None
 
-        meta = getattr(fn, "skill_meta", None) or getattr(fn, "_skill", None)
+        meta = getattr(fn, "tool_meta", None) or getattr(fn, "_tool", None)
         # Registry-agnostic — just confirm callable + has the expected name
-        # somewhere on its metadata. The skill registry itself is tested
-        # separately in tests/test_skills.py.
+        # somewhere on its metadata. The tool registry itself is tested
+        # separately in tests/test_tools.py.
         assert callable(fn)
-        # The skill decorator stores metadata; we just confirm description
+        # The tool decorator stores metadata; we just confirm description
         # mentions adblock so future refactors can't silently lose intent.
         # Falls back to inspecting the docstring if no metadata attr.
         meta_text = (
