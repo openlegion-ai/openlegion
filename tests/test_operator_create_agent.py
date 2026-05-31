@@ -18,8 +18,8 @@ def _mesh_env(tmp_path, monkeypatch):
     """Patch config module paths so agent creation writes to tmp_path."""
     cfg_dir = tmp_path / "config"
     cfg_dir.mkdir()
-    skills_dir = tmp_path / "skills"
-    skills_dir.mkdir()
+    tools_dir = tmp_path / "agent_tools"
+    tools_dir.mkdir()
 
     monkeypatch.setattr("src.cli.config.PROJECT_ROOT", tmp_path)
     monkeypatch.setattr("src.cli.config.AGENTS_FILE", cfg_dir / "agents.yaml")
@@ -285,15 +285,15 @@ class TestCreateCustomAgent:
         assert env_overrides.get("INITIAL_INSTRUCTIONS") == "Do great things"
         assert env_overrides.get("INITIAL_SOUL") == "Be kind"
 
-    def test_skills_dir_created(self, mesh_app, tmp_path):
-        """Skills directory should be created for the new agent."""
+    def test_tools_dir_created(self, mesh_app, tmp_path):
+        """Tools directory should be created for the new agent."""
         client = mesh_app["client"]
         resp = client.post(
             "/mesh/agents/create",
-            json={"agent_id": "operator", "name": "skillbot", "role": "test"},
+            json={"agent_id": "operator", "name": "toolbot", "role": "test"},
         )
         assert resp.status_code == 200
-        assert (tmp_path / "skills" / "skillbot").is_dir()
+        assert (tmp_path / "agent_tools" / "toolbot").is_dir()
 
     def test_agent_registered_in_router(self, mesh_app):
         """New agent should appear in the router's registry."""

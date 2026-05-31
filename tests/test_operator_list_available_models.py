@@ -1,4 +1,4 @@
-"""Tests for the operator ``list_available_models`` skill (Fix 2 in seam follow-up).
+"""Tests for the operator ``list_available_models`` tool (Fix 2 in seam follow-up).
 
 Operator-only tool that queries the mesh ``/mesh/introspect?section=llm``
 payload and returns a stable shape (per-provider allowed models + credential

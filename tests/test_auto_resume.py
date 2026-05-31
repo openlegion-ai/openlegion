@@ -55,11 +55,11 @@ def _make_mock_loop(*, has_memory: bool = True) -> MagicMock:
     loop._current_task_handle = None
     loop._cancel_requested = False
     loop._excluded_tools = frozenset()
-    loop.skills = MagicMock()
-    loop.skills.list_skills = MagicMock(return_value=[])
-    loop.skills.get_tool_definitions = MagicMock(return_value=[])
-    loop.skills.get_tool_sources = MagicMock(return_value={})
-    loop.skills.execute = AsyncMock(return_value={"ok": True})
+    loop.tools = MagicMock()
+    loop.tools.list_tools = MagicMock(return_value=[])
+    loop.tools.get_tool_definitions = MagicMock(return_value=[])
+    loop.tools.get_tool_sources = MagicMock(return_value={})
+    loop.tools.execute = AsyncMock(return_value={"ok": True})
     loop.mesh_client = MagicMock()
     loop.workspace = None
 

@@ -19,7 +19,7 @@ from src.cli.config import (
     _add_agent_to_config,
     _apply_template,
     _create_agent_from_template,
-    _load_skill_templates,
+    _load_tool_templates,
     _validate_agent_name,
 )
 
@@ -526,7 +526,7 @@ class TestApplyTemplate(_TempConfigMixin):
             cfg = yaml.safe_load(f)
         assert cfg["agents"]["agent1"]["model"] == "anthropic/claude-sonnet-4-6"
 
-    def test_skills_dir_created(self):
+    def test_tools_dir_created(self):
         tpl = {
             "agents": {
                 "agent1": {
@@ -538,8 +538,8 @@ class TestApplyTemplate(_TempConfigMixin):
         with self._mock_config():
             _apply_template("test-tpl", tpl)
 
-        skills_dir = Path(self._tmpdir) / "skills" / "agent1"
-        assert skills_dir.is_dir()
+        tools_dir = Path(self._tmpdir) / "agent_tools" / "agent1"
+        assert tools_dir.is_dir()
 
     def test_rejects_invalid_agent_name(self):
         """Agent names with path traversal are rejected."""
@@ -1005,14 +1005,14 @@ class TestValidateAgentTemplate:
         assert not warnings
 
 
-class TestLoadSkillTemplates:
+class TestLoadToolTemplates:
     def test_returns_flat_list(self):
-        templates = _load_skill_templates()
+        templates = _load_tool_templates()
         assert isinstance(templates, list)
         assert len(templates) > 0
 
     def test_template_structure(self):
-        templates = _load_skill_templates()
+        templates = _load_tool_templates()
         for tpl in templates:
             assert "id" in tpl
             assert "name" in tpl
@@ -1025,33 +1025,33 @@ class TestLoadSkillTemplates:
             assert "/" in tpl["id"]
 
     def test_ids_are_source_slash_name(self):
-        templates = _load_skill_templates()
+        templates = _load_tool_templates()
         for tpl in templates:
             source, name = tpl["id"].split("/", 1)
             assert source == tpl["source"]
             assert name == tpl["name"]
 
     def test_known_templates_present(self):
-        templates = _load_skill_templates()
+        templates = _load_tool_templates()
         ids = {t["id"] for t in templates}
         assert "devteam/engineer" in ids
         assert "starter/assistant" in ids
         assert "deep-research/scout" in ids
 
     def test_devteam_engineer_has_instructions_and_soul(self):
-        templates = _load_skill_templates()
+        templates = _load_tool_templates()
         eng = next(t for t in templates if t["id"] == "devteam/engineer")
         assert eng["has_instructions"] is True
         assert eng["has_soul"] is True
         assert eng["has_heartbeat"] is True
 
     def test_monitor_watcher_has_heartbeat(self):
-        templates = _load_skill_templates()
+        templates = _load_tool_templates()
         watcher = next(t for t in templates if t["id"] == "monitor/watcher")
         assert watcher["has_heartbeat"] is True
 
     def test_deep_research_analyst_has_thinking(self):
-        templates = _load_skill_templates()
+        templates = _load_tool_templates()
         analyst = next(t for t in templates if t["id"] == "deep-research/analyst")
         assert analyst["thinking"] == "medium"
 
@@ -1085,12 +1085,12 @@ class TestCreateAgentFromTemplate(_TempConfigMixin):
         eng = perms["permissions"]["my_engineer"]
         assert "tasks/*" in eng["blackboard_read"]
 
-    def test_creates_skills_dir(self):
+    def test_creates_tools_dir(self):
         with self._mock_config():
             _create_agent_from_template("my_scout", "deep-research/scout", "openai/gpt-4o")
 
-        skills_dir = Path(self._tmpdir) / "skills" / "my_scout"
-        assert skills_dir.is_dir()
+        tools_dir = Path(self._tmpdir) / "agent_tools" / "my_scout"
+        assert tools_dir.is_dir()
 
     def test_resolves_default_model_placeholder(self):
         with self._mock_config():

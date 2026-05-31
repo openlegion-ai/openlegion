@@ -1,4 +1,4 @@
-"""Tests for ``/mesh/work-summaries`` endpoints + operator skill +
+"""Tests for ``/mesh/work-summaries`` endpoints + operator tool +
 ``WorkSummariesStore`` end-to-end via the mesh app.
 
 Covers create / list / get / rate paths + permission boundaries

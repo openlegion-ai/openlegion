@@ -905,7 +905,7 @@ def reset(yes: bool):
         click.echo("This will stop all containers and delete:")
         click.echo("  - All agent configs and permissions")
         click.echo("  - All teams")
-        click.echo("  - All skills (except _marketplace)")
+        click.echo("  - All tools (except _marketplace)")
         click.echo("  - All runtime data (memory, blackboard, costs, etc.)")
         click.echo("  - All channel pairings, webhooks, cron jobs, API keys")
         click.echo("")
@@ -932,14 +932,14 @@ def reset(yes: bool):
         shutil.rmtree(data_dir)
         click.echo("Removed data/")
 
-    # Remove agent skills (keep _marketplace and skills/ dir)
-    skills_dir = root / "skills"
-    if skills_dir.is_dir():
-        for entry in skills_dir.iterdir():
+    # Remove agent tools (keep _marketplace and agent_tools/ dir)
+    tools_dir = root / "agent_tools"
+    if tools_dir.is_dir():
+        for entry in tools_dir.iterdir():
             if entry.name.startswith("_") or entry.is_file():
                 continue
             shutil.rmtree(entry)
-        click.echo("Removed agent skills/")
+        click.echo("Removed agent tools")
 
     # Remove Docker volumes for agents
     try:

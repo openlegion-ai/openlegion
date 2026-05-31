@@ -235,7 +235,7 @@ Two distinct controls cover two distinct traffic paths, with **deliberately asym
 - Pins DNS by replacing the hostname with the resolved IP in the request URL, preserving the original Host/SNI for TLS validation
 - **Fail-closed on DNS error** — `ValueError("SSRF protection: DNS resolution failed (fail-closed)")` rather than allowing the request through
 - Max 5 redirects with re-validation at each hop (re-resolves DNS, re-checks IP); `Authorization` stripped on cross-origin redirects
-- A compromised agent container with arbitrary code execution (e.g. a `skill_tool` bypass or `exec_tool` escape) **could in principle reach private IPs via raw syscalls** — the agent container has a regular bridge network, not iptables egress filtering. The application-layer block stops the supported tool surface; it is not a kernel boundary.
+- A compromised agent container with arbitrary code execution (e.g. a `tool_authoring` bypass or `exec_tool` escape) **could in principle reach private IPs via raw syscalls** — the agent container has a regular bridge network, not iptables egress filtering. The application-layer block stops the supported tool surface; it is not a kernel boundary.
 
 **Browser-initiated traffic** is filtered by the **iptables egress rules in the browser service container** (see Browser Service Container above). That filter is the authoritative SSRF boundary for everything the browser does — page loads, embedded subresources, `inspect_requests` activity, downloads, redirects, XHR, fetch, WebSockets. The mesh-side `_resolve_and_pin()` check on `navigate` and `open_tab` is a **friendly early-reject only**; it returns HTTP 400 with a clear error before the browser ever opens a connection, but it covers only those two action paths — everything else relies on iptables.
 
@@ -263,18 +263,18 @@ Workspace files (the agent's own `SOUL.md` / `INSTRUCTIONS.md` / `MEMORY.md` / e
 - **`_FILE_CAPS`** (`src/agent/server.py:332-340`) — char-count caps per file, enforced on `PUT` with HTTP 413 on overflow: `SOUL.md=4000`, `INSTRUCTIONS.md=12000`, `AGENTS.md=12000`, `USER.md=4000`, `MEMORY.md=16000`, `INTERFACE.md=4000`, `HEARTBEAT.md=None` (uncapped).
 - **`x-mesh-internal` gate on `PUT /workspace/{filename}`** (`src/agent/server.py:397-402`) — the agent cannot call its own workspace endpoint via `http_tool` or `exec+curl`. Writes must originate from the mesh on loopback with the internal header set. Reads from the agent's own loop are allowed without the gate.
 
-### Skill Self-Authoring
+### Tool Self-Authoring
 
-Agents can write and register new tools (`skill_tool`). Submitted code passes an AST analysis before being saved:
+Agents can write and register new tools (`tool_authoring`). Submitted code passes an AST analysis before being saved:
 - Forbidden imports (23 modules including `os`, `subprocess`, `socket`, `importlib`, etc.)
 - Forbidden calls (16 functions including `eval`, `exec`, `open`, `compile`, etc.)
 - Forbidden attribute accesses (11 attributes including `__dict__`, `__subclasses__`, `__globals__`, etc.)
 - A forgotten-`await` check (sync functions that call `mesh_client`/`memory_store` coroutines are rejected).
-- Skills are capped at 10,000 characters.
+- Tools are capped at 10,000 characters.
 
-**This AST validation is authoring HYGIENE, not a security boundary.** It catches obvious footguns and keeps self-authored skills well-formed — it does **not** contain a malicious agent. Agents already have `run_command`, so in-container code execution is part of the design; a determined agent never needs to smuggle anything past this validator. The **container hardening is the real boundary** (non-root UID 1000, `cap_drop=ALL`, `no-new-privileges`, read-only root fs, memory/CPU/PID limits — see Runtime Isolation above). Do not treat the forbidden-imports / forbidden-calls lists as a sandbox.
+**This AST validation is authoring HYGIENE, not a security boundary.** It catches obvious footguns and keeps self-authored tools well-formed — it does **not** contain a malicious agent. Agents already have `run_command`, so in-container code execution is part of the design; a determined agent never needs to smuggle anything past this validator. The **container hardening is the real boundary** (non-root UID 1000, `cap_drop=ALL`, `no-new-privileges`, read-only root fs, memory/CPU/PID limits — see Runtime Isolation above). Do not treat the forbidden-imports / forbidden-calls lists as a sandbox.
 
-**Marketplace skills are loaded without load-time AST validation.** `SkillRegistry.MARKETPLACE_SKILLS_DIR` (`/app/marketplace_skills`) is discovered by importing each module — arbitrary code runs at import time, with no AST gate. This is acceptable today only because that directory is **operator-populated and mounted read-only**. If a remote or agent-reachable marketplace-install path is ever added, pin installs to a verified commit SHA so the audited code is the code that runs.
+**Marketplace tools are loaded without load-time AST validation.** `ToolRegistry.MARKETPLACE_TOOLS_DIR` (`/app/marketplace_tools`) is discovered by importing each module — arbitrary code runs at import time, with no AST gate. This is acceptable today only because that directory is **operator-populated and mounted read-only**. If a remote or agent-reachable marketplace-install path is ever added, pin installs to a verified commit SHA so the audited code is the code that runs.
 
 See `docs/security-remediation-review-2026-05-29.md` (M1, H15) for the full finding.
 

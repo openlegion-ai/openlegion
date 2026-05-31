@@ -317,7 +317,7 @@ class CronScheduler:
         job exists for a given scope.
 
         Fires the tool directly (``tool_name="compose_work_summary"``)
-        so each tick is a deterministic skill invocation — no LLM call
+        so each tick is a deterministic tool invocation — no LLM call
         per fire. Per-team schedule customization arrives via the
         ``schedule`` arg (sourced from team metadata at boot) or via
         the existing ``PUT /mesh/cron/{id}`` operator endpoint.

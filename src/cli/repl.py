@@ -20,7 +20,7 @@ from src.cli.config import (
     _edit_agent_interactive,
     _get_default_model,
     _load_config,
-    _load_skill_templates,
+    _load_tool_templates,
     _pick_model_interactive,
 )
 from src.cli.formatting import (
@@ -409,8 +409,8 @@ class REPLSession:
             click.echo(f"Agent '{new_name}' already exists.")
             return
 
-        # Offer skill template selection
-        templates = _load_skill_templates()
+        # Offer tool template selection
+        templates = _load_tool_templates()
         selected_template = None
         if templates:
             click.echo("\nAvailable templates:")
@@ -456,7 +456,7 @@ class REPLSession:
         # Reload permissions so the mesh grants the new agent API access
         self.ctx.permissions.reload()
         agent_cfg_data = _load_config().get("agents", {}).get(new_name, {})
-        skills_dir = os.path.abspath(agent_cfg_data.get("skills_dir", ""))
+        tools_dir = os.path.abspath(agent_cfg_data.get("tools_dir", ""))
         add_mcp_servers = agent_cfg_data.get("mcp_servers") or None
         add_thinking = agent_cfg_data.get("thinking", "")
         # Build per-agent env overrides (no shared extra_env mutation)
@@ -472,7 +472,7 @@ class REPLSession:
         url = self.ctx.runtime.start_agent(
             agent_id=new_name,
             role=new_desc,
-            skills_dir=skills_dir,
+            tools_dir=tools_dir,
             model=agent_cfg_data.get("model", model),
             mcp_servers=add_mcp_servers,
             thinking=add_thinking,
@@ -1403,7 +1403,7 @@ class REPLSession:
         fresh_cfg = _load_config()
         agent_cfg = fresh_cfg.get("agents", {}).get(name, {})
         default_model = fresh_cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
-        skills_dir = os.path.abspath(agent_cfg.get("skills_dir", ""))
+        tools_dir = os.path.abspath(agent_cfg.get("tools_dir", ""))
         agent_model = agent_cfg.get("model", default_model)
         agent_mcp_servers = agent_cfg.get("mcp_servers") or None
         agent_thinking = agent_cfg.get("thinking", "")
@@ -1420,7 +1420,7 @@ class REPLSession:
         url = self.ctx.runtime.start_agent(
             agent_id=name,
             role=agent_cfg.get("role", ""),
-            skills_dir=skills_dir,
+            tools_dir=tools_dir,
             model=agent_model,
             mcp_servers=agent_mcp_servers,
             thinking=agent_thinking,

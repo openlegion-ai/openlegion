@@ -64,7 +64,7 @@ pytest tests/ --ignore=tests/test_e2e.py --ignore=tests/test_e2e_chat.py \
   --ignore=tests/test_e2e_memory.py --ignore=tests/test_e2e_triggering.py -x
 
 # Single file
-pytest tests/test_skills.py -x -v
+pytest tests/test_tools.py -x -v
 
 # E2E (requires Docker + API key)
 pytest tests/test_e2e.py -x -v
@@ -109,7 +109,7 @@ Sharding uses `pytest-split` (`--splits 3 --group N`). `--dist=loadfile` keeps a
 | `src/agent/memory.py` | `tests/test_memory.py`, `tests/test_memory_integration.py` |
 | `src/agent/workspace.py` | `tests/test_workspace.py`, `tests/test_chat_workspace.py` |
 | `src/agent/context.py` | `tests/test_context.py` |
-| `src/agent/skills.py` | `tests/test_skills.py` |
+| `src/agent/tools.py` | `tests/test_tools.py` |
 | `src/agent/builtins/*` | `tests/test_builtins.py`, `tests/test_memory_tools.py` |
 | `src/agent/builtins/vault_tool.py` | `tests/test_vault.py` |
 | `src/agent/builtins/subagent_tool.py` | `tests/test_subagent.py` |
@@ -171,7 +171,7 @@ async def _make_loop(tool_calls=None, text="Done"):
         agent_id="test",
         role="test",
         memory=mock_memory,
-        skills=mock_skills,
+        tools=mock_tools,
         llm=llm,
         mesh_client=mock_mesh,
     )
@@ -218,7 +218,7 @@ from src.shared.utils import setup_logging
 if TYPE_CHECKING:
     from src.agent.mcp_client import MCPClient
 
-logger = setup_logging("agent.skills")
+logger = setup_logging("agent.tools")
 ```
 
 ### Pydantic for Boundaries
@@ -278,13 +278,13 @@ Context manager thresholds (`src/agent/context.py`): 60% proactive fact flush, 7
 
 Workspace file caps (`_FILE_CAPS` in `src/agent/server.py`) are enforced on `PUT /workspace/{filename}` with HTTP 413 on overflow — see [`configuration.md`](configuration.md) for the per-file size table.
 
-### Skill Discovery
+### Tool Discovery
 
-Skills are auto-discovered at agent startup from three paths inside the container:
+Tools are auto-discovered at agent startup from three paths inside the container:
 
 - `/app/agent/builtins` — built-in tools shipped with the engine
-- `/data/custom_skills` — agent self-authored skills (persisted on the agent's data volume)
-- `/app/marketplace_skills` — installed marketplace skills
+- `/data/custom_tools` — agent self-authored tools (persisted on the agent's data volume)
+- `/app/marketplace_tools` — installed marketplace tools
 
 Conflicts resolve in order: custom overrides built-in overrides marketplace.
 
@@ -293,15 +293,15 @@ Conflicts resolve in order: custom overrides built-in overrides marketplace.
 ### Adding a Built-in Tool
 
 1. Create `src/agent/builtins/your_tool.py` (maps to `/app/agent/builtins/your_tool.py` inside the agent container at runtime)
-2. Use the `@skill` decorator
+2. Use the `@tool` decorator
 3. Accept `mesh_client`/`workspace_manager`/`memory_store` as keyword-only args if needed (auto-injected)
 4. Return a dict
 5. Add tests in `tests/test_builtins.py`
 
 ```python
-from src.agent.skills import skill
+from src.agent.tools import tool
 
-@skill(
+@tool(
     name="your_tool",
     description="Clear description of what this does",
     parameters={
@@ -344,9 +344,9 @@ async def your_endpoint(request: Request, body: YourRequest):
 4. Wire startup/stop lifecycle in `src/cli/channels.py:ChannelManager` — channel adapters live under `src/channels/`; `src/cli/channels.py` only orchestrates lifecycle.
 5. Add tests in `tests/test_channels.py`
 
-### Self-Authored Skills and the Marketplace
+### Self-Authored Tools and the Marketplace
 
-Agents can author their own skills via `src/agent/builtins/skill_tool.py`, and operators can install skills from git repositories via `src/marketplace.py`. Both paths run untrusted Python — the safety net is **AST validation** before the file is imported:
+Agents can author their own tools via `src/agent/builtins/tool_authoring.py`, and operators can install tools from git repositories via `src/marketplace.py`. Both paths run untrusted Python — the safety net is **AST validation** before the file is imported:
 
 - `_FORBIDDEN_IMPORTS` (23 modules) — blocks `os`, `subprocess`, `socket`, etc.
 - `_FORBIDDEN_CALLS` (16 functions) — blocks `eval`, `exec`, `open`, `compile`, `__import__`, etc.
@@ -364,7 +364,7 @@ openlegion/
 │   │   ├── server.py            # Agent FastAPI server
 │   │   ├── loop.py              # Execution loop (task + chat)
 │   │   ├── loop_detector.py     # Tool loop detection (warn/block/terminate)
-│   │   ├── skills.py            # Skill registry
+│   │   ├── tools.py            # Tool registry
 │   │   ├── memory.py            # SQLite + sqlite-vec memory
 │   │   ├── workspace.py         # Persistent markdown workspace
 │   │   ├── context.py           # Context window management
@@ -380,7 +380,7 @@ openlegion/
 │   │       ├── mesh_tool.py     # Blackboard, pub/sub, artifacts, cron
 │   │       ├── vault_tool.py    # Credential vault (blind storage)
 │   │       ├── introspect_tool.py # Live runtime state queries
-│   │       ├── skill_tool.py    # Custom skill creation + reload
+│   │       ├── tool_authoring.py    # Custom tool creation + reload
 │   │       ├── subagent_tool.py # In-process subagent spawning
 │   │       ├── web_search_tool.py  # DuckDuckGo search
 │   │       ├── wallet_tool.py   # Blockchain wallet operations (address, balance, transfer)
@@ -426,7 +426,7 @@ openlegion/
 │   │   ├── templates/           # Dashboard HTML (Alpine.js + Tailwind)
 │   │   └── static/              # CSS + JS assets
 │   ├── setup_wizard.py          # Guided setup wizard
-│   ├── marketplace.py           # Skill marketplace
+│   ├── marketplace.py           # Tool marketplace
 │   ├── templates/               # Agent setup templates
 │   └── cli/                     # CLI package
 │       ├── main.py              # Click commands and entry point

@@ -29,11 +29,11 @@ def _make_agent_app():
     loop._excluded_tools = frozenset()
     loop.memory = None
     loop.mesh_client = MagicMock()
-    loop.skills = MagicMock()
-    loop.skills.list_skills = MagicMock(return_value=[])
-    loop.skills.get_tool_definitions = MagicMock(return_value=[])
-    loop.skills.get_tool_sources = MagicMock(return_value={})
-    loop.skills.execute = AsyncMock(return_value={"ok": True})
+    loop.tools = MagicMock()
+    loop.tools.list_tools = MagicMock(return_value=[])
+    loop.tools.get_tool_definitions = MagicMock(return_value=[])
+    loop.tools.get_tool_sources = MagicMock(return_value={})
+    loop.tools.execute = AsyncMock(return_value={"ok": True})
     loop.workspace = None
     return create_agent_app(loop)
 

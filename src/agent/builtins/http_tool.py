@@ -19,7 +19,7 @@ from urllib.parse import urlparse, urlunparse
 import httpx
 
 from src.agent.builtins import CRED_HANDLE_RE
-from src.agent.skills import skill
+from src.agent.tools import tool
 
 _MAX_BODY = 50_000
 _MAX_REDIRECTS = 5
@@ -380,7 +380,7 @@ def _redact(text: str, secrets: list[str]) -> str:
     return text
 
 
-@skill(
+@tool(
     name="http_request",
     description=(
         "Make an HTTP request. Use this to call APIs, download web pages, "

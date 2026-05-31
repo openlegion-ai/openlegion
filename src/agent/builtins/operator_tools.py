@@ -8,7 +8,7 @@ import re as _re
 import time as _time
 from datetime import datetime, timezone
 
-from src.agent.skills import skill
+from src.agent.tools import tool
 from src.shared.operator_ceiling import (
     _OPERATOR_PERMISSION_CEILING,  # noqa: F401 — re-exported for back-compat
     clamp_to_operator_ceiling,
@@ -167,7 +167,7 @@ def _validate_edit(agent_id: str, field: str, value) -> dict | None:
     return None
 
 
-@skill(
+@tool(
     name="read_agent_config",
     description=(
         "Read an agent's current configuration. Symmetric inverse of "
@@ -256,7 +256,7 @@ async def read_agent_config(
     return result
 
 
-@skill(
+@tool(
     name="read_user_notifications",
     description=(
         "Read recent notifications that AGENTS pushed to the human USER's "
@@ -323,7 +323,7 @@ async def read_user_notifications(
     return {"notifications": notifications, "count": len(notifications)}
 
 
-@skill(
+@tool(
     name="list_peer_artifacts",
     description=(
         "List a teammate's artifact files. Artifacts are files agents "
@@ -378,7 +378,7 @@ async def list_peer_artifacts(
     return result
 
 
-@skill(
+@tool(
     name="read_peer_artifact",
     description=(
         "Read a single artifact file written by a teammate. Use this "
@@ -462,7 +462,7 @@ async def read_peer_artifact(
     return result
 
 
-@skill(
+@tool(
     name="list_available_models",
     description=(
         "List models currently usable given the active credential setup. "
@@ -522,7 +522,7 @@ async def list_available_models(
     }
 
 
-@skill(
+@tool(
     name="edit_agent",
     description=(
         "Change an agent's configuration. All edits apply IMMEDIATELY and "
@@ -649,7 +649,7 @@ async def edit_agent(
     }
 
 
-@skill(
+@tool(
     name="undo_change",
     description=(
         "Reverse a recent soft edit by undo_token. Use this if you realize "
@@ -701,7 +701,7 @@ async def undo_change(
 # ── Create Agent ─────────────────────────────────────────────
 
 
-@skill(
+@tool(
     name="create_agent",
     description=(
         "Create a new custom agent with role/model/instructions. "
@@ -801,7 +801,7 @@ def _parse_over_budget(error: Exception) -> dict | None:
 # ── Read tools ──────────────────────────────────────────────
 
 
-@skill(
+@tool(
     name="list_agent_queue",
     description=(
         "Read an agent's task queue: current and recent tasks grouped by "
@@ -838,7 +838,7 @@ async def list_agent_queue(
         return {"error": f"Failed to read queue for {agent_id}: {e}"}
 
 
-@skill(
+@tool(
     name="get_team_outputs",
     description=(
         "Completed task artifacts for a project in a time window. "
@@ -875,7 +875,7 @@ async def get_team_outputs(
         return {"error": f"Failed to read outputs for {project_id}: {e}"}
 
 
-@skill(
+@tool(
     name="workflow_snapshot",
     description=(
         "Read a workflow chain snapshot for a multi-stage handoff. Pass "
@@ -928,7 +928,7 @@ _AWAIT_TASK_EVENT_MAX_TIMEOUT_S = 270
 _AWAIT_TASK_EVENT_DEFAULT_TIMEOUT_S = 240
 
 
-@skill(
+@tool(
     name="await_task_event",
     description=(
         "Block until a specific task reaches a terminal status (done / "
@@ -936,7 +936,7 @@ _AWAIT_TASK_EVENT_DEFAULT_TIMEOUT_S = 240
         "the operator's back-edge inbox with exponential backoff. Use "
         "this when you need to wait for one specific child task to "
         "finish before proceeding (e.g. confirming a setup handoff). "
-        "For multi-stage chains, prefer workflow_snapshot — this skill "
+        "For multi-stage chains, prefer workflow_snapshot — this tool "
         "is a single-task blocking primitive. Max timeout is 270s so "
         "the call can return cleanly before the agent loop's tool "
         "execution ceiling cancels it. Returns the terminal event or "
@@ -972,14 +972,14 @@ async def await_task_event(
 ) -> dict:
     """Poll the operator's inbox for a terminal back-edge event.
 
-    Top-level try/except ensures the skill ALWAYS returns a non-empty
+    Top-level try/except ensures the tool ALWAYS returns a non-empty
     envelope (event / timed_out / error). Operator's prompt and the LLM
     upstream both depend on a dict shape — an unexpected exception that
     escaped the inner loop would surface to the LLM as an empty body and
     break the awareness loop (Bug 2 repro 2026-05-21).
     """
     # Round-4 forensic trace (Bug 2 still reproduces post-PR#952). Entry
-    # logging at INFO so the operator's E2E log shows whether the skill
+    # logging at INFO so the operator's E2E log shows whether the tool
     # was even invoked with what args. Pairs with the exit-log added
     # to every return site below — a missing exit line for a present
     # entry line means an unhandled exception escaped both guards.
@@ -1151,7 +1151,7 @@ async def await_task_event(
     }
 
 
-@skill(
+@tool(
     name="inspect_agents",
     description=(
         "Read agents. Without agent_id: roster summary. With agent_id: "
@@ -1298,7 +1298,7 @@ async def inspect_agents(
 # ── Action tools ────────────────────────────────────────────
 
 
-@skill(
+@tool(
     name="manage_task",
     description=(
         "Cancel, reroute, or retry a task. action='cancel' stops the task; "
@@ -1407,7 +1407,7 @@ async def manage_task(
     return {"error": f"Unknown action {action!r}; use cancel|reroute|retry"}
 
 
-@skill(
+@tool(
     name="manage_agent",
     description=(
         "Archive or delete an agent. action='archive' is reversible and "
@@ -1477,7 +1477,7 @@ async def manage_agent(
 # ── Self-cleanup tools ──────────────────────────────────────
 
 
-@skill(
+@tool(
     name="list_pending",
     description=(
         "List every non-expired pending action awaiting user "
@@ -1502,7 +1502,7 @@ async def list_pending(*, mesh_client=None, **_kw) -> dict:
     return {"pending": pending, "count": len(pending)}
 
 
-@skill(
+@tool(
     name="cancel_pending_action",
     description=(
         "Cancel a pending action by nonce. Use this to clean up stale or "
@@ -1559,7 +1559,7 @@ async def cancel_pending_action(
     }
 
 
-@skill(
+@tool(
     name="archive_audit_before",
     description=(
         "Archive operator audit entries older than the given date. Removes "
@@ -1623,7 +1623,7 @@ async def archive_audit_before(
 # coalesces them.
 
 
-@skill(
+@tool(
     name="inspect_teams",
     description=(
         "Read team info. detail='names' lists name+description; "
@@ -1681,7 +1681,7 @@ async def inspect_teams(
         return {"error": f"Failed to list teams: {e}"}
 
 
-@skill(
+@tool(
     name="create_team",
     description=(
         "Create a new team and optionally assign agents to it. "
@@ -1720,7 +1720,7 @@ async def create_team(
         return {"error": f"Failed to create team: {e}"}
 
 
-@skill(
+@tool(
     name="add_agents_to_team",
     description="Add one or more agents to a team. Requires user confirmation.",
     parameters={
@@ -1757,7 +1757,7 @@ async def add_agents_to_team(
     return {"team": target, "results": results}
 
 
-@skill(
+@tool(
     name="remove_agents_from_team",
     description="Remove one or more agents from a team. Requires user confirmation.",
     parameters={
@@ -1794,7 +1794,7 @@ async def remove_agents_from_team(
     return {"team": target, "results": results}
 
 
-@skill(
+@tool(
     name="update_team_context",
     description="Update a team's description / shared context.",
     parameters={
@@ -1823,7 +1823,7 @@ async def update_team_context(
         return {"error": f"Failed to update team context: {e}"}
 
 
-@skill(
+@tool(
     name="set_team_goal",
     description="Set a team's north star + success criteria.",
     parameters={
@@ -1893,7 +1893,7 @@ async def set_team_goal(
         return {"error": f"Failed to set team goal: {e}"}
 
 
-@skill(
+@tool(
     name="summarize_team_progress",
     description="Synthesised progress summary for a team.",
     parameters={
@@ -1919,7 +1919,7 @@ async def summarize_team_progress(
         return {"error": f"Failed to summarize {target}: {e}"}
 
 
-@skill(
+@tool(
     name="compose_work_summary",
     description=(
         "Compose and persist a work summary for a team or solo agent "
@@ -1965,7 +1965,7 @@ async def compose_work_summary(
     ``POST /mesh/work-summaries``. The narrative is a structured prose
     rendering of the team's recent counts and blockers — not an LLM
     paraphrase — so the summary is reproducible, cheap, and never
-    hallucinates a metric. PR-B adds the UI; this skill is the
+    hallucinates a metric. PR-B adds the UI; this tool is the
     backend-side composer that the cron and the operator both use.
     """
     if not _is_operator():
@@ -2093,7 +2093,7 @@ async def compose_work_summary(
         return {"error": f"Failed to persist work summary: {e}"}
 
 
-@skill(
+@tool(
     name="manage_team",
     description=(
         "Team lifecycle action (archive / unarchive / propose-delete). "
@@ -2468,7 +2468,7 @@ def _validate_goal_input(goal, *, require_status: bool = True) -> tuple[dict | N
     }, None
 
 
-@skill(
+@tool(
     name="manage_goals",
     description=(
         "Manage tracked business goals shown on the user's Work tab. "
@@ -2741,7 +2741,7 @@ _VALID_RATE_OUTCOMES = frozenset({
 _MAX_RATE_FEEDBACK_CHARS = 2000
 
 
-@skill(
+@tool(
     name="rate_delivery",
     description=(
         "Record outcome for a completed task. Operator's per-task "

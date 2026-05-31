@@ -1,7 +1,7 @@
 """Web search tool using DuckDuckGo HTML.
 
 No API key required. Extracts titles, URLs, and snippets from search results.
-Available to every agent as a built-in skill.
+Available to every agent as a built-in tool.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from html import unescape
 
 import httpx
 
-from src.agent.skills import skill
+from src.agent.tools import tool
 from src.shared.utils import sanitize_for_prompt
 
 logger = logging.getLogger("agent.web_search")
@@ -76,7 +76,7 @@ def _normalize_max_results(value: int) -> int:
         return _DEFAULT_MAX_RESULTS
 
 
-@skill(
+@tool(
     name="web_search",
     description=(
         "Search current public web pages via DuckDuckGo HTML search. Returns "

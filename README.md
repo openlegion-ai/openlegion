@@ -122,7 +122,7 @@ openlegion start
 openlegion start -d
 openlegion chat <agent_name>   # connect from another terminal to an agent you created
 openlegion stop                # clean shutdown
-openlegion reset               # destructive: wipe config/, data/, skills/* (keeps .env)
+openlegion reset               # destructive: wipe config/, data/, tools/* (keeps .env)
 ```
 
 ---
@@ -182,7 +182,7 @@ No LangChain. No Redis. No Kubernetes. No CEO agent. BSL License.
 
 4. **Self-aware and self-improving** — agents understand their own permissions, budget, fleet topology, and system architecture via auto-generated `SYSTEM.md` and live runtime context. They learn from tool failures and user corrections, injecting past learnings into future sessions.
 
-5. **Self-extends** — agents write their own Python skills at runtime and hot-reload them. Agents can also spawn sub-agents for specialized work.
+5. **Self-extends** — agents write their own Python tools at runtime and hot-reload them. Agents can also spawn sub-agents for specialized work.
 
 6. **Multi-channel** — connect agents to Telegram, Discord, Slack, and WhatsApp. Also accessible via CLI and API.
 
@@ -395,7 +395,7 @@ chat, status, capabilities, and results.
 │  └──┬──────────┬──────────┬──────────┬──────────┬───────┘    │
 │     │          │          │          │          │             │
 │  ┌──▼───┐  ┌──▼───┐  ┌──▼──────┐ ┌─▼──────┐ ┌─▼─────────┐ │
-│  │ LLM  │  │ Mesh │  │ Skill   │ │Work-   │ │ Context   │ │
+│  │ LLM  │  │ Mesh │  │ Tool   │ │Work-   │ │ Context   │ │
 │  │Client│  │Client│  │Registry │ │space   │ │ Manager   │ │
 │  │(mesh │  │(HTTP)│  │(builtins│ │Manager │ │(token     │ │
 │  │proxy)│  │      │  │+custom) │ │(/data/ │ │tracking,  │ │
@@ -491,8 +491,8 @@ canonicalized parameters and results over a 15-call sliding window.
 | `update_workspace` | Update identity files (SOUL.md, INSTRUCTIONS.md, USER.md, HEARTBEAT.md) |
 | `set_cron` | Schedule a recurring job (set `heartbeat=true` for autonomous wakeups) |
 | `list_cron` / `remove_cron` | Manage scheduled jobs |
-| `create_skill` | Write a new Python skill at runtime |
-| `reload_skills` | Hot-reload all skills |
+| `create_tool` | Write a new Python tool at runtime |
+| `reload_tools` | Hot-reload all tools |
 | `spawn_fleet_agent` | Spawn an ephemeral sub-agent in a new container |
 | `spawn_subagent` | Spawn a lightweight in-container subagent for parallel subtasks |
 | `list_subagents` | List active subagents and their status |
@@ -507,13 +507,13 @@ canonicalized parameters and results over a 15-call sliding window.
 | `get_system_status` | Query own runtime state: permissions, budget, fleet, cron, health |
 | `read_agent_history` | Read another agent's conversation logs |
 
-Custom skills are Python functions decorated with `@skill`, auto-discovered
-from the agent's `skills_dir` at startup. Agents can also create new skills
+Custom tools are Python functions decorated with `@tool`, auto-discovered
+from the agent's `tools_dir` at startup. Agents can also create new tools
 at runtime and hot-reload them.
 
 Agents also support **[MCP (Model Context Protocol)](#mcp-tool-support)** — any
 MCP-compatible tool server can be plugged in via config, giving agents access to
-databases, filesystems, APIs, and more without writing custom skills.
+databases, filesystems, APIs, and more without writing custom tools.
 
 ---
 
@@ -670,7 +670,7 @@ Defense-in-depth with six layers:
 
 Per-agent rate limits on 17 mesh endpoints (token bucket; HTTP 429 + audit log on overflow). See [`docs/security.md`](docs/security.md) for the full table.
 
-Containers run with `no-new-privileges`, `cap_drop=ALL`, `read_only=True`, `/tmp` tmpfs (100MB noexec/nosuid), UID 1000. Skills self-authored by agents pass AST validation (23 forbidden imports, 16 forbidden calls, 11 forbidden attrs).
+Containers run with `no-new-privileges`, `cap_drop=ALL`, `read_only=True`, `/tmp` tmpfs (100MB noexec/nosuid), UID 1000. Tools self-authored by agents pass AST validation (23 forbidden imports, 16 forbidden calls, 11 forbidden attrs).
 
 ### Dual Runtime Backend
 
@@ -714,7 +714,7 @@ openlegion [--verbose/-v] [--quiet/-q] [--json]
 ├── pending [--port PORT] [--json]                         # List pending actions awaiting confirmation
 ├── confirm <nonce> [--port PORT]                          # Confirm a pending action
 ├── cancel <nonce> [--port PORT]                           # Cancel a pending action
-├── reset [-y]                                             # DESTRUCTIVE: stop everything and wipe config/, data/, skills/* (keeps .env)
+├── reset [-y]                                             # DESTRUCTIVE: stop everything and wipe config/, data/, tools/* (keeps .env)
 ├── version [--verbose/-v]                                 # Show version and environment info
 └── wallet                                                 # Manage agent wallets (derives EVM + Solana from one master seed)
     ├── init                                               # Generate the master wallet seed (shown once; HTTP 410 thereafter)
@@ -831,7 +831,7 @@ agents:
   researcher:
     role: "research"
     model: "openai/gpt-4o-mini"
-    skills_dir: "./skills/researcher"
+    tools_dir: "./tools/researcher"
     initial_instructions: "You are a research specialist..."
     thinking: "medium"                   # off (default), low, medium, or high
     budget:
@@ -906,7 +906,7 @@ On next `openlegion start`, a pairing code appears — send it to your bot to li
 OpenLegion supports the **[Model Context Protocol (MCP)](https://modelcontextprotocol.io)** —
 the emerging standard for LLM tool interoperability. Any MCP-compatible tool server
 can be plugged into an agent via config, with tools automatically discovered and
-exposed to the LLM alongside built-in skills.
+exposed to the LLM alongside built-in tools.
 
 > **Note:** MCP support is an optional dependency and is NOT installed by `./install.sh`. From the cloned repo, activate the venv and run `pip install -e '.[mcp]'`. Without it, agents with `mcp_servers` configured will log an import error and skip MCP tool loading at startup. Wallet tools likewise require the optional `[wallet]` group (`web3`, `eth-account`, `mnemonic`, `solders`, `solana`).
 
@@ -946,16 +946,16 @@ The same `MCPServerConfig` model validates both paths: `name` matches
 handles (use `env` or `args` instead), case-insensitive duplicate names are
 rejected. Each server is launched as a subprocess inside the agent container
 using stdio transport; tools are discovered via the MCP protocol and appear
-in the LLM's tool list alongside built-in skills.
+in the LLM's tool list alongside built-in tools.
 
 ### How It Works
 
 1. Agent container reads `MCP_SERVERS` from environment (set by the runtime)
 2. `MCPClient` launches each server subprocess via stdio transport
 3. MCP protocol handshake discovers available tools and their schemas
-4. Tools are registered in `SkillRegistry` with OpenAI function-calling format
+4. Tools are registered in `ToolRegistry` with OpenAI function-calling format
 5. LLM tool calls route through `MCPClient.call_tool()` to the correct server
-6. Name conflicts with built-in skills are resolved by prefixing (`mcp_{server}_{tool}`)
+6. Name conflicts with built-in tools are resolved by prefixing (`mcp_{server}_{tool}`)
 
 ### Server Config Options
 
@@ -1031,7 +1031,7 @@ src/
 │   ├── __main__.py                     # Container entry
 │   ├── loop.py                         # Execution loop (task + chat)
 │   ├── loop_detector.py                # Tool loop detection (warn/block/terminate)
-│   ├── skills.py                       # Skill registry + discovery
+│   ├── tools.py                       # Tool registry + discovery
 │   ├── mcp_client.py                   # MCP server lifecycle + tool routing
 │   ├── memory.py                       # Hierarchical memory (SQLite + sqlite-vec + FTS5)
 │   ├── workspace.py                    # Persistent workspace + BM25 search
@@ -1048,7 +1048,7 @@ src/
 │       ├── memory_tool.py              # Memory search and save
 │       ├── mesh_tool.py                # Shared state, fleet awareness, artifacts
 │       ├── vault_tool.py               # Credential vault operations
-│       ├── skill_tool.py               # Runtime skill creation + hot-reload
+│       ├── tool_authoring.py               # Runtime tool creation + hot-reload
 │       ├── introspect_tool.py          # Live runtime state queries
 │       ├── subagent_tool.py            # Spawn in-process subagents
 │       ├── coordination_tool.py        # Structured inter-agent coordination (hand_off, check_inbox, update_status, complete_task)
@@ -1112,7 +1112,7 @@ src/
 │   ├── templates/index.html            # Dashboard UI (Alpine.js + Tailwind via CDN)
 │   └── static/                         # CSS + JS assets + avatars
 ├── setup_wizard.py                    # Guided setup wizard
-├── marketplace.py                     # Skill marketplace (git-based install/remove)
+├── marketplace.py                     # Tool marketplace (git-based install/remove)
 └── templates/
     ├── starter.yaml                    # Single-agent template
     ├── sales.yaml                      # Sales pipeline team
@@ -1146,7 +1146,7 @@ config/
 | Private by default, shared by promotion | Agents keep knowledge private. Facts are explicitly promoted to the blackboard. |
 | Explicit failure handling | Domain-specific exceptions propagated with context. No silent error swallowing. |
 | Small enough to audit | ~77,000 lines in `src/`. The entire codebase is still auditable in a day. |
-| Skills over features | New capabilities are agent skills, not mesh code. |
+| Tools over features | New capabilities are agent tools, not mesh code. |
 | SQLite for all state | Single-file databases. No external services. WAL mode for concurrent reads. |
 | Zero vendor lock-in | LiteLLM supports 100+ providers. Markdown workspace files. No proprietary formats. |
 
@@ -1167,7 +1167,7 @@ Yes. Self-hosting is the default and is free under the BSL. You need Python 3.10
 For production and team use, yes - it adds container/microVM isolation, a credential vault so agents never hold API keys, per-agent budget caps, and permission ACLs on top of autonomous agents. For a single-user assistant on one machine, OpenClaw or a lighter tool may be simpler. See [OpenLegion vs OpenClaw](#openlegion-vs-openclaw).
 
 **How does OpenLegion compare to Hermes Agent?**
-Hermes Agent (Nous Research) is an open-source single-user agent known for self-authored, self-improving skills and strong default memory. OpenLegion solves a different problem: running fleets of agents safely in production. It adds per-agent container isolation, a credential vault so agents never hold API keys, per-agent budget caps, and default-deny permission ACLs - controls aimed at teams that cannot afford a security incident. If you want a self-improving personal assistant, Hermes is a strong choice; if you need isolated, auditable, cost-bounded multi-agent fleets, that is what OpenLegion is built for.
+Hermes Agent (Nous Research) is an open-source single-user agent known for self-authored, self-improving tools and strong default memory. OpenLegion solves a different problem: running fleets of agents safely in production. It adds per-agent container isolation, a credential vault so agents never hold API keys, per-agent budget caps, and default-deny permission ACLs - controls aimed at teams that cannot afford a security incident. If you want a self-improving personal assistant, Hermes is a strong choice; if you need isolated, auditable, cost-bounded multi-agent fleets, that is what OpenLegion is built for.
 
 **How is OpenLegion different from CrewAI, LangGraph, and AutoGen?**
 Those are primarily libraries/frameworks for orchestrating agent logic inside one process. OpenLegion is a **runtime**: it runs each agent in its own isolated container, vaults credentials away from agents, enforces budgets and ACLs at a mesh host, and ships browser automation, memory, and multi-channel chat. They are not mutually exclusive - you can run framework-style logic on top of OpenLegion's isolation and cost controls.
@@ -1200,7 +1200,7 @@ See [LICENSE](LICENSE) for details.
 Looking for alternatives? OpenLegion is often compared to:
 
 - **OpenClaw** — personal AI assistant, 200K+ stars, not designed for production security
-- **Hermes Agent** — open-source self-improving agent (Nous Research), strong memory and self-authored skills, single-user focused, no container isolation or credential vault
+- **Hermes Agent** — open-source self-improving agent (Nous Research), strong memory and self-authored tools, single-user focused, no container isolation or credential vault
 - **nanobot** — ultra-lightweight Python agent (~4K lines), limited multi-agent support
 - **ZeroClaw** — Rust-based AI agent runtime, extreme resource efficiency, early-stage
 - **NanoClaw** — container-isolated, Claude-only, no cost tracking

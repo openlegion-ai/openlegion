@@ -273,7 +273,7 @@ class TestKnownBrowserActionsSet:
         assert "open_tab" in KNOWN_BROWSER_ACTIONS
 
     def test_phase_8_captcha_actions_present(self):
-        """Phase 8 §11.14 explicit-trigger captcha skills must be in
+        """Phase 8 §11.14 explicit-trigger captcha tools must be in
         KNOWN_BROWSER_ACTIONS so the mesh accepts ``solve_captcha`` and
         ``request_captcha_help`` routed via /mesh/browser/command."""
         from src.host.permissions import KNOWN_BROWSER_ACTIONS
@@ -688,8 +688,8 @@ class _SpawnRouteFixture:
 
         cfg_dir = tmp_path / "config"
         cfg_dir.mkdir(exist_ok=True)
-        skills_dir = tmp_path / "skills"
-        skills_dir.mkdir(exist_ok=True)
+        tools_dir = tmp_path / "agent_tools"
+        tools_dir.mkdir(exist_ok=True)
         templates_dir = tmp_path / "templates"
         templates_dir.mkdir(exist_ok=True)
         # Minimal one-agent template for /mesh/fleet/apply.

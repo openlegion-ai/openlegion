@@ -1,9 +1,9 @@
-"""Tests for the agent-side ``browser_warmup`` skill.
+"""Tests for the agent-side ``browser_warmup`` tool.
 
-The skill composes existing ``navigate`` and ``scroll`` browser commands
+The tool composes existing ``navigate`` and ``scroll`` browser commands
 into a believable pre-task browsing trail. Tests pin:
 
-  * the registered skill schema
+  * the registered tool schema
   * the per-intensity action shape (light=1 nav, normal=2 navs, deep=mix)
   * apex-host extraction (``www.linkedin.com/in/x`` → ``linkedin.com/``)
   * input validation (rejects non-http URLs without making nav calls)
@@ -40,13 +40,13 @@ def _make_mesh(side_effect=None, return_value=None):
 
 
 class TestBrowserWarmupSchema:
-    def test_skill_is_registered_with_expected_schema(self):
-        # Force-import the module so the @skill decorator runs.
+    def test_tool_is_registered_with_expected_schema(self):
+        # Force-import the module so the @tool decorator runs.
         import src.agent.builtins.browser_tool  # noqa: F401
-        from src.agent.skills import _skill_staging
+        from src.agent.tools import _tool_staging
 
-        assert "browser_warmup" in _skill_staging
-        info = _skill_staging["browser_warmup"]
+        assert "browser_warmup" in _tool_staging
+        info = _tool_staging["browser_warmup"]
 
         assert info["name"] == "browser_warmup"
         assert "warmup" in info["description"].lower()
@@ -60,9 +60,9 @@ class TestBrowserWarmupSchema:
         assert params["intensity"].get("default") == "normal"
 
     def test_required_params_only_target_url(self):
-        from src.agent.skills import _skill_staging
+        from src.agent.tools import _tool_staging
 
-        required = _skill_staging["browser_warmup"]["_sig_required_params"]
+        required = _tool_staging["browser_warmup"]["_sig_required_params"]
         # ``intensity`` has a default ⇒ not required; mesh_client is
         # keyword-only auto-injected and also has a default.
         assert "target_url" in required

@@ -12,7 +12,7 @@ import base64
 import re
 from pathlib import Path
 
-from src.agent.skills import skill
+from src.agent.tools import tool
 from src.shared.paths import resolve_under_root
 from src.shared.utils import setup_logging
 
@@ -24,7 +24,7 @@ _ARTIFACTS_DIR = Path("/data/workspace/artifacts")
 _FILENAME_UNSAFE_RE = re.compile(r"[^a-zA-Z0-9._-]")
 
 
-@skill(
+@tool(
     name="generate_image",
     description=(
         "Generate an image from a text prompt using AI image generation. "

@@ -35,12 +35,12 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None, *, real_memory: b
         memory.get_tool_history = MagicMock(return_value=[])
         memory._run_db = AsyncMock(return_value=None)
 
-    skills = MagicMock()
-    skills.get_tool_definitions = MagicMock(return_value=[])
-    skills.get_descriptions = MagicMock(return_value="- no tools")
-    skills.list_skills = MagicMock(return_value=[])
-    skills.is_parallel_safe = MagicMock(return_value=True)
-    skills.get_loop_exempt_tools = MagicMock(return_value=frozenset())
+    tools = MagicMock()
+    tools.get_tool_definitions = MagicMock(return_value=[])
+    tools.get_descriptions = MagicMock(return_value="- no tools")
+    tools.list_tools = MagicMock(return_value=[])
+    tools.is_parallel_safe = MagicMock(return_value=True)
+    tools.get_loop_exempt_tools = MagicMock(return_value=frozenset())
 
     llm = MagicMock()
     if llm_responses:
@@ -59,7 +59,7 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None, *, real_memory: b
         agent_id="test_agent",
         role="research",
         memory=memory,
-        skills=skills,
+        tools=tools,
         llm=llm,
         mesh_client=mesh_client,
     )
@@ -213,10 +213,10 @@ class TestTaskCheckpointLoop:
         )
         final_response = LLMResponse(content='{"result": {"done": true}}', tokens_used=30)
         loop = _make_loop([tool_call_response, final_response], real_memory=True)
-        loop.skills.get_tool_definitions = MagicMock(
+        loop.tools.get_tool_definitions = MagicMock(
             return_value=[{"type": "function", "function": {"name": "web_search"}}]
         )
-        loop.skills.execute = AsyncMock(return_value={"results": ["r1"]})
+        loop.tools.execute = AsyncMock(return_value={"results": ["r1"]})
 
         # Track checkpoint saves
         saved_checkpoints = []
@@ -472,12 +472,12 @@ class TestTaskCheckpointLoop:
         )
         llm.default_model = "test-model"
 
-        skills = MagicMock()
-        skills.get_tool_definitions = MagicMock(return_value=[])
-        skills.get_descriptions = MagicMock(return_value="- no tools")
-        skills.list_skills = MagicMock(return_value=[])
-        skills.is_parallel_safe = MagicMock(return_value=True)
-        skills.get_loop_exempt_tools = MagicMock(return_value=frozenset())
+        tools = MagicMock()
+        tools.get_tool_definitions = MagicMock(return_value=[])
+        tools.get_descriptions = MagicMock(return_value="- no tools")
+        tools.list_tools = MagicMock(return_value=[])
+        tools.is_parallel_safe = MagicMock(return_value=True)
+        tools.get_loop_exempt_tools = MagicMock(return_value=frozenset())
 
         mesh_client = MagicMock()
         mesh_client.is_standalone = False
@@ -492,7 +492,7 @@ class TestTaskCheckpointLoop:
 
         loop = AgentLoop(
             agent_id="test_agent", role="research",
-            memory=memory, skills=skills, llm=llm,
+            memory=memory, tools=tools, llm=llm,
             mesh_client=mesh_client, context_manager=context_mgr,
         )
 

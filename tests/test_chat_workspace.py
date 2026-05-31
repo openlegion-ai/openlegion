@@ -34,12 +34,12 @@ def _make_loop_with_workspace(
     memory.log_action = AsyncMock()
     memory._run_db = AsyncMock(return_value=None)
 
-    skills = MagicMock()
-    skills.get_tool_definitions = MagicMock(return_value=[])
-    skills.get_descriptions = MagicMock(return_value="- memory_search\n- memory_save")
-    skills.list_skills = MagicMock(return_value=["memory_search", "memory_save"])
-    skills.is_parallel_safe = MagicMock(return_value=True)
-    skills.get_loop_exempt_tools = MagicMock(return_value=frozenset())
+    tools = MagicMock()
+    tools.get_tool_definitions = MagicMock(return_value=[])
+    tools.get_descriptions = MagicMock(return_value="- memory_search\n- memory_save")
+    tools.list_tools = MagicMock(return_value=["memory_search", "memory_save"])
+    tools.is_parallel_safe = MagicMock(return_value=True)
+    tools.get_loop_exempt_tools = MagicMock(return_value=frozenset())
 
     llm = MagicMock()
     if llm_responses:
@@ -58,7 +58,7 @@ def _make_loop_with_workspace(
         agent_id="test_agent",
         role="assistant",
         memory=memory,
-        skills=skills,
+        tools=tools,
         llm=llm,
         mesh_client=mesh_client,
         workspace=workspace,
@@ -155,15 +155,15 @@ class TestChatWithWorkspace:
         loop = _make_loop_with_workspace(
             self._tmpdir, llm_responses=[tool_response, final_response]
         )
-        loop.skills.execute = AsyncMock(return_value={"results": [], "count": 0})
-        loop.skills.get_tool_definitions = MagicMock(
+        loop.tools.execute = AsyncMock(return_value={"results": [], "count": 0})
+        loop.tools.get_tool_definitions = MagicMock(
             return_value=[{"type": "function", "function": {"name": "memory_search"}}]
         )
 
         await loop.chat("Search for test")
 
-        # Verify workspace_manager was passed to skills.execute
-        call_args = loop.skills.execute.call_args
+        # Verify workspace_manager was passed to tools.execute
+        call_args = loop.tools.execute.call_args
         assert call_args.kwargs.get("workspace_manager") is not None
 
     @pytest.mark.asyncio
@@ -275,8 +275,8 @@ class TestChatTranscriptIntegration:
         loop = _make_loop_with_workspace(
             self._tmpdir, llm_responses=[tool_response, final_response],
         )
-        loop.skills.execute = AsyncMock(return_value={"results": []})
-        loop.skills.get_tool_definitions = MagicMock(
+        loop.tools.execute = AsyncMock(return_value={"results": []})
+        loop.tools.get_tool_definitions = MagicMock(
             return_value=[{"type": "function", "function": {"name": "memory_search"}}],
         )
 
@@ -357,10 +357,10 @@ class TestChatTranscriptIntegration:
         memory.get_tool_history = MagicMock(return_value=[])
         memory._run_db = AsyncMock(return_value=None)
 
-        skills = MagicMock()
-        skills.get_tool_definitions = MagicMock(return_value=[])
-        skills.get_descriptions = MagicMock(return_value="none")
-        skills.list_skills = MagicMock(return_value=[])
+        tools = MagicMock()
+        tools.get_tool_definitions = MagicMock(return_value=[])
+        tools.get_descriptions = MagicMock(return_value="none")
+        tools.list_tools = MagicMock(return_value=[])
 
         llm = MagicMock()
         llm.chat = AsyncMock(return_value=LLMResponse(content="Reply", tokens_used=10))
@@ -371,7 +371,7 @@ class TestChatTranscriptIntegration:
 
         loop = AgentLoop(
             agent_id="no_ws", role="test",
-            memory=memory, skills=skills, llm=llm, mesh_client=mesh,
+            memory=memory, tools=tools, llm=llm, mesh_client=mesh,
             workspace=None,
         )
         await loop.chat("Hello")
@@ -526,10 +526,10 @@ class TestChatPartialPersistence:
         # Tool execution raises a base exception so the partial we wrote
         # before dispatch is the LAST persistent transcript event for
         # this turn — the simulated mid-tool crash.
-        loop.skills.execute = AsyncMock(
+        loop.tools.execute = AsyncMock(
             side_effect=RuntimeError("tool blew up"),
         )
-        loop.skills.get_tool_definitions = MagicMock(
+        loop.tools.get_tool_definitions = MagicMock(
             return_value=[{"type": "function", "function": {"name": "slow_tool"}}],
         )
 
@@ -570,8 +570,8 @@ class TestChatPartialPersistence:
         loop = _make_loop_with_workspace(
             self._tmpdir, llm_responses=[tool_response, final_response],
         )
-        loop.skills.execute = AsyncMock(return_value={"results": []})
-        loop.skills.get_tool_definitions = MagicMock(
+        loop.tools.execute = AsyncMock(return_value={"results": []})
+        loop.tools.get_tool_definitions = MagicMock(
             return_value=[{"type": "function", "function": {"name": "memory_search"}}],
         )
 
@@ -615,8 +615,8 @@ class TestChatPartialPersistence:
             yield  # makes it an async generator
 
         loop.llm.chat_stream = _no_stream
-        loop.skills.execute = AsyncMock(return_value={"results": []})
-        loop.skills.get_tool_definitions = MagicMock(
+        loop.tools.execute = AsyncMock(return_value={"results": []})
+        loop.tools.get_tool_definitions = MagicMock(
             return_value=[
                 {"type": "function", "function": {"name": "slow_tool"}},
             ],
@@ -707,8 +707,8 @@ class TestChatPartialPersistence:
                     yield evt
 
         loop.llm.chat_stream = _dispatch
-        loop.skills.execute = AsyncMock(return_value={"results": []})
-        loop.skills.get_tool_definitions = MagicMock(
+        loop.tools.execute = AsyncMock(return_value={"results": []})
+        loop.tools.get_tool_definitions = MagicMock(
             return_value=[
                 {"type": "function", "function": {"name": "slow_tool"}},
             ],
@@ -767,8 +767,8 @@ class TestChatPartialPersistence:
             self._tmpdir,
             llm_responses=[round1, round2, round3, final_response],
         )
-        loop.skills.execute = AsyncMock(return_value={"ok": True})
-        loop.skills.get_tool_definitions = MagicMock(
+        loop.tools.execute = AsyncMock(return_value={"ok": True})
+        loop.tools.get_tool_definitions = MagicMock(
             return_value=[
                 {"type": "function", "function": {"name": "tool_a"}},
                 {"type": "function", "function": {"name": "tool_b"}},
@@ -860,8 +860,8 @@ class TestChatPartialPersistence:
             self._tmpdir,
             llm_responses=[tool_resp_1, tool_resp_2, final_resp],
         )
-        loop.skills.execute = AsyncMock(return_value={"ok": True})
-        loop.skills.get_tool_definitions = MagicMock(
+        loop.tools.execute = AsyncMock(return_value={"ok": True})
+        loop.tools.get_tool_definitions = MagicMock(
             return_value=[
                 {"type": "function", "function": {"name": "tool_a"}},
                 {"type": "function", "function": {"name": "tool_b"}},

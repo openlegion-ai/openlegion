@@ -1,6 +1,6 @@
-"""Skill discovery and registry for agent tools.
+"""Tool discovery and registry for agent tools.
 
-Skills are plain Python functions with a @skill decorator.
+Tools are plain Python functions with a @tool decorator.
 Auto-discovered from a directory at startup. No plugin system.
 """
 
@@ -18,19 +18,19 @@ from src.shared.utils import setup_logging
 if TYPE_CHECKING:
     from src.agent.mcp_client import MCPClient
 
-logger = setup_logging("agent.skills")
+logger = setup_logging("agent.tools")
 
-# Global registry populated by the @skill decorator.
-# Protected by _skill_staging_lock during reload to prevent
+# Global registry populated by the @tool decorator.
+# Protected by _tool_staging_lock during reload to prevent
 # corruption if hot-reload runs concurrently with module import.
-_skill_staging: dict[str, dict] = {}
-_skill_staging_lock = threading.Lock()
+_tool_staging: dict[str, dict] = {}
+_tool_staging_lock = threading.Lock()
 
 
 def _normalize_params_dict(params: object) -> dict:
-    """Normalize skill parameters to the canonical dict shape.
+    """Normalize tool parameters to the canonical dict shape.
 
-    Self-authored skills sometimes declare parameters as a list of
+    Self-authored tools sometimes declare parameters as a list of
     {name, type, description, ...} dicts instead of the canonical
     {name: {type, description, ...}} dict. Normalize list form to dict
     form; return empty dict for anything else unparseable.
@@ -45,7 +45,7 @@ def _normalize_params_dict(params: object) -> dict:
             name = p["name"]
             if name in result:
                 logger.warning(
-                    "Skill params contain duplicate name %r — keeping first", name,
+                    "Tool params contain duplicate name %r — keeping first", name,
                 )
                 continue
             result[name] = {k: v for k, v in p.items() if k != "name"}
@@ -53,14 +53,14 @@ def _normalize_params_dict(params: object) -> dict:
     return {}
 
 
-def skill(
+def tool(
     name: str,
     description: str,
     parameters: dict,
     parallel_safe: bool = True,
     loop_exempt: bool = False,
 ):
-    """Decorator to register a function as an agent skill.
+    """Decorator to register a function as an agent tool.
 
     *parallel_safe* — when ``True`` (default), the tool may be executed
     concurrently with other parallel-safe tools via ``asyncio.gather``.
@@ -79,7 +79,7 @@ def skill(
             if param.default is inspect.Parameter.empty
             and param.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
         )
-        _skill_staging[name] = {
+        _tool_staging[name] = {
             "name": name,
             "description": description,
             "parameters": parameters,
@@ -99,15 +99,15 @@ def skill(
     return decorator
 
 
-class SkillRegistry:
-    """Auto-discovers and manages agent skills from a directory.
+class ToolRegistry:
+    """Auto-discovers and manages agent tools from a directory.
 
-    Loads built-in tools first, then custom skills (which can override builtins).
-    Supports hot-reload when agents create new skills at runtime.
+    Loads built-in tools first, then custom tools (which can override builtins).
+    Supports hot-reload when agents create new tools at runtime.
     """
 
-    CUSTOM_SKILLS_DIR = "/data/custom_skills"
-    MARKETPLACE_SKILLS_DIR = "/app/marketplace_skills"
+    CUSTOM_TOOLS_DIR = "/data/custom_tools"
+    MARKETPLACE_TOOLS_DIR = "/app/marketplace_tools"
 
     # Class-level defaults so attribute access is safe even when __init__
     # is bypassed (e.g. via __new__ in tests).
@@ -115,24 +115,24 @@ class SkillRegistry:
     _tool_defs_cache: dict[tuple, list[dict]] | None = None
     _descriptions_cache: dict[tuple, str] | None = None
 
-    def __init__(self, skills_dir: str, mcp_client: MCPClient | None = None):
-        self.skills_dir = skills_dir
+    def __init__(self, tools_dir: str, mcp_client: MCPClient | None = None):
+        self.tools_dir = tools_dir
         self._mcp_client = mcp_client
-        self.skills: dict[str, dict] = {}
+        self.tools: dict[str, dict] = {}
         self._builtin_functions: frozenset = frozenset()
         # Memoization caches — cleared on reload()
         self._tool_defs_cache: dict[tuple, list[dict]] = {}
         self._descriptions_cache: dict[tuple, str] = {}
-        with _skill_staging_lock:
+        with _tool_staging_lock:
             self._discover_builtins()
             self._builtin_functions = frozenset(
-                info["function"] for info in _skill_staging.values()
+                info["function"] for info in _tool_staging.values()
                 if callable(info.get("function"))
             )
-            self._discover(skills_dir)
-            self._discover(self.CUSTOM_SKILLS_DIR)
-            self._discover(self.MARKETPLACE_SKILLS_DIR)
-            self.skills = dict(_skill_staging)
+            self._discover(tools_dir)
+            self._discover(self.CUSTOM_TOOLS_DIR)
+            self._discover(self.MARKETPLACE_TOOLS_DIR)
+            self.tools = dict(_tool_staging)
         self._register_mcp_tools()
 
     def _discover_builtins(self) -> None:
@@ -142,16 +142,16 @@ class SkillRegistry:
             return
         self._load_modules_from(builtins_dir, label="builtin")
 
-    def _discover(self, skills_dir: str) -> None:
-        """Load all .py files from skills_dir and register decorated functions."""
-        skills_path = Path(skills_dir)
-        if not skills_path.exists():
-            logger.warning(f"Skills directory not found: {skills_dir}")
+    def _discover(self, tools_dir: str) -> None:
+        """Load all .py files from tools_dir and register decorated functions."""
+        tools_path = Path(tools_dir)
+        if not tools_path.exists():
+            logger.warning(f"Tools directory not found: {tools_dir}")
             return
-        self._load_modules_from(skills_path, label="skill")
+        self._load_modules_from(tools_path, label="tool")
 
     def _load_modules_from(self, directory: Path, label: str) -> None:
-        """Load all .py modules from a directory, registering decorated skills."""
+        """Load all .py modules from a directory, registering decorated tools."""
         for py_file in directory.glob("**/*.py"):
             if py_file.name.startswith("_"):
                 continue
@@ -169,28 +169,28 @@ class SkillRegistry:
             return
         for tool_def in self._mcp_client.list_tools():
             name = tool_def["name"]
-            if name not in self.skills:
-                self.skills[name] = tool_def
+            if name not in self.tools:
+                self.tools[name] = tool_def
             # Conflicts already handled with prefixing in MCPClient.start()
 
     def reload(self) -> int:
-        """Re-discover skills from builtins and skills_dir. Returns new skill count."""
-        with _skill_staging_lock:
-            _skill_staging.clear()
+        """Re-discover tools from builtins and tools_dir. Returns new tool count."""
+        with _tool_staging_lock:
+            _tool_staging.clear()
             self._discover_builtins()
             self._builtin_functions = frozenset(
-                info["function"] for info in _skill_staging.values()
+                info["function"] for info in _tool_staging.values()
                 if callable(info.get("function"))
             )
-            self._discover(self.skills_dir)
-            self._discover(self.CUSTOM_SKILLS_DIR)
-            self._discover(self.MARKETPLACE_SKILLS_DIR)
-            self.skills = dict(_skill_staging)
+            self._discover(self.tools_dir)
+            self._discover(self.CUSTOM_TOOLS_DIR)
+            self._discover(self.MARKETPLACE_TOOLS_DIR)
+            self.tools = dict(_tool_staging)
         self._register_mcp_tools()
         self._tool_defs_cache = {}
         self._descriptions_cache = {}
-        logger.info(f"Reloaded {len(self.skills)} skills")
-        return len(self.skills)
+        logger.info(f"Reloaded {len(self.tools)} tools")
+        return len(self.tools)
 
     async def execute(
         self,
@@ -201,21 +201,21 @@ class SkillRegistry:
         memory_store: Any = None,
         _messages: list[dict] | None = None,
     ) -> Any:
-        """Execute a skill by name with given arguments."""
+        """Execute a tool by name with given arguments."""
         if self._mcp_client and self._mcp_client.has_tool(name):
             return await self._mcp_client.call_tool(name, arguments)
 
-        if name not in self.skills:
-            raise ValueError(f"Unknown skill: {name}")
+        if name not in self.tools:
+            raise ValueError(f"Unknown tool: {name}")
 
-        info = self.skills[name]
+        info = self.tools[name]
         func = info["function"]
         call_args = dict(arguments) if isinstance(arguments, dict) else {}
 
         # ── Type coercion ──────────────────────────────────────────────
         # The LLM occasionally sends values with the wrong JSON type
         # (e.g. "5" instead of 5 for an integer parameter).  Coerce to
-        # the type declared in the skill's parameter schema so that tool
+        # the type declared in the tool's parameter schema so that tool
         # functions don't crash with TypeError.
         param_schemas = _normalize_params_dict(info.get("parameters", {}))
         for key in list(call_args):
@@ -249,13 +249,13 @@ class SkillRegistry:
                     f"got {type(value).__name__}: {value!r}"
                 )
 
-        # Use cached signature metadata (computed at registration time via @skill)
+        # Use cached signature metadata (computed at registration time via @tool)
         sig_params = info.get("_sig_params")
         if sig_params is not None:
             has_var_keyword = info["_sig_has_var_keyword"]
             is_coroutine = info["_sig_is_coroutine"]
         else:
-            # Fallback for dynamically registered skills (MCP, marketplace)
+            # Fallback for dynamically registered tools (MCP, marketplace)
             sig = inspect.signature(func)
             sig_params = set(sig.parameters.keys())
             has_var_keyword = any(
@@ -282,7 +282,7 @@ class SkillRegistry:
             extra = set(call_args) - sig_params
             if extra:
                 logger.debug(
-                    "Dropping unknown args %s for skill '%s'", extra, name,
+                    "Dropping unknown args %s for tool '%s'", extra, name,
                 )
                 call_args = {k: v for k, v in call_args.items() if k in sig_params}
 
@@ -294,7 +294,7 @@ class SkillRegistry:
         # corresponding schema "default".
         sig_required = info.get("_sig_required_params")
         if sig_required is None and not has_var_keyword:
-            # Fallback for dynamically registered skills
+            # Fallback for dynamically registered tools
             sig_required = frozenset(
                 pname for pname, param in inspect.signature(func).parameters.items()
                 if param.default is inspect.Parameter.empty
@@ -336,17 +336,17 @@ class SkillRegistry:
         exclude: frozenset[str] | None = None,
         allowed: frozenset[str] | None = None,
     ) -> dict[str, str]:
-        """Return a mapping of skill name → source tag.
+        """Return a mapping of tool name → source tag.
 
         Tags: ``"builtin"`` (core platform tools), ``"mcp"`` (MCP server tools),
-        ``"custom"`` (agent-created or marketplace skills).
+        ``"custom"`` (agent-created or marketplace tools).
 
         Uses function-object identity rather than name lookup so that a custom
-        skill that overrides a builtin by the same name is correctly tagged
+        tool that overrides a builtin by the same name is correctly tagged
         ``"custom"``.
         """
         result = {}
-        for name, info in self.skills.items():
+        for name, info in self.tools.items():
             if allowed is not None:
                 if name not in allowed:
                     continue
@@ -362,8 +362,8 @@ class SkillRegistry:
         return result
 
     def is_parallel_safe(self, name: str) -> bool:
-        """Return whether a skill is safe to execute concurrently."""
-        info = self.skills.get(name)
+        """Return whether a tool is safe to execute concurrently."""
+        info = self.tools.get(name)
         if not info:
             return True  # unknown tools default to safe
         return info.get("_parallel_safe", True)
@@ -371,28 +371,28 @@ class SkillRegistry:
     def get_loop_exempt_tools(self) -> frozenset[str]:
         """Return the set of tool names marked loop_exempt."""
         return frozenset(
-            name for name, info in self.skills.items()
+            name for name, info in self.tools.items()
             if info.get("_loop_exempt", False)
         )
 
-    def list_skills(
+    def list_tools(
         self,
         exclude: frozenset[str] | None = None,
         allowed: frozenset[str] | None = None,
     ) -> list[str]:
-        """Return list of available skill names."""
+        """Return list of available tool names."""
         if allowed is not None:
-            return [n for n in self.skills if n in allowed]
+            return [n for n in self.tools if n in allowed]
         if exclude:
-            return [n for n in self.skills if n not in exclude]
-        return list(self.skills.keys())
+            return [n for n in self.tools if n not in exclude]
+        return list(self.tools.keys())
 
     def get_descriptions(
         self,
         exclude: frozenset[str] | None = None,
         allowed: frozenset[str] | None = None,
     ) -> str:
-        """Return human-readable descriptions of all skills (memoized)."""
+        """Return human-readable descriptions of all tools (memoized)."""
         if self._descriptions_cache is None:
             self._descriptions_cache = {}
         cache = self._descriptions_cache
@@ -402,7 +402,7 @@ class SkillRegistry:
             return cached
 
         lines = []
-        for name, info in self.skills.items():
+        for name, info in self.tools.items():
             if allowed is not None:
                 if name not in allowed:
                     continue
@@ -436,7 +436,7 @@ class SkillRegistry:
             return cached
 
         tools = []
-        for name, info in self.skills.items():
+        for name, info in self.tools.items():
             if allowed is not None:
                 if name not in allowed:
                     continue
@@ -457,8 +457,8 @@ class SkillRegistry:
                 })
                 continue
 
-            # Built-in skills store a flat {param_name: {type, description, ...}} dict.
-            # Self-authored skills may provide a list of {name, type, description}
+            # Built-in tools store a flat {param_name: {type, description, ...}} dict.
+            # Self-authored tools may provide a list of {name, type, description}
             # dicts — normalise to the expected dict format.
             params = _normalize_params_dict(params)
             properties = {}
@@ -479,7 +479,7 @@ class SkillRegistry:
                     prop["items"] = param_info["items"]
                 properties[param_name] = prop
                 # Honor explicit required metadata as well as the default-based
-                # inference — list-form self-authored skills may carry
+                # inference — list-form self-authored tools may carry
                 # `required: true` on individual params.
                 is_required = (
                     param_info.get("required") is True

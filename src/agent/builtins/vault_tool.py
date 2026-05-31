@@ -11,7 +11,7 @@ import re
 import secrets
 import string
 
-from src.agent.skills import skill
+from src.agent.tools import tool
 from src.shared.utils import setup_logging
 
 logger = setup_logging("agent.vault")
@@ -23,7 +23,7 @@ _CHARSETS = {
 }
 
 
-@skill(
+@tool(
     name="vault_generate_secret",
     description=(
         "Generate a cryptographically random secret and store it in the vault. "
@@ -71,7 +71,7 @@ async def vault_generate_secret(
         return {"error": f"Failed to store credential: {e}"}
 
 
-@skill(
+@tool(
     name="vault_list",
     description="List all credential names stored in the vault (names only, never values).",
     parameters={},
@@ -90,7 +90,7 @@ async def vault_list(*, mesh_client=None) -> dict:
 _CRED_NAME_RE = re.compile(r'^[a-zA-Z0-9_.\-]{1,128}$')
 
 
-@skill(
+@tool(
     name="request_credential",
     description=(
         "Ask the user to provide a credential (API key, password, token) "

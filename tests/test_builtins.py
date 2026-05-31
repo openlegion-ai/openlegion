@@ -310,7 +310,7 @@ class TestFileToolErrorHandling:
 
 
 class TestUpdateWorkspaceTool:
-    """Skill-level tests for the update_workspace tool in mesh_tool.py."""
+    """Tool-level tests for the update_workspace tool in mesh_tool.py."""
 
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()
@@ -1316,7 +1316,7 @@ class TestBrowserSnapshotHttpClient:
         )
 
     @pytest.mark.asyncio
-    async def test_browser_get_elements_skill_include_frames_param(self):
+    async def test_browser_get_elements_tool_include_frames_param(self):
         """include_frames=False is forwarded; default True is omitted from
         payload (server defaults to True)."""
         from src.agent.builtins.browser_tool import browser_get_elements
@@ -1565,25 +1565,25 @@ class TestBrowserNoMeshClient:
         assert "error" in result
 
 
-# ── SkillRegistry discovers builtins ─────────────────────────
+# ── ToolRegistry discovers builtins ─────────────────────────
 
 
 class TestBuiltinDiscovery:
     def test_builtins_auto_discovered(self):
-        from src.agent.skills import SkillRegistry
+        from src.agent.tools import ToolRegistry
 
-        registry = SkillRegistry(skills_dir="/nonexistent/path")
-        assert "run_command" in registry.skills
-        assert "read_file" in registry.skills
-        assert "write_file" in registry.skills
-        assert "list_files" in registry.skills
-        assert "http_request" in registry.skills
-        assert "browser_navigate" in registry.skills
-        assert "browser_get_elements" in registry.skills
-        assert "browser_reset" in registry.skills
-        assert "browser_scroll" in registry.skills
-        assert "memory_search" in registry.skills
-        assert "category" in registry.skills["memory_search"]["parameters"]
+        registry = ToolRegistry(tools_dir="/nonexistent/path")
+        assert "run_command" in registry.tools
+        assert "read_file" in registry.tools
+        assert "write_file" in registry.tools
+        assert "list_files" in registry.tools
+        assert "http_request" in registry.tools
+        assert "browser_navigate" in registry.tools
+        assert "browser_get_elements" in registry.tools
+        assert "browser_reset" in registry.tools
+        assert "browser_scroll" in registry.tools
+        assert "memory_search" in registry.tools
+        assert "category" in registry.tools["memory_search"]["parameters"]
 
 
 # ── memory_tool ────────────────────────────────────────────────
@@ -2581,7 +2581,7 @@ class TestIntrospectTool:
 
 
 class TestListAgentsProjectScope:
-    """Tests that list_agents skill passes project scope via MeshClient."""
+    """Tests that list_agents tool passes project scope via MeshClient."""
 
     @pytest.mark.asyncio
     async def test_list_agents_project_scope(self):
@@ -2785,7 +2785,7 @@ class TestBrowserOpenTabHttpClient:
 
 
 class TestBrowserDownloadHttpClient:
-    """browser_download skill calls mesh_client.browser_download (Phase 5 §8.2)."""
+    """browser_download tool calls mesh_client.browser_download (Phase 5 §8.2)."""
 
     @pytest.mark.asyncio
     async def test_download_calls_mesh_with_args(self):
@@ -3275,8 +3275,8 @@ class TestBrowserUploadFileHttpClient:
         mc.browser_upload_stage.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_oversize_file_rejected_at_skill(self, monkeypatch):
-        """Skill cap is now sourced from OPENLEGION_UPLOAD_STAGE_MAX_MB so
+    async def test_oversize_file_rejected_at_tool(self, monkeypatch):
+        """Tool cap is now sourced from OPENLEGION_UPLOAD_STAGE_MAX_MB so
         it stays consistent with the mesh + browser layers (P1.9).
         Setting it to 1 MB makes a 2 MB file blow the per-file cap."""
         from src.agent.builtins import browser_tool

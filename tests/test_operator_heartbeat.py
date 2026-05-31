@@ -30,7 +30,7 @@ async def test_heartbeat_restricts_operator_tools():
     assert result["outcome"] == "ok"
 
     # Verify get_tool_definitions was called with allowed=_HEARTBEAT_TOOLS
-    for c in loop.skills.get_tool_definitions.call_args_list:
+    for c in loop.tools.get_tool_definitions.call_args_list:
         if c.kwargs.get("allowed") is not None:
             assert c.kwargs["allowed"] == _HEARTBEAT_TOOLS
 
