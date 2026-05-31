@@ -88,7 +88,24 @@ class PermissionMatrix:
     def __init__(self, config_path: str = "config/permissions.json"):
         self.permissions: dict[str, AgentPermissions] = {}
         self._config_path = config_path
+        # L10: names of credentials that loaded under the SYSTEM_* tier.
+        # Injected post-construction by the runtime via
+        # ``set_system_credential_names``. Blocks agent resolution of a
+        # system secret even when its name doesn't match the provider-key
+        # shape heuristic (``is_system_credential``).
+        self._system_credential_names: frozenset[str] = frozenset()
         self._load(config_path)
+
+    def set_system_credential_names(self, names) -> None:
+        """Register the names of credentials loaded under the system tier.
+
+        Lowercased + frozen. Called by the runtime once the credential
+        vault is built so ``can_access_credential`` can deny by LOADED
+        TIER, not just by name shape (L10).
+        """
+        self._system_credential_names = frozenset(
+            n.lower() for n in (names or [])
+        )
 
     def reload(self) -> None:
         """Reload permissions from disk (e.g. after adding an agent at runtime)."""
@@ -345,17 +362,25 @@ class PermissionMatrix:
         Returns False for system credentials (always).
         Uses fnmatch against allowed_credentials patterns.
 
-        Defense-in-depth: The ``is_system_credential()`` check here blocks
-        agent access to provider-key-shaped names regardless of which tier
-        they landed in.  The primary separation is at loading time
-        (``OPENLEGION_SYSTEM_`` → ``system_credentials``, ``OPENLEGION_CRED_``
-        → ``credentials``), and ``resolve_credential()`` only returns
-        agent-tier values.  This check catches edge cases where a
-        provider-key name might appear in the agent-tier dict (e.g. via
-        ``add_credential()`` without ``system=True``).
+        Defense-in-depth: TWO independent system-tier checks block agent
+        access regardless of the matched ``allowed_credentials`` patterns.
+
+        1. L10 — LOADED TIER: any name that loaded under ``OPENLEGION_SYSTEM_``
+           (registered via ``set_system_credential_names``) is denied even
+           if its name doesn't match the provider-key shape. Closes the gap
+           where a system secret with a non-conforming name
+           (e.g. ``my_internal_token``) would otherwise be agent-resolvable.
+        2. NAME SHAPE — ``is_system_credential()`` blocks provider-key-shaped
+           names (``<provider>_api_key`` / ``_api_base``) regardless of tier,
+           catching e.g. an ``add_credential()`` without ``system=True``.
+
+        The primary separation is still at loading time, and
+        ``resolve_credential()`` only returns agent-tier values.
         """
         if self._is_trusted(agent_id):
             return True
+        if credential_name.lower() in self._system_credential_names:
+            return False
         if is_system_credential(credential_name):
             return False
         perms = self.get_permissions(agent_id)

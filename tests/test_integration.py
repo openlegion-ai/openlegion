@@ -2959,3 +2959,113 @@ def test_mesh_wake_paired_human_origin_keeps_kind(tmp_path, monkeypatch):
         loop.call_soon_threadsafe(loop.stop)
         bb.close()
         _server._invalidate_pairing_cache()
+
+
+# === M8: LLM-proxy input size cap ===
+
+def test_proxy_input_oversize_rejected(vault_components, monkeypatch):
+    """M8: a serialized proxy input above the cap is rejected (413) before
+    dispatch — the vault handler is never reached."""
+    import src.host.server as server_module
+
+    # Shrink the cap so the test payload is cheap to build.
+    monkeypatch.setattr(server_module, "_PROXY_INPUT_MAX_BYTES", 1024)
+    # Pin the agent to the model it requests so the request clears the
+    # model-pin gate and reaches the input-cap gate under test.
+    monkeypatch.setattr(
+        "src.cli.config._load_config",
+        lambda *a, **k: {
+            "agents": {"trusted": {"model": "anthropic/claude-sonnet-4-6"}},
+        },
+    )
+    # The pin also runs an is_model_compatible() check — give the fixture
+    # vault an Anthropic key so the requested model clears it and the
+    # request reaches the input-cap gate under test.
+    vault_components["vault"].system_credentials["anthropic_api_key"] = "sk-ant-test"
+    client = vault_components["client"]
+    big = "x" * 4096
+    resp = client.post(
+        "/mesh/api",
+        params={"agent_id": "trusted"},
+        json={
+            "service": "llm", "action": "chat",
+            "params": {
+                "model": "anthropic/claude-sonnet-4-6",
+                "messages": [{"role": "user", "content": big}],
+            },
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is False
+    assert data["status_code"] == 413
+    assert "too large" in data["error"].lower()
+
+
+def test_proxy_input_under_cap_not_rejected_for_size(vault_components, monkeypatch):
+    """M8: a normal-sized prompt is NOT rejected by the size gate (it may
+    still fail downstream for other reasons, but not with a 413)."""
+    import src.host.server as server_module
+
+    monkeypatch.setattr(server_module, "_PROXY_INPUT_MAX_BYTES", 4 * 1024 * 1024)
+    # Pin the agent to the model it requests so the request clears the
+    # model-pin gate and reaches the input-cap gate under test.
+    monkeypatch.setattr(
+        "src.cli.config._load_config",
+        lambda *a, **k: {
+            "agents": {"trusted": {"model": "anthropic/claude-sonnet-4-6"}},
+        },
+    )
+    # The pin also runs an is_model_compatible() check — give the fixture
+    # vault an Anthropic key so the requested model clears it and the
+    # request reaches the input-cap gate under test.
+    vault_components["vault"].system_credentials["anthropic_api_key"] = "sk-ant-test"
+    client = vault_components["client"]
+    resp = client.post(
+        "/mesh/api",
+        params={"agent_id": "trusted"},
+        json={
+            "service": "llm", "action": "chat",
+            "params": {
+                "model": "anthropic/claude-sonnet-4-6",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    # Whatever happens downstream, it is NOT a size rejection.
+    assert data.get("status_code") != 413
+
+
+def test_proxy_stream_input_oversize_rejected(vault_components, monkeypatch):
+    """M8: the streaming proxy rejects oversized input with HTTP 413."""
+    import src.host.server as server_module
+
+    monkeypatch.setattr(server_module, "_PROXY_INPUT_MAX_BYTES", 1024)
+    # Pin the agent to the model it requests so the request clears the
+    # model-pin gate and reaches the input-cap gate under test.
+    monkeypatch.setattr(
+        "src.cli.config._load_config",
+        lambda *a, **k: {
+            "agents": {"trusted": {"model": "anthropic/claude-sonnet-4-6"}},
+        },
+    )
+    # The pin also runs an is_model_compatible() check — give the fixture
+    # vault an Anthropic key so the requested model clears it and the
+    # request reaches the input-cap gate under test.
+    vault_components["vault"].system_credentials["anthropic_api_key"] = "sk-ant-test"
+    client = vault_components["client"]
+    big = "y" * 4096
+    resp = client.post(
+        "/mesh/api/stream",
+        params={"agent_id": "trusted"},
+        json={
+            "service": "llm", "action": "chat",
+            "params": {
+                "model": "anthropic/claude-sonnet-4-6",
+                "messages": [{"role": "user", "content": big}],
+            },
+        },
+    )
+    assert resp.status_code == 413

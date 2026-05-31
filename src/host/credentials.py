@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -282,6 +283,21 @@ def is_system_credential(name: str) -> bool:
             if prefix in get_known_provider_names():
                 return True
     return False
+
+
+def _masked_upstream_error(service: str, action: str, status_code: int, detail: str) -> str:
+    """L15: log full upstream detail, return a fixed non-revealing string.
+
+    Third-party provider error bodies can embed request URLs, internal
+    hostnames, echoed parameters, or partial credential material. Agents
+    are untrusted, so they receive only a generic message plus the HTTP
+    status; operators keep the full body in the mesh log.
+    """
+    logger.error(
+        "Upstream %s/%s call failed (HTTP %s): %s",
+        service, action, status_code, detail,
+    )
+    return f"Upstream {service} call failed (HTTP {status_code})."
 
 
 def _load_oauth_config(env_var: str, label: str) -> dict | None:
@@ -627,17 +643,23 @@ class CredentialVault:
                 response = await handler(request)
 
                 if self.cost_tracker and agent_id and response.success and response.data:
-                    if not response.data.get("oauth"):
-                        tokens_used = response.data.get("tokens_used", 0)
-                        if tokens_used:
-                            model = response.data.get(
-                                "model", request.params.get("model", "unknown"),
-                            )
-                            raw_pt = response.data.get("input_tokens")
-                            prompt_tokens = raw_pt if raw_pt else int(tokens_used * 0.7)
-                            raw_ct = response.data.get("output_tokens")
-                            completion_tokens = raw_ct if raw_ct else (tokens_used - prompt_tokens)
-                            self.cost_tracker.track(agent_id, model, prompt_tokens, completion_tokens)
+                    # M8: record usage even on the OAuth path. OAuth calls
+                    # carry no per-call dollar enforcement (``_needs_budget``
+                    # is False above, so no budget gate runs), but we still
+                    # TRACK the token spend so operators retain visibility
+                    # into OAuth consumption. Previously OAuth responses were
+                    # skipped entirely, leaving a blind spot. No $ semantics
+                    # are introduced — this is observability-only tracking.
+                    tokens_used = response.data.get("tokens_used", 0)
+                    if tokens_used:
+                        model = response.data.get(
+                            "model", request.params.get("model", "unknown"),
+                        )
+                        raw_pt = response.data.get("input_tokens")
+                        prompt_tokens = raw_pt if raw_pt else int(tokens_used * 0.7)
+                        raw_ct = response.data.get("output_tokens")
+                        completion_tokens = raw_ct if raw_ct else (tokens_used - prompt_tokens)
+                        self.cost_tracker.track(agent_id, model, prompt_tokens, completion_tokens)
 
                     fixed_cost = response.data.get("fixed_cost_usd")
                     if fixed_cost and fixed_cost > 0:
@@ -721,10 +743,29 @@ class CredentialVault:
                     },
                 )
             except Exception as e:
+                # L15: keep full detail in the operator-facing log, but
+                # return a fixed, non-revealing error to the agent so raw
+                # upstream provider exceptions (which may embed URLs,
+                # internal hostnames, or partial credentials) don't leak
+                # across the trust boundary. Typed envelopes above keep
+                # their structured detail; only this generic ``str(e)``
+                # leak is masked.
+                #
+                # The HTTP status code is preserved on the envelope AND
+                # echoed in the message text. The agent-side retry
+                # classifier (src/agent/llm.py:_raise_classified_error)
+                # backstops on numeric substrings ("429"/"503"), so keeping
+                # the bare status in the masked message preserves retry
+                # behaviour without leaking any provider-supplied text.
+                _status = getattr(e, "status_code", None)
                 logger.error(f"API call failed for {request.service}/{request.action}: {e}")
+                _masked = "Upstream service call failed."
+                if _status:
+                    _masked = f"Upstream service call failed (HTTP {_status})."
                 return APIProxyResponse(
-                    success=False, error=str(e),
-                    status_code=getattr(e, "status_code", None),
+                    success=False,
+                    error=_masked,
+                    status_code=_status,
                 )
 
         if lock is not None:
@@ -1314,7 +1355,15 @@ class CredentialVault:
 
         if last_error is not None:
             raise last_error
-        raise RuntimeError(f"No API key configured for model: {requested_model}")
+        # Typed config error (not a provider leak): missing credential is
+        # operator-actionable setup info that SHOULD reach the agent. Using
+        # ``LLMConfigError`` keeps it inside the typed-envelope path so L15's
+        # generic-exception masking doesn't swallow this safe message.
+        raise LLMConfigError(
+            f"No API key configured for model: {requested_model}",
+            provider=self._resolve_provider(requested_model),
+            model=requested_model,
+        )
 
     def get_model_health(self) -> list[dict]:
         """Return diagnostic model-health data."""
@@ -1810,10 +1859,11 @@ class CredentialVault:
         if "thinking" in body:
             sdk_kwargs["thinking"] = body["thinking"]
 
-        # Debug: log token info to diagnose deployed instance issues
-        token_preview = f"{api_key[:15]}...{api_key[-4:]}" if len(api_key) > 20 else "***"
+        # Debug: log a non-reversible token fingerprint to diagnose
+        # deployed instance issues without leaking token material (L1).
+        token_preview = hashlib.sha256(api_key.encode()).hexdigest()[:8]
         logger.info(
-            "OAuth stream: model=%s, token=%s, token_len=%d",
+            "OAuth stream: model=%s, token_fp=%s, token_len=%d",
             body["model"], token_preview, len(api_key),
         )
 
@@ -1912,7 +1962,7 @@ class CredentialVault:
             msg = "Auth failed"
             if hasattr(e, "body") and isinstance(e.body, dict):
                 msg = e.body.get("error", {}).get("message", msg)
-            logger.error("OAuth AuthenticationError: token=%s, msg=%s", token_preview, msg)
+            logger.error("OAuth AuthenticationError: token_fp=%s, msg=%s", token_preview, msg)
             err_msg = f"OAuth auth failed (token may have expired): {msg}"
             # Codex P2 r3: do NOT yield an untyped error frame before
             # raising — see ``_openai_oauth_chat_stream`` for the full
@@ -1931,7 +1981,7 @@ class CredentialVault:
             msg = f"Anthropic API error (HTTP {e.status_code})"
             if detail:
                 msg += f": {detail}"
-            logger.error("OAuth APIStatusError (%d): token=%s, detail=%s", e.status_code, token_preview, detail)
+            logger.error("OAuth APIStatusError (%d): token_fp=%s, detail=%s", e.status_code, token_preview, detail)
             # 403 → auth issue; 400 with model-related text → config issue.
             # Codex P2 r3: raise typed exceptions without yielding an
             # untyped frame first (would mask the typed error in the
@@ -2039,8 +2089,9 @@ class CredentialVault:
             raise RuntimeError("No Anthropic OAuth credentials configured")
 
         token = self._anthropic_oauth["access_token"]
-        token_preview = f"{token[:15]}...{token[-4:]}" if len(token) > 20 else "***"
-        logger.info("OAuth token resolved: %s (len=%d)", token_preview, len(token))
+        # L1: non-reversible fingerprint instead of a token slice.
+        token_preview = hashlib.sha256(token.encode()).hexdigest()[:8]
+        logger.info("OAuth token resolved: fp=%s (len=%d)", token_preview, len(token))
 
         now = int(time.time())
         expires_at = self._anthropic_oauth.get("expires_at", 0)
@@ -3149,7 +3200,9 @@ class CredentialVault:
             return APIProxyResponse(
                 success=response.is_success,
                 data=response.json() if response.is_success else None,
-                error=response.text if not response.is_success else None,
+                error=None if response.is_success else _masked_upstream_error(
+                    "apollo", request.action, response.status_code, response.text,
+                ),
                 status_code=response.status_code,
             )
 
@@ -3171,7 +3224,9 @@ class CredentialVault:
             return APIProxyResponse(
                 success=response.is_success,
                 data=response.json() if response.is_success else None,
-                error=response.text if not response.is_success else None,
+                error=None if response.is_success else _masked_upstream_error(
+                    "hunter", request.action, response.status_code, response.text,
+                ),
                 status_code=response.status_code,
             )
 
@@ -3193,7 +3248,9 @@ class CredentialVault:
         return APIProxyResponse(
             success=response.is_success,
             data=response.json() if response.is_success else None,
-            error=response.text if not response.is_success else None,
+            error=None if response.is_success else _masked_upstream_error(
+                "brave_search", request.action, response.status_code, response.text,
+            ),
             status_code=response.status_code,
         )
 
@@ -3296,8 +3353,9 @@ class CredentialVault:
             if not resp.is_success:
                 return APIProxyResponse(
                     success=False,
-                    error=f"Gemini API error {resp.status_code}: "
-                    f"{resp.text[:500]}",
+                    error=_masked_upstream_error(
+                        "gemini_image", "generate", resp.status_code, resp.text[:500],
+                    ),
                     status_code=resp.status_code,
                 )
 

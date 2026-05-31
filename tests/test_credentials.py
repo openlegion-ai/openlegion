@@ -246,7 +246,12 @@ async def test_handle_llm_no_failover_on_bad_request(monkeypatch):
         result = await v.execute_api_call(req)
 
     assert not result.success
-    assert "invalid request" in result.error
+    # L15: raw upstream provider message is masked from the agent; the
+    # status_code (400, permanent) is still surfaced so failover behaviour
+    # (no cascade on bad-request) remains observable.
+    assert "invalid request" not in (result.error or "")
+    assert result.error == "Upstream service call failed (HTTP 400)."
+    assert result.status_code == 400
 
 
 async def test_handle_llm_all_models_exhausted(monkeypatch):
@@ -272,7 +277,14 @@ async def test_handle_llm_all_models_exhausted(monkeypatch):
         result = await v.execute_api_call(req)
 
     assert not result.success
-    assert "down" in result.error
+    # L15: raw upstream message masked; status_code (503) preserved so the
+    # all-models-exhausted condition is still surfaced to the agent loop.
+    assert "down" not in (result.error or "")
+    assert result.error == "Upstream service call failed (HTTP 503)."
+    # 503 preserved both on the envelope and in the message so the agent's
+    # numeric retry-substring backstop still recognizes it as retryable.
+    assert result.status_code == 503
+    assert "503" in result.error
 
 
 async def test_handle_llm_empty_choices_triggers_failover(monkeypatch):
@@ -2381,8 +2393,9 @@ async def test_handle_llm_routes_oauth_to_direct_path(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_oauth_skips_cost_tracking(monkeypatch):
-    """OAuth calls via execute_api_call must NOT record costs."""
+async def test_oauth_tracks_usage_but_skips_budget_enforcement(monkeypatch):
+    """M8: OAuth calls via execute_api_call TRACK usage (observability)
+    but skip dollar enforcement (no preflight/budget gate)."""
     from unittest.mock import AsyncMock
 
     monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant-oat01-" + "x" * 80)
@@ -2393,7 +2406,11 @@ async def test_oauth_skips_cost_tracking(monkeypatch):
     # Mock _oauth_chat directly (it delegates to streaming internally)
     mock_result = MagicMock()
     mock_result.success = True
-    mock_result.data = {"content": "Hello!", "tokens_used": 75, "oauth": True}
+    mock_result.data = {
+        "content": "Hello!", "tokens_used": 75,
+        "input_tokens": 50, "output_tokens": 25, "oauth": True,
+        "model": "anthropic/claude-sonnet-4-6",
+    }
     v._oauth_chat = AsyncMock(return_value=mock_result)
 
     req = APIProxyRequest(
@@ -2406,7 +2423,11 @@ async def test_oauth_skips_cost_tracking(monkeypatch):
     result = await v.execute_api_call(req, agent_id="test-agent")
 
     assert result.success
-    cost_tracker.track.assert_not_called()
+    # Usage IS tracked now (spend visibility) ...
+    cost_tracker.track.assert_called_once_with(
+        "test-agent", "anthropic/claude-sonnet-4-6", 50, 25,
+    )
+    # ... but no dollar enforcement runs on the OAuth path.
     cost_tracker.preflight_check.assert_not_called()
 
 
@@ -3115,8 +3136,9 @@ async def test_codex_routing_prefixed_model(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_codex_skips_cost_tracking(monkeypatch):
-    """Codex calls via execute_api_call must NOT record costs."""
+async def test_codex_tracks_usage_but_skips_budget(monkeypatch):
+    """M8: Codex (OAuth) calls TRACK usage for visibility but skip dollar
+    enforcement (no preflight)."""
     from unittest.mock import AsyncMock
 
     monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
@@ -3140,7 +3162,7 @@ async def test_codex_skips_cost_tracking(monkeypatch):
     )
     result = await v.execute_api_call(req, agent_id="test-agent")
     assert result.success
-    cost_tracker.track.assert_not_called()
+    cost_tracker.track.assert_called_once()
     cost_tracker.preflight_check.assert_not_called()
 
 
@@ -4941,3 +4963,88 @@ def test_resolve_single_pass_no_recursion(monkeypatch, perms_allow_all):
     assert resolved == "before $CRED{inner} after"
     # Only the outer value is in the redaction list — inner was never read.
     assert secrets == ["before $CRED{inner} after"]
+
+
+# === L15: generic upstream errors masked to the agent ===
+
+@pytest.mark.asyncio
+async def test_generic_upstream_exception_masked(monkeypatch):
+    """L15: a raw exception from a service handler is masked to a fixed,
+    non-revealing string in the agent-facing response."""
+    v = CredentialVault()
+
+    secret = "internal-host.corp.local:5432 token=sk-leak-9999"
+
+    async def boom(request):
+        raise RuntimeError(secret)
+
+    v.service_handlers["llm"] = boom
+
+    req = APIProxyRequest(
+        service="llm", action="chat",
+        params={"model": "anthropic/claude-sonnet-4-6", "messages": []},
+    )
+    result = await v.execute_api_call(req, agent_id="agent-x")
+    assert result.success is False
+    # The raw exception detail must NOT leak to the agent.
+    assert secret not in (result.error or "")
+    assert "sk-leak-9999" not in (result.error or "")
+    assert result.error == "Upstream service call failed."
+
+
+@pytest.mark.asyncio
+async def test_thirdparty_handler_error_body_masked(monkeypatch):
+    """L15: third-party (apollo/hunter/brave) HTTP error bodies are masked;
+    the agent sees only a generic message + status, not the raw body."""
+    v = CredentialVault()
+    v.credentials["brave_search_api_key"] = "bsk-test"
+
+    class _Resp:
+        is_success = False
+        status_code = 429
+        text = "rate limited: key=bsk-SECRET-LEAK quota at https://internal/x"
+
+        def json(self):
+            return {}
+
+    class _Client:
+        async def get(self, *a, **kw):
+            return _Resp()
+
+    async def _get_client():
+        return _Client()
+
+    v._get_http_client = _get_client
+
+    req = APIProxyRequest(service="brave_search", action="search", params={"q": "x"})
+    result = await v.execute_api_call(req, agent_id="agent-x")
+    assert result.success is False
+    assert "bsk-SECRET-LEAK" not in (result.error or "")
+    assert "internal" not in (result.error or "")
+    assert result.status_code == 429
+
+
+# === L1: OAuth token never logged in full ===
+
+@pytest.mark.asyncio
+async def test_oauth_resolve_token_not_logged_in_full(monkeypatch, caplog):
+    """L1: ``_ensure_anthropic_oauth_token`` logs a sha256 fingerprint,
+    never a slice of the actual token."""
+    import logging
+
+    token = "sk-ant-oat01-" + "Z" * 80
+    monkeypatch.setenv(
+        "OPENLEGION_SYSTEM_ANTHROPIC_OAUTH",
+        '{"access_token": "%s"}' % token,
+    )
+    v = CredentialVault()
+
+    with caplog.at_level(logging.INFO):
+        resolved = await v._ensure_anthropic_oauth_token()
+
+    assert resolved == token
+    logged = "\n".join(r.getMessage() for r in caplog.records)
+    # Neither the full token nor its head/tail slice may appear.
+    assert token not in logged
+    assert token[:15] not in logged
+    assert token[-4:] not in logged or "fp=" in logged  # fingerprint only

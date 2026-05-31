@@ -334,7 +334,9 @@ async def test_get_missing_summary_returns_404(mesh_setup):
 
 
 @pytest.mark.asyncio
-async def test_get_summary_scope_403_for_outsider(mesh_setup):
+async def test_get_summary_scope_404_for_outsider(mesh_setup):
+    # L16: an unauthorized caller gets the SAME 404 as a non-existent
+    # summary so the endpoint can't be used as an existence oracle.
     store = mesh_setup["store"]
     now = time.time()
     row = store.create(
@@ -350,7 +352,7 @@ async def test_get_summary_scope_403_for_outsider(mesh_setup):
             f"/mesh/work-summaries/{row['id']}",
             headers=_hdr(mesh_setup["tokens"]["scout"]),
         )
-    assert resp.status_code == 403
+    assert resp.status_code == 404
 
 
 # =============================================================================
