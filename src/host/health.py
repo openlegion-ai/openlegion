@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING
 
 from src.cli.config import _load_config
 from src.cli.proxy import build_proxy_env_vars, resolve_agent_proxy
-from src.shared.utils import setup_logging
+from src.shared.utils import set_llm_max_tokens_env, setup_logging
 
 if TYPE_CHECKING:
     from src.host.mesh import MessageRouter
@@ -524,6 +524,11 @@ class HealthMonitor:
                 _proxy_url, _network_cfg.get("no_proxy", ""),
             )
             self.runtime.extra_env.update(_proxy_env)
+            # Per-agent output-token cap → LLM_MAX_TOKENS so an operator's
+            # max_output_tokens edit survives an automatic crash-recovery
+            # restart. Read from fresh YAML (the registry ``info`` dict
+            # doesn't carry it); no-op when unset → LLMClient default 8192.
+            set_llm_max_tokens_env(restart_env, _agents_cfg.get(agent_id, {}))
             try:
                 url = await loop.run_in_executor(
                     None,

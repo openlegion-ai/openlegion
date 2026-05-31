@@ -93,11 +93,17 @@ class LLMClient:
         if m.startswith("anthropic/"):
             budget = self._THINKING_BUDGETS.get(self.thinking, 10_000)
             # Anthropic requires max_tokens > budget_tokens; ensure enough room
-            # for both thinking and output text.
+            # for both thinking and output text. Honour the configured output
+            # cap so the per-agent max_output_tokens lever is meaningful for
+            # thinking agents too (otherwise a translator that turns thinking
+            # on would re-truncate on large tool calls). ``budget + 4096`` is
+            # the historical floor — taking the max preserves the prior
+            # default behaviour exactly (8192 cap <= budget + 4096) while
+            # letting an operator-raised cap take over when it's larger.
             return {
                 "thinking": {"type": "enabled", "budget_tokens": budget},
                 "temperature": 1.0,
-                "max_tokens": budget + 4096,
+                "max_tokens": max(self.max_output_tokens, budget + 4096),
             }
         if m.startswith("openai/o") or m.startswith("o1") or m.startswith("o3") or m.startswith("o4"):
             return {"reasoning_effort": self.thinking}

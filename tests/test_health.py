@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -105,6 +105,30 @@ class TestHealthRestartMissingConfig:
         monitor.runtime.start_agent.assert_called_once()
         assert health.status == "healthy"
         assert health.restart_count == 1
+
+    @pytest.mark.asyncio
+    async def test_restart_propagates_max_output_tokens(self):
+        """A crash-recovery restart must carry the operator's per-agent
+        output cap into the new container's env (LLM_MAX_TOKENS), or the
+        agent silently reverts to the 8192 default on every crash."""
+        monitor = _make_monitor({
+            "good-agent": {"role": "coder", "skills_dir": "/skills"},
+        })
+        monitor.register("good-agent")
+        health = monitor.agents["good-agent"]
+        health.consecutive_failures = 3
+        health.status = "unhealthy"
+        monitor.runtime.start_agent.return_value = "http://localhost:8401"
+        monitor.runtime.wait_for_agent = AsyncMock(return_value=True)
+
+        # The cap lives in YAML, not the registry info dict — patch the
+        # fresh-config load the restart path performs.
+        fake_cfg = {"agents": {"good-agent": {"max_output_tokens": 32000}}}
+        with patch("src.host.health._load_config", return_value=fake_cfg):
+            await monitor._try_restart("good-agent")
+
+        _, kwargs = monitor.runtime.start_agent.call_args
+        assert kwargs["env_overrides"].get("LLM_MAX_TOKENS") == "32000"
 
 
 class TestParallelHealthChecks:

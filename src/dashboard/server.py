@@ -49,7 +49,13 @@ from src.dashboard.auth import verify_session_cookie
 from src.shared.paths import resolve_under_root
 from src.shared.sqlite_helpers import open_db
 from src.shared.types import CRED_HANDLE_RE, MCPServerConfig
-from src.shared.utils import dumps_safe, friendly_streaming_error, sanitize_for_prompt, setup_logging
+from src.shared.utils import (
+    dumps_safe,
+    friendly_streaming_error,
+    sanitize_for_prompt,
+    set_llm_max_tokens_env,
+    setup_logging,
+)
 
 if TYPE_CHECKING:
     from src.dashboard.events import EventBus
@@ -2878,6 +2884,10 @@ def create_dashboard_router(
                 _proxy_url, cfg.get("network", {}).get("no_proxy", ""),
             )
             restart_env.update(_proxy_env)
+            # Per-agent output-token cap → LLM_MAX_TOKENS so an edit_agent
+            # change survives a single-agent dashboard restart (not just the
+            # live hot-reload). Absent = LLMClient default 8192.
+            set_llm_max_tokens_env(restart_env, agent_cfg)
             url = await asyncio.wait_for(
                 asyncio.to_thread(
                     runtime.start_agent,
@@ -5773,6 +5783,9 @@ def create_dashboard_router(
                     _proxy_url, _network_cfg.get("no_proxy", ""),
                 )
                 _restart_env.update(_proxy_env)
+                # Per-agent output-token cap → LLM_MAX_TOKENS (survives the
+                # dashboard "restart all agents" flow, not just hot-reload).
+                set_llm_max_tokens_env(_restart_env, agent_cfg)
                 url = await loop.run_in_executor(
                     None,
                     lambda aid=agent_id, acfg=agent_cfg, sd=skills_dir, re=_restart_env: runtime.start_agent(

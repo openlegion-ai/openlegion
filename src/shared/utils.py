@@ -13,6 +13,26 @@ from typing import Any
 UTC = timezone.utc
 
 
+def set_llm_max_tokens_env(env: dict[str, str], agent_cfg: dict) -> None:
+    """Inject ``LLM_MAX_TOKENS`` into a per-agent container env dict from the
+    agent's YAML config.
+
+    Called by every restart-from-config path (CLI start, dashboard
+    "restart agents", REPL ``/restart``, fleet-template apply) so an
+    operator's ``edit_agent`` change to ``max_output_tokens`` survives a
+    container restart — the agent reads this env at startup (see
+    ``src/agent/__main__.py``); the live ``/config`` hot-reload only covers
+    the already-running container.
+
+    No-op when the cap is unset or not a plain int, so the LLMClient default
+    (8192) then applies. ``bool`` is rejected explicitly (it is an ``int``
+    subclass) so a stray ``True``/``False`` can't become ``1``/``0``.
+    """
+    value = agent_cfg.get("max_output_tokens")
+    if isinstance(value, int) and not isinstance(value, bool):
+        env["LLM_MAX_TOKENS"] = str(value)
+
+
 def dumps_safe(obj: Any, **kwargs: Any) -> str:
     """json.dumps with `default=str` — handles datetime, UUID, Decimal, Path.
 

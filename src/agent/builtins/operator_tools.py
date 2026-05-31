@@ -41,7 +41,15 @@ _VALID_FIELDS = frozenset({
     "instructions", "soul", "model", "role", "heartbeat",
     "heartbeat_schedule",
     "interface", "thinking", "budget", "permissions",
+    "max_output_tokens",
 })
+
+# Per-agent output-token cap bounds. Mirrors the clamp in
+# ``src/agent/__main__.py`` (LLM_MAX_TOKENS) and the validation in the
+# agent ``/config`` endpoint + host ``/edit-soft`` so all three layers
+# reject the same out-of-range values identically.
+_MAX_OUTPUT_TOKENS_MIN = 256
+_MAX_OUTPUT_TOKENS_MAX = 200_000
 
 # Heartbeat schedule validator. Accepts the same forms cron.py accepts:
 #  * 5-field cron expressions ("*/15 * * * *", "0 9 * * 1-5")
@@ -139,6 +147,23 @@ def _validate_edit(agent_id: str, field: str, value) -> dict | None:
         err = _validate_heartbeat_schedule(value)
         if err:
             return {"error": err}
+    if field == "max_output_tokens":
+        # bool is an int subclass — reject it explicitly so True/False
+        # can't slip through as 1/0.
+        if not isinstance(value, int) or isinstance(value, bool):
+            return {
+                "error": (
+                    f"max_output_tokens must be an integer, got {value!r}"
+                ),
+            }
+        if not (_MAX_OUTPUT_TOKENS_MIN <= value <= _MAX_OUTPUT_TOKENS_MAX):
+            return {
+                "error": (
+                    f"max_output_tokens must be "
+                    f"{_MAX_OUTPUT_TOKENS_MIN}-{_MAX_OUTPUT_TOKENS_MAX}, "
+                    f"got {value}"
+                ),
+            }
     return None
 
 
@@ -153,7 +178,8 @@ def _validate_edit(agent_id: str, field: str, value) -> dict | None:
         "before changing a heartbeat schedule).\n\n"
         "Returns ``{agent_id, config: {...}}`` with these fields: "
         "model, instructions, soul, heartbeat, heartbeat_schedule, "
-        "interface, role, permissions, budget, thinking. Pass "
+        "interface, role, permissions, budget, thinking, "
+        "max_output_tokens. Pass "
         "``fields=['instructions','soul']`` to scope the read to a subset."
     ),
     parameters={
@@ -167,7 +193,8 @@ def _validate_edit(agent_id: str, field: str, value) -> dict | None:
             "description": (
                 "Optional list of field names to return. Valid values: "
                 "model, instructions, soul, heartbeat, heartbeat_schedule, "
-                "interface, role, permissions, budget, thinking. "
+                "interface, role, permissions, budget, thinking, "
+                "max_output_tokens. "
                 "Omit or pass empty for the full config."
             ),
             "default": [],
@@ -503,8 +530,8 @@ async def list_available_models(
         "— act decisively on what the user asked for. The undo window is "
         "5 minutes for soft fields (instructions/soul/role/heartbeat/"
         "heartbeat_schedule/interface) and 30 minutes for hard fields "
-        "(model/permissions/budget/thinking) so the user has more time to "
-        "catch a costly edit.\n\n"
+        "(model/permissions/budget/thinking/max_output_tokens) so the user "
+        "has more time to catch a costly edit.\n\n"
         "Always pass `reason` so the audit trail captures intent.\n\n"
         "Fields & value formats:\n"
         "- instructions/soul/heartbeat/interface/role: string\n"
@@ -513,7 +540,11 @@ async def list_available_models(
         "- budget: {\"daily_usd\": float, \"monthly_usd\": float}\n"
         "- permissions: {\"can_use_browser\": bool, ...}\n"
         "- thinking: \"off\" | \"low\" | \"medium\" | \"high\"\n"
-        "- model: e.g. \"anthropic/claude-sonnet-4-20250514\""
+        "- model: e.g. \"anthropic/claude-sonnet-4-20250514\"\n"
+        "- max_output_tokens: integer 256-200000 — per-agent cap on output "
+        "tokens per LLM call. Raise it for agents that emit large single "
+        "tool calls (e.g. a translator that PUTs a whole file in one call) "
+        "and hit 'Truncated tool-call arguments'. Default 8192."
     ),
     parameters={
         "agent_id": {
@@ -527,11 +558,15 @@ async def list_available_models(
                 "instructions", "soul", "model", "role", "heartbeat",
                 "heartbeat_schedule",
                 "interface", "thinking", "budget", "permissions",
+                "max_output_tokens",
             ],
         },
         "value": {
-            "type": ["string", "object"],
-            "description": "New value for the field",
+            "type": ["string", "object", "integer"],
+            "description": (
+                "New value for the field. String/object for most fields; "
+                "integer for max_output_tokens."
+            ),
         },
         "reason": {
             "type": "string",

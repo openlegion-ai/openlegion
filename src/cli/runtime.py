@@ -26,6 +26,7 @@ from src.cli.config import (
 from src.cli.formatting import echo_fail, echo_header, echo_ok
 from src.cli.proxy import build_proxy_env_vars, resolve_agent_proxy
 from src.shared.types import RESERVED_AGENT_IDS
+from src.shared.utils import set_llm_max_tokens_env
 
 if TYPE_CHECKING:
     from src.shared.types import MessageOrigin
@@ -452,6 +453,8 @@ class RuntimeContext:
             agent_max_iters = agent_cfg.get("max_iterations")
             if agent_max_iters is not None:
                 agent_env["OPENLEGION_MAX_ITERATIONS"] = str(agent_max_iters)
+            # Per-agent output-token cap → LLM_MAX_TOKENS (survives restart).
+            set_llm_max_tokens_env(agent_env, agent_cfg)
             if agent_id == _OPERATOR_AGENT_ID:
                 agent_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
                 # PR-L' — pass the boot greeting so the agent can seed
