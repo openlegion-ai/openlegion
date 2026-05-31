@@ -2878,6 +2878,10 @@ def create_dashboard_router(
                 _proxy_url, cfg.get("network", {}).get("no_proxy", ""),
             )
             restart_env.update(_proxy_env)
+            # Per-agent output-token cap → LLM_MAX_TOKENS so an edit_agent
+            # change survives a single-agent dashboard restart (not just the
+            # live hot-reload). Absent = LLMClient default 8192.
+            set_llm_max_tokens_env(restart_env, agent_cfg)
             url = await asyncio.wait_for(
                 asyncio.to_thread(
                     runtime.start_agent,

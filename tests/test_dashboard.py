@@ -5856,6 +5856,32 @@ class TestDashboardEventBusCoverage:
             assert e["data"]["agent_id"] == "alpha"
 
     @patch("src.cli.config._load_config")
+    def test_restart_endpoint_propagates_max_output_tokens(self, mock_load):
+        """A single-agent dashboard restart must carry the operator's
+        per-agent output cap into the new container's env, or it silently
+        reverts to the 8192 default on every restart."""
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4o-mini"},
+            "agents": {
+                "alpha": {
+                    "role": "tester", "skills_dir": "",
+                    "model": "openai/gpt-4o-mini",
+                    "max_output_tokens": 32000,
+                },
+            },
+            "network": {},
+        }
+        runtime = self.components["runtime"]
+        runtime.start_agent.return_value = "http://localhost:8401"
+        runtime.wait_for_agent = AsyncMock(return_value=True)
+
+        resp = self.client.post("/dashboard/api/agents/alpha/restart")
+        assert resp.status_code == 200, resp.text
+
+        _, kwargs = runtime.start_agent.call_args
+        assert kwargs["env_overrides"].get("LLM_MAX_TOKENS") == "32000"
+
+    @patch("src.cli.config._load_config")
     def test_restart_failure_emits_state_restart_failed(self, mock_load):
         mock_load.return_value = {
             "llm": {"default_model": "openai/gpt-4o-mini"},
