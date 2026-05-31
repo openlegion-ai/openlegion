@@ -423,3 +423,13 @@ def test_agent_config_mcp_servers_round_trip_via_model_dump():
     assert dumped["mcp_servers"][0]["env"] == {"K": "v"}
 
 
+def test_max_output_tokens_is_a_hard_edit_field():
+    """The per-agent output cap earns the 30-min hard-edit undo window and
+    must not collide with the soft-field set (the two are disjoint)."""
+    from src.shared.types import HARD_EDIT_FIELDS, SOFT_EDIT_FIELDS
+
+    assert "max_output_tokens" in HARD_EDIT_FIELDS
+    assert "max_output_tokens" not in SOFT_EDIT_FIELDS
+    assert HARD_EDIT_FIELDS.isdisjoint(SOFT_EDIT_FIELDS)
+
+

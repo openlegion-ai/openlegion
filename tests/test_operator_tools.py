@@ -988,6 +988,60 @@ async def test_edit_agent_thinking_valid():
     )
 
 
+# ── max_output_tokens ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_max_output_tokens_valid():
+    """An in-range integer cap passes validation and reaches edit_soft."""
+    from src.agent.builtins.operator_tools import edit_agent
+
+    mc = MagicMock()
+    mc.edit_soft = AsyncMock(return_value={
+        "success": True,
+        "undo_token": "tok-m1",
+        "expires_at": "2026-05-13T00:30:00+00:00",
+        "ttl_seconds": 1800,
+        "field_class": "hard",
+        "summary": "Raised translator's output cap",
+    })
+    result = await edit_agent(
+        "translator", "max_output_tokens", 32000,
+        reason="user_asked", mesh_client=mc,
+    )
+    assert result["applied"] is True
+    assert result["undo_token"] == "tok-m1"
+    mc.edit_soft.assert_awaited_once_with(
+        "translator", "max_output_tokens", 32000, "user_asked",
+    )
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_max_output_tokens_rejects_non_int():
+    """A non-integer (or bool) value is rejected pre-mesh."""
+    from src.agent.builtins.operator_tools import edit_agent
+
+    for bad in ("8192", 8192.5, True):
+        result = await edit_agent(
+            "translator", "max_output_tokens", bad, mesh_client=MagicMock(),
+        )
+        assert "error" in result
+        assert "max_output_tokens" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_edit_agent_max_output_tokens_rejects_out_of_range():
+    """Values below 256 or above 200000 are rejected pre-mesh."""
+    from src.agent.builtins.operator_tools import edit_agent
+
+    for bad in (255, 200_001):
+        result = await edit_agent(
+            "translator", "max_output_tokens", bad, mesh_client=MagicMock(),
+        )
+        assert "error" in result
+        assert "max_output_tokens" in result["error"]
+
+
 # ── list_pending ─────────────────────────────────────────────
 
 

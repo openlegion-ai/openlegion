@@ -53,14 +53,17 @@ is a mirrored constant kept for back-compat; prefer importing from
 here.
 """
 
-HARD_EDIT_FIELDS = frozenset({"model", "permissions", "budget", "thinking"})
+HARD_EDIT_FIELDS = frozenset(
+    {"model", "permissions", "budget", "thinking", "max_output_tokens"}
+)
 """Agent-config fields that earn the longer 30-min Undo window (the
 "hard" review path). Mirrors :data:`SOFT_EDIT_FIELDS` — the union is
 the full set of editable fields surfaced through the operator-tool
 layer.
 
 These are the consequential edits — model swaps, permission grants,
-budget tweaks, thinking-level changes. All edits apply immediately
+budget tweaks, thinking-level changes, output-cap changes. All edits
+apply immediately
 via ``/edit-soft``; the only difference between hard and soft fields
 is the receipt TTL, i.e. how long the user has to click Undo:
 

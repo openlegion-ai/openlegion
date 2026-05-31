@@ -3540,6 +3540,13 @@ def create_mesh_app(
                 val = acfg.get(cfg_key, "")
                 if val:
                     env_overrides[env_key] = val
+            # Per-agent output cap → LLM_MAX_TOKENS so an edit_agent change
+            # survives container restart (the YAML row is the source of
+            # truth; __main__.py reads this env at startup). Only set when
+            # configured — absent means the LLMClient default (8192) applies.
+            _mot = acfg.get("max_output_tokens")
+            if isinstance(_mot, int) and not isinstance(_mot, bool):
+                env_overrides["LLM_MAX_TOKENS"] = str(_mot)
 
             try:
                 # Start container with per-agent env_overrides (not shared extra_env)
@@ -6734,6 +6741,9 @@ def create_mesh_app(
             "soul": raw.get("initial_soul", ""),
             "heartbeat": raw.get("initial_heartbeat", ""),
             "interface": raw.get("initial_interface", ""),
+            # Falls back to the LLMClient default (8192) when never set, so the
+            # operator sees the effective cap, not a blank.
+            "max_output_tokens": raw.get("max_output_tokens", 8192) or 8192,
         }
 
         # Permissions live in PERMISSIONS_FILE, not agents.yaml. Load via
@@ -6983,8 +6993,8 @@ def create_mesh_app(
                 except Exception:
                     pass  # Agent might not be running
 
-        # Hot-reload: runtime config (model, thinking) — env-var fields that
-        # won't get picked up by the YAML write alone.
+        # Hot-reload: runtime config (model, thinking, max_output_tokens) —
+        # env-var fields that won't get picked up by the YAML write alone.
         #
         # ``hot_reload_ok`` defaults to True for fields that don't
         # hot-reload (config-write only) so the emit doesn't lie about
@@ -6993,17 +7003,29 @@ def create_mesh_app(
         # ``agent_config_updated`` event so the SPA can render a
         # "saved — restart to apply" hint when the running agent still
         # has the old config (Docker hang, agent crash, transport timeout).
+        #
+        # The agent /config endpoint keys the output cap as ``max_tokens``
+        # (LLMClient.max_output_tokens), while the operator-facing edit field
+        # is ``max_output_tokens`` — map between the two here.
         hot_reload_ok = True
+        _config_push_key = {
+            "model": "model",
+            "thinking": "thinking",
+            "max_output_tokens": "max_tokens",
+        }.get(field)
         if (
             transport
             and agent_id in router.agent_registry
-            and field in ("model", "thinking")
-            and isinstance(new_value, str)
+            and _config_push_key is not None
+            and (
+                isinstance(new_value, str)
+                or (field == "max_output_tokens" and isinstance(new_value, int))
+            )
         ):
             try:
                 result = await transport.request(
                     agent_id, "POST", "/config",
-                    json={field: new_value}, timeout=10,
+                    json={_config_push_key: new_value}, timeout=10,
                 )
                 # transport.request returns {"error": ...} dicts for HTTP /
                 # timeout / connect failures rather than raising. Surface
@@ -7259,6 +7281,19 @@ def create_mesh_app(
                 raise HTTPException(
                     400,
                     f"thinking must be one of: {sorted(LLMClient.VALID_THINKING_LEVELS)}",
+                )
+        elif field == "max_output_tokens":
+            # Re-enforce server-side (mirrors operator_tools._validate_edit and
+            # the agent /config endpoint). bool is an int subclass — reject it
+            # so True/False can't slip through as 1/0. Range matches the
+            # LLM_MAX_TOKENS clamp in src/agent/__main__.py.
+            if not isinstance(new_value, int) or isinstance(new_value, bool):
+                raise HTTPException(
+                    400, "max_output_tokens must be an integer",
+                )
+            if not (256 <= new_value <= 200_000):
+                raise HTTPException(
+                    400, "max_output_tokens must be between 256 and 200000",
                 )
         elif field == "permissions":
             # Finding H1 (May 2026 remediation): re-enforce the operator

@@ -368,3 +368,32 @@ async def test_chat_uses_instance_max_tokens_default():
     with patch.object(llm, "_get_client", AsyncMock(return_value=_Client())):
         await llm.chat(system="s", messages=[{"role": "user", "content": "hi"}])
     assert captured["max_tokens"] == 16384
+
+
+def test_thinking_max_tokens_preserves_default_floor():
+    """With the default 8192 cap, an Anthropic thinking call keeps the
+    historical ``budget + 4096`` ceiling — taking the max introduces no
+    regression because 8192 <= budget + 4096 at every thinking level."""
+    llm = LLMClient(
+        mesh_url="http://mesh:8420", agent_id="a1",
+        default_model="anthropic/claude-sonnet-4-6", thinking="medium",
+    )
+    params = llm._get_thinking_params()
+    # medium budget = 10_000 → 10_000 + 4096
+    assert params["max_tokens"] == 14096
+    assert params["thinking"]["budget_tokens"] == 10_000
+
+
+def test_thinking_max_tokens_honours_raised_cap():
+    """A per-agent cap larger than ``budget + 4096`` takes over, so the
+    output-cap lever is meaningful for thinking-enabled agents too."""
+    llm = LLMClient(
+        mesh_url="http://mesh:8420", agent_id="a1",
+        default_model="anthropic/claude-sonnet-4-6", thinking="medium",
+        max_output_tokens=64000,
+    )
+    params = llm._get_thinking_params()
+    # max(64000, 10_000 + 4096) == 64000
+    assert params["max_tokens"] == 64000
+    # The thinking budget itself is unchanged — only the total ceiling grows.
+    assert params["thinking"]["budget_tokens"] == 10_000

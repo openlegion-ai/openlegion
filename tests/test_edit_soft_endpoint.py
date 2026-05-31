@@ -148,6 +148,44 @@ async def test_edit_soft_accepts_hard_field_model_with_30min_ttl(mesh_app):
 
 
 @pytest.mark.asyncio
+async def test_edit_soft_accepts_max_output_tokens_and_writes_yaml(mesh_app):
+    """The per-agent output cap is a hard field: applies immediately, gets a
+    30-min undo window, and persists to YAML so it survives restart."""
+    app, _, tmp_path = mesh_app
+    afile = tmp_path / "config" / "agents.yaml"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/agents/writer/edit-soft",
+            json={"field": "max_output_tokens", "value": 32000, "reason": "user_asked"},
+            headers=_human_origin_headers(),
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["success"] is True
+    assert body["field"] == "max_output_tokens"
+    assert body["field_class"] == "hard"
+    assert body["ttl_seconds"] == 1800
+    cfg = yaml.safe_load(afile.read_text())
+    assert cfg["agents"]["writer"]["max_output_tokens"] == 32000
+
+
+@pytest.mark.asyncio
+async def test_edit_soft_rejects_out_of_range_max_output_tokens(mesh_app):
+    """Out-of-range / non-integer caps are rejected server-side with 400,
+    mirroring the operator-tool guard and the agent /config endpoint."""
+    app, _, _ = mesh_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        for bad in (200_001, "8192"):
+            r = await c.post(
+                "/mesh/agents/writer/edit-soft",
+                json={"field": "max_output_tokens", "value": bad, "reason": "user_asked"},
+                headers=_human_origin_headers(),
+            )
+            assert r.status_code == 400, r.text
+            assert "max_output_tokens" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_edit_soft_accepts_hard_field_permissions(mesh_app):
     """Permissions edits apply immediately with a 30-min undo window."""
     app, _, _ = mesh_app
