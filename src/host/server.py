@@ -2961,7 +2961,7 @@ def create_mesh_app(
             acfg = _agents_cfg_listing.get(aid) or {}
             # Structured routing fields (Task 8). The ``interface_*`` keys
             # are the human-facing routing surface; the bare
-            # ``capabilities`` key remains the runtime tool/tool list to
+            # ``capabilities`` key remains the runtime tool list to
             # avoid breaking back-compat with existing dashboard / CLI
             # consumers.
             entry["interface_capabilities"] = list(acfg.get("capabilities") or [])
@@ -4112,7 +4112,7 @@ def create_mesh_app(
                 logger.debug("Could not fetch INTERFACE.md from %s (direct)", agent_id)
 
         # Task 8 — structured routing fields from agents.yaml. ``capabilities``
-        # remains the runtime tool/tool list (router.get_capabilities); the
+        # remains the runtime tool list (router.get_capabilities); the
         # human-routing capabilities live under ``interface_capabilities`` to
         # avoid the naming collision. The other four sibling fields keep
         # their natural names (no collision).
