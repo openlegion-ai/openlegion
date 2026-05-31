@@ -2031,3 +2031,96 @@ async def test_get_agent_profile_hides_runtime_fields_from_peer_agents(tmp_path)
         bb.close()
         costs.close()
         traces.close()
+
+
+@pytest.mark.asyncio
+async def test_profile_denied_to_worker_omitting_requesting_agent(tmp_path):
+    """M24: with auth tokens configured, a worker that omits the
+    ``requesting_agent`` hint AND lacks ``can_message`` to the target is
+    denied the profile (the verified Bearer identity drives the gate, so
+    the optional hint can't be used to bypass it). An authorized peer and
+    the operator still get 200."""
+    from unittest.mock import patch
+
+    import yaml as yaml_mod
+    from httpx import ASGITransport, AsyncClient
+
+    from src.host.costs import CostTracker
+    from src.host.server import create_mesh_app
+    from src.host.traces import TraceStore
+
+    cfg_dir = tmp_path / "config"
+    cfg_dir.mkdir(parents=True)
+    agents_path = cfg_dir / "agents.yaml"
+    agents_path.write_text(yaml_mod.dump({"agents": {
+        "writer": {"role": "writer", "model": "x"},
+        "peer": {"role": "peer", "model": "x"},
+        "stranger": {"role": "stranger", "model": "x"},
+    }}))
+    (cfg_dir / "mesh.yaml").write_text(yaml_mod.dump({"mesh": {"port": 8420}}))
+    projects_dir = cfg_dir / "projects"
+    projects_dir.mkdir()
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    # peer may message writer; stranger may not message anyone.
+    perms.permissions["peer"] = AgentPermissions(
+        agent_id="peer", can_message=["writer"],
+    )
+    perms.permissions["stranger"] = AgentPermissions(
+        agent_id="stranger", can_message=[],
+    )
+    router = MessageRouter(perms, {})
+    costs = CostTracker(str(tmp_path / "costs.db"))
+    traces = TraceStore(str(tmp_path / "traces.db"))
+    router.register_agent("writer", "http://writer:8400", ["file_write"])
+    router.register_agent("peer", "http://peer:8400", [])
+    router.register_agent("stranger", "http://stranger:8400", [])
+
+    auth_tokens = {
+        "operator": "tok-operator",
+        "peer": "tok-peer",
+        "stranger": "tok-stranger",
+    }
+
+    app = create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
+        cost_tracker=costs, trace_store=traces, auth_tokens=auth_tokens,
+    )
+
+    try:
+        with patch("src.cli.config.AGENTS_FILE", agents_path), \
+             patch("src.cli.config.CONFIG_FILE", cfg_dir / "mesh.yaml"), \
+             patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test",
+            ) as client:
+                # Stranger omits requesting_agent entirely — previously this
+                # fell through to _require_any_auth and leaked the profile.
+                # Now the Bearer-verified identity is gated → 403.
+                denied = await client.get(
+                    "/mesh/agents/writer/profile",
+                    headers={"Authorization": "Bearer tok-stranger"},
+                )
+                assert denied.status_code == 403, denied.text
+
+                # Authorized peer (can_message=[writer]) still gets the profile,
+                # even though it also omits requesting_agent.
+                peer_ok = await client.get(
+                    "/mesh/agents/writer/profile",
+                    headers={"Authorization": "Bearer tok-peer"},
+                )
+                assert peer_ok.status_code == 200, peer_ok.text
+                assert peer_ok.json()["agent_id"] == "writer"
+
+                # Operator (verified Bearer identity == "operator") always gets it.
+                op_ok = await client.get(
+                    "/mesh/agents/writer/profile",
+                    headers={"Authorization": "Bearer tok-operator"},
+                )
+                assert op_ok.status_code == 200, op_ok.text
+    finally:
+        bb.close()
+        costs.close()
+        traces.close()

@@ -3928,18 +3928,27 @@ def create_mesh_app(
         what it accepts, produces, subscribes to, and its public contract.
         Permission-checked: requesting agent must be allowed to message the target.
         """
-        if requesting_agent:
-            requesting_agent = _resolve_agent_id(requesting_agent, request)
-            await _check_rate_limit("agent_profile", requesting_agent)
-            if not _caller_is_operator(requesting_agent, request):
-                if not permissions.can_message(requesting_agent, agent_id):
+        # M24: resolve the caller's verified identity UNCONDITIONALLY and apply
+        # the can_message gate to it. The optional ``requesting_agent`` query
+        # hint must never relax the check — omitting it previously fell through
+        # to ``_require_any_auth`` and leaked a peer's subscriptions / watch-keys
+        # / INTERFACE.md cross-team. ``_extract_verified_agent_id`` derives the
+        # caller from the Bearer token (or trusts the loopback/mesh-internal
+        # boundary) so the hint can never spoof or relax the identity. In
+        # dev/test mode (no auth tokens) it falls back to the X-Agent-ID hint /
+        # "unknown" exactly as ``_resolve_agent_id`` does, so legitimate dev
+        # reads are unaffected.
+        _require_any_auth(request)
+        effective_caller = _extract_verified_agent_id(request)
+        if effective_caller and effective_caller != "unknown":
+            await _check_rate_limit("agent_profile", effective_caller)
+            if not _caller_is_operator(effective_caller, request):
+                if not permissions.can_message(effective_caller, agent_id):
                     _record_denial(
-                        "permission", caller=requesting_agent, target=agent_id,
+                        "permission", caller=effective_caller, target=agent_id,
                         gate="agent.profile:can_message",
                     )
-                    raise HTTPException(403, f"Agent {requesting_agent} cannot read profile of {agent_id}")
-        else:
-            _require_any_auth(request)
+                    raise HTTPException(403, f"Agent {effective_caller} cannot read profile of {agent_id}")
 
         if agent_id not in router.agent_registry:
             raise HTTPException(404, f"Agent not found: {agent_id}")

@@ -248,6 +248,23 @@ class TestAddAgentPermissions(_TempConfigMixin):
             "can_request_user_credentials", False,
         ) is False
 
+    def test_template_cannot_grant_can_spawn(self):
+        """L4: a template setting can_spawn=true must be clamped to false —
+        the irreversible-grant ceiling. Other template booleans still apply."""
+        _add_agent_to_config("mallory", "engineer", "openai/gpt-4o")
+        _add_agent_permissions("mallory", permissions={
+            "can_spawn": True,
+            "can_use_wallet": True,
+            "can_manage_cron": True,  # not on the ceiling — should pass through
+        }, from_template=True)
+        with open(self._perms_path) as f:
+            perms = json.load(f)
+        m = perms["permissions"]["mallory"]
+        assert m.get("can_spawn") is False
+        assert m.get("can_use_wallet") is False
+        # Non-ceiling boolean still honored.
+        assert m.get("can_manage_cron") is True
+
     def test_template_permissions_merge_with_collab_defaults(self):
         """Template permissions add to collaboration defaults, not replace."""
         _add_agent_to_config("carol", "writer", "openai/gpt-4o")

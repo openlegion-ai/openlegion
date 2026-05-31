@@ -1944,18 +1944,91 @@ def test_agent_profile_not_found(mesh_components):
     assert resp.status_code == 404
 
 
-def test_agent_profile_permission_denied(mesh_components):
-    """GET /mesh/agents/{id}/profile returns 403 when agent lacks can_message."""
-    client = mesh_components["client"]
+def test_agent_profile_permission_denied(tmp_path):
+    """GET /mesh/agents/{id}/profile enforces can_message on the VERIFIED
+    bearer identity — not the (untrusted) ``requesting_agent`` query param.
 
-    # Register both agents
-    client.post("/mesh/register", json={"agent_id": "qualify", "capabilities": [], "port": 8402})
-    client.post("/mesh/register", json={"agent_id": "research", "capabilities": [], "port": 8401})
+    M24 stopped trusting ``requesting_agent``; the gate now keys off the
+    token-verified caller. This builds a mesh app WITH ``auth_tokens`` so a
+    real verified identity exists, then asserts a caller lacking
+    ``can_message`` for the target is denied 403 even with NO
+    ``requesting_agent`` param, while a caller that DOES have ``can_message``
+    is allowed 200.
+    """
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
 
-    # "qualify" can only message "mesh" per the fixture permissions.
-    # Try to read "research" profile from "qualify" — should be denied.
-    resp = client.get("/mesh/agents/research/profile", params={"requesting_agent": "qualify"})
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {
+        "research": AgentPermissions(
+            agent_id="research",
+            can_message=["mesh"],
+            allowed_apis=["anthropic"],
+        ),
+        # "qualify" can message "mesh" but NOT "research".
+        "qualify": AgentPermissions(
+            agent_id="qualify",
+            can_message=["mesh"],
+            allowed_apis=["anthropic"],
+        ),
+        # "scout" CAN message "research" — used for the positive case.
+        "scout": AgentPermissions(
+            agent_id="scout",
+            can_message=["mesh", "research"],
+            allowed_apis=["anthropic"],
+        ),
+    }
+
+    router = MessageRouter(permissions=perms, agent_registry={})
+
+    # Each agent has its own token — ``/mesh/register`` resolves the
+    # registered identity from the bearer (not the supplied agent_id) when
+    # auth is on, so each agent must register under its own token.
+    tokens = {
+        "research": "research-token-xyz",
+        "qualify": "qualify-token-xyz",
+        "scout": "scout-token-xyz",
+    }
+    app = create_mesh_app(bb, pubsub, router, perms, auth_tokens=tokens)
+    client = TestClient(app)
+
+    # Register target + callers (each authenticated as itself).
+    for agent_id, token, port in (
+        ("research", "research-token-xyz", 8401),
+        ("qualify", "qualify-token-xyz", 8402),
+        ("scout", "scout-token-xyz", 8403),
+    ):
+        reg = client.post(
+            "/mesh/register",
+            json={"agent_id": agent_id, "capabilities": [], "port": port},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert reg.status_code == 200, reg.text
+
+    # Verified caller "qualify" lacks can_message=["research"] → 403,
+    # WITHOUT any requesting_agent param (the param is no longer trusted).
+    resp = client.get(
+        "/mesh/agents/research/profile",
+        headers={"Authorization": "Bearer qualify-token-xyz"},
+    )
     assert resp.status_code == 403
+
+    # Spoofing the param does NOT change the outcome — still keyed on the
+    # verified bearer identity ("qualify"), so still denied.
+    resp = client.get(
+        "/mesh/agents/research/profile",
+        params={"requesting_agent": "scout"},
+        headers={"Authorization": "Bearer qualify-token-xyz"},
+    )
+    assert resp.status_code == 403
+
+    # Verified caller "scout" HAS can_message=["research"] → allowed 200.
+    resp = client.get(
+        "/mesh/agents/research/profile",
+        headers={"Authorization": "Bearer scout-token-xyz"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["agent_id"] == "research"
 
 
 # ── Fix 4: parse_origin_header input validation ─────────────────

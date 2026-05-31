@@ -23,6 +23,13 @@ from src.shared.utils import truncate
 
 logger = logging.getLogger("cli")
 
+# L4: irreversible-grant ceiling for fleet templates. Booleans here can never
+# be set true from a template's ``permissions`` dict — they are operator/user-
+# only grants (spawning agents, spending the wallet) that must not be mintable
+# by template application. Mirrors ``_OPERATOR_PERMISSION_CEILING`` in
+# ``src/agent/builtins/operator_tools.py`` (the False entries there).
+_TEMPLATE_PERMISSION_CEILING = frozenset({"can_spawn", "can_use_wallet"})
+
 # ── Path constants ──────────────────────────────────────────
 
 
@@ -551,7 +558,9 @@ def _add_agent_to_config(
         yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
 
 
-def _add_agent_permissions(name: str, permissions: dict | None = None) -> None:
+def _add_agent_permissions(
+    name: str, permissions: dict | None = None, *, from_template: bool = False
+) -> None:
     """Add default permissions for a new agent.
 
     If collaboration mode is enabled in mesh.yaml, agents can message
@@ -600,9 +609,24 @@ def _add_agent_permissions(name: str, permissions: dict | None = None) -> None:
             "can_manage_fleet", "can_manage_teams", "can_edit_agent_config",
             "can_view_fleet_metrics",
             "can_request_user_credentials",
+            "can_use_wallet",
         ):
             if key in permissions:
-                agent_perms[key] = bool(permissions[key])
+                value = bool(permissions[key])
+                # L4: clamp the irreversible-grant ceiling. A fleet template
+                # must never mint an agent that can spawn other agents or
+                # spend from the wallet — those are operator/user-only grants
+                # (mirrors _OPERATOR_PERMISSION_CEILING in operator_tools.py).
+                # None of the shipped templates set these true, so legitimate
+                # template application is unaffected.
+                if from_template and key in _TEMPLATE_PERMISSION_CEILING and value:
+                    logger.warning(
+                        "Template for agent '%s' tried to grant '%s'=true; "
+                        "clamping to false (irreversible-grant ceiling)",
+                        name, key,
+                    )
+                    value = False
+                agent_perms[key] = value
 
     perms["permissions"][name] = agent_perms
     _save_permissions(perms)
@@ -1323,7 +1347,7 @@ def _apply_template(
             escalation_to=agent_def.get("escalation_to"),
             forbidden=agent_def.get("forbidden") or [],
         )
-        _add_agent_permissions(agent_name, permissions=agent_permissions)
+        _add_agent_permissions(agent_name, permissions=agent_permissions, from_template=True)
         skills_dir = PROJECT_ROOT / "skills" / agent_name
         skills_dir.mkdir(parents=True, exist_ok=True)
         created.append(agent_name)
@@ -1447,7 +1471,7 @@ def _create_agent_from_template(
         escalation_to=agent_def.get("escalation_to"),
         forbidden=agent_def.get("forbidden") or [],
     )
-    _add_agent_permissions(name, permissions=agent_permissions)
+    _add_agent_permissions(name, permissions=agent_permissions, from_template=True)
     skills_dir = PROJECT_ROOT / "skills" / name
     skills_dir.mkdir(parents=True, exist_ok=True)
 

@@ -67,6 +67,21 @@ class DiscordChannel(Channel):
         except (TypeError, ValueError):
             return False
 
+    def _dm_blocked_by_guild_restriction(self, has_guild: bool, author_id: int) -> bool:
+        """L5: True when a DM must be dropped because guilds are restricted.
+
+        When ``allowed_guilds`` is set, the guild allow-list is bypassable via
+        DM (no guild) unless we require the DMing user to already be paired/
+        allowed. Returns True (drop) for an unpaired DM under a guild
+        restriction; False for in-guild messages, already-paired DM users, or
+        when no guild restriction is configured.
+        """
+        if not self.allowed_guilds:
+            return False
+        if has_guild:
+            return False
+        return not self._is_allowed(author_id)
+
     # ── extracted command handlers ─────────────────────────────
 
     def _handle_pairing(self, author_id: int, code_arg: str) -> str:
@@ -352,6 +367,16 @@ class DiscordChannel(Channel):
                 return
 
             author_id = message.author.id
+
+            # L5: when guilds are restricted, a DM (no guild) is only honored
+            # for users who are ALREADY paired/allowed. An unpaired DM must
+            # not see the pairing flow — otherwise the guild allow-list is
+            # bypassable by DMing the bot. Already-paired DM users and the
+            # normal in-guild path are unaffected.
+            if channel_ref._dm_blocked_by_guild_restriction(
+                message.guild is not None, author_id
+            ):
+                return
 
             # Pairing via code: /start <code> or !start <code>
             if channel_ref._pairing.owner is None:
