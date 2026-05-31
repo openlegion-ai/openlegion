@@ -108,7 +108,7 @@ agents:
       Step 4 — Tech stack from job postings
         web_search: site:linkedin.com/jobs "{company name}" engineer OR developer
         browser_navigate to 2-3 recent engineering job postings
-        Extract required tools and tools listed in each posting
+        Extract required skills and tools listed in each posting
 
       Step 5 — Crunchbase for funding
         web_search: site:crunchbase.com/organization "{company name}"

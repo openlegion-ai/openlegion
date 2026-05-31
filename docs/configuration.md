@@ -28,7 +28,7 @@ agents:
   researcher:
     role: Research assistant that finds and analyzes information
     model: anthropic/claude-haiku-4-5-20251001
-    tools_dir: ./tools/researcher
+    tools_dir: ./agent_tools/researcher
     system_prompt: |
       You are the 'researcher' agent in a multi-agent fleet.
       Your specialty is finding information and writing reports.

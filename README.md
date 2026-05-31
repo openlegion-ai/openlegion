@@ -122,7 +122,7 @@ openlegion start
 openlegion start -d
 openlegion chat <agent_name>   # connect from another terminal to an agent you created
 openlegion stop                # clean shutdown
-openlegion reset               # destructive: wipe config/, data/, tools/* (keeps .env)
+openlegion reset               # destructive: wipe config/, data/, agent_tools/* (keeps .env)
 ```
 
 ---
@@ -714,7 +714,7 @@ openlegion [--verbose/-v] [--quiet/-q] [--json]
 ├── pending [--port PORT] [--json]                         # List pending actions awaiting confirmation
 ├── confirm <nonce> [--port PORT]                          # Confirm a pending action
 ├── cancel <nonce> [--port PORT]                           # Cancel a pending action
-├── reset [-y]                                             # DESTRUCTIVE: stop everything and wipe config/, data/, tools/* (keeps .env)
+├── reset [-y]                                             # DESTRUCTIVE: stop everything and wipe config/, data/, agent_tools/* (keeps .env)
 ├── version [--verbose/-v]                                 # Show version and environment info
 └── wallet                                                 # Manage agent wallets (derives EVM + Solana from one master seed)
     ├── init                                               # Generate the master wallet seed (shown once; HTTP 410 thereafter)
@@ -831,7 +831,7 @@ agents:
   researcher:
     role: "research"
     model: "openai/gpt-4o-mini"
-    tools_dir: "./tools/researcher"
+    tools_dir: "./agent_tools/researcher"
     initial_instructions: "You are a research specialist..."
     thinking: "medium"                   # off (default), low, medium, or high
     budget:
@@ -1167,7 +1167,7 @@ Yes. Self-hosting is the default and is free under the BSL. You need Python 3.10
 For production and team use, yes - it adds container/microVM isolation, a credential vault so agents never hold API keys, per-agent budget caps, and permission ACLs on top of autonomous agents. For a single-user assistant on one machine, OpenClaw or a lighter tool may be simpler. See [OpenLegion vs OpenClaw](#openlegion-vs-openclaw).
 
 **How does OpenLegion compare to Hermes Agent?**
-Hermes Agent (Nous Research) is an open-source single-user agent known for self-authored, self-improving tools and strong default memory. OpenLegion solves a different problem: running fleets of agents safely in production. It adds per-agent container isolation, a credential vault so agents never hold API keys, per-agent budget caps, and default-deny permission ACLs - controls aimed at teams that cannot afford a security incident. If you want a self-improving personal assistant, Hermes is a strong choice; if you need isolated, auditable, cost-bounded multi-agent fleets, that is what OpenLegion is built for.
+Hermes Agent (Nous Research) is an open-source single-user agent known for self-authored, self-improving skills and strong default memory. OpenLegion solves a different problem: running fleets of agents safely in production. It adds per-agent container isolation, a credential vault so agents never hold API keys, per-agent budget caps, and default-deny permission ACLs - controls aimed at teams that cannot afford a security incident. If you want a self-improving personal assistant, Hermes is a strong choice; if you need isolated, auditable, cost-bounded multi-agent fleets, that is what OpenLegion is built for.
 
 **How is OpenLegion different from CrewAI, LangGraph, and AutoGen?**
 Those are primarily libraries/frameworks for orchestrating agent logic inside one process. OpenLegion is a **runtime**: it runs each agent in its own isolated container, vaults credentials away from agents, enforces budgets and ACLs at a mesh host, and ships browser automation, memory, and multi-channel chat. They are not mutually exclusive - you can run framework-style logic on top of OpenLegion's isolation and cost controls.
@@ -1200,7 +1200,7 @@ See [LICENSE](LICENSE) for details.
 Looking for alternatives? OpenLegion is often compared to:
 
 - **OpenClaw** — personal AI assistant, 200K+ stars, not designed for production security
-- **Hermes Agent** — open-source self-improving agent (Nous Research), strong memory and self-authored tools, single-user focused, no container isolation or credential vault
+- **Hermes Agent** — open-source self-improving agent (Nous Research), strong memory and self-authored skills, single-user focused, no container isolation or credential vault
 - **nanobot** — ultra-lightweight Python agent (~4K lines), limited multi-agent support
 - **ZeroClaw** — Rust-based AI agent runtime, extreme resource efficiency, early-stage
 - **NanoClaw** — container-isolated, Claude-only, no cost tracking
