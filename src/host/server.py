@@ -55,7 +55,12 @@ from src.shared.types import (
     MessageOrigin,
     NotifyRequest,
 )
-from src.shared.utils import dumps_safe, sanitize_for_prompt, setup_logging
+from src.shared.utils import (
+    dumps_safe,
+    sanitize_for_prompt,
+    set_llm_max_tokens_env,
+    setup_logging,
+)
 
 logger = setup_logging("host.server")
 
@@ -3540,13 +3545,8 @@ def create_mesh_app(
                 val = acfg.get(cfg_key, "")
                 if val:
                     env_overrides[env_key] = val
-            # Per-agent output cap → LLM_MAX_TOKENS so an edit_agent change
-            # survives container restart (the YAML row is the source of
-            # truth; __main__.py reads this env at startup). Only set when
-            # configured — absent means the LLMClient default (8192) applies.
-            _mot = acfg.get("max_output_tokens")
-            if isinstance(_mot, int) and not isinstance(_mot, bool):
-                env_overrides["LLM_MAX_TOKENS"] = str(_mot)
+            # Per-agent output-token cap → LLM_MAX_TOKENS (survives restart).
+            set_llm_max_tokens_env(env_overrides, acfg)
 
             try:
                 # Start container with per-agent env_overrides (not shared extra_env)
@@ -7335,7 +7335,15 @@ def create_mesh_app(
             old_value = perms.get("permissions", {}).get(agent_id, {})
         else:
             yaml_key = _CONFIG_FIELD_MAP.get(field, field)
-            old_value = agents[agent_id].get(yaml_key, "")
+            # For max_output_tokens, default the "before" value to the
+            # effective cap (LLMClient default 8192) rather than "" when it
+            # was never set. This keeps the audit before-value sensible AND
+            # makes Undo work end-to-end: the undo writes back an int, which
+            # the hot-reload push forwards to the agent /config (the push
+            # guard requires an int) so the live agent actually drops back to
+            # 8192 instead of silently keeping the raised cap until restart.
+            _missing_default = 8192 if field == "max_output_tokens" else ""
+            old_value = agents[agent_id].get(yaml_key, _missing_default)
 
         # Apply directly via the same write helper used by the confirm
         # path. ``_apply_pending_change`` is async and handles audit

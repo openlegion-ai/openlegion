@@ -31,7 +31,7 @@ from src.cli.formatting import (
     display_stream_tool_start,
     user_prompt,
 )
-from src.shared.utils import dumps_safe
+from src.shared.utils import dumps_safe, set_llm_max_tokens_env
 
 if TYPE_CHECKING:
     from src.cli.runtime import RuntimeContext
@@ -1413,6 +1413,8 @@ class REPLSession:
         restart_env: dict[str, str] = {}
         if name == _OPERATOR_AGENT_ID:
             restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
+        # Per-agent output-token cap → LLM_MAX_TOKENS (survives /restart).
+        set_llm_max_tokens_env(restart_env, agent_cfg)
 
         # Start new container
         url = self.ctx.runtime.start_agent(
