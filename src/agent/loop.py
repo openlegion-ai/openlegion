@@ -206,6 +206,9 @@ _READ_ONLY_TOOLS = frozenset({
     "vault_list",
     # Self-introspection
     "introspect",
+    # Skill-pack discovery/read (SKILL.md packs). Pure reads — consulting
+    # a procedure is not itself outbound work.
+    "skills_list", "skill_view",
     # NOTE: ``web_search`` is intentionally NOT here — it makes an
     # external network call which counts as outbound work. Same logic
     # applies to any external HTTP / image-gen / browser tool: a worker
@@ -1620,6 +1623,8 @@ class AgentLoop:
             f"- If your first approach fails, try at least one alternative before reporting a blocker.\n"
             f"- Never respond with just text when a tool could make progress.\n"
             f"- Before acting on past context, run memory_search first.\n"
+            f"- For a non-trivial task, call skills_list first — if a skill "
+            f"(saved step-by-step procedure) fits, skill_view it and follow it.\n"
             f"- When done, respond with JSON: "
         )
         if is_standalone:
