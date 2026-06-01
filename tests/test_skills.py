@@ -6,9 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from src.agent import skills as skills_mod
 from src.agent.builtins import skills_tool
-from src.agent.skills import Skill, SkillStore, parse_skill_md
+from src.agent.skills import Skill, SkillStore, parse_skill_md, render_text
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -210,9 +209,8 @@ def tool_store(tmp_path, monkeypatch):
     bundled = tmp_path / "bundled"
     bundled.mkdir()
     monkeypatch.setenv("SKILLS_DIR", str(bundled))
-    # Neutralise the hard-coded installed dir so the host's /data/skills
-    # (if any) can't leak into the test.
-    monkeypatch.setattr(skills_mod, "_INSTALLED_DIR", str(tmp_path / "no-installed"))
+    # Neutralise the installed dir so the host's real one can't leak in.
+    monkeypatch.setenv("SKILLS_INSTALLED_DIR", str(tmp_path / "no-installed"))
     return bundled
 
 
@@ -268,3 +266,71 @@ def test_bundled_example_parses():
     assert skill.body
     # Its referenced template resolves via Level 2.
     assert store.read_reference("competitor-research", "references/brief-template.md")
+
+
+# ── ${SKILL_DIR} substitution + declared requirements (PR 3) ──────────────
+
+def test_render_text_substitutes_skill_dir(tmp_path):
+    md = _write_skill(tmp_path, "x", body="run ${SKILL_DIR}/scripts/go.py")
+    skill = parse_skill_md(md)
+    rendered = render_text(skill.body, skill)
+    assert "${SKILL_DIR}" not in rendered
+    assert str(skill.directory) in rendered
+
+
+def test_render_text_noop_without_token(tmp_path):
+    md = _write_skill(tmp_path, "x", body="no tokens here")
+    skill = parse_skill_md(md)
+    assert render_text(skill.body, skill) == "no tokens here"
+
+
+def test_skill_view_substitutes_skill_dir(tool_store):
+    pack = _write_skill(tool_store, "research", body="exec ${SKILL_DIR}/scripts/x.py").parent
+    result = skills_tool.skill_view("research")
+    assert "${SKILL_DIR}" not in result["body"]
+    assert str(pack) in result["body"]
+
+
+def test_skill_view_substitutes_in_reference(tool_store):
+    _write_skill(tool_store, "research")
+    refs = tool_store / "research" / "references"
+    refs.mkdir()
+    (refs / "r.md").write_text("see ${SKILL_DIR}/scripts/x.py", encoding="utf-8")
+    result = skills_tool.skill_view("research", "references/r.md")
+    assert "${SKILL_DIR}" not in result["content"]
+    assert str(tool_store / "research") in result["content"]
+
+
+def test_skill_view_surfaces_declared_requirements(tool_store):
+    _write_skill(
+        tool_store, "research",
+        extra_frontmatter=(
+            "required_environment_variables:\n"
+            "  - {name: API_KEY, prompt: 'key', required_for: 'x'}\n"
+            "metadata:\n"
+            "  hermes:\n"
+            "    config:\n"
+            "      - {key: max_sources, default: '10'}\n"
+        ),
+    )
+    result = skills_tool.skill_view("research")
+    assert result["required_environment_variables"][0]["name"] == "API_KEY"
+    assert result["config"][0]["key"] == "max_sources"
+
+
+def test_skill_view_plain_skill_has_no_requirements(tool_store):
+    _write_skill(tool_store, "plain")
+    result = skills_tool.skill_view("plain")
+    assert "required_environment_variables" not in result
+    assert "config" not in result
+
+
+def test_store_installed_dir_from_env(tmp_path, monkeypatch):
+    bundled = tmp_path / "b"
+    installed = tmp_path / "i"
+    _write_skill(installed, "fromenv")
+    monkeypatch.setenv("SKILLS_DIR", str(bundled))
+    monkeypatch.setenv("SKILLS_INSTALLED_DIR", str(installed))
+    store = SkillStore()  # both dirs from env
+    assert [s.name for s in store.list()] == ["fromenv"]
+    assert store.get("fromenv").source == "installed"

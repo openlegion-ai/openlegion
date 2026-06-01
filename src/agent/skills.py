@@ -33,11 +33,21 @@ logger = setup_logging("agent.skills")
 
 # Container-side store locations, mirroring the Tools layering:
 #   bundled   → shipped read-only with the product (SKILLS_DIR, default /app/skills)
-#   installed → operator/marketplace-installed packs (writable /data volume)
-# ``installed`` overrides ``bundled`` on a name collision.
+#   installed → operator-installed packs, shared across the fleet via a host
+#               bind mount (SKILLS_INSTALLED_DIR, default /app/skills_installed).
+# ``installed`` overrides ``bundled`` on a name collision. The installed dir is
+# a single host directory bind-mounted read-only into every agent (mirroring
+# the marketplace-tools mount) — NOT the per-agent /data volume — so an install
+# is visible fleet-wide. Because the store re-scans on every call, a freshly
+# installed pack appears without restarting agents.
 _BUNDLED_DIR_ENV = "SKILLS_DIR"
 _DEFAULT_BUNDLED_DIR = "/app/skills"
-_INSTALLED_DIR = "/data/skills"
+_INSTALLED_DIR_ENV = "SKILLS_INSTALLED_DIR"
+_DEFAULT_INSTALLED_DIR = "/app/skills_installed"
+
+# Template token substituted into a skill's body/reference text at view time
+# (agentskills.io compat — bundled scripts reference ``${SKILL_DIR}/...``).
+_SKILL_DIR_TOKEN = "${SKILL_DIR}"
 
 # Skill names are matched by exact lookup, never used to build a path — but
 # we still reject path-significant characters so an installed pack can't smuggle
@@ -161,7 +171,9 @@ class SkillStore:
             else Path(os.environ.get(_BUNDLED_DIR_ENV, _DEFAULT_BUNDLED_DIR))
         )
         self.installed_dir = (
-            Path(installed_dir) if installed_dir is not None else Path(_INSTALLED_DIR)
+            Path(installed_dir)
+            if installed_dir is not None
+            else Path(os.environ.get(_INSTALLED_DIR_ENV, _DEFAULT_INSTALLED_DIR))
         )
 
     def _scan_dir(self, directory: Path, source: str) -> dict[str, Skill]:
@@ -214,3 +226,16 @@ class SkillStore:
             return target.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             return None
+
+
+def render_text(text: str, skill: Skill) -> str:
+    """Substitute load-time template tokens into a skill's body/reference text.
+
+    Currently only ``${SKILL_DIR}`` — replaced with the skill's on-disk
+    directory as the agent sees it — so bundled scripts the skill references
+    (e.g. ``${SKILL_DIR}/scripts/dedupe.py``) resolve to a real path the agent
+    can run. ``${SESSION_ID}`` and config-value resolution are deferred.
+    """
+    if _SKILL_DIR_TOKEN not in text:
+        return text
+    return text.replace(_SKILL_DIR_TOKEN, str(skill.directory))
