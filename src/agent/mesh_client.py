@@ -30,7 +30,7 @@ def _raise_with_body(response: httpx.Response) -> None:
     member of project 'foo'"``). Plain ``raise_for_status`` discards
     that body — the exception string is just ``"Client error '403
     Forbidden' for url ..."``, leaving the caller to guess which gate
-    fired. Wrapping it here means every coordination skill's failure
+    fired. Wrapping it here means every coordination tool's failure
     envelope (``wake_failed``, ``create_failed``, ``output_write_failed``,
     ``update_status_failed``, ``complete_task_failed``) surfaces the
     gate reason in its ``error`` field without changes at the callsites.
@@ -1200,7 +1200,7 @@ class MeshClient:
             _raise_with_body(response)
             raise
         # Pass through structured error envelopes (e.g. operator kill switch
-        # returning ``BROWSER_DOWNLOADS_DISABLED``) so the calling skill can
+        # returning ``BROWSER_DOWNLOADS_DISABLED``) so the calling tool can
         # surface the reason to the LLM without an exception. FastAPI wraps
         # HTTPException(detail=...) as ``{"detail": <envelope>}``, so unwrap.
         if response.status_code >= 400 and isinstance(data, dict):

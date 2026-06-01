@@ -721,7 +721,7 @@ class TestFillFormActionRegistered:
         from src.host.permissions import KNOWN_BROWSER_ACTIONS
         assert "fill_form" in KNOWN_BROWSER_ACTIONS, (
             "fill_form missing from KNOWN_BROWSER_ACTIONS in "
-            "host/permissions.py — browser_fill_form skill will silently "
+            "host/permissions.py — browser_fill_form tool will silently "
             "fail with a 400 from the mesh proxy."
         )
 

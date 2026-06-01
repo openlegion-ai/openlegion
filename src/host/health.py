@@ -535,7 +535,7 @@ class HealthMonitor:
                     lambda: self.runtime.start_agent(
                         agent_id=agent_id,
                         role=info.get("role", ""),
-                        skills_dir=info.get("skills_dir", ""),
+                        tools_dir=info.get("tools_dir", ""),
                         model=info.get("model", ""),
                         mcp_servers=info.get("mcp_servers"),
                         thinking=info.get("thinking", ""),

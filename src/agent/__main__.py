@@ -23,7 +23,7 @@ from src.agent.loop import AgentLoop
 from src.agent.memory import MemoryStore
 from src.agent.mesh_client import MeshClient
 from src.agent.server import create_agent_app
-from src.agent.skills import SkillRegistry
+from src.agent.tools import ToolRegistry
 from src.agent.workspace import WorkspaceManager
 from src.shared.trace import new_trace_id
 from src.shared.utils import setup_logging
@@ -44,7 +44,7 @@ def main() -> None:
     agent_id = os.environ["AGENT_ID"]
     role = os.environ["AGENT_ROLE"]
     mesh_url = os.environ["MESH_URL"]
-    skills_dir = os.environ.get("SKILLS_DIR", "/app/skills")
+    tools_dir = os.environ.get("TOOLS_DIR", "/app/tools")
 
     llm_model = os.environ.get("LLM_MODEL", "openai/gpt-4o-mini")
     embedding_model = os.environ.get("EMBEDDING_MODEL", "")
@@ -80,11 +80,11 @@ def main() -> None:
     initial_heartbeat = os.environ.get("INITIAL_HEARTBEAT", "")
     initial_interface = os.environ.get("INITIAL_INTERFACE", "")
 
-    skills = SkillRegistry(skills_dir=skills_dir, mcp_client=mcp_client)
+    tools = ToolRegistry(tools_dir=tools_dir, mcp_client=mcp_client)
 
-    # Write skill authoring reference guide if not present
-    from src.agent.builtins.skill_tool import _ensure_skill_guide
-    _ensure_skill_guide()
+    # Write tool authoring reference guide if not present
+    from src.agent.builtins.tool_authoring import _ensure_tool_guide
+    _ensure_tool_guide()
 
     workspace = WorkspaceManager(
         workspace_dir="/data/workspace",
@@ -138,7 +138,7 @@ def main() -> None:
         agent_id=agent_id,
         role=role,
         memory=memory,
-        skills=skills,
+        tools=tools,
         llm=llm,
         mesh_client=mesh_client,
         workspace=workspace,
@@ -157,10 +157,10 @@ def main() -> None:
         if mcp_client and mcp_servers_json:
             try:
                 server_configs = json.loads(mcp_servers_json)
-                builtin_names = set(skills.list_skills())
+                builtin_names = set(tools.list_tools())
                 await mcp_client.start(server_configs, builtin_names=builtin_names)
                 # Re-register MCP tools now that servers are running
-                skills._register_mcp_tools()
+                tools._register_mcp_tools()
                 logger.info(f"MCP servers started for agent '{agent_id}'")
             except Exception as e:
                 logger.error(f"Failed to start MCP servers: {e}")
@@ -169,7 +169,7 @@ def main() -> None:
         for attempt in range(1, _MAX_REGISTRATION_ATTEMPTS + 1):
             try:
                 await mesh_client.register(
-                    capabilities=skills.list_skills(),
+                    capabilities=tools.list_tools(),
                     port=agent_port,
                     timeout=_REGISTRATION_TIMEOUT_SECONDS,
                 )

@@ -1,6 +1,6 @@
-"""Tests for the ``compose_work_summary`` operator skill.
+"""Tests for the ``compose_work_summary`` operator tool.
 
-The skill is deterministic (no LLM call) and composes from the existing
+The tool is deterministic (no LLM call) and composes from the existing
 ``team_summary`` endpoint + prior rated feedback. Tests pin:
 
 - Operator gate (other agents get a clean error, not a 403).
@@ -40,7 +40,7 @@ def _make_mesh(*, base_summary=None, list_response=None, create_response=None):
 
 @pytest.fixture
 def as_operator(monkeypatch):
-    """Pretend the running agent IS operator for the @skill is_operator gate."""
+    """Pretend the running agent IS operator for the @tool is_operator gate."""
     monkeypatch.setenv("AGENT_ID", "operator")
     monkeypatch.setenv("ALLOWED_TOOLS", "compose_work_summary,foo")
     return None

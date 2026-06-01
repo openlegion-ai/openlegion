@@ -2955,7 +2955,7 @@ class CamoufoxInstance:
         know the generated UUID. If ``self.dialog_active`` is True, seeds
         refs with ``scope_root`` pointing at the modal selector — matching
         what a live snapshot emits during modal scoping. Not for production
-        use — agent skills don't construct RefHandles, snapshots do.
+        use — agent tools don't construct RefHandles, snapshots do.
         """
         page_id = self._page_id_for(self.page)
         scope = _MODAL_SELECTOR if self.dialog_active else None
@@ -5154,7 +5154,7 @@ class BrowserManager:
             # §6.5 referer realism. ``referer is None`` ⇒ picker decides;
             # explicit ``""`` ⇒ direct navigation (no referer); any other
             # string ⇒ caller override, validated before reaching
-            # Playwright (the agent skill is LLM-callable so a malformed
+            # Playwright (the agent tool is LLM-callable so a malformed
             # value can land here from untrusted-by-default input).
             if referer is None:
                 # Only honour ``inst.page.url`` as the previous-URL hint
@@ -8403,7 +8403,7 @@ class BrowserManager:
         **Empty-probe defense.** Spec calls for triggering only on a
         match. We respect that — pages that swap captchas via
         ``innerHTML`` replace (rare) will miss the MutationObserver and
-        agents must fall back to the explicit ``solve_captcha`` skill.
+        agents must fall back to the explicit ``solve_captcha`` tool.
         Always firing ``_check_captcha`` would defeat the cost-saving
         purpose of this wrapper (each call walks 7 selectors via
         ``locator(...).count()``).
@@ -9842,7 +9842,7 @@ class BrowserManager:
                 "data": _with_legacy_fields(envelope),
             }
 
-    # ── §11.14 explicit-trigger captcha skills ────────────────────────────
+    # ── §11.14 explicit-trigger captcha tools ────────────────────────────
 
     async def solve_captcha(
         self,
@@ -9885,7 +9885,7 @@ class BrowserManager:
         ``target_ref`` accepts a snapshot ref for selecting one captcha among
         many on the same page; multi-captcha enumeration lands in §11.6.
         Until then, we LOG and IGNORE — the top-ranked visible widget gets
-        solved. Documented in the skill description so agents don't expect
+        solved. Documented in the tool description so agents don't expect
         targeting precision yet.
 
         ``retry_previous`` semantics (review polish): the original

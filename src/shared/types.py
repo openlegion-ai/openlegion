@@ -38,7 +38,7 @@ AGENT_ID_RE_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
 MCP_SERVER_NAME_RE_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
 """MCP server name regex — matches :data:`AGENT_ID_RE_PATTERN` convention.
 
-Used as a prefix when an MCP tool conflicts with a built-in skill or
+Used as a prefix when an MCP tool conflicts with a built-in tool or
 another server's tool (``mcp_<server>_<tool>`` — see
 :mod:`src.agent.mcp_client`).
 """
@@ -493,7 +493,7 @@ class AgentConfig(BaseModel):
 
     role: str = ""
     model: str = ""
-    skills_dir: str = ""
+    tools_dir: str = ""
     initial_instructions: str = ""
     initial_soul: str = ""
     initial_heartbeat: str = ""

@@ -384,11 +384,11 @@ def test_docker_backend_operator_gets_distinct_token(tmp_path, monkeypatch):
 
     # Start operator and a worker.
     backend.start_agent(
-        agent_id="operator", role="orchestrator", skills_dir="",
+        agent_id="operator", role="orchestrator", tools_dir="",
         env_overrides={"ALLOWED_TOOLS": "chat"},
     )
     backend.start_agent(
-        agent_id="scout", role="worker", skills_dir="",
+        agent_id="scout", role="worker", tools_dir="",
     )
 
     # Each agent has its own distinct token.
@@ -430,13 +430,13 @@ def test_sandbox_backend_operator_gets_distinct_token(tmp_path):
 
     # Operator workspace.
     op_ws = backend._prepare_workspace(
-        agent_id="operator", role="orchestrator", skills_dir="",
+        agent_id="operator", role="orchestrator", tools_dir="",
         system_prompt="", model="",
         env_overrides={"ALLOWED_TOOLS": "chat"},
     )
     # Worker workspace.
     sw_ws = backend._prepare_workspace(
-        agent_id="scout", role="worker", skills_dir="",
+        agent_id="scout", role="worker", tools_dir="",
         system_prompt="", model="",
     )
 
@@ -479,14 +479,14 @@ def test_runtime_restart_rotates_operator_token(tmp_path):
 
     b1 = _new_backend("run1")
     b1._prepare_workspace(
-        agent_id="operator", role="orch", skills_dir="",
+        agent_id="operator", role="orch", tools_dir="",
         system_prompt="", model="",
     )
     token1 = b1.auth_tokens["operator"]
 
     b2 = _new_backend("run2")
     b2._prepare_workspace(
-        agent_id="operator", role="orch", skills_dir="",
+        agent_id="operator", role="orch", tools_dir="",
         system_prompt="", model="",
     )
     token2 = b2.auth_tokens["operator"]
@@ -517,7 +517,7 @@ def test_post_rotation_register_uses_new_token(tmp_path):
     backend._workspace_root = tmp_path / "ws"
 
     backend._prepare_workspace(
-        agent_id="operator", role="orch", skills_dir="",
+        agent_id="operator", role="orch", tools_dir="",
         system_prompt="", model="",
     )
     current_token = backend.auth_tokens["operator"]

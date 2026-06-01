@@ -1,4 +1,4 @@
-"""Unit tests for agent skill registry and skill authoring."""
+"""Unit tests for agent tool registry and tool authoring."""
 
 import shutil
 import tempfile
@@ -7,65 +7,65 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.agent.skills import (
-    SkillRegistry,
+from src.agent.tools import (
+    ToolRegistry,
     _normalize_params_dict,
-    _skill_staging,
-    skill,
+    _tool_staging,
+    tool,
 )
 
 
 def setup_function():
-    """Clear global skill registry before each test."""
-    _skill_staging.clear()
+    """Clear global tool registry before each test."""
+    _tool_staging.clear()
 
 
-def test_skill_decorator_registers():
-    @skill(name="test_skill", description="A test", parameters={"x": {"type": "string"}})
-    def my_skill(x: str):
+def test_tool_decorator_registers():
+    @tool(name="test_tool", description="A test", parameters={"x": {"type": "string"}})
+    def my_tool(x: str):
         return {"result": x}
 
-    assert "test_skill" in _skill_staging
-    assert _skill_staging["test_skill"]["description"] == "A test"
+    assert "test_tool" in _tool_staging
+    assert _tool_staging["test_tool"]["description"] == "A test"
 
 
 @pytest.mark.asyncio
-async def test_skill_execution_sync():
-    @skill(name="sync_skill", description="sync test", parameters={"val": {"type": "integer"}})
+async def test_tool_execution_sync():
+    @tool(name="sync_tool", description="sync test", parameters={"val": {"type": "integer"}})
     def sync_fn(val: int):
         return val * 2
 
-    registry = SkillRegistry.__new__(SkillRegistry)
-    registry.skills = dict(_skill_staging)
+    registry = ToolRegistry.__new__(ToolRegistry)
+    registry.tools = dict(_tool_staging)
 
-    result = await registry.execute("sync_skill", {"val": 5})
+    result = await registry.execute("sync_tool", {"val": 5})
     assert result == 10
 
 
 @pytest.mark.asyncio
-async def test_skill_execution_async():
-    @skill(name="async_skill", description="async test", parameters={"val": {"type": "string"}})
+async def test_tool_execution_async():
+    @tool(name="async_tool", description="async test", parameters={"val": {"type": "string"}})
     async def async_fn(val: str):
         return f"hello {val}"
 
-    registry = SkillRegistry.__new__(SkillRegistry)
-    registry.skills = dict(_skill_staging)
+    registry = ToolRegistry.__new__(ToolRegistry)
+    registry.tools = dict(_tool_staging)
 
-    result = await registry.execute("async_skill", {"val": "world"})
+    result = await registry.execute("async_tool", {"val": "world"})
     assert result == "hello world"
 
 
 @pytest.mark.asyncio
-async def test_unknown_skill_raises():
-    registry = SkillRegistry.__new__(SkillRegistry)
-    registry.skills = {}
+async def test_unknown_tool_raises():
+    registry = ToolRegistry.__new__(ToolRegistry)
+    registry.tools = {}
 
-    with pytest.raises(ValueError, match="Unknown skill"):
+    with pytest.raises(ValueError, match="Unknown tool"):
         await registry.execute("nonexistent", {})
 
 
 def test_get_tool_definitions():
-    @skill(
+    @tool(
         name="tool_test",
         description="tool desc",
         parameters={"q": {"type": "string", "description": "query"}, "n": {"type": "integer", "default": 5}},
@@ -73,8 +73,8 @@ def test_get_tool_definitions():
     def dummy(q: str, n: int = 5):
         return {}
 
-    registry = SkillRegistry.__new__(SkillRegistry)
-    registry.skills = dict(_skill_staging)
+    registry = ToolRegistry.__new__(ToolRegistry)
+    registry.tools = dict(_tool_staging)
 
     defs = registry.get_tool_definitions()
     assert len(defs) == 1
@@ -85,7 +85,7 @@ def test_get_tool_definitions():
 
 def test_get_tool_definitions_enum():
     """Enum values in parameters are passed through to tool definitions."""
-    @skill(
+    @tool(
         name="enum_test",
         description="test enum",
         parameters={
@@ -99,8 +99,8 @@ def test_get_tool_definitions_enum():
     def dummy(choice: str):
         return {}
 
-    registry = SkillRegistry.__new__(SkillRegistry)
-    registry.skills = dict(_skill_staging)
+    registry = ToolRegistry.__new__(ToolRegistry)
+    registry.tools = dict(_tool_staging)
 
     defs = registry.get_tool_definitions()
     assert len(defs) == 1
@@ -108,54 +108,54 @@ def test_get_tool_definitions_enum():
     assert props["choice"]["enum"] == ["opt_a", "opt_b"]
 
 
-def test_list_skills():
-    @skill(name="a", description="a", parameters={})
+def test_list_tools():
+    @tool(name="a", description="a", parameters={})
     def a():
         return None
 
-    @skill(name="b", description="b", parameters={})
+    @tool(name="b", description="b", parameters={})
     def b():
         return None
 
-    registry = SkillRegistry.__new__(SkillRegistry)
-    registry.skills = dict(_skill_staging)
+    registry = ToolRegistry.__new__(ToolRegistry)
+    registry.tools = dict(_tool_staging)
 
-    names = registry.list_skills()
+    names = registry.list_tools()
     assert "a" in names
     assert "b" in names
 
 
-def test_list_skills_with_exclude():
-    @skill(name="keep_me", description="keep", parameters={})
+def test_list_tools_with_exclude():
+    @tool(name="keep_me", description="keep", parameters={})
     def keep():
         return None
 
-    @skill(name="drop_me", description="drop", parameters={})
+    @tool(name="drop_me", description="drop", parameters={})
     def drop():
         return None
 
-    registry = SkillRegistry.__new__(SkillRegistry)
-    registry.skills = dict(_skill_staging)
+    registry = ToolRegistry.__new__(ToolRegistry)
+    registry.tools = dict(_tool_staging)
 
     excluded = frozenset({"drop_me"})
-    names = registry.list_skills(exclude=excluded)
+    names = registry.list_tools(exclude=excluded)
     assert "keep_me" in names
     assert "drop_me" not in names
     # Without exclude, both present
-    assert "drop_me" in registry.list_skills()
+    assert "drop_me" in registry.list_tools()
 
 
 def test_get_descriptions_with_exclude():
-    @skill(name="visible", description="I am visible", parameters={})
+    @tool(name="visible", description="I am visible", parameters={})
     def vis():
         return None
 
-    @skill(name="hidden", description="I am hidden", parameters={})
+    @tool(name="hidden", description="I am hidden", parameters={})
     def hid():
         return None
 
-    registry = SkillRegistry.__new__(SkillRegistry)
-    registry.skills = dict(_skill_staging)
+    registry = ToolRegistry.__new__(ToolRegistry)
+    registry.tools = dict(_tool_staging)
 
     excluded = frozenset({"hidden"})
     desc = registry.get_descriptions(exclude=excluded)
@@ -166,16 +166,16 @@ def test_get_descriptions_with_exclude():
 
 
 def test_get_tool_definitions_with_exclude():
-    @skill(name="included", description="inc", parameters={"x": {"type": "string"}})
+    @tool(name="included", description="inc", parameters={"x": {"type": "string"}})
     def inc(x: str):
         return x
 
-    @skill(name="excluded_tool", description="exc", parameters={"y": {"type": "string"}})
+    @tool(name="excluded_tool", description="exc", parameters={"y": {"type": "string"}})
     def exc(y: str):
         return y
 
-    registry = SkillRegistry.__new__(SkillRegistry)
-    registry.skills = dict(_skill_staging)
+    registry = ToolRegistry.__new__(ToolRegistry)
+    registry.tools = dict(_tool_staging)
 
     excluded = frozenset({"excluded_tool"})
     defs = registry.get_tool_definitions(exclude=excluded)
@@ -187,154 +187,154 @@ def test_get_tool_definitions_with_exclude():
     assert "excluded_tool" in all_names
 
 
-class TestSkillReload:
+class TestToolReload:
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()
-        _skill_staging.clear()
+        _tool_staging.clear()
 
     def teardown_method(self):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_reload_picks_up_new_file(self):
-        registry = SkillRegistry.__new__(SkillRegistry)
-        registry.skills_dir = self._tmpdir
-        registry.skills = {}
+        registry = ToolRegistry.__new__(ToolRegistry)
+        registry.tools_dir = self._tmpdir
+        registry.tools = {}
         registry._mcp_client = None
         registry._tool_defs_cache = {}
         registry._descriptions_cache = {}
 
-        # Write a new skill file
-        skill_code = '''
-from src.agent.skills import skill
+        # Write a new tool file
+        tool_code = '''
+from src.agent.tools import tool
 
-@skill(name="dynamic_test", description="dynamic", parameters={"x": {"type": "string"}})
+@tool(name="dynamic_test", description="dynamic", parameters={"x": {"type": "string"}})
 def dynamic_test(x: str):
     return {"echo": x}
 '''
-        (Path(self._tmpdir) / "dynamic.py").write_text(skill_code)
+        (Path(self._tmpdir) / "dynamic.py").write_text(tool_code)
 
         count = registry.reload()
         assert count > 0
-        assert "dynamic_test" in registry.skills
+        assert "dynamic_test" in registry.tools
 
 
-class TestSkillValidation:
+class TestToolValidation:
     def test_validate_valid_code(self):
-        from src.agent.builtins.skill_tool import _validate_skill_code
+        from src.agent.builtins.tool_authoring import _validate_tool_code
         code = '''
-from src.agent.skills import skill
+from src.agent.tools import tool
 
-@skill(name="test", description="test", parameters={})
+@tool(name="test", description="test", parameters={})
 def test():
     return {"ok": True}
 '''
-        assert _validate_skill_code(code) is None
+        assert _validate_tool_code(code) is None
 
     def test_validate_syntax_error(self):
-        from src.agent.builtins.skill_tool import _validate_skill_code
-        assert _validate_skill_code("def broken(") is not None
+        from src.agent.builtins.tool_authoring import _validate_tool_code
+        assert _validate_tool_code("def broken(") is not None
 
     def test_validate_valid_async_code(self):
-        from src.agent.builtins.skill_tool import _validate_skill_code
+        from src.agent.builtins.tool_authoring import _validate_tool_code
         code = '''
-from src.agent.skills import skill
+from src.agent.tools import tool
 
-@skill(name="async_test", description="async test", parameters={})
+@tool(name="async_test", description="async test", parameters={})
 async def async_test(*, mesh_client=None):
     return {"ok": True}
 '''
-        assert _validate_skill_code(code) is None
+        assert _validate_tool_code(code) is None
 
     def test_validate_missing_decorator(self):
-        from src.agent.builtins.skill_tool import _validate_skill_code
+        from src.agent.builtins.tool_authoring import _validate_tool_code
         code = "def plain():\n    return 1\n"
-        error = _validate_skill_code(code)
+        error = _validate_tool_code(code)
         assert error is not None
         assert "decorator" in error.lower()
 
     def test_validate_missing_decorator_async(self):
-        from src.agent.builtins.skill_tool import _validate_skill_code
+        from src.agent.builtins.tool_authoring import _validate_tool_code
         code = "async def plain():\n    return 1\n"
-        error = _validate_skill_code(code)
+        error = _validate_tool_code(code)
         assert error is not None
         assert "decorator" in error.lower()
 
     def test_validate_forbidden_import(self):
-        from src.agent.builtins.skill_tool import _validate_skill_code
+        from src.agent.builtins.tool_authoring import _validate_tool_code
         code = '''
 import subprocess
-from src.agent.skills import skill
+from src.agent.tools import tool
 
-@skill(name="bad", description="bad", parameters={})
+@tool(name="bad", description="bad", parameters={})
 def bad():
     subprocess.run(["rm", "-rf", "/"])
 '''
-        error = _validate_skill_code(code)
+        error = _validate_tool_code(code)
         assert error is not None
         assert "Forbidden" in error
 
     def test_sanitize_filename(self):
-        from src.agent.builtins.skill_tool import _sanitize_filename
+        from src.agent.builtins.tool_authoring import _sanitize_filename
         assert _sanitize_filename("my tool") == "custom_my_tool.py"
         assert _sanitize_filename("API-Helper") == "custom_api_helper.py"
 
 
-class TestSkillRegistryIsolation:
-    """Verify that creating a second SkillRegistry doesn't destroy the first's skills."""
+class TestToolRegistryIsolation:
+    """Verify that creating a second ToolRegistry doesn't destroy the first's tools."""
 
     def setup_method(self):
-        _skill_staging.clear()
+        _tool_staging.clear()
 
     def test_second_registry_preserves_decorators(self):
-        """Creating a second SkillRegistry doesn't clear decorator registrations."""
-        @skill(name="preserved", description="test", parameters={})
+        """Creating a second ToolRegistry doesn't clear decorator registrations."""
+        @tool(name="preserved", description="test", parameters={})
         def preserved_fn():
             return True
 
-        # First registry picks up the decorated skill
-        r1 = SkillRegistry.__new__(SkillRegistry)
-        r1.skills_dir = "/nonexistent"
-        r1.skills = dict(_skill_staging)
-        assert "preserved" in r1.skills
+        # First registry picks up the decorated tool
+        r1 = ToolRegistry.__new__(ToolRegistry)
+        r1.tools_dir = "/nonexistent"
+        r1.tools = dict(_tool_staging)
+        assert "preserved" in r1.tools
 
-        # Second registry init should NOT clear _skill_staging
-        r2 = SkillRegistry.__new__(SkillRegistry)
-        r2.skills_dir = "/nonexistent"
-        r2.skills = dict(_skill_staging)
-        assert "preserved" in r2.skills
+        # Second registry init should NOT clear _tool_staging
+        r2 = ToolRegistry.__new__(ToolRegistry)
+        r2.tools_dir = "/nonexistent"
+        r2.tools = dict(_tool_staging)
+        assert "preserved" in r2.tools
 
         # r1's snapshot should still be intact
-        assert "preserved" in r1.skills
+        assert "preserved" in r1.tools
 
     def test_reload_isolated(self):
         """reload() clears staging and re-discovers, but other instances keep their snapshot."""
-        @skill(name="original", description="test", parameters={})
+        @tool(name="original", description="test", parameters={})
         def original_fn():
             return True
 
-        r1 = SkillRegistry.__new__(SkillRegistry)
-        r1.skills_dir = "/nonexistent"
-        r1.skills = dict(_skill_staging)
-        assert "original" in r1.skills
+        r1 = ToolRegistry.__new__(ToolRegistry)
+        r1.tools_dir = "/nonexistent"
+        r1.tools = dict(_tool_staging)
+        assert "original" in r1.tools
 
         # Simulate reload on a different registry
-        r2 = SkillRegistry.__new__(SkillRegistry)
-        r2.skills_dir = "/nonexistent"
-        r2.skills = {}
+        r2 = ToolRegistry.__new__(ToolRegistry)
+        r2.tools_dir = "/nonexistent"
+        r2.tools = {}
         # reload clears staging and re-discovers (no files found)
-        _skill_staging.clear()
-        r2.skills = dict(_skill_staging)
-        assert "original" not in r2.skills
+        _tool_staging.clear()
+        r2.tools = dict(_tool_staging)
+        assert "original" not in r2.tools
 
         # r1 still has its snapshot
-        assert "original" in r1.skills
+        assert "original" in r1.tools
 
 
 class TestMCPIntegration:
-    """Tests for MCP tool integration with SkillRegistry."""
+    """Tests for MCP tool integration with ToolRegistry."""
 
     def setup_method(self):
-        _skill_staging.clear()
+        _tool_staging.clear()
 
     def _make_mcp_client(self, tools: list[dict] | None = None):
         """Create a mock MCPClient with optional tool definitions."""
@@ -363,10 +363,10 @@ class TestMCPIntegration:
         ]
         mcp = self._make_mcp_client(mcp_tools)
 
-        registry = SkillRegistry.__new__(SkillRegistry)
-        registry.skills_dir = "/nonexistent"
+        registry = ToolRegistry.__new__(ToolRegistry)
+        registry.tools_dir = "/nonexistent"
         registry._mcp_client = mcp
-        registry.skills = {}
+        registry.tools = {}
         registry._register_mcp_tools()
 
         defs = registry.get_tool_definitions()
@@ -389,10 +389,10 @@ class TestMCPIntegration:
         ]
         mcp = self._make_mcp_client(mcp_tools)
 
-        registry = SkillRegistry.__new__(SkillRegistry)
-        registry.skills_dir = "/nonexistent"
+        registry = ToolRegistry.__new__(ToolRegistry)
+        registry.tools_dir = "/nonexistent"
         registry._mcp_client = mcp
-        registry.skills = {}
+        registry.tools = {}
         registry._register_mcp_tools()
 
         result = await registry.execute("mcp_tool", {"key": "value"})
@@ -411,21 +411,21 @@ class TestMCPIntegration:
         ]
         mcp = self._make_mcp_client(mcp_tools)
 
-        registry = SkillRegistry.__new__(SkillRegistry)
-        registry.skills_dir = "/nonexistent"
+        registry = ToolRegistry.__new__(ToolRegistry)
+        registry.tools_dir = "/nonexistent"
         registry._mcp_client = mcp
-        registry.skills = {}
+        registry.tools = {}
         registry._register_mcp_tools()
-        assert "persistent_mcp" in registry.skills
+        assert "persistent_mcp" in registry.tools
 
         # Simulate reload
-        _skill_staging.clear()
-        registry.skills = dict(_skill_staging)
+        _tool_staging.clear()
+        registry.tools = dict(_tool_staging)
         registry._register_mcp_tools()
-        assert "persistent_mcp" in registry.skills
+        assert "persistent_mcp" in registry.tools
 
-    def test_mcp_tools_in_list_skills(self):
-        """MCP tools appear in list_skills output."""
+    def test_mcp_tools_in_list_tools(self):
+        """MCP tools appear in list_tools output."""
         mcp_tools = [
             {
                 "name": "mcp_listed",
@@ -436,99 +436,99 @@ class TestMCPIntegration:
         ]
         mcp = self._make_mcp_client(mcp_tools)
 
-        registry = SkillRegistry.__new__(SkillRegistry)
-        registry.skills_dir = "/nonexistent"
+        registry = ToolRegistry.__new__(ToolRegistry)
+        registry.tools_dir = "/nonexistent"
         registry._mcp_client = mcp
-        registry.skills = {}
+        registry.tools = {}
         registry._register_mcp_tools()
 
-        assert "mcp_listed" in registry.list_skills()
+        assert "mcp_listed" in registry.list_tools()
 
     def test_no_mcp_client_is_noop(self):
         """When no MCP client is set, _register_mcp_tools does nothing."""
-        registry = SkillRegistry.__new__(SkillRegistry)
-        registry.skills_dir = "/nonexistent"
+        registry = ToolRegistry.__new__(ToolRegistry)
+        registry.tools_dir = "/nonexistent"
         registry._mcp_client = None
-        registry.skills = {}
+        registry.tools = {}
         registry._register_mcp_tools()
-        assert len(registry.skills) == 0
+        assert len(registry.tools) == 0
 
 
 @pytest.mark.asyncio
 async def test_execute_filters_hallucinated_params():
     """LLM-hallucinated parameters (e.g. 'raw') should be silently dropped."""
-    @skill(name="no_args_skill", description="takes no args", parameters={})
+    @tool(name="no_args_tool", description="takes no args", parameters={})
     def no_args():
         return {"ok": True}
 
-    registry = SkillRegistry.__new__(SkillRegistry)
-    registry.skills = dict(_skill_staging)
+    registry = ToolRegistry.__new__(ToolRegistry)
+    registry.tools = dict(_tool_staging)
 
     # Passing 'raw' should not crash — it should be filtered out
-    result = await registry.execute("no_args_skill", {"raw": ""})
+    result = await registry.execute("no_args_tool", {"raw": ""})
     assert result == {"ok": True}
 
 
 @pytest.mark.asyncio
 async def test_execute_filters_extra_params_keeps_valid():
     """Extra params are dropped but valid params are preserved."""
-    @skill(name="one_arg_skill", description="takes one arg", parameters={"x": {"type": "string"}})
+    @tool(name="one_arg_tool", description="takes one arg", parameters={"x": {"type": "string"}})
     def one_arg(x: str):
         return {"got": x}
 
-    registry = SkillRegistry.__new__(SkillRegistry)
-    registry.skills = dict(_skill_staging)
+    registry = ToolRegistry.__new__(ToolRegistry)
+    registry.tools = dict(_tool_staging)
 
-    result = await registry.execute("one_arg_skill", {"x": "hello", "raw": "", "bogus": 42})
+    result = await registry.execute("one_arg_tool", {"x": "hello", "raw": "", "bogus": 42})
     assert result == {"got": "hello"}
 
 
 @pytest.mark.asyncio
 async def test_execute_kwargs_function_keeps_all_params():
     """Functions accepting **kwargs should receive all params including extras."""
-    @skill(name="kwargs_skill", description="accepts kwargs", parameters={})
+    @tool(name="kwargs_tool", description="accepts kwargs", parameters={})
     def kwargs_fn(**kwargs):
         return {"keys": sorted(kwargs.keys())}
 
-    registry = SkillRegistry.__new__(SkillRegistry)
-    registry.skills = dict(_skill_staging)
+    registry = ToolRegistry.__new__(ToolRegistry)
+    registry.tools = dict(_tool_staging)
 
-    result = await registry.execute("kwargs_skill", {"raw": "", "extra": "val"})
+    result = await registry.execute("kwargs_tool", {"raw": "", "extra": "val"})
     assert result == {"keys": ["extra", "raw"]}
 
 
 @pytest.mark.asyncio
 async def test_execute_filters_hallucinated_params_async():
     """Async functions also get hallucinated params filtered."""
-    @skill(name="async_no_args", description="async no args", parameters={})
+    @tool(name="async_no_args", description="async no args", parameters={})
     async def async_no_args():
         return {"async_ok": True}
 
-    registry = SkillRegistry.__new__(SkillRegistry)
-    registry.skills = dict(_skill_staging)
+    registry = ToolRegistry.__new__(ToolRegistry)
+    registry.tools = dict(_tool_staging)
 
     result = await registry.execute("async_no_args", {"raw": ""})
     assert result == {"async_ok": True}
 
 
 class TestGetToolSources:
-    """Tests for SkillRegistry.get_tool_sources()."""
+    """Tests for ToolRegistry.get_tool_sources()."""
 
     def setup_method(self):
-        _skill_staging.clear()
+        _tool_staging.clear()
 
-    def _make_registry(self, builtin_fns=(), extra_skills=None):
+    def _make_registry(self, builtin_fns=(), extra_tools=None):
         """Build a registry with explicit builtin function refs."""
-        registry = SkillRegistry.__new__(SkillRegistry)
-        registry.skills = dict(_skill_staging)
-        if extra_skills:
-            registry.skills.update(extra_skills)
+        registry = ToolRegistry.__new__(ToolRegistry)
+        registry.tools = dict(_tool_staging)
+        if extra_tools:
+            registry.tools.update(extra_tools)
         registry._builtin_functions = frozenset(builtin_fns)
         return registry
 
     def test_builtin_tagged_correctly(self):
-        """Skills whose function object is in _builtin_functions → 'builtin'."""
-        @skill(name="core_tool", description="core", parameters={})
+        """Tools whose function object is in _builtin_functions → 'builtin'."""
+        @tool(name="core_tool", description="core", parameters={})
         def core_fn():
             return {}
 
@@ -537,8 +537,8 @@ class TestGetToolSources:
         assert sources["core_tool"] == "builtin"
 
     def test_custom_tagged_correctly(self):
-        """Skills not in _builtin_functions and not MCP → 'custom'."""
-        @skill(name="agent_tool", description="custom", parameters={})
+        """Tools not in _builtin_functions and not MCP → 'custom'."""
+        @tool(name="agent_tool", description="custom", parameters={})
         def agent_fn():
             return {}
 
@@ -547,24 +547,24 @@ class TestGetToolSources:
         assert sources["agent_tool"] == "custom"
 
     def test_mcp_tagged_correctly(self):
-        """Skills with function='mcp' sentinel → 'mcp'."""
+        """Tools with function='mcp' sentinel → 'mcp'."""
         mcp_entry = {
             "name": "ext_search",
             "description": "MCP tool",
             "parameters": {"type": "object", "properties": {}},
             "function": "mcp",
         }
-        registry = self._make_registry(extra_skills={"ext_search": mcp_entry})
+        registry = self._make_registry(extra_tools={"ext_search": mcp_entry})
         sources = registry.get_tool_sources()
         assert sources["ext_search"] == "mcp"
 
     def test_exclude_removes_entries(self):
-        """Excluded skills do not appear in the returned mapping."""
-        @skill(name="visible", description="shown", parameters={})
+        """Excluded tools do not appear in the returned mapping."""
+        @tool(name="visible", description="shown", parameters={})
         def vis_fn():
             return {}
 
-        @skill(name="hidden", description="excluded", parameters={})
+        @tool(name="hidden", description="excluded", parameters={})
         def hid_fn():
             return {}
 
@@ -574,31 +574,31 @@ class TestGetToolSources:
         assert "hidden" not in sources
 
     def test_custom_override_of_builtin_name(self):
-        """A custom skill using the same name as a builtin is tagged 'custom',
+        """A custom tool using the same name as a builtin is tagged 'custom',
         not 'builtin', because the function object differs."""
-        @skill(name="read_file", description="original builtin", parameters={})
+        @tool(name="read_file", description="original builtin", parameters={})
         def original_builtin():
             return {}
 
         original_fn_ref = original_builtin  # capture the builtin function
 
-        # Simulate a custom skill overriding the same name
-        @skill(name="read_file", description="custom override", parameters={})
+        # Simulate a custom tool overriding the same name
+        @tool(name="read_file", description="custom override", parameters={})
         def custom_override():
             return {}
 
-        # registry.skills now has custom_override for "read_file"
+        # registry.tools now has custom_override for "read_file"
         registry = self._make_registry(builtin_fns=[original_fn_ref])
         sources = registry.get_tool_sources()
         assert sources["read_file"] == "custom"
 
     def test_mixed_sources(self):
         """Registry with builtin, custom, and mcp tools returns correct tags."""
-        @skill(name="builtin_a", description="b", parameters={})
+        @tool(name="builtin_a", description="b", parameters={})
         def builtin_a_fn():
             return {}
 
-        @skill(name="custom_b", description="c", parameters={})
+        @tool(name="custom_b", description="c", parameters={})
         def custom_b_fn():
             return {}
 
@@ -610,7 +610,7 @@ class TestGetToolSources:
         }
         registry = self._make_registry(
             builtin_fns=[builtin_a_fn],
-            extra_skills={"mcp_c": mcp_entry},
+            extra_tools={"mcp_c": mcp_entry},
         )
         sources = registry.get_tool_sources()
         assert sources["builtin_a"] == "builtin"
@@ -618,9 +618,9 @@ class TestGetToolSources:
         assert sources["mcp_c"] == "mcp"
 
     def test_empty_registry_returns_empty(self):
-        """Empty skills dict → empty sources dict."""
-        registry = SkillRegistry.__new__(SkillRegistry)
-        registry.skills = {}
+        """Empty tools dict → empty sources dict."""
+        registry = ToolRegistry.__new__(ToolRegistry)
+        registry.tools = {}
         registry._builtin_functions = frozenset()
         assert registry.get_tool_sources() == {}
 
@@ -631,15 +631,15 @@ class TestGetToolSources:
 @pytest.mark.asyncio
 async def test_execute_coerces_string_to_int():
     """LLM sends '5' instead of 5 for an integer parameter."""
-    registry = SkillRegistry.__new__(SkillRegistry)
+    registry = ToolRegistry.__new__(ToolRegistry)
 
-    @skill(name="int_tool", description="t", parameters={
+    @tool(name="int_tool", description="t", parameters={
         "count": {"type": "integer", "description": "n"},
     })
     def int_tool(count: int) -> dict:
         return {"count": count, "type": type(count).__name__}
 
-    registry.skills = dict(_skill_staging)
+    registry.tools = dict(_tool_staging)
     result = await registry.execute("int_tool", {"count": "5"})
     assert result == {"count": 5, "type": "int"}
 
@@ -647,15 +647,15 @@ async def test_execute_coerces_string_to_int():
 @pytest.mark.asyncio
 async def test_execute_coerces_string_to_bool():
     """LLM sends 'true' instead of true for a boolean parameter."""
-    registry = SkillRegistry.__new__(SkillRegistry)
+    registry = ToolRegistry.__new__(ToolRegistry)
 
-    @skill(name="bool_tool", description="t", parameters={
+    @tool(name="bool_tool", description="t", parameters={
         "flag": {"type": "boolean", "description": "f"},
     })
     def bool_tool(flag: bool) -> dict:
         return {"flag": flag}
 
-    registry.skills = dict(_skill_staging)
+    registry.tools = dict(_tool_staging)
     result = await registry.execute("bool_tool", {"flag": "true"})
     assert result == {"flag": True}
 
@@ -663,15 +663,15 @@ async def test_execute_coerces_string_to_bool():
 @pytest.mark.asyncio
 async def test_execute_coerces_int_to_string():
     """LLM sends 42 instead of '42' for a string parameter."""
-    registry = SkillRegistry.__new__(SkillRegistry)
+    registry = ToolRegistry.__new__(ToolRegistry)
 
-    @skill(name="str_tool", description="t", parameters={
+    @tool(name="str_tool", description="t", parameters={
         "name": {"type": "string", "description": "n"},
     })
     def str_tool(name: str) -> dict:
         return {"name": name}
 
-    registry.skills = dict(_skill_staging)
+    registry.tools = dict(_tool_staging)
     result = await registry.execute("str_tool", {"name": 42})
     assert result == {"name": "42"}
 
@@ -679,15 +679,15 @@ async def test_execute_coerces_int_to_string():
 @pytest.mark.asyncio
 async def test_execute_type_coercion_failure_raises():
     """Non-numeric string for integer parameter raises TypeError."""
-    registry = SkillRegistry.__new__(SkillRegistry)
+    registry = ToolRegistry.__new__(ToolRegistry)
 
-    @skill(name="bad_int", description="t", parameters={
+    @tool(name="bad_int", description="t", parameters={
         "count": {"type": "integer", "description": "n"},
     })
     def bad_int(count: int) -> dict:
         return {"count": count}
 
-    registry.skills = dict(_skill_staging)
+    registry.tools = dict(_tool_staging)
     with pytest.raises(TypeError, match="expects integer"):
         await registry.execute("bad_int", {"count": "not_a_number"})
 
@@ -698,16 +698,16 @@ async def test_execute_type_coercion_failure_raises():
 @pytest.mark.asyncio
 async def test_execute_missing_required_param_raises():
     """Missing required parameter raises TypeError with clear message."""
-    registry = SkillRegistry.__new__(SkillRegistry)
+    registry = ToolRegistry.__new__(ToolRegistry)
 
-    @skill(name="req_tool", description="t", parameters={
+    @tool(name="req_tool", description="t", parameters={
         "path": {"type": "string", "description": "p"},
         "limit": {"type": "integer", "description": "l", "default": 10},
     })
     def req_tool(path: str, limit: int = 10) -> dict:
         return {"path": path}
 
-    registry.skills = dict(_skill_staging)
+    registry.tools = dict(_tool_staging)
     with pytest.raises(TypeError, match="without required.*path"):
         await registry.execute("req_tool", {})
 
@@ -715,15 +715,15 @@ async def test_execute_missing_required_param_raises():
 @pytest.mark.asyncio
 async def test_execute_malformed_raw_args_raises():
     """When LLM sends malformed JSON, the {"raw": ...} fallback triggers missing-param error."""
-    registry = SkillRegistry.__new__(SkillRegistry)
+    registry = ToolRegistry.__new__(ToolRegistry)
 
-    @skill(name="file_tool", description="t", parameters={
+    @tool(name="file_tool", description="t", parameters={
         "path": {"type": "string", "description": "p"},
     })
     def file_tool(path: str) -> dict:
         return {"path": path}
 
-    registry.skills = dict(_skill_staging)
+    registry.tools = dict(_tool_staging)
     # Simulates what happens when LLM sends malformed JSON → {"raw": "garbage"}
     with pytest.raises(TypeError, match="without required.*path"):
         await registry.execute("file_tool", {"raw": "some garbage"})
@@ -732,16 +732,16 @@ async def test_execute_malformed_raw_args_raises():
 @pytest.mark.asyncio
 async def test_execute_optional_params_not_required():
     """Optional params (with defaults) should not trigger missing-param error."""
-    registry = SkillRegistry.__new__(SkillRegistry)
+    registry = ToolRegistry.__new__(ToolRegistry)
 
-    @skill(name="opt_tool", description="t", parameters={
+    @tool(name="opt_tool", description="t", parameters={
         "path": {"type": "string", "description": "p"},
         "verbose": {"type": "boolean", "description": "v", "default": False},
     })
     def opt_tool(path: str, verbose: bool = False) -> dict:
         return {"path": path, "verbose": verbose}
 
-    registry.skills = dict(_skill_staging)
+    registry.tools = dict(_tool_staging)
     result = await registry.execute("opt_tool", {"path": "test.txt"})
     assert result == {"path": "test.txt", "verbose": False}
 
@@ -749,15 +749,15 @@ async def test_execute_optional_params_not_required():
 @pytest.mark.asyncio
 async def test_execute_coerces_string_to_float():
     """LLM sends '3.14' instead of 3.14 for a number parameter."""
-    registry = SkillRegistry.__new__(SkillRegistry)
+    registry = ToolRegistry.__new__(ToolRegistry)
 
-    @skill(name="num_tool", description="t", parameters={
+    @tool(name="num_tool", description="t", parameters={
         "value": {"type": "number", "description": "n"},
     })
     def num_tool(value: float) -> dict:
         return {"value": value, "type": type(value).__name__}
 
-    registry.skills = dict(_skill_staging)
+    registry.tools = dict(_tool_staging)
     result = await registry.execute("num_tool", {"value": "3.14"})
     assert result == {"value": 3.14, "type": "float"}
 
@@ -765,15 +765,15 @@ async def test_execute_coerces_string_to_float():
 @pytest.mark.asyncio
 async def test_execute_coerces_string_false_to_bool():
     """LLM sends 'false' string — must coerce to False, not truthy non-empty string."""
-    registry = SkillRegistry.__new__(SkillRegistry)
+    registry = ToolRegistry.__new__(ToolRegistry)
 
-    @skill(name="bool_false_tool", description="t", parameters={
+    @tool(name="bool_false_tool", description="t", parameters={
         "flag": {"type": "boolean", "description": "f"},
     })
     def bool_false_tool(flag: bool) -> dict:
         return {"flag": flag}
 
-    registry.skills = dict(_skill_staging)
+    registry.tools = dict(_tool_staging)
     result = await registry.execute("bool_false_tool", {"flag": "false"})
     assert result == {"flag": False}
 
@@ -781,16 +781,16 @@ async def test_execute_coerces_string_false_to_bool():
 @pytest.mark.asyncio
 async def test_execute_function_default_not_flagged_as_required():
     """Param with function default but no schema default should NOT be rejected."""
-    registry = SkillRegistry.__new__(SkillRegistry)
+    registry = ToolRegistry.__new__(ToolRegistry)
 
-    @skill(name="image_tool", description="t", parameters={
+    @tool(name="image_tool", description="t", parameters={
         "prompt": {"type": "string", "description": "p"},
         "filename": {"type": "string", "description": "f"},  # No "default" in schema
     })
     def image_tool(prompt: str, filename: str = "") -> dict:  # Has default in function
         return {"prompt": prompt, "filename": filename}
 
-    registry.skills = dict(_skill_staging)
+    registry.tools = dict(_tool_staging)
     # LLM omits filename — should succeed using the function default
     result = await registry.execute("image_tool", {"prompt": "a cat"})
     assert result == {"prompt": "a cat", "filename": ""}
@@ -799,16 +799,16 @@ async def test_execute_function_default_not_flagged_as_required():
 @pytest.mark.asyncio
 async def test_execute_missing_param_error_includes_hints():
     """Error message includes parameter hints so agent can self-correct."""
-    registry = SkillRegistry.__new__(SkillRegistry)
+    registry = ToolRegistry.__new__(ToolRegistry)
 
-    @skill(name="search_tool", description="t", parameters={
+    @tool(name="search_tool", description="t", parameters={
         "query": {"type": "string", "description": "what to search"},
         "limit": {"type": "integer", "description": "max results", "default": 5},
     })
     def search_tool(query: str, limit: int = 5) -> dict:
         return {"query": query}
 
-    registry.skills = dict(_skill_staging)
+    registry.tools = dict(_tool_staging)
     with pytest.raises(TypeError, match=r"(?s)REQUIRED:.*query.*OPTIONAL:.*limit"):
         await registry.execute("search_tool", {})
 
@@ -816,9 +816,9 @@ async def test_execute_missing_param_error_includes_hints():
 @pytest.mark.asyncio
 async def test_execute_missing_param_error_includes_enum_values():
     """Error hints include enum values so agent knows valid options."""
-    registry = SkillRegistry.__new__(SkillRegistry)
+    registry = ToolRegistry.__new__(ToolRegistry)
 
-    @skill(name="status_tool", description="t", parameters={
+    @tool(name="status_tool", description="t", parameters={
         "state": {
             "type": "string",
             "enum": ["idle", "working", "blocked", "done"],
@@ -828,7 +828,7 @@ async def test_execute_missing_param_error_includes_enum_values():
     def status_tool(state: str) -> dict:
         return {"state": state}
 
-    registry.skills = dict(_skill_staging)
+    registry.tools = dict(_tool_staging)
     with pytest.raises(TypeError, match=r"one of: idle, working, blocked, done"):
         await registry.execute("status_tool", {})
 
@@ -836,15 +836,15 @@ async def test_execute_missing_param_error_includes_enum_values():
 @pytest.mark.asyncio
 async def test_execute_none_arguments_treated_as_empty():
     """None arguments (from null JSON) should be treated as empty dict."""
-    registry = SkillRegistry.__new__(SkillRegistry)
+    registry = ToolRegistry.__new__(ToolRegistry)
 
-    @skill(name="no_req_tool", description="t", parameters={
+    @tool(name="no_req_tool", description="t", parameters={
         "verbose": {"type": "boolean", "description": "v", "default": False},
     })
     def no_req_tool(verbose: bool = False) -> dict:
         return {"verbose": verbose}
 
-    registry.skills = dict(_skill_staging)
+    registry.tools = dict(_tool_staging)
     result = await registry.execute("no_req_tool", None)
     assert result == {"verbose": False}
 
@@ -852,15 +852,15 @@ async def test_execute_none_arguments_treated_as_empty():
 @pytest.mark.asyncio
 async def test_execute_non_dict_arguments_treated_as_empty():
     """Non-dict arguments (int, list, string) should not crash execute."""
-    registry = SkillRegistry.__new__(SkillRegistry)
+    registry = ToolRegistry.__new__(ToolRegistry)
 
-    @skill(name="safe_tool", description="t", parameters={
+    @tool(name="safe_tool", description="t", parameters={
         "verbose": {"type": "boolean", "description": "v", "default": False},
     })
     def safe_tool(verbose: bool = False) -> dict:
         return {"verbose": verbose}
 
-    registry.skills = dict(_skill_staging)
+    registry.tools = dict(_tool_staging)
     for bad_args in [42, [1, 2], "hello", True, 0]:
         result = await registry.execute("safe_tool", bad_args)
         assert result == {"verbose": False}, f"Failed for arguments={bad_args!r}"
@@ -898,19 +898,19 @@ def test_normalize_params_dict_skips_malformed_list_items():
 
 @pytest.mark.asyncio
 async def test_list_style_params_end_to_end():
-    """Skills with list-style params should work across all three entry points."""
-    @skill(
-        name="list_params_skill",
-        description="skill with list-style params",
+    """Tools with list-style params should work across all three entry points."""
+    @tool(
+        name="list_params_tool",
+        description="tool with list-style params",
         parameters={"q": {"type": "string", "description": "query"}},
     )
     def list_fn(q: str) -> dict:
         return {"q": q}
 
-    registry = SkillRegistry.__new__(SkillRegistry)
-    registry.skills = dict(_skill_staging)
-    # Simulate a self-authored skill that declared params as a list.
-    registry.skills["list_params_skill"]["parameters"] = [
+    registry = ToolRegistry.__new__(ToolRegistry)
+    registry.tools = dict(_tool_staging)
+    # Simulate a self-authored tool that declared params as a list.
+    registry.tools["list_params_tool"]["parameters"] = [
         {"name": "q", "type": "string", "description": "query"},
     ]
     registry._descriptions_cache = {}
@@ -919,17 +919,17 @@ async def test_list_style_params_end_to_end():
 
     # get_descriptions should not crash and should include the param.
     descriptions = registry.get_descriptions()
-    assert "list_params_skill" in descriptions
+    assert "list_params_tool" in descriptions
     assert "q: string" in descriptions
 
     # get_tool_definitions should produce an OpenAI-style tool definition.
     defs = registry.get_tool_definitions()
-    target = next(d for d in defs if d["function"]["name"] == "list_params_skill")
+    target = next(d for d in defs if d["function"]["name"] == "list_params_tool")
     assert "q" in target["function"]["parameters"]["properties"]
     assert target["function"]["parameters"]["properties"]["q"]["type"] == "string"
 
-    # execute should coerce and call the skill successfully.
-    result = await registry.execute("list_params_skill", {"q": 123})
+    # execute should coerce and call the tool successfully.
+    result = await registry.execute("list_params_tool", {"q": 123})
     assert result == {"q": "123"}
 
 
@@ -938,7 +938,7 @@ def test_normalize_params_dict_warns_on_duplicate_names(caplog):
         {"name": "x", "type": "string", "description": "first"},
         {"name": "x", "type": "integer", "description": "second"},
     ]
-    with caplog.at_level("WARNING", logger="agent.skills"):
+    with caplog.at_level("WARNING", logger="agent.tools"):
         result = _normalize_params_dict(params)
     # First wins, second discarded.
     assert result == {"x": {"type": "string", "description": "first"}}
@@ -948,19 +948,19 @@ def test_normalize_params_dict_warns_on_duplicate_names(caplog):
 @pytest.mark.asyncio
 async def test_list_style_params_explicit_required_honored():
     """List-form params with explicit required:true should mark the param required."""
-    @skill(
-        name="explicit_required_skill",
-        description="skill with explicit required param",
+    @tool(
+        name="explicit_required_tool",
+        description="tool with explicit required param",
         parameters={"q": {"type": "string"}},
     )
     def explicit_fn(q: str = "default") -> dict:
         return {"q": q}
 
-    registry = SkillRegistry.__new__(SkillRegistry)
-    registry.skills = dict(_skill_staging)
+    registry = ToolRegistry.__new__(ToolRegistry)
+    registry.tools = dict(_tool_staging)
     # List form with an explicit `required: true` flag on a param that also
     # carries a `default` (which would normally mark it optional).
-    registry.skills["explicit_required_skill"]["parameters"] = [
+    registry.tools["explicit_required_tool"]["parameters"] = [
         {
             "name": "q",
             "type": "string",
@@ -975,6 +975,6 @@ async def test_list_style_params_explicit_required_honored():
 
     defs = registry.get_tool_definitions()
     target = next(
-        d for d in defs if d["function"]["name"] == "explicit_required_skill"
+        d for d in defs if d["function"]["name"] == "explicit_required_tool"
     )
     assert "q" in target["function"]["parameters"]["required"]

@@ -7,10 +7,10 @@ snapshot cached in SYSTEM.md).
 
 from __future__ import annotations
 
-from src.agent.skills import skill
+from src.agent.tools import tool
 
 
-@skill(
+@tool(
     name="get_system_status",
     description=(
         "Query your live runtime status from the mesh: permissions, budget "

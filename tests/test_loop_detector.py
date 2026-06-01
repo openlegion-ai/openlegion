@@ -175,7 +175,7 @@ def test_would_terminate_exempt_tools():
 
 
 def test_custom_exempt_tools():
-    """Custom exempt_tools from skill registry are merged with defaults."""
+    """Custom exempt_tools from tool registry are merged with defaults."""
     d = ToolLoopDetector(exempt_tools=frozenset({"http_request", "read_file"}))
     args = {"url": "http://example.com"}
     result = '{"status": 200}'

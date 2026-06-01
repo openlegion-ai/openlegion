@@ -394,7 +394,7 @@ async def test_mesh_client_edit_soft_wires_unified_endpoint():
 @pytest.mark.asyncio
 async def test_mesh_client_undo_change_wires_endpoint():
     """MeshClient.undo_change targets /mesh/changes/undo/{token} so the
-    operator-tool layer's ``undo_change`` skill can reverse an edit by
+    operator-tool layer's ``undo_change`` tool can reverse an edit by
     token. Verifies URL shape and response passthrough.
     """
     from src.agent.mesh_client import MeshClient

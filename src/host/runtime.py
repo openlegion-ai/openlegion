@@ -172,7 +172,7 @@ class RuntimeBackend(abc.ABC):
         self,
         agent_id: str,
         role: str,
-        skills_dir: str,
+        tools_dir: str,
         system_prompt: str = "",
         model: str = "",
         mcp_servers: list[dict] | None = None,
@@ -215,7 +215,7 @@ class RuntimeBackend(abc.ABC):
     ) -> str:
         """Spawn an ephemeral agent with a TTL for auto-cleanup."""
         url = self.start_agent(
-            agent_id=agent_id, role=role, skills_dir="",
+            agent_id=agent_id, role=role, tools_dir="",
             system_prompt=system_prompt, model=model,
             mcp_servers=mcp_servers,
             thinking=thinking,
@@ -348,7 +348,7 @@ class DockerBackend(RuntimeBackend):
         self,
         agent_id: str,
         role: str,
-        skills_dir: str,
+        tools_dir: str,
         system_prompt: str = "",
         model: str = "",
         mcp_servers: list[dict] | None = None,
@@ -376,7 +376,7 @@ class DockerBackend(RuntimeBackend):
             return self._start_agent_container(
                 agent_id=agent_id,
                 role=role,
-                skills_dir=skills_dir,
+                tools_dir=tools_dir,
                 port=port,
                 auth_token=auth_token,
                 system_prompt=system_prompt,
@@ -394,7 +394,7 @@ class DockerBackend(RuntimeBackend):
         *,
         agent_id: str,
         role: str,
-        skills_dir: str | None,
+        tools_dir: str | None,
         port: int,
         auth_token: str,
         system_prompt: str,
@@ -410,7 +410,7 @@ class DockerBackend(RuntimeBackend):
             "AGENT_ID": agent_id,
             "AGENT_ROLE": role,
             "MESH_URL": f"http://{mesh_host}:{self.mesh_host_port}",
-            "SKILLS_DIR": "/app/skills",
+            "TOOLS_DIR": "/app/tools",
             "MESH_AUTH_TOKEN": auth_token,
         }
         # Route system_prompt through INITIAL_INSTRUCTIONS for spawn compat
@@ -434,10 +434,10 @@ class DockerBackend(RuntimeBackend):
         volumes: dict[str, Any] = {
             f"openlegion_data_{safe_name}": {"bind": "/data", "mode": "rw"},
         }
-        if skills_dir:
+        if tools_dir:
             # docker-py on Windows needs forward-slash or POSIX paths for bind mounts
-            volumes[str(Path(skills_dir).as_posix() if platform.system() == "Windows" else skills_dir)] = {
-                "bind": "/app/skills", "mode": "ro",
+            volumes[str(Path(tools_dir).as_posix() if platform.system() == "Windows" else tools_dir)] = {
+                "bind": "/app/tools", "mode": "ro",
             }
         # Mount team-specific TEAM.md (solo agents get none).
         # Resolution order honours both new ``TEAM_MD_PATH`` and legacy
@@ -463,12 +463,12 @@ class DockerBackend(RuntimeBackend):
         elif team_md_path:
             logger.warning("Team file not found: %s", team_md_path)
 
-        marketplace_dir = self.project_root / "skills" / "_marketplace"
+        marketplace_dir = self.project_root / "agent_tools" / "_marketplace"
         if marketplace_dir.is_dir():
             mp_path = str(marketplace_dir)
             if platform.system() == "Windows":
                 mp_path = marketplace_dir.as_posix()
-            volumes[mp_path] = {"bind": "/app/marketplace_skills", "mode": "ro"}
+            volumes[mp_path] = {"bind": "/app/marketplace_tools", "mode": "ro"}
 
         # Read-only uploads: user-managed files agents can read but never write.
         uploads_path = str(self.uploads_dir.as_posix() if platform.system() == "Windows" else self.uploads_dir)
@@ -522,7 +522,7 @@ class DockerBackend(RuntimeBackend):
             "url": url,
             "port": port,
             "role": role,
-            "skills_dir": skills_dir,
+            "tools_dir": tools_dir,
             "model": model,
             "mcp_servers": mcp_servers,
             "thinking": thinking,
@@ -988,7 +988,7 @@ class SandboxBackend(RuntimeBackend):
         self,
         agent_id: str,
         role: str,
-        skills_dir: str,
+        tools_dir: str,
         system_prompt: str = "",
         model: str = "",
         mcp_servers: list[dict] | None = None,
@@ -1019,18 +1019,18 @@ class SandboxBackend(RuntimeBackend):
         elif team_md_path:
             logger.warning("Team file not found: %s", team_md_path)
 
-        # Copy skills
-        skills_dest = ws / "skills"
-        if skills_dir and Path(skills_dir).is_dir():
-            if skills_dest.exists():
-                shutil.rmtree(skills_dest)
-            shutil.copytree(skills_dir, skills_dest, symlinks=True)
+        # Copy tools
+        tools_dest = ws / "tools"
+        if tools_dir and Path(tools_dir).is_dir():
+            if tools_dest.exists():
+                shutil.rmtree(tools_dest)
+            shutil.copytree(tools_dir, tools_dest, symlinks=True)
         else:
-            skills_dest.mkdir(exist_ok=True)
+            tools_dest.mkdir(exist_ok=True)
 
-        # Copy marketplace skills
-        marketplace_src = self.project_root / "skills" / "_marketplace"
-        marketplace_dest = ws / "marketplace_skills"
+        # Copy marketplace tools
+        marketplace_src = self.project_root / "agent_tools" / "_marketplace"
+        marketplace_dest = ws / "marketplace_tools"
         if marketplace_src.is_dir():
             if marketplace_dest.exists():
                 shutil.rmtree(marketplace_dest)
@@ -1051,7 +1051,7 @@ class SandboxBackend(RuntimeBackend):
             "AGENT_ID": agent_id,
             "AGENT_ROLE": role,
             "MESH_URL": f"http://host.docker.internal:{self.mesh_host_port}",
-            "SKILLS_DIR": "/app/skills",
+            "TOOLS_DIR": "/app/tools",
             "AGENT_PORT": str(self.AGENT_PORT),
             "MESH_AUTH_TOKEN": auth_token,
         }
@@ -1090,7 +1090,7 @@ class SandboxBackend(RuntimeBackend):
         self,
         agent_id: str,
         role: str,
-        skills_dir: str,
+        tools_dir: str,
         system_prompt: str = "",
         model: str = "",
         mcp_servers: list[dict] | None = None,
@@ -1099,7 +1099,7 @@ class SandboxBackend(RuntimeBackend):
     ) -> str:
         sandbox_name = f"openlegion_{_docker_safe_name(agent_id)}"
         ws = self._prepare_workspace(
-            agent_id, role, skills_dir, system_prompt, model,
+            agent_id, role, tools_dir, system_prompt, model,
             mcp_servers=mcp_servers, thinking=thinking,
             env_overrides=env_overrides,
         )
@@ -1144,7 +1144,7 @@ class SandboxBackend(RuntimeBackend):
             "workspace": str(ws),
             "url": url,
             "role": role,
-            "skills_dir": skills_dir,
+            "tools_dir": tools_dir,
             "model": model,
             "mcp_servers": mcp_servers,
             "thinking": thinking,

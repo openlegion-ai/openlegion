@@ -203,7 +203,7 @@ The panel has **7 tabs** defined in `_IDENTITY_TABS` (`app.js`):
 | `memory` | **Memory** | `MEMORY.md` (16K cap), `USER.md` (4K cap), `HEARTBEAT.md` (no cap) | Long-term facts, user preferences, autonomous heartbeat rules |
 | `activity` | **Activity** | Per-agent activity stream from `/dashboard/api/agents/{id}/activity` | Recent agent events scoped to this agent |
 | `logs` | **Logs** | Daily logs + Learnings (read-only) | Daily session logs and recorded errors/corrections |
-| `capabilities` | **Tools** | Tools list (read-only) | Available tools and skill definitions from `/dashboard/api/agents/{id}/capabilities` |
+| `capabilities` | **Tools** | Tools list (read-only) | Available tools and tool definitions from `/dashboard/api/agents/{id}/capabilities` |
 | `files` | **Files** | `/data` listing for the agent | Browse files written by the agent; proxied via `/dashboard/api/agents/{id}/files` |
 
 Each file card shows an access badge: **Shared** (teal) for files both you and the agent can edit (`SOUL.md`, `INSTRUCTIONS.md`, `USER.md`, `HEARTBEAT.md`, `INTERFACE.md`), **Auto** (gray) for system-managed files (`MEMORY.md`). Customized files show a description subtitle; default files show a CTA prompt.

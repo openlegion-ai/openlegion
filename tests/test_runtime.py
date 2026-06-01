@@ -156,9 +156,9 @@ class TestSandboxBackend:
         team_md = tmp_path / "team_context.md"
         team_md.write_text("# Test Team")
 
-        skills_src = project_root / "skills" / "alpha"
-        skills_src.mkdir(parents=True)
-        (skills_src / "my_skill.py").write_text("# skill")
+        tools_src = project_root / "agent_tools" / "alpha"
+        tools_src.mkdir(parents=True)
+        (tools_src / "my_tool.py").write_text("# tool")
 
         backend = SandboxBackend.__new__(SandboxBackend)
         backend.project_root = project_root
@@ -172,7 +172,7 @@ class TestSandboxBackend:
         ws = backend._prepare_workspace(
             agent_id="alpha",
             role="test",
-            skills_dir=str(skills_src),
+            tools_dir=str(tools_src),
             system_prompt="You are a test agent.",
             model="openai/gpt-4o-mini",
         )
@@ -182,7 +182,7 @@ class TestSandboxBackend:
         assert (ws / "TEAM.md").read_text() == "# Test Team"
         # PR 3 dropped the legacy PROJECT.md write — only TEAM.md ships.
         assert not (ws / "PROJECT.md").exists()
-        assert (ws / "skills" / "my_skill.py").read_text() == "# skill"
+        assert (ws / "tools" / "my_tool.py").read_text() == "# tool"
         assert (ws / ".agent.env").exists()
 
         env_content = (ws / ".agent.env").read_text()
@@ -211,7 +211,7 @@ class TestSandboxBackend:
         backend._workspace_root.mkdir(parents=True)
 
         ws = backend._prepare_workspace(
-            agent_id="solo", role="test", skills_dir="",
+            agent_id="solo", role="test", tools_dir="",
             system_prompt="", model="",
         )
         assert not (ws / "TEAM.md").exists()
@@ -234,7 +234,7 @@ class TestSandboxBackend:
         ws = backend._prepare_workspace(
             agent_id="gamma",
             role="helper",
-            skills_dir="",
+            tools_dir="",
             system_prompt="",
             model="openai/gpt-4o-mini",
         )
@@ -259,7 +259,7 @@ class TestSandboxBackend:
         ws = backend._prepare_workspace(
             agent_id="delta",
             role="helper",
-            skills_dir="",
+            tools_dir="",
             system_prompt="",
             model="openai/gpt-4o-mini",
         )
@@ -284,7 +284,7 @@ class TestSandboxBackend:
         ws = backend._prepare_workspace(
             agent_id="nl-test",
             role="test",
-            skills_dir="",
+            tools_dir="",
             system_prompt="line1\nline2\r\nline3",
             model="openai/gpt-4o-mini",
         )
@@ -548,7 +548,7 @@ class TestDockerBackendSlimResources:
         backend.start_agent(
             agent_id="test-agent",
             role="test",
-            skills_dir="",
+            tools_dir="",
         )
 
         run_call = mock_client.containers.run.call_args
@@ -567,7 +567,7 @@ class TestDockerBackendSlimResources:
         mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
         backend.client = mock_client
 
-        backend.start_agent(agent_id="test-agent", role="test", skills_dir="")
+        backend.start_agent(agent_id="test-agent", role="test", tools_dir="")
 
         agent_info = backend.agents["test-agent"]
         assert "vnc_port" not in agent_info
@@ -589,7 +589,7 @@ class TestDockerBackendSlimResources:
         mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
         backend.client = mock_client
 
-        backend.start_agent(agent_id="test-agent", role="test", skills_dir="")
+        backend.start_agent(agent_id="test-agent", role="test", tools_dir="")
 
         run_call = mock_client.containers.run.call_args
         ports = run_call.kwargs.get("ports", {})
@@ -1107,7 +1107,7 @@ class TestDockerBackendSlimResources:
         backend.start_agent(
             agent_id="test-init",
             role="test",
-            skills_dir="",
+            tools_dir="",
         )
 
         run_call = mock_client.containers.run.call_args
@@ -1124,7 +1124,7 @@ class TestDockerBackendSlimResources:
         mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
         backend.client = mock_client
 
-        backend.start_agent(agent_id="test-agent", role="test", skills_dir="")
+        backend.start_agent(agent_id="test-agent", role="test", tools_dir="")
 
         run_call = mock_client.containers.run.call_args
         env = run_call.kwargs.get("environment", {})
@@ -1141,7 +1141,7 @@ class TestDockerBackendSlimResources:
         mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
         backend.client = mock_client
 
-        backend.start_agent(agent_id="test-agent", role="test", skills_dir="")
+        backend.start_agent(agent_id="test-agent", role="test", tools_dir="")
 
         run_call = mock_client.containers.run.call_args
         env = run_call.kwargs.get("environment", {})
@@ -1158,7 +1158,7 @@ class TestDockerBackendSlimResources:
         mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
         backend.client = mock_client
 
-        backend.start_agent(agent_id="test-agent", role="test", skills_dir="")
+        backend.start_agent(agent_id="test-agent", role="test", tools_dir="")
 
         run_call = mock_client.containers.run.call_args
         assert run_call.kwargs.get("network") == "openlegion_agents"
@@ -1290,7 +1290,7 @@ class TestContainerHardening:
         mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
         backend.client = mock_client
 
-        backend.start_agent(agent_id="test-agent", role="test", skills_dir="")
+        backend.start_agent(agent_id="test-agent", role="test", tools_dir="")
 
         run_call = mock_client.containers.run.call_args
         assert run_call.kwargs.get("pids_limit") == 256
@@ -1305,7 +1305,7 @@ class TestContainerHardening:
         mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
         backend.client = mock_client
 
-        backend.start_agent(agent_id="test-agent", role="test", skills_dir="")
+        backend.start_agent(agent_id="test-agent", role="test", tools_dir="")
 
         run_call = mock_client.containers.run.call_args
         assert run_call.kwargs.get("cap_drop") == ["ALL"]
@@ -1321,7 +1321,7 @@ class TestContainerHardening:
         mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
         backend.client = mock_client
 
-        backend.start_agent(agent_id="test-agent", role="test", skills_dir="")
+        backend.start_agent(agent_id="test-agent", role="test", tools_dir="")
 
         run_call = mock_client.containers.run.call_args
         assert run_call.kwargs.get("read_only") is True
@@ -1347,7 +1347,7 @@ class TestEnvOverrides:
         backend.start_agent(
             agent_id="test-agent",
             role="test",
-            skills_dir="",
+            tools_dir="",
             env_overrides={"INITIAL_INSTRUCTIONS": "Be helpful.", "PROJECT_NAME": "myproj"},
         )
 
@@ -1372,7 +1372,7 @@ class TestEnvOverrides:
         backend.start_agent(
             agent_id="agent-a",
             role="test",
-            skills_dir="",
+            tools_dir="",
             env_overrides={"INITIAL_INSTRUCTIONS": "Agent A instructions", "INITIAL_SOUL": "A soul"},
         )
 
@@ -1394,7 +1394,7 @@ class TestEnvOverrides:
         backend.start_agent(
             agent_id="test-agent",
             role="test",
-            skills_dir="",
+            tools_dir="",
             env_overrides={"LLM_MODEL": "per-agent-model"},
         )
 
@@ -1419,7 +1419,7 @@ class TestEnvOverrides:
         ws = backend._prepare_workspace(
             agent_id="test-agent",
             role="test",
-            skills_dir="",
+            tools_dir="",
             system_prompt="",
             model="openai/gpt-4o-mini",
             env_overrides={"INITIAL_INSTRUCTIONS": "Override instruction", "PROJECT_NAME": "proj1"},
@@ -1453,7 +1453,7 @@ class TestEnvOverrides:
         backend._prepare_workspace(
             agent_id="agent-b",
             role="test",
-            skills_dir="",
+            tools_dir="",
             env_overrides={"INITIAL_SOUL": "B soul", "HTTP_PROXY": "http://proxy:8080"},
         )
 
@@ -1473,7 +1473,7 @@ class TestEnvOverrides:
         backend.start_agent(
             agent_id="test-agent",
             role="test",
-            skills_dir="",
+            tools_dir="",
             env_overrides=None,
         )
 

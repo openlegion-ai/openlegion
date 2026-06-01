@@ -368,7 +368,7 @@ def validate_referer(referer: str) -> str:
       * URLs without a hostname (``http:///path``)
       * Non-string types
 
-    The agent skill is LLM-callable, so a malformed value can reach
+    The agent tool is LLM-callable, so a malformed value can reach
     here from untrusted-by-default agent output. Playwright doesn't
     validate ``Page.goto(referer=...)`` strictly enough for our threat
     model — defense in depth.

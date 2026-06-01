@@ -867,7 +867,7 @@ def create_mesh_app(
         tasks_store.set_event_bus(event_bus)
 
     # Durable work-summaries store. One row per (scope, period_start);
-    # operator generates via the ``compose_work_summary`` skill or the
+    # operator generates via the ``compose_work_summary`` tool or the
     # per-team cron, user rates via the dashboard. The bus emit drives
     # the Work tab's summary cards live (PR-B).
     from src.host.summaries import WorkSummariesStore
@@ -2940,7 +2940,7 @@ def create_mesh_app(
             acfg = _agents_cfg_listing.get(aid) or {}
             # Structured routing fields (Task 8). The ``interface_*`` keys
             # are the human-facing routing surface; the bare
-            # ``capabilities`` key remains the runtime tool/skill list to
+            # ``capabilities`` key remains the runtime tool list to
             # avoid breaking back-compat with existing dashboard / CLI
             # consumers.
             entry["interface_capabilities"] = list(acfg.get("capabilities") or [])
@@ -3637,8 +3637,8 @@ def create_mesh_app(
                 model_override,
                 default_model,
             )
-            skills_dir = str(
-                (container_manager.project_root / "skills" / agent_name).resolve()
+            tools_dir = str(
+                (container_manager.project_root / "agent_tools" / agent_name).resolve()
             ) if container_manager.project_root else ""
 
             # Build per-agent env_overrides (NOT shared extra_env)
@@ -3660,7 +3660,7 @@ def create_mesh_app(
                 url = container_manager.start_agent(
                     agent_id=agent_name,
                     role=acfg.get("role", agent_name),
-                    skills_dir=skills_dir,
+                    tools_dir=tools_dir,
                     model=agent_model,
                     thinking=acfg.get("thinking", ""),
                     env_overrides=env_overrides,
@@ -3850,8 +3850,8 @@ def create_mesh_app(
         # /mesh/register call will fall through to default/deny-all (cf. PR
         # #656 which added the same reload for the no-defaults case).
         permissions.reload()
-        skills_dir = PROJECT_ROOT / "skills" / name
-        skills_dir.mkdir(parents=True, exist_ok=True)
+        tools_dir = PROJECT_ROOT / "agent_tools" / name
+        tools_dir.mkdir(parents=True, exist_ok=True)
 
         # Start container using env_overrides pattern
         agent_env: dict[str, str] = {}
@@ -3863,7 +3863,7 @@ def create_mesh_app(
         try:
             url = container_manager.start_agent(
                 agent_id=name, role=role or name,
-                skills_dir=str(skills_dir), model=model,
+                tools_dir=str(tools_dir), model=model,
                 env_overrides=agent_env,
             )
         except Exception as e:
@@ -3874,7 +3874,7 @@ def create_mesh_app(
             except Exception:
                 pass
             import shutil
-            shutil.rmtree(skills_dir, ignore_errors=True)
+            shutil.rmtree(tools_dir, ignore_errors=True)
             raise HTTPException(500, f"Failed to start agent container: {e}") from e
 
         try:
@@ -3916,7 +3916,7 @@ def create_mesh_app(
             except Exception:
                 pass
             import shutil
-            shutil.rmtree(skills_dir, ignore_errors=True)
+            shutil.rmtree(tools_dir, ignore_errors=True)
             raise HTTPException(500, f"Failed to register agent: {e}") from e
 
 
@@ -4091,7 +4091,7 @@ def create_mesh_app(
                 logger.debug("Could not fetch INTERFACE.md from %s (direct)", agent_id)
 
         # Task 8 — structured routing fields from agents.yaml. ``capabilities``
-        # remains the runtime tool/skill list (router.get_capabilities); the
+        # remains the runtime tool list (router.get_capabilities); the
         # human-routing capabilities live under ``interface_capabilities`` to
         # avoid the naming collision. The other four sibling fields keep
         # their natural names (no collision).
@@ -5848,7 +5848,7 @@ def create_mesh_app(
     # mental unit shifts from individual tasks to team-level health,
     # and the user rates one summary per team per period instead of
     # rating every delivery. Operator generates via the
-    # ``compose_work_summary`` skill (or cron); user (operator persona
+    # ``compose_work_summary`` tool (or cron); user (operator persona
     # via dashboard) rates via ``POST /mesh/work-summaries/{id}/rating``.
     #
     # Visibility: operator + loopback-internal see all summaries.
@@ -6014,7 +6014,7 @@ def create_mesh_app(
 
     # === Operator product surface (Task 7) — read tools ===
     #
-    # Read endpoints surfaced as operator skills. They aggregate over
+    # Read endpoints surfaced as operator tools. They aggregate over
     # the tasks store + project metadata and respect the same scoping
     # rules as the task-store endpoints (operator + internal can see all,
     # other callers can see only their own projects).

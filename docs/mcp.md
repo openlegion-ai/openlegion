@@ -1,6 +1,6 @@
 # MCP Integration Guide
 
-OpenLegion supports the **Model Context Protocol (MCP)** -- the emerging standard for LLM tool interoperability. Any MCP-compatible tool server can be plugged into an agent, with tools automatically discovered and exposed to the LLM alongside built-in skills.
+OpenLegion supports the **Model Context Protocol (MCP)** -- the emerging standard for LLM tool interoperability. Any MCP-compatible tool server can be plugged into an agent, with tools automatically discovered and exposed to the LLM alongside built-in tools.
 
 ## Overview
 
@@ -8,7 +8,7 @@ MCP servers are external processes that expose tools via a standardized protocol
 
 ```
 LLM -> tool_call("read_file", {path: "/data/report.csv"})
-  -> SkillRegistry.execute()
+  -> ToolRegistry.execute()
     -> MCPClient.call_tool()
       -> stdio -> MCP Server subprocess
         -> result
@@ -140,24 +140,24 @@ Validation errors from the backend (regex failures, oversize fields, `$CRED` in 
 
 1. The runtime layer (`DockerBackend` / `SandboxBackend` in `src/host/runtime.py`) reads `mcp_servers` from the agent's record and serializes it as JSON into the `MCP_SERVERS` environment variable passed to the agent container (`environment["MCP_SERVERS"] = self._build_mcp_servers_env(...)`). Any `$CRED{name}` handles in `env` values or `args` strings are resolved here against the mesh credential vault — the agent container receives plaintext values; the persisted config retains the handle.
 2. Agent container starts; `src/agent/__main__.py` reads `MCP_SERVERS`
-3. `MCPClient` is created and passed to `SkillRegistry`
+3. `MCPClient` is created and passed to `ToolRegistry`
 4. During lifespan startup, `MCPClient.start()` launches each server:
    - Creates `StdioServerParameters` from config; any `env` dict in the server config is forwarded to the subprocess environment
    - Opens stdio transport via `AsyncExitStack`
    - Establishes `ClientSession` and calls `initialize()`
    - Calls `list_tools()` to discover available tools
-5. Each tool is recorded in the `MCPClient` schema table with `"function": "mcp"` and an `_mcp_original_name` field that preserves the original tool name (used at call time — see Tool Call Routing). `SkillRegistry._register_mcp_tools()` then inserts those entries alongside built-in skills.
+5. Each tool is recorded in the `MCPClient` schema table with `"function": "mcp"` and an `_mcp_original_name` field that preserves the original tool name (used at call time — see Tool Call Routing). `ToolRegistry._register_mcp_tools()` then inserts those entries alongside built-in tools.
 6. Agent registers with mesh, reporting MCP tools in its capabilities
 
-If a server fails to start at step 4, its tools are not registered but the agent continues normally with built-in skills and any successfully started MCP servers.
+If a server fails to start at step 4, its tools are not registered but the agent continues normally with built-in tools and any successfully started MCP servers.
 
 ### Tool Call Routing
 
-MCP tools are registered into `SkillRegistry` at startup alongside built-in skills. Name conflicts are resolved **at registration time** (not at call time) — if an MCP tool has the same name as a built-in or as another MCP tool, it is renamed to `mcp_{server_name}_{tool_name}` before insertion. This means by the time `execute()` runs, every tool has a unique name and there is no runtime priority check.
+MCP tools are registered into `ToolRegistry` at startup alongside built-in tools. Name conflicts are resolved **at registration time** (not at call time) — if an MCP tool has the same name as a built-in or as another MCP tool, it is renamed to `mcp_{server_name}_{tool_name}` before insertion. This means by the time `execute()` runs, every tool has a unique name and there is no runtime priority check.
 
 When the LLM calls a tool:
 
-1. `SkillRegistry.execute()` looks up the name in the unified skill dict
+1. `ToolRegistry.execute()` looks up the name in the unified tool dict
 2. If the entry has `"function": "mcp"`, it routes to `MCPClient.call_tool(name, arguments)`
 3. `MCPClient` looks up which server provides the tool via its internal `_tool_to_server` map
 4. The renamed-on-conflict name is mapped back to `_mcp_original_name` before being sent over the wire, so the MCP server receives the tool name it actually exposes (useful when grepping server-side logs)
@@ -172,7 +172,7 @@ If an agent has `ALLOWED_TOOLS` configured (operator mode — `loop.py:277-287` 
 
 Conflicts are resolved at registration time, before execution:
 
-- If an MCP tool has the same name as a built-in skill, the MCP tool is renamed to `mcp_{server_name}_{tool_name}` and a warning is logged. The built-in always keeps its original name.
+- If an MCP tool has the same name as a built-in tool, the MCP tool is renamed to `mcp_{server_name}_{tool_name}` and a warning is logged. The built-in always keeps its original name.
 - If two MCP servers provide tools with the same name, conflicts are resolved in **config / registration order**: the first server listed in `mcp_servers` keeps the unprefixed name, and any subsequent server providing the same tool name gets prefixed with `mcp_{server_name}_{tool_name}`.
 
 After registration every tool has a unique name, so there is no runtime priority resolution.
@@ -180,7 +180,7 @@ After registration every tool has a unique name, so there is no runtime priority
 ### Graceful Failure
 
 - If one MCP server fails to start, others still work
-- Built-in skills are always available regardless of MCP server status
+- Built-in tools are always available regardless of MCP server status
 - Failed servers are logged but don't crash the agent
 - If a server crashes mid-session, tool calls return error dicts
 
@@ -195,7 +195,7 @@ On agent shutdown, `MCPClient.stop()` closes the `AsyncExitStack`, which termina
 | File | Role |
 |------|------|
 | `src/agent/mcp_client.py` | `MCPClient` class -- server lifecycle, tool discovery, call routing |
-| `src/agent/skills.py` | `SkillRegistry` -- MCP tool registration and execution routing |
+| `src/agent/tools.py` | `ToolRegistry` -- MCP tool registration and execution routing |
 | `src/agent/__main__.py` | Reads `MCP_SERVERS` env var, creates MCPClient, manages lifespan |
 | `src/host/runtime.py` | Passes `mcp_servers` config as container environment variable |
 | `src/host/health.py` | Preserves `mcp_servers` across agent restarts |
@@ -209,10 +209,10 @@ On agent shutdown, `MCPClient.stop()` closes the `AsyncExitStack`, which termina
 - `call_tool(name, arguments)` -- Route call to correct server
 - `has_tool(name)` -- Check if a tool exists
 
-**`SkillRegistry`** (`src/agent/skills.py`):
+**`ToolRegistry`** (`src/agent/tools.py`):
 - Accepts optional `mcp_client` parameter
-- `_register_mcp_tools()` -- Register MCP tools in the skill dict
-- `execute()` -- Dispatches tool calls by name from the unified skill dict; MCP tools are identified by the `"function": "mcp"` marker set at registration time
+- `_register_mcp_tools()` -- Register MCP tools in the tool dict
+- `execute()` -- Dispatches tool calls by name from the unified tool dict; MCP tools are identified by the `"function": "mcp"` marker set at registration time
 - `get_tool_definitions()` -- MCP tools included with full JSON Schema
 
 ## Popular MCP Servers

@@ -51,12 +51,12 @@ def _make_loop(
         memory.get_tool_history = MagicMock(return_value=[])
         memory._run_db = AsyncMock(return_value=None)
 
-    skills = MagicMock()
-    skills.get_tool_definitions = MagicMock(return_value=[])
-    skills.get_descriptions = MagicMock(return_value="- no tools")
-    skills.list_skills = MagicMock(return_value=[])
-    skills.is_parallel_safe = MagicMock(return_value=True)
-    skills.get_loop_exempt_tools = MagicMock(return_value=frozenset())
+    tools = MagicMock()
+    tools.get_tool_definitions = MagicMock(return_value=[])
+    tools.get_descriptions = MagicMock(return_value="- no tools")
+    tools.list_tools = MagicMock(return_value=[])
+    tools.is_parallel_safe = MagicMock(return_value=True)
+    tools.get_loop_exempt_tools = MagicMock(return_value=frozenset())
 
     llm = MagicMock()
     if llm_responses:
@@ -77,7 +77,7 @@ def _make_loop(
         agent_id="test_agent",
         role="research",
         memory=memory,
-        skills=skills,
+        tools=tools,
         llm=llm,
         mesh_client=mesh_client,
     )
@@ -240,7 +240,7 @@ async def test_lazy_guard_conservative_seed_on_resume_after_compaction():
 
     # Give the agent tools so the nudge would normally fire — but the
     # nudge only fires at iteration 0, and we're resuming at iteration 4.
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "web_search"}}]
     )
 

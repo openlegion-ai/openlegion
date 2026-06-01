@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import re
 
-from src.agent.skills import skill
+from src.agent.tools import tool
 from src.shared.redaction import redact_text_with_urls
 from src.shared.task_titles import (
     LONG_TITLE_THRESHOLD,
@@ -94,7 +94,7 @@ _RESERVED_ENVELOPE_KEYS: frozenset[str] = frozenset(
 )
 
 
-@skill(
+@tool(
     name="hand_off",
     description=(
         "Hand off work to a teammate. Creates a task in their inbox and "
@@ -399,7 +399,7 @@ async def hand_off(
     return result
 
 
-@skill(
+@tool(
     name="check_inbox",
     description=(
         "Check your task inbox for pending work from teammates. Returns "
@@ -464,7 +464,7 @@ async def check_inbox(*, mesh_client=None) -> dict:
     }
 
 
-@skill(
+@tool(
     name="update_status",
     description=(
         "Update your status on the blackboard so teammates know what "
@@ -583,7 +583,7 @@ async def update_status(
     return {"updated": True, "state": state, "task_id": target["id"]}
 
 
-@skill(
+@tool(
     name="complete_task",
     description=(
         "Mark a task from your inbox as done so it won't appear in "

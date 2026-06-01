@@ -4250,7 +4250,7 @@ function dashboard() {
       // Live-update fleet on llm_call/health/agent_state changes (debounced)
       if (evt.type === 'llm_call' || evt.type === 'health_change' || evt.type === 'agent_state') {
         this._debouncedFleetRefresh();
-        // Refresh capabilities when an agent re-registers (e.g. new skill authored)
+        // Refresh capabilities when an agent re-registers (e.g. new tool authored)
         if (evt.type === 'agent_state' && agent && evt.data?.state === 'registered') {
           const viewing = this.selectedAgent || this.detailAgent;
           if (viewing === agent) this.fetchAgentCapabilities(agent);
@@ -8665,7 +8665,7 @@ function dashboard() {
     // ── Reset ────────────────────────────────────────────
 
     async resetAgent(agentId) {
-      this.showConfirm('Reset Conversation', `Start a fresh conversation with "${agentId}"? The conversation thread is wiped, but memories and skills are preserved.`, async () => {
+      this.showConfirm('Reset Conversation', `Start a fresh conversation with "${agentId}"? The conversation thread is wiped, but memories and tools are preserved.`, async () => {
         try {
           // Abort active stream and recovery before clearing history
           if (this._chatAborts[agentId]) {

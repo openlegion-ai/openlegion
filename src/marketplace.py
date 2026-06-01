@@ -1,6 +1,6 @@
-"""Git-based skill marketplace for installing community skills.
+"""Git-based tool marketplace for installing community tools.
 
-Skills are cloned from git repos, validated against the existing AST
+Tools are cloned from git repos, validated against the existing AST
 checker, and mounted into agent containers at runtime.
 """
 
@@ -18,25 +18,25 @@ from src.shared.utils import setup_logging
 logger = setup_logging("marketplace")
 
 
-def _parse_skill_manifest(path: Path) -> dict | None:
-    """Parse YAML front matter from a SKILL.md manifest.
+def _parse_tool_manifest(path: Path) -> dict | None:
+    """Parse YAML front matter from a TOOL.md manifest.
 
     Expected format::
 
         ---
-        name: my-skill
+        name: my-tool
         version: 1.0.0
-        description: What this skill does
+        description: What this tool does
         ---
         # Optional markdown body...
 
     Returns dict with at least name, version, description, or None on failure.
     """
-    skill_md = path / "SKILL.md"
-    if not skill_md.exists():
+    tool_md = path / "TOOL.md"
+    if not tool_md.exists():
         return None
 
-    text = skill_md.read_text()
+    text = tool_md.read_text()
     if not text.startswith("---"):
         return None
 
@@ -48,13 +48,13 @@ def _parse_skill_manifest(path: Path) -> dict | None:
     try:
         import yaml
     except ImportError:
-        logger.error("PyYAML is required to parse SKILL.md manifests: pip install pyyaml")
+        logger.error("PyYAML is required to parse TOOL.md manifests: pip install pyyaml")
         return None
 
     try:
         meta = yaml.safe_load(parts[1])
     except Exception as e:
-        logger.debug("Failed to parse SKILL.md YAML frontmatter: %s", e)
+        logger.debug("Failed to parse TOOL.md YAML frontmatter: %s", e)
         return None
 
     if not isinstance(meta, dict):
@@ -68,18 +68,18 @@ def _parse_skill_manifest(path: Path) -> dict | None:
     # Sanitize name to prevent path traversal
     name = str(meta["name"])
     if ".." in name or "/" in name or "\\" in name or not re.match(r"^[a-zA-Z0-9_-]+$", name):
-        logger.warning("Invalid skill name in manifest: %r", name)
+        logger.warning("Invalid tool name in manifest: %r", name)
         return None
 
     return meta
 
 
-def _validate_all_skills(directory: Path) -> list[str]:
+def _validate_all_tools(directory: Path) -> list[str]:
     """Run AST validation on all .py files in a directory.
 
     Returns list of error messages (empty = all valid).
     """
-    from src.agent.builtins.skill_tool import _validate_skill_code
+    from src.agent.builtins.tool_authoring import _validate_tool_code
 
     errors: list[str] = []
     for py_file in directory.glob("**/*.py"):
@@ -88,13 +88,13 @@ def _validate_all_skills(directory: Path) -> list[str]:
         if py_file.name.startswith("_") and py_file.name != "__init__.py":
             continue
         code = py_file.read_text()
-        error = _validate_skill_code(code)
+        error = _validate_tool_code(code)
         if error:
             errors.append(f"{py_file.name}: {error}")
     return errors
 
 
-def install_skill(
+def install_tool(
     repo_url: str,
     marketplace_dir: Path,
     ref: str = "",
@@ -139,21 +139,21 @@ def install_skill(
         return {"error": f"Git clone failed: {result.stderr.strip()}"}
 
     # Parse manifest
-    manifest = _parse_skill_manifest(tmp_dir)
+    manifest = _parse_tool_manifest(tmp_dir)
     if manifest is None:
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        return {"error": "No valid SKILL.md manifest found (requires name, version, description in YAML front matter)"}
+        return {"error": "No valid TOOL.md manifest found (requires name, version, description in YAML front matter)"}
 
-    skill_name = manifest["name"]
+    tool_name = manifest["name"]
 
     # Validate all Python files
-    errors = _validate_all_skills(tmp_dir)
+    errors = _validate_all_tools(tmp_dir)
     if errors:
         shutil.rmtree(tmp_dir, ignore_errors=True)
-        return {"error": f"Skill validation failed: {'; '.join(errors)}"}
+        return {"error": f"Tool validation failed: {'; '.join(errors)}"}
 
     # Move to final location
-    final_dir = marketplace_dir / skill_name
+    final_dir = marketplace_dir / tool_name
     if final_dir.exists():
         shutil.rmtree(final_dir)
     shutil.move(str(tmp_dir), str(final_dir))
@@ -165,7 +165,7 @@ def install_skill(
 
     # Write install metadata
     metadata = {
-        "name": skill_name,
+        "name": tool_name,
         "version": manifest.get("version", "unknown"),
         "description": manifest.get("description", ""),
         "repo_url": repo_url,
@@ -173,15 +173,15 @@ def install_skill(
     }
     (final_dir / ".installed.json").write_text(json.dumps(metadata, indent=2) + "\n")
 
-    logger.info("Installed marketplace skill: %s v%s", skill_name, metadata["version"])
+    logger.info("Installed marketplace tool: %s v%s", tool_name, metadata["version"])
     return {"installed": True, **metadata}
 
 
-def list_skills(marketplace_dir: Path) -> list[dict]:
-    """List all installed marketplace skills."""
-    skills: list[dict] = []
+def list_tools(marketplace_dir: Path) -> list[dict]:
+    """List all installed marketplace tools."""
+    tools: list[dict] = []
     if not marketplace_dir.exists():
-        return skills
+        return tools
 
     for entry in sorted(marketplace_dir.iterdir()):
         if not entry.is_dir() or entry.name.startswith("_"):
@@ -190,23 +190,23 @@ def list_skills(marketplace_dir: Path) -> list[dict]:
         if meta_file.exists():
             try:
                 meta = json.loads(meta_file.read_text())
-                skills.append(meta)
+                tools.append(meta)
             except (json.JSONDecodeError, OSError):
-                skills.append({"name": entry.name, "version": "unknown"})
+                tools.append({"name": entry.name, "version": "unknown"})
         else:
-            skills.append({"name": entry.name, "version": "unknown"})
+            tools.append({"name": entry.name, "version": "unknown"})
 
-    return skills
+    return tools
 
 
-def remove_skill(name: str, marketplace_dir: Path) -> dict:
-    """Remove an installed marketplace skill."""
+def remove_tool(name: str, marketplace_dir: Path) -> dict:
+    """Remove an installed marketplace tool."""
     if ".." in name or "/" in name or "\\" in name:
-        return {"error": "Invalid skill name"}
-    skill_dir = marketplace_dir / name
-    if not skill_dir.exists():
-        return {"error": f"Skill '{name}' not found"}
+        return {"error": "Invalid tool name"}
+    tool_dir = marketplace_dir / name
+    if not tool_dir.exists():
+        return {"error": f"Tool '{name}' not found"}
 
-    shutil.rmtree(skill_dir)
-    logger.info("Removed marketplace skill: %s", name)
+    shutil.rmtree(tool_dir)
+    logger.info("Removed marketplace tool: %s", name)
     return {"removed": True, "name": name}

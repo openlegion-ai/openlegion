@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
-from src.agent.skills import SkillRegistry, _skill_staging, skill
+from src.agent.tools import ToolRegistry, _tool_staging, tool
 from src.shared.utils import generate_id, setup_logging
 
 if TYPE_CHECKING:
@@ -35,8 +35,8 @@ DEFAULT_TTL = 300
 MAX_TTL = 600
 DEFAULT_MAX_ITERATIONS = 10
 
-# Skills that subagents should NOT have (they could cause recursion or contention)
-_UNSAFE_SKILLS = frozenset({"create_skill", "reload_skills", "spawn_subagent", "wait_for_subagent"})
+# Tools that subagents should NOT have (they could cause recursion or contention)
+_UNSAFE_TOOLS = frozenset({"create_tool", "reload_tools", "spawn_subagent", "wait_for_subagent"})
 
 
 def register_parent_llm(agent_id: str, llm: LLMClient) -> None:
@@ -62,19 +62,19 @@ def _cleanup_depth(agent_id: str) -> None:
     _depth_map.pop(agent_id, None)
 
 
-def _clone_skill_registry() -> SkillRegistry:
-    """Create a cloned SkillRegistry from the current staging, removing unsafe skills.
+def _clone_tool_registry() -> ToolRegistry:
+    """Create a cloned ToolRegistry from the current staging, removing unsafe tools.
 
     The clone uses ``__new__`` to skip module re-execution, copies the current
-    skill dict, removes unsafe skills, and disables ``reload()``.
+    tool dict, removes unsafe tools, and disables ``reload()``.
     """
-    clone = SkillRegistry.__new__(SkillRegistry)
-    clone.skills_dir = ""
+    clone = ToolRegistry.__new__(ToolRegistry)
+    clone.tools_dir = ""
     clone._mcp_client = None
-    # Copy current staging (which has all discovered skills)
-    clone.skills = {k: v for k, v in _skill_staging.items() if k not in _UNSAFE_SKILLS}
+    # Copy current staging (which has all discovered tools)
+    clone.tools = {k: v for k, v in _tool_staging.items() if k not in _UNSAFE_TOOLS}
     # Disable reload on clones
-    clone.reload = lambda: len(clone.skills)  # type: ignore[assignment]
+    clone.reload = lambda: len(clone.tools)  # type: ignore[assignment]
     return clone
 
 
@@ -100,7 +100,7 @@ async def _run_subagent(
     memory = MemoryStore(db_path=":memory:")
     ws_dir = f"/data/workspace/subagents/{subagent_id}"
     workspace = WorkspaceManager(workspace_dir=ws_dir)
-    skills = _clone_skill_registry()
+    tools = _clone_tool_registry()
 
     _set_depth(subagent_id, _get_depth(parent_id) + 1)
 
@@ -108,7 +108,7 @@ async def _run_subagent(
         agent_id=subagent_id,
         role=role,
         memory=memory,
-        skills=skills,
+        tools=tools,
         llm=llm,
         mesh_client=mesh_client,
         workspace=workspace,
@@ -164,7 +164,7 @@ async def _run_subagent(
     return result_data
 
 
-@skill(
+@tool(
     name="spawn_subagent",
     description=(
         "Spawn a lightweight subagent in your own container to handle a subtask "
@@ -250,7 +250,7 @@ async def spawn_subagent(
     }
 
 
-@skill(
+@tool(
     name="list_subagents",
     description="List active subagents spawned by this agent and their status.",
     parameters={},
@@ -276,7 +276,7 @@ async def list_subagents(*, mesh_client=None) -> dict:
     }
 
 
-@skill(
+@tool(
     name="wait_for_subagent",
     description=(
         "Wait for a subagent to finish and return its result. Returns the "

@@ -110,11 +110,11 @@ def e2e_trigger_stack(tmp_path_factory):
             pass
         time.sleep(0.5)
 
-    skills_dir = os.path.abspath("skills/research")
+    tools_dir = os.path.abspath("agent_tools/research")
     url = cm.start_agent(
         agent_id="trigger_test",
         role="assistant",
-        skills_dir=skills_dir,
+        tools_dir=tools_dir,
         system_prompt="You are a helpful assistant. Keep responses brief.",
         model="openai/gpt-4o-mini",
     )

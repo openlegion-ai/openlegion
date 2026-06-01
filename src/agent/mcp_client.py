@@ -2,7 +2,7 @@
 
 Manages MCP server lifecycles via stdio transport. Each agent can connect
 to multiple MCP servers, discover their tools, and route tool calls through
-the MCP protocol. Tools are exposed to the LLM alongside built-in skills.
+the MCP protocol. Tools are exposed to the LLM alongside built-in tools.
 """
 
 from __future__ import annotations
@@ -99,7 +99,7 @@ class MCPClient:
                 command (str): Command to run
                 args (list[str], optional): Command arguments
                 env (dict[str, str], optional): Environment variables
-            builtin_names: Set of built-in skill names for conflict detection.
+            builtin_names: Set of built-in tool names for conflict detection.
         """
         if StdioServerParameters is None:
             logger.error("MCP SDK not installed — cannot start MCP servers")

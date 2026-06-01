@@ -21,7 +21,7 @@ except ImportError:
     HAS_MCP = False
 
 from src.agent.mcp_client import MCPClient
-from src.agent.skills import SkillRegistry, _skill_staging
+from src.agent.tools import ToolRegistry, _tool_staging
 
 pytestmark = pytest.mark.skipif(not HAS_MCP, reason="mcp package not installed")
 
@@ -163,15 +163,15 @@ class TestMCPE2EProtocol:
             await client.stop()
 
 
-class TestMCPE2ESkillRegistry:
-    """Test MCPClient integration with SkillRegistry end-to-end."""
+class TestMCPE2EToolRegistry:
+    """Test MCPClient integration with ToolRegistry end-to-end."""
 
     def setup_method(self):
-        _skill_staging.clear()
+        _tool_staging.clear()
 
     @pytest.mark.asyncio
     async def test_mcp_tools_in_registry(self):
-        """MCP tools appear in SkillRegistry and route correctly."""
+        """MCP tools appear in ToolRegistry and route correctly."""
         client = MCPClient()
         await client.start([{
             "name": "echo",
@@ -180,15 +180,15 @@ class TestMCPE2ESkillRegistry:
         }])
 
         try:
-            registry = SkillRegistry.__new__(SkillRegistry)
-            registry.skills_dir = "/nonexistent"
+            registry = ToolRegistry.__new__(ToolRegistry)
+            registry.tools_dir = "/nonexistent"
             registry._mcp_client = client
-            registry.skills = {}
+            registry.tools = {}
             registry._register_mcp_tools()
 
             # Tools should appear in registry
-            assert "echo" in registry.list_skills()
-            assert "add" in registry.list_skills()
+            assert "echo" in registry.list_tools()
+            assert "add" in registry.list_tools()
 
             # Tool definitions should be LLM-ready
             defs = registry.get_tool_definitions()

@@ -6,7 +6,7 @@ OpenLegion uses YAML and JSON files in the `config/` directory. Config files are
 
 | File | Format | Purpose |
 |------|--------|---------|
-| `config/agents.yaml` | YAML | Agent definitions (role, model, skills, resources) |
+| `config/agents.yaml` | YAML | Agent definitions (role, model, tools, resources) |
 | `config/mesh.yaml` | YAML | Mesh host settings, LLM defaults, channel config |
 | `config/permissions.json` | JSON | Per-agent ACL matrix |
 | `config/cron.json` | JSON | Scheduled job state (auto-managed) |
@@ -28,7 +28,7 @@ agents:
   researcher:
     role: Research assistant that finds and analyzes information
     model: anthropic/claude-haiku-4-5-20251001
-    skills_dir: ./skills/researcher
+    tools_dir: ./agent_tools/researcher
     system_prompt: |
       You are the 'researcher' agent in a multi-agent fleet.
       Your specialty is finding information and writing reports.
@@ -51,7 +51,7 @@ agents:
 |-------|------|----------|-------------|
 | `role` | string | Yes | Short description of the agent's purpose |
 | `model` | string | No | LLM model in `provider/model` format. Falls back to `llm.default_model` in mesh.yaml, then `openai/gpt-4o-mini` if neither is set. |
-| `skills_dir` | string | No | Path to custom skills directory |
+| `tools_dir` | string | No | Path to custom tools directory |
 | `system_prompt` | string | No | Custom system prompt. Auto-generated if omitted. Also accepted as `instructions` — first non-empty wins (`src/cli/config.py`). Distinct from the top-level `initial_instructions` (below): `system_prompt`/`instructions` seed the runtime system prompt, `initial_instructions` seeds the `INSTRUCTIONS.md` workspace file on first boot. |
 | `resources.memory_limit` | string | No | Reserved for future use. Currently hardcoded by the runtime for security — `384m` for workers, `128m` for the operator agent (selected by `ALLOWED_TOOLS` env). |
 | `resources.cpu_limit` | float | No | Reserved for future use. Currently hardcoded by the runtime for security — `0.15` for workers, `0.05` for the operator agent. |

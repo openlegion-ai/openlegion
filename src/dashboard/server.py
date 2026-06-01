@@ -152,7 +152,7 @@ def _get_builtin_tool_names() -> frozenset[str]:
                 continue
             try:
                 text = py_file.read_text()
-                names.update(re.findall(r'@skill\s*\(\s*name\s*=\s*["\']([^"\']+)["\']', text))
+                names.update(re.findall(r'@tool\s*\(\s*name\s*=\s*["\']([^"\']+)["\']', text))
             except OSError:
                 pass
     _get_builtin_tool_names._cache = frozenset(names)
@@ -2096,9 +2096,9 @@ def create_dashboard_router(
 
     @api_router.get("/api/agent-templates")
     async def api_agent_templates() -> list:
-        """Return available skill templates for creating new agents."""
-        from src.cli.config import _load_skill_templates
-        return _load_skill_templates()
+        """Return available tool templates for creating new agents."""
+        from src.cli.config import _load_tool_templates
+        return _load_tool_templates()
 
     @api_router.get("/api/fleet/templates")
     async def api_fleet_templates(request: Request) -> dict:
@@ -2214,7 +2214,7 @@ def create_dashboard_router(
             acfg = cfg.get("agents", {}).get(name, {})
             if template:
                 role = acfg.get("role", role)
-            skills_dir = os.path.abspath(acfg.get("skills_dir", ""))
+            tools_dir = os.path.abspath(acfg.get("tools_dir", ""))
             # Build per-agent env overrides (no shared extra_env mutation)
             agent_env: dict[str, str] = {}
             for env_key, cfg_key in (
@@ -2228,7 +2228,7 @@ def create_dashboard_router(
             url = runtime.start_agent(
                 agent_id=name,
                 role=role,
-                skills_dir=skills_dir,
+                tools_dir=tools_dir,
                 model=acfg.get("model", model),
                 thinking=acfg.get("thinking", ""),
                 env_overrides=agent_env,
@@ -2851,9 +2851,9 @@ def create_dashboard_router(
                 asyncio.to_thread(runtime.stop_agent, agent_id),
                 timeout=60,
             )
-            skills_dir = agent_cfg.get("skills_dir", "")
-            if skills_dir:
-                skills_dir = str(Path(skills_dir).resolve())
+            tools_dir = agent_cfg.get("tools_dir", "")
+            if tools_dir:
+                tools_dir = str(Path(tools_dir).resolve())
             # Preserve operator's ALLOWED_TOOLS on restart
             from src.cli.config import (
                 _OPERATOR_AGENT_ID,
@@ -2893,7 +2893,7 @@ def create_dashboard_router(
                     runtime.start_agent,
                     agent_id=agent_id,
                     role=agent_cfg.get("role", "assistant"),
-                    skills_dir=skills_dir,
+                    tools_dir=tools_dir,
                     model=agent_cfg.get("model", default_model),
                     mcp_servers=agent_cfg.get("mcp_servers") or None,
                     thinking=agent_cfg.get("thinking", ""),
@@ -5769,9 +5769,9 @@ def create_dashboard_router(
             agent_cfg = agents_cfg.get(agent_id, {})
             try:
                 await loop.run_in_executor(None, runtime.stop_agent, agent_id)
-                skills_dir = agent_cfg.get("skills_dir", "")
-                if skills_dir:
-                    skills_dir = str(Path(skills_dir).resolve())
+                tools_dir = agent_cfg.get("tools_dir", "")
+                if tools_dir:
+                    tools_dir = str(Path(tools_dir).resolve())
                 # Per-agent env overrides (proxy + operator tools).
                 # Proxy goes in env_overrides instead of runtime.extra_env
                 # so parallel restarts don't stomp each other's proxy vars.
@@ -5788,10 +5788,10 @@ def create_dashboard_router(
                 set_llm_max_tokens_env(_restart_env, agent_cfg)
                 url = await loop.run_in_executor(
                     None,
-                    lambda aid=agent_id, acfg=agent_cfg, sd=skills_dir, re=_restart_env: runtime.start_agent(
+                    lambda aid=agent_id, acfg=agent_cfg, sd=tools_dir, re=_restart_env: runtime.start_agent(
                         agent_id=aid,
                         role=acfg.get("role", "assistant"),
-                        skills_dir=sd,
+                        tools_dir=sd,
                         model=acfg.get("model", default_model),
                         mcp_servers=acfg.get("mcp_servers") or None,
                         thinking=acfg.get("thinking", ""),

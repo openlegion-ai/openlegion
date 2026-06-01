@@ -37,7 +37,7 @@ from src.host.permissions import PermissionMatrix
 def _operator_env(monkeypatch):
     """Operator gating is environment-driven — pin the operator id +
     expose ``rate_delivery`` so the per-tool ALLOWED_TOOLS filter on
-    skill execution doesn't intercept the call.
+    tool execution doesn't intercept the call.
     """
     monkeypatch.setenv("ALLOWED_TOOLS", "rate_delivery")
     yield
