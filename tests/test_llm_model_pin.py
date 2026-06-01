@@ -315,3 +315,88 @@ async def test_chat_same_off_allowlist_model_still_403(pin_setup):
     )
     assert resp.status_code == 403, resp.text
     assert "not authorized to use model" in resp.text
+
+
+# REGRESSION (fail-open): an agent with NO explicit ``model`` field in its
+# config is NOT pinned — the old implementation fell back to the global
+# ``llm.default_model`` so the allowed set was never empty, which pinned
+# (and 403'd) operator-created agents whose config carried no model row.
+# Now the pin fails open: any requested model passes the pin and reaches
+# dispatch.
+@pytest.mark.asyncio
+async def test_agent_without_explicit_model_not_pinned(pin_setup):
+    app = pin_setup["app"]
+    # Drop writer's explicit model — config has no per-agent model. The
+    # global default_model is still openai/gpt-4o-mini, but it must NOT be
+    # used as a pin source anymore.
+    pin_setup["cfg_holder"]["cfg"]["agents"]["writer"].pop("model", None)
+    # An arbitrary model unrelated to the global default passes the pin.
+    resp = await _post(
+        app, _req("anthropic/claude-opus-4"), "writer-secret", "writer",
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["success"] is True
+    # It reached the vault (the pin did not short-circuit it).
+    assert pin_setup["vault"].calls[-1]["model"] == "anthropic/claude-opus-4"
+
+
+# An agent with no config row at all (not present under ``agents``) is also
+# unpinned — same fail-open path.
+@pytest.mark.asyncio
+async def test_agent_missing_from_config_not_pinned(pin_setup):
+    app = pin_setup["app"]
+    pin_setup["cfg_holder"]["cfg"]["agents"].pop("writer", None)
+    resp = await _post(
+        app, _req("anthropic/claude-opus-4"), "writer-secret", "writer",
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["success"] is True
+
+
+# Provider-prefix-insensitive compare: an explicit config of
+# ``anthropic/claude-...`` must accept a request for the bare
+# ``claude-...`` (the prefix alone must not false-trip the pin).
+@pytest.mark.asyncio
+async def test_prefix_insensitive_configured_prefixed_request_bare(pin_setup):
+    app = pin_setup["app"]
+    pin_setup["cfg_holder"]["cfg"]["agents"]["writer"]["model"] = (
+        "anthropic/claude-3-5-sonnet"
+    )
+    resp = await _post(
+        app, _req("claude-3-5-sonnet"), "writer-secret", "writer",
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["success"] is True
+    assert pin_setup["vault"].calls[-1]["model"] == "claude-3-5-sonnet"
+
+
+# ...and the reverse: configured bare, request prefixed.
+@pytest.mark.asyncio
+async def test_prefix_insensitive_configured_bare_request_prefixed(pin_setup):
+    app = pin_setup["app"]
+    pin_setup["cfg_holder"]["cfg"]["agents"]["writer"]["model"] = (
+        "claude-3-5-sonnet"
+    )
+    resp = await _post(
+        app, _req("anthropic/claude-3-5-sonnet"), "writer-secret", "writer",
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["success"] is True
+    assert (
+        pin_setup["vault"].calls[-1]["model"] == "anthropic/claude-3-5-sonnet"
+    )
+
+
+# Prefix-insensitivity must not weaken the pin: a genuinely different bare
+# name (same provider prefix) is still 403'd.
+@pytest.mark.asyncio
+async def test_prefix_insensitive_does_not_allow_different_bare_name(pin_setup):
+    app = pin_setup["app"]
+    pin_setup["cfg_holder"]["cfg"]["agents"]["writer"]["model"] = (
+        "anthropic/claude-3-5-sonnet"
+    )
+    resp = await _post(
+        app, _req("anthropic/claude-opus-4"), "writer-secret", "writer",
+    )
+    assert resp.status_code == 403, resp.text
+    assert "not authorized to use model" in resp.text
