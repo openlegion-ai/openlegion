@@ -74,18 +74,108 @@ class TestEphemeralCleanup:
 
 class TestHealthRestartMissingConfig:
     @pytest.mark.asyncio
-    async def test_restart_skipped_when_no_config(self):
-        """Restart with missing agent metadata sets status to 'failed' and does NOT call start_agent."""
-        monitor = _make_monitor({})  # empty agents dict — no config
+    async def test_restart_skipped_when_truly_unknown(self):
+        """Restart for an agent absent from BOTH the runtime registry AND
+        agents.yaml sets status to 'failed' and does NOT call start_agent."""
+        monitor = _make_monitor({})  # empty registry — no in-memory config
         monitor.register("ghost-agent")
         health = monitor.agents["ghost-agent"]
         health.consecutive_failures = 3
         health.status = "unhealthy"
 
-        await monitor._try_restart("ghost-agent")
+        # YAML also has no entry for ghost-agent → truly unrecoverable.
+        fake_cfg = {"agents": {"other-agent": {"role": "x"}}}
+        with patch("src.host.health._load_config", return_value=fake_cfg):
+            await monitor._try_restart("ghost-agent")
 
         assert health.status == "failed"
         monitor.runtime.start_agent.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_restart_marks_failed_when_yaml_load_raises(self):
+        """New guard: when the runtime registry has NO entry for the agent
+        and the yaml fallback's ``_load_config`` RAISES (corrupt/unreadable
+        agents.yaml), ``_info_from_yaml`` swallows the exception and returns
+        ``None`` so ``_try_restart`` takes its unrecoverable path cleanly —
+        marking the agent 'failed' instead of letting the exception
+        propagate out of the health-monitor loop and stalling all other
+        agents' checks."""
+        monitor = _make_monitor({})  # registry has NO entry for the agent
+        monitor.register("ghost-agent")
+        health = monitor.agents["ghost-agent"]
+        health.consecutive_failures = 3
+        health.status = "unhealthy"
+
+        # The yaml fallback read blows up (e.g. corrupt YAML on disk).
+        with patch(
+            "src.host.health._load_config",
+            side_effect=RuntimeError("corrupt yaml"),
+        ):
+            # Must NOT propagate — no exception escapes _try_restart.
+            await monitor._try_restart("ghost-agent")
+
+        assert health.status == "failed"
+        monitor.runtime.start_agent.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_restart_falls_back_to_yaml_when_registry_missing(self):
+        """Production incident: a container died and was deregistered from the
+        runtime's in-memory ``agents`` map during a redeploy, but its config
+        still lives in agents.yaml. The restart path must rebuild the
+        container from the yaml config (with the agent's configured model)
+        instead of giving up and marking it permanently 'failed', which turned
+        a transient blip into a permanent outage."""
+        monitor = _make_monitor({})  # registry has NO entry for the agent
+        monitor.register("content-creator")
+        health = monitor.agents["content-creator"]
+        health.consecutive_failures = 3
+        health.status = "unhealthy"
+        monitor.runtime.start_agent.return_value = "http://localhost:8401"
+        monitor.runtime.wait_for_agent = AsyncMock(return_value=True)
+
+        fake_cfg = {
+            "agents": {
+                "content-creator": {
+                    "role": "writer",
+                    "skills_dir": "skills/content",
+                    "model": "anthropic/claude-3-5-sonnet",
+                },
+            },
+            "llm": {"default_model": "openai/gpt-4o-mini"},
+        }
+        with patch("src.host.health._load_config", return_value=fake_cfg):
+            await monitor._try_restart("content-creator")
+
+        # Rebuilt from yaml rather than marked failed.
+        monitor.runtime.start_agent.assert_called_once()
+        _, kwargs = monitor.runtime.start_agent.call_args
+        assert kwargs["agent_id"] == "content-creator"
+        assert kwargs["role"] == "writer"
+        assert kwargs["model"] == "anthropic/claude-3-5-sonnet"
+        assert health.status == "healthy"
+        assert health.restart_count == 1
+
+    @pytest.mark.asyncio
+    async def test_yaml_fallback_uses_default_model_when_unset(self):
+        """When the yaml agent entry omits ``model``, the fallback uses the
+        configured llm.default_model (mirrors cli/repl.py:_restart_agent)."""
+        monitor = _make_monitor({})
+        monitor.register("content-creator")
+        health = monitor.agents["content-creator"]
+        health.consecutive_failures = 3
+        health.status = "unhealthy"
+        monitor.runtime.start_agent.return_value = "http://localhost:8401"
+        monitor.runtime.wait_for_agent = AsyncMock(return_value=True)
+
+        fake_cfg = {
+            "agents": {"content-creator": {"role": "writer"}},
+            "llm": {"default_model": "anthropic/claude-3-5-haiku"},
+        }
+        with patch("src.host.health._load_config", return_value=fake_cfg):
+            await monitor._try_restart("content-creator")
+
+        _, kwargs = monitor.runtime.start_agent.call_args
+        assert kwargs["model"] == "anthropic/claude-3-5-haiku"
 
     @pytest.mark.asyncio
     async def test_restart_succeeds_with_config(self):

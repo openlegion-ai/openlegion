@@ -443,6 +443,45 @@ class HealthMonitor:
             logger.warning(f"Agent '{agent_id}' unreachable, restarting...")
             await self._try_restart(agent_id)
 
+    def _info_from_yaml(self, agent_id: str) -> dict | None:
+        """Reconstruct a runtime-registry-shaped info dict from agents.yaml.
+
+        Used by ``_try_restart`` as a fallback when the runtime's in-memory
+        ``agents`` map has no entry for ``agent_id`` (e.g. the container died
+        and was deregistered during a redeploy). Mirrors the reload pattern
+        in ``cli/repl.py:_restart_agent`` so a health-monitor restart can
+        rebuild the container from disk instead of stranding the agent.
+
+        Returns ``None`` when the agent is not defined in agents.yaml at all,
+        or when the config can't be read — the caller treats ``None`` as
+        "unrecoverable, mark failed", which preserves the original
+        exception-free behaviour of the no-stored-config path (the later
+        ``_load_config`` call in ``_try_restart`` is likewise inside a
+        ``try``; this one must not be the lone unguarded read).
+        """
+        try:
+            fresh_cfg = _load_config()
+        except Exception as e:
+            logger.error(
+                "Cannot reload config to restart agent '%s' from yaml: %s",
+                agent_id, e,
+            )
+            return None
+        agents_cfg = fresh_cfg.get("agents", {})
+        if agent_id not in agents_cfg:
+            return None
+        agent_cfg = agents_cfg.get(agent_id, {})
+        default_model = fresh_cfg.get("llm", {}).get(
+            "default_model", "openai/gpt-4o-mini",
+        )
+        return {
+            "role": agent_cfg.get("role", ""),
+            "skills_dir": os.path.abspath(agent_cfg.get("skills_dir", "")),
+            "model": agent_cfg.get("model", default_model),
+            "mcp_servers": agent_cfg.get("mcp_servers") or None,
+            "thinking": agent_cfg.get("thinking", ""),
+        }
+
     async def _try_restart(self, agent_id: str) -> None:
         health = self.agents[agent_id]
         now = time.time()
@@ -479,12 +518,26 @@ class HealthMonitor:
         logger.info(f"Restarting agent '{agent_id}'...")
         info = self.runtime.agents.get(agent_id)
         if not info:
-            logger.error(
-                "Cannot restart agent '%s': no stored config. "
-                "Manual restart required.", agent_id,
+            # The runtime lost its in-memory registry entry (e.g. the
+            # container died and was deregistered during a redeploy), but the
+            # agent may still be fully defined on disk. Rather than stranding
+            # it permanently, rebuild the start parameters from agents.yaml —
+            # the same fallback the CLI manual restart uses
+            # (cli/repl.py:_restart_agent). Only if the agent is ALSO absent
+            # from yaml is it truly unknown and unrecoverable.
+            info = self._info_from_yaml(agent_id)
+            if not info:
+                logger.error(
+                    "Cannot restart agent '%s': no stored config and not "
+                    "defined in agents.yaml. Manual restart required.",
+                    agent_id,
+                )
+                health.status = "failed"
+                return
+            logger.info(
+                "Agent '%s' missing from runtime registry; rebuilding "
+                "container from agents.yaml config.", agent_id,
             )
-            health.status = "failed"
-            return
         try:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, self.runtime.stop_agent, agent_id)
