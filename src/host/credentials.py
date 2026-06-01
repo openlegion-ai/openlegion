@@ -259,10 +259,53 @@ OAUTH_ALLOWED_MODELS_ANTHROPIC = _parse_env_models(
     }),
 )
 
+# Whether the operator deliberately narrowed the Anthropic OAuth subset.
+# When True, ``is_model_compatible`` enforces EXACT membership against
+# ``OAUTH_ALLOWED_MODELS_ANTHROPIC`` (the operator opted into a fixed list).
+# When False (the default), the Anthropic OAuth path is FAMILY-based: any
+# Claude opus/sonnet/haiku model is accepted. An Anthropic OAuth token is
+# provider-locked (it can only ever call Anthropic), so exact-version pins
+# just produced stale-allowlist 403s every time the Claude lineup bumped a
+# version (prod: anthropic/claude-opus-4-6 → hard 403 gate=api:model_incompatible
+# even though the same OAuth credential serves claude-opus-4-8 in-process).
+_ANTHROPIC_OAUTH_ALLOWLIST_IS_OPERATOR_SET = bool(
+    os.environ.get("OPENLEGION_OAUTH_ALLOWED_MODELS_ANTHROPIC")
+)
+
+# Bare Claude families accepted by default on the Anthropic OAuth path.
+# Matched as ``<family>-*`` against the bare model name (sans ``anthropic/``).
+_ANTHROPIC_OAUTH_MODEL_FAMILIES = frozenset({
+    "claude-opus",
+    "claude-sonnet",
+    "claude-haiku",
+})
+
 _OAUTH_ALLOWED_MODELS: dict[str, frozenset[str]] = {
     "openai": OAUTH_ALLOWED_MODELS_OPENAI,
     "anthropic": OAUTH_ALLOWED_MODELS_ANTHROPIC,
 }
+
+
+def _anthropic_oauth_model_ok(model: str) -> bool:
+    """Family/prefix match for the default Anthropic OAuth allowlist.
+
+    Returns True when the bare model name (``anthropic/`` prefix stripped,
+    lowercased) belongs to one of the Claude opus/sonnet/haiku families —
+    i.e. ``claude-opus-4-6``, ``-4-7``, ``-4-8`` and future versions, plus
+    the sonnet/haiku variants. Used only when the operator has NOT pinned an
+    exact subset via the override env var.
+
+    A version suffix is REQUIRED (``<family>-*``): the bare family stem on
+    its own (e.g. ``claude-opus``) is not a real model, so it is rejected —
+    a truncated/typo'd config then still fails the create/edit validation
+    gate up front instead of passing here and only erroring at the provider
+    on first call.
+    """
+    bare = model.rsplit("/", 1)[-1].lower()
+    return any(
+        bare.startswith(f"{family}-")
+        for family in _ANTHROPIC_OAUTH_MODEL_FAMILIES
+    )
 
 
 def is_oauth_token(token: str) -> bool:
@@ -955,6 +998,25 @@ class CredentialVault:
         # runtime (see ``_handle_llm`` routing), so apply the OAuth
         # allowlist. This prevents the "passes validation, fails on
         # first call" gap codex flagged.
+        #
+        # Anthropic default: family-based (any claude-opus/sonnet/haiku).
+        # An Anthropic OAuth token is provider-locked, so exact-version
+        # pins only ever produced stale-allowlist 403s on each Claude bump
+        # without buying real isolation. Operators who deliberately set the
+        # override env var still get EXACT enforcement (opt-in narrowing).
+        if (
+            provider == "anthropic"
+            and not _ANTHROPIC_OAUTH_ALLOWLIST_IS_OPERATOR_SET
+        ):
+            if _anthropic_oauth_model_ok(model):
+                return (True, None)
+            families = ", ".join(f"{f}-*" for f in sorted(_ANTHROPIC_OAUTH_MODEL_FAMILIES))
+            return (False, (
+                f"Model '{model}' is not a recognised Claude family for the "
+                f"anthropic OAuth credential. Allowed families: {families}. "
+                f"To pin an exact subset, set "
+                f"OPENLEGION_OAUTH_ALLOWED_MODELS_ANTHROPIC=...,..."
+            ))
         allowed = _OAUTH_ALLOWED_MODELS.get(provider, frozenset())
         if model in allowed:
             return (True, None)
