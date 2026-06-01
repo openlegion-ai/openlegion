@@ -9,8 +9,29 @@ orchestrate Tools the agent is already allowed to call. See
 
 from __future__ import annotations
 
-from src.agent.skills import SkillStore
+from src.agent.skills import SkillStore, render_text
 from src.agent.tools import tool
+
+
+def _declared_requirements(metadata: dict) -> dict:
+    """Surface config/env a skill declares so the agent knows what to set.
+
+    Reads both the top-level agentskills.io ``required_environment_variables``
+    and any vendor ``metadata.*.config`` block, without interpreting/resolving
+    them (resolution + sandbox env passthrough are deferred). Returns only the
+    keys that are present, so a plain skill adds nothing to the payload.
+    """
+    out: dict = {}
+    env = metadata.get("required_environment_variables")
+    if env:
+        out["required_environment_variables"] = env
+    for vendor in metadata.get("metadata", {}).values() if isinstance(
+        metadata.get("metadata"), dict,
+    ) else []:
+        if isinstance(vendor, dict) and vendor.get("config"):
+            out["config"] = vendor["config"]
+            break
+    return out
 
 
 @tool(
@@ -69,10 +90,13 @@ def skill_view(name: str, path: str = "") -> dict:
         content = store.read_reference(name, path)
         if content is None:
             return {"error": f"Reference '{path}' not found in skill '{name}'."}
-        return {"name": name, "path": path, "content": content}
-    return {
+        return {"name": name, "path": path, "content": render_text(content, skill)}
+    result = {
         "name": skill.name,
         "description": skill.description,
         "version": skill.version,
-        "body": skill.body,
+        "body": render_text(skill.body, skill),
     }
+    # Only present when the skill actually declares config/env requirements.
+    result.update(_declared_requirements(skill.metadata))
+    return result

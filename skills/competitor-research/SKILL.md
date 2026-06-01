@@ -21,7 +21,10 @@ and `http_request`; it adds no new capability — only a procedure.
    claim as you go — every fact in the brief must be traceable.
 3. Cross-check anything surprising against a second source before stating it.
    If two sources conflict, say so in the brief rather than picking one.
-4. Assemble the brief using the structure in
+4. De-duplicate your source URLs before writing — run
+   `python ${SKILL_DIR}/scripts/dedupe_sources.py url1 url2 ...`; it prints the
+   unique set so you don't cite the same page twice.
+5. Assemble the brief using the structure in
    `references/brief-template.md` (read it with skill_view if unsure).
 
 # Pitfalls / Verification

@@ -803,6 +803,33 @@ class MeshClient:
         _raise_with_body(response)
         return response.json()
 
+    async def install_skill(self, repo_url: str, ref: str = "") -> dict:
+        """Install a SKILL.md skill pack from a git repo (operator-gated)."""
+        client = await self._get_client()
+        body: dict = {"repo_url": repo_url}
+        if ref:
+            body["ref"] = ref
+        response = await client.post(
+            f"{self.mesh_url}/mesh/skills/install",
+            json=body,
+            timeout=120,
+            headers=self._trace_headers(),
+        )
+        _raise_with_body(response)
+        return response.json()
+
+    async def remove_skill(self, name: str) -> dict:
+        """Remove an installed skill pack (operator-gated)."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/skills/remove",
+            json={"name": name},
+            timeout=30,
+            headers=self._trace_headers(),
+        )
+        _raise_with_body(response)
+        return response.json()
+
     # === Browser (shared browser service via mesh proxy) ===
 
     # === Operator agent config management ===

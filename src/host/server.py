@@ -1054,6 +1054,9 @@ def create_mesh_app(
         "notify": (3000, 60),
         "cron_create": (1000, 60),
         "spawn": (600, 60),
+        # Installing a skill pack clones a git repo on the host — its own
+        # bucket so a runaway install loop is throttled independently.
+        "skill_install": (100, 60),
         "wallet_read": (6000, 60),
         "wallet_transfer": (600, 60),
         "wallet_execute": (600, 60),
@@ -3690,6 +3693,71 @@ def create_mesh_app(
             "failed": failed_agents,
             "skipped": [n for n in tpl_agents if n not in created_names],
         }
+
+    # === Skill packs (SKILL.md) — operator-gated install / remove ===
+
+    def _skills_installed_dir():
+        """Host path of the shared installed-skills dir, or None."""
+        if container_manager is None or not container_manager.project_root:
+            return None
+        return container_manager.project_root / "skills_installed"
+
+    def _require_skill_admin(request: Request, data: dict, gate: str) -> str:
+        """Resolve caller and enforce operator-or-can_manage_fleet. Returns caller."""
+        caller = _resolve_agent_id(data.get("caller", "unknown"), request)
+        if _auth_tokens and not _caller_is_operator(caller, request):
+            if not permissions.can_manage_fleet(caller):
+                _record_denial("permission", caller=caller, gate=gate)
+                raise HTTPException(
+                    403,
+                    f"Agent {caller} is not allowed to manage skills "
+                    "(requires can_manage_fleet)",
+                )
+        return caller
+
+    @app.post("/mesh/skills/install")
+    async def install_skill_pack(data: dict, request: Request) -> dict:
+        """Install a SKILL.md skill pack from a git repo (operator-gated).
+
+        Body: {repo_url: str, ref?: str, caller?: str}
+        """
+        caller = _require_skill_admin(request, data, "skills.install:can_manage_fleet")
+        await _check_rate_limit("skill_install", caller)
+
+        repo_url = str(data.get("repo_url", "")).strip()
+        if not repo_url:
+            raise HTTPException(400, "repo_url is required")
+        skills_installed = _skills_installed_dir()
+        if skills_installed is None:
+            raise HTTPException(503, "Skills directory not available")
+
+        from src import marketplace
+        result = await asyncio.to_thread(
+            marketplace.install_skill,
+            repo_url,
+            skills_installed,
+            str(data.get("ref", "")).strip(),
+        )
+        if "error" in result:
+            raise HTTPException(400, result["error"])
+        return result
+
+    @app.post("/mesh/skills/remove")
+    async def remove_skill_pack(data: dict, request: Request) -> dict:
+        """Remove an installed skill pack (operator-gated). Body: {name, caller?}"""
+        _require_skill_admin(request, data, "skills.remove:can_manage_fleet")
+        name = str(data.get("name", "")).strip()
+        if not name:
+            raise HTTPException(400, "name is required")
+        skills_installed = _skills_installed_dir()
+        if skills_installed is None:
+            raise HTTPException(503, "Skills directory not available")
+
+        from src import marketplace
+        result = marketplace.remove_skill(name, skills_installed)
+        if "error" in result:
+            raise HTTPException(404, result["error"])
+        return result
 
     # === Create Custom Agent ===
 
