@@ -1237,26 +1237,30 @@ def create_mesh_app(
         abuse). ``is_model_compatible`` alone does NOT close this — it
         permits the whole API-key catalog.
 
-        Source of truth is the agent's configured model in
-        ``config/settings.json`` (``agents.{id}.model``, falling back to
-        ``llm.default_model``) — the SAME value written on
-        ``create_agent`` / ``edit_agent`` and injected as the container's
-        ``LLM_MODEL`` env. Because models are config-fixed per agent today
-        (``loop.py`` never passes a ``model=`` override — it always sends
-        ``self.default_model``), the legitimate agent only ever requests
-        this one model, so the pin is non-breaking. The pin auto-updates
-        when the operator edits the model (edit-soft rewrites this same
-        config row).
+        Source of truth is the agent's EXPLICIT configured model in
+        ``config/settings.json`` (``agents.{id}.model``) — the SAME value
+        written on ``create_agent`` / ``edit_agent`` and injected as the
+        container's ``LLM_MODEL`` env. Because models are config-fixed per
+        agent today (``loop.py`` never passes a ``model=`` override — it
+        always sends ``self.default_model``), a pinned agent only ever
+        requests this one model, so the pin is non-breaking. The pin
+        auto-updates when the operator edits the model (edit-soft rewrites
+        this same config row).
 
         An optional operator-settable ``allowed_models`` list on the
         agent's config row widens the set (e.g. for an agent the operator
-        deliberately lets pick among a few models). The configured model
-        is always included.
+        deliberately lets pick among a few models). The explicit
+        configured model is always included.
 
-        Returns ``None`` (no pin / fail-open) when the config cannot be
-        read or the agent has no resolvable model — keeps test harnesses
-        and partial-config deployments working rather than 403-ing real
-        traffic on a missing file.
+        The pin ONLY restricts agents that have an explicit per-agent
+        model (or ``allowed_models``). Agents with no explicit model are
+        NOT pinned — we return ``None`` (no pin / fail-open). We must NOT
+        fall back to the global ``llm.default_model``: an agent may not
+        actually use that model, and pinning to it 403'd legitimate
+        operator-created agents whose config carries no explicit ``model``
+        row. Also returns ``None`` when the config cannot be read — keeps
+        test harnesses and partial-config deployments working rather than
+        403-ing real traffic on a missing file.
         """
         try:
             from src.cli.config import _load_config
@@ -1266,11 +1270,8 @@ def create_mesh_app(
             return None
         agents_cfg = cfg.get("agents", {}) or {}
         acfg = agents_cfg.get(agent_id) or {}
-        default_model = (cfg.get("llm", {}) or {}).get(
-            "default_model", "openai/gpt-4o-mini",
-        )
         allowed: set[str] = set()
-        configured = acfg.get("model") or default_model
+        configured = acfg.get("model")
         if isinstance(configured, str) and configured:
             allowed.add(configured)
         extra = acfg.get("allowed_models")
@@ -1309,15 +1310,24 @@ def create_mesh_app(
             return
         allowed = _agent_allowed_models(agent_id)
         if allowed is not None and requested_model not in allowed:
-            _record_denial(
-                "permission", caller=agent_id, target=requested_model,
-                gate="api:model_pin",
-            )
-            raise HTTPException(
-                403,
-                f"Agent {agent_id} is not authorized to use model "
-                f"'{requested_model}'. Allowed: {sorted(allowed)}.",
-            )
+            # Provider-prefix-insensitive fallback compare: an explicit
+            # config of ``anthropic/claude-3-5-sonnet`` must still accept a
+            # request for the bare ``claude-3-5-sonnet`` (and vice versa),
+            # so the prefix alone can't false-trip the pin.
+            def _bare(name: str) -> str:
+                return name.rsplit("/", 1)[-1].lower()
+
+            allowed_bare = {_bare(m) for m in allowed}
+            if _bare(requested_model) not in allowed_bare:
+                _record_denial(
+                    "permission", caller=agent_id, target=requested_model,
+                    gate="api:model_pin",
+                )
+                raise HTTPException(
+                    403,
+                    f"Agent {agent_id} is not authorized to use model "
+                    f"'{requested_model}'. Allowed: {sorted(allowed)}.",
+                )
         # Cheap interim compatibility gate (mirrors the call-time check the
         # LLM proxy runs) — reject requested models with no usable
         # credentials before dispatch.
