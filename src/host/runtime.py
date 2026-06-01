@@ -411,6 +411,7 @@ class DockerBackend(RuntimeBackend):
             "AGENT_ROLE": role,
             "MESH_URL": f"http://{mesh_host}:{self.mesh_host_port}",
             "TOOLS_DIR": "/app/tools",
+            "SKILLS_DIR": "/app/skills",
             "MESH_AUTH_TOKEN": auth_token,
         }
         # Route system_prompt through INITIAL_INSTRUCTIONS for spawn compat
@@ -469,6 +470,15 @@ class DockerBackend(RuntimeBackend):
             if platform.system() == "Windows":
                 mp_path = marketplace_dir.as_posix()
             volumes[mp_path] = {"bind": "/app/marketplace_tools", "mode": "ro"}
+
+        # Bundled SKILL.md skill packs (read-only). Installed/custom packs
+        # live on the writable /data volume at /data/skills (see SkillStore).
+        skills_dir = self.project_root / "skills"
+        if skills_dir.is_dir():
+            sk_path = str(skills_dir)
+            if platform.system() == "Windows":
+                sk_path = skills_dir.as_posix()
+            volumes[sk_path] = {"bind": "/app/skills", "mode": "ro"}
 
         # Read-only uploads: user-managed files agents can read but never write.
         uploads_path = str(self.uploads_dir.as_posix() if platform.system() == "Windows" else self.uploads_dir)
@@ -1038,6 +1048,16 @@ class SandboxBackend(RuntimeBackend):
         else:
             marketplace_dest.mkdir(exist_ok=True)
 
+        # Copy bundled SKILL.md skill packs
+        skills_src = self.project_root / "skills"
+        skills_dest = ws / "skills"
+        if skills_src.is_dir():
+            if skills_dest.exists():
+                shutil.rmtree(skills_dest)
+            shutil.copytree(skills_src, skills_dest, symlinks=True)
+        else:
+            skills_dest.mkdir(exist_ok=True)
+
         # Generate per-agent auth token for mesh request verification.
         # Task 4 invariant: every agent (including the operator) gets a
         # distinct token keyed by ``agent_id``; no fleet-shared token
@@ -1052,6 +1072,7 @@ class SandboxBackend(RuntimeBackend):
             "AGENT_ROLE": role,
             "MESH_URL": f"http://host.docker.internal:{self.mesh_host_port}",
             "TOOLS_DIR": "/app/tools",
+            "SKILLS_DIR": "/app/skills",
             "AGENT_PORT": str(self.AGENT_PORT),
             "MESH_AUTH_TOKEN": auth_token,
         }
