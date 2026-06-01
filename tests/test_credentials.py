@@ -4395,6 +4395,33 @@ class TestCredentialKindAndModelCompat:
         assert "claude-haiku-*" in reason
         assert "OPENLEGION_OAUTH_ALLOWED_MODELS_ANTHROPIC" in reason
 
+    def test_anthropic_oauth_family_rejects_bare_stem_without_version(self, monkeypatch):
+        """A version suffix is REQUIRED: a bare family stem with no version
+        (e.g. ``anthropic/claude-opus``) is not a real model and is rejected
+        under the family default, so a truncated/typo'd config fails the
+        create/edit validation gate up front instead of only erroring at the
+        provider on first call. The fully versioned model still passes — this
+        documents the boundary."""
+        self._purge_env(monkeypatch)
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_ANTHROPIC_API_KEY",
+            "sk-ant-oat01-" + "x" * 80,
+        )
+        v = CredentialVault()
+        assert v.get_credential_kind("anthropic") == "oauth"
+        for model in (
+            "anthropic/claude-opus",
+            "anthropic/claude-sonnet",
+            "anthropic/claude-haiku",
+        ):
+            ok, reason = v.is_model_compatible(model)
+            assert ok is False, f"{model} (bare stem) should be rejected"
+            assert reason is not None
+        # The fully versioned model still passes — boundary documented.
+        ok, reason = v.is_model_compatible("anthropic/claude-opus-4-8")
+        assert ok is True
+        assert reason is None
+
     def test_anthropic_oauth_override_enforces_exact_match(self, monkeypatch):
         """When the operator sets OPENLEGION_OAUTH_ALLOWED_MODELS_ANTHROPIC,
         it becomes an opt-in EXACT restriction — family matching is disabled
