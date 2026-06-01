@@ -92,6 +92,32 @@ class TestHealthRestartMissingConfig:
         monitor.runtime.start_agent.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_restart_marks_failed_when_yaml_load_raises(self):
+        """New guard: when the runtime registry has NO entry for the agent
+        and the yaml fallback's ``_load_config`` RAISES (corrupt/unreadable
+        agents.yaml), ``_info_from_yaml`` swallows the exception and returns
+        ``None`` so ``_try_restart`` takes its unrecoverable path cleanly —
+        marking the agent 'failed' instead of letting the exception
+        propagate out of the health-monitor loop and stalling all other
+        agents' checks."""
+        monitor = _make_monitor({})  # registry has NO entry for the agent
+        monitor.register("ghost-agent")
+        health = monitor.agents["ghost-agent"]
+        health.consecutive_failures = 3
+        health.status = "unhealthy"
+
+        # The yaml fallback read blows up (e.g. corrupt YAML on disk).
+        with patch(
+            "src.host.health._load_config",
+            side_effect=RuntimeError("corrupt yaml"),
+        ):
+            # Must NOT propagate — no exception escapes _try_restart.
+            await monitor._try_restart("ghost-agent")
+
+        assert health.status == "failed"
+        monitor.runtime.start_agent.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_restart_falls_back_to_yaml_when_registry_missing(self):
         """Production incident: a container died and was deregistered from the
         runtime's in-memory ``agents`` map during a redeploy, but its config
