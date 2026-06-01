@@ -4351,6 +4351,122 @@ class TestCredentialKindAndModelCompat:
             monkeypatch.delenv("OPENLEGION_OAUTH_ALLOWED_MODELS_OPENAI", raising=False)
             importlib.reload(creds_mod)
 
+    def test_anthropic_oauth_family_accepts_any_claude_by_default(self, monkeypatch):
+        """By default (no override env), Anthropic OAuth accepts ANY model
+        in the claude-opus/sonnet/haiku families — current AND future
+        versions. Regression for the prod stale-allowlist 403: an agent
+        on anthropic/claude-opus-4-6 got gate=api:model_incompatible even
+        though the same OAuth credential serves claude-opus-4-8."""
+        self._purge_env(monkeypatch)
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_ANTHROPIC_API_KEY",
+            "sk-ant-oat01-" + "x" * 80,
+        )
+        v = CredentialVault()
+        assert v.get_credential_kind("anthropic") == "oauth"
+        for model in (
+            "anthropic/claude-opus-4-6",    # the prod-broken model
+            "anthropic/claude-opus-4-7",
+            "anthropic/claude-opus-4-8",    # in-process operator model
+            "anthropic/claude-sonnet-4-6",
+            "anthropic/claude-haiku-4-5-20251001",
+        ):
+            ok, reason = v.is_model_compatible(model)
+            assert ok is True, f"{model} should be compatible (reason={reason})"
+            assert reason is None
+
+    def test_anthropic_oauth_family_rejects_non_claude(self, monkeypatch):
+        """A non-Claude / unrecognised anthropic model is still rejected
+        under the family default, and the reason names the allowed families
+        plus the override env var."""
+        self._purge_env(monkeypatch)
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_ANTHROPIC_API_KEY",
+            "sk-ant-oat01-" + "x" * 80,
+        )
+        v = CredentialVault()
+        # Legacy claude-3-* names do NOT match the claude-opus-*/sonnet-*/
+        # haiku-* families (bare name is 'claude-3-opus-...').
+        ok, reason = v.is_model_compatible("anthropic/claude-3-opus-20240229")
+        assert ok is False
+        assert reason is not None
+        assert "claude-opus-*" in reason
+        assert "claude-sonnet-*" in reason
+        assert "claude-haiku-*" in reason
+        assert "OPENLEGION_OAUTH_ALLOWED_MODELS_ANTHROPIC" in reason
+
+    def test_anthropic_oauth_override_enforces_exact_match(self, monkeypatch):
+        """When the operator sets OPENLEGION_OAUTH_ALLOWED_MODELS_ANTHROPIC,
+        it becomes an opt-in EXACT restriction — family matching is disabled
+        and only the listed models pass."""
+        import importlib
+
+        import src.host.credentials as creds_mod
+        monkeypatch.setenv(
+            "OPENLEGION_OAUTH_ALLOWED_MODELS_ANTHROPIC",
+            "anthropic/claude-opus-4-7",
+        )
+        importlib.reload(creds_mod)
+        try:
+            # Recreate the vault from the reloaded module so it picks up
+            # the operator-set flag + parsed override set.
+            self._purge_env(monkeypatch)
+            monkeypatch.setenv(
+                "OPENLEGION_SYSTEM_ANTHROPIC_API_KEY",
+                "sk-ant-oat01-" + "x" * 80,
+            )
+            v = creds_mod.CredentialVault()
+            assert v.get_credential_kind("anthropic") == "oauth"
+            # Exact-listed model passes.
+            ok, reason = v.is_model_compatible("anthropic/claude-opus-4-7")
+            assert ok is True, reason
+            # A different (family-matching) version is now REJECTED because
+            # the operator opted into an exact subset.
+            ok2, reason2 = v.is_model_compatible("anthropic/claude-opus-4-8")
+            assert ok2 is False
+            assert reason2 is not None
+            assert "OAuth-allowed models" in reason2
+        finally:
+            monkeypatch.delenv(
+                "OPENLEGION_OAUTH_ALLOWED_MODELS_ANTHROPIC", raising=False
+            )
+            importlib.reload(creds_mod)
+
+    def test_openai_oauth_unchanged_still_exact(self, monkeypatch):
+        """The OpenAI OAuth subset is genuinely restricted (codex) and stays
+        EXACT — the Anthropic family change must not loosen it. A non-listed
+        gpt model is still rejected."""
+        self._purge_env(monkeypatch)
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+            '{"access_token":"tok","refresh_token":"ref"}',
+        )
+        v = CredentialVault()
+        assert v.get_credential_kind("openai") == "oauth"
+        # gpt-5-codex-next would "family match" if we naively reused the
+        # Anthropic logic — it must NOT, OpenAI stays exact.
+        ok, reason = v.is_model_compatible("openai/gpt-5-codex-next")
+        assert ok is False
+        assert reason is not None
+        assert "OAuth-allowed models" in reason
+        # A genuinely-listed model still passes.
+        ok2, _ = v.is_model_compatible("openai/gpt-5.3-codex")
+        assert ok2 is True
+
+    def test_anthropic_api_key_path_accepts_any_model(self, monkeypatch):
+        """A regular (non-OAuth) Anthropic api_key is unrestricted — the
+        family gate only applies to the OAuth path."""
+        self._purge_env(monkeypatch)
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_ANTHROPIC_API_KEY",
+            "sk-ant-api03-regular-key",
+        )
+        v = CredentialVault()
+        assert v.get_credential_kind("anthropic") == "api_key"
+        ok, reason = v.is_model_compatible("anthropic/claude-3-opus-20240229")
+        assert ok is True
+        assert reason is None
+
 
 class TestLLMAuthAndConfigErrors:
     """Tests for LLMAuthError / LLMConfigError raised from OAuth paths.
