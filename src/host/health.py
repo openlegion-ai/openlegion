@@ -452,9 +452,21 @@ class HealthMonitor:
         in ``cli/repl.py:_restart_agent`` so a health-monitor restart can
         rebuild the container from disk instead of stranding the agent.
 
-        Returns ``None`` when the agent is not defined in agents.yaml at all.
+        Returns ``None`` when the agent is not defined in agents.yaml at all,
+        or when the config can't be read — the caller treats ``None`` as
+        "unrecoverable, mark failed", which preserves the original
+        exception-free behaviour of the no-stored-config path (the later
+        ``_load_config`` call in ``_try_restart`` is likewise inside a
+        ``try``; this one must not be the lone unguarded read).
         """
-        fresh_cfg = _load_config()
+        try:
+            fresh_cfg = _load_config()
+        except Exception as e:
+            logger.error(
+                "Cannot reload config to restart agent '%s' from yaml: %s",
+                agent_id, e,
+            )
+            return None
         agents_cfg = fresh_cfg.get("agents", {})
         if agent_id not in agents_cfg:
             return None
