@@ -294,10 +294,16 @@ def _anthropic_oauth_model_ok(model: str) -> bool:
     i.e. ``claude-opus-4-6``, ``-4-7``, ``-4-8`` and future versions, plus
     the sonnet/haiku variants. Used only when the operator has NOT pinned an
     exact subset via the override env var.
+
+    A version suffix is REQUIRED (``<family>-*``): the bare family stem on
+    its own (e.g. ``claude-opus``) is not a real model, so it is rejected —
+    a truncated/typo'd config then still fails the create/edit validation
+    gate up front instead of passing here and only erroring at the provider
+    on first call.
     """
     bare = model.rsplit("/", 1)[-1].lower()
     return any(
-        bare == family or bare.startswith(f"{family}-")
+        bare.startswith(f"{family}-")
         for family in _ANTHROPIC_OAUTH_MODEL_FAMILIES
     )
 
