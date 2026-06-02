@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -41,7 +42,7 @@ class CostTracker:
     def __init__(
         self,
         db_path: str = "data/costs.db",
-        budgets_path: str = "config/agent_budgets.json",
+        budgets_path: str | None = None,
     ):
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.db = open_db(db_path)
@@ -50,7 +51,23 @@ class CostTracker:
         # Per-agent budget overrides. Persisted to ``budgets_path`` so caps
         # raised/lowered by the operator survive a mesh restart (otherwise
         # they silently revert to the global default after a redeploy).
+        #
+        # When the caller doesn't pass an explicit ``budgets_path``, derive it
+        # from ``db_path``: the production default (``data/costs.db``) maps to
+        # the canonical ``config/agent_budgets.json``, while any other db path
+        # (e.g. a test tmp dir) co-locates the budgets file alongside the db so
+        # tests and tools never read/write the real ``config/`` file.
+        if budgets_path is None:
+            if db_path == "data/costs.db":
+                budgets_path = "config/agent_budgets.json"
+            else:
+                budgets_path = str(Path(db_path).parent / "agent_budgets.json")
         self.budgets_path = Path(budgets_path)
+        # Serializes the in-memory mutation + ``_save_budgets()`` so concurrent
+        # ``set_budget`` / ``cleanup_agent`` calls can't clobber the file (one
+        # writer's ``os.replace`` landing last would otherwise drop another's
+        # change).
+        self._budget_lock = threading.Lock()
         self.budgets: dict[str, dict[str, float]] = {}
         self._load_budgets()
         # ``_team_budgets`` (formerly ``_project_budgets``). Back-compat
@@ -139,8 +156,9 @@ class CostTracker:
         """Delete all cost records for an agent. Returns rows deleted."""
         cursor = self.db.execute("DELETE FROM usage WHERE agent = ?", (agent_id,))
         self.db.commit()
-        if self.budgets.pop(agent_id, None) is not None:
-            self._save_budgets()
+        with self._budget_lock:
+            if self.budgets.pop(agent_id, None) is not None:
+                self._save_budgets()
         return cursor.rowcount
 
     def set_budget(self, agent: str, daily_usd: float | None = None, monthly_usd: float | None = None) -> None:
@@ -150,8 +168,9 @@ class CostTracker:
                 daily_usd = defaults["daily_usd"]
             if monthly_usd is None:
                 monthly_usd = defaults["monthly_usd"]
-        self.budgets[agent] = {"daily_usd": daily_usd, "monthly_usd": monthly_usd}
-        self._save_budgets()
+        with self._budget_lock:
+            self.budgets[agent] = {"daily_usd": daily_usd, "monthly_usd": monthly_usd}
+            self._save_budgets()
 
     def _check_budget_post_hoc(self, agent: str) -> bool:
         """Check if agent exceeded daily/monthly budget. Returns True if over budget."""

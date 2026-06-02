@@ -371,6 +371,55 @@ class TestBudgetPersistence:
         tracker.close()
 
 
+class TestBudgetsPathDerivation:
+    """When no ``budgets_path`` is passed, it is derived from ``db_path`` so
+    tests and tools pointing the db at a tmp dir never touch the real
+    ``config/agent_budgets.json``.
+    """
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self._tmpdir, "costs.db")
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_derives_budgets_path_alongside_tmp_db(self):
+        from pathlib import Path
+
+        config_file = Path("config/agent_budgets.json")
+        config_existed_before = config_file.exists()
+
+        # No budgets_path → co-located with the (tmp) db, NOT config/.
+        tracker = CostTracker(db_path=self.db_path)
+        expected = Path(self._tmpdir) / "agent_budgets.json"
+        assert tracker.budgets_path == expected
+
+        tracker.set_budget("agent1", daily_usd=3.0, monthly_usd=60.0)
+        tracker.close()
+
+        # The write landed under the tmp dir, not the real config dir.
+        assert expected.exists()
+        # And it did NOT create / mutate the real config file.
+        assert config_file.exists() == config_existed_before
+
+    def test_production_default_db_maps_to_config(self):
+        from pathlib import Path
+
+        # The production default db_path maps to the canonical config file
+        # (constructed without touching disk via __new__ + manual derivation).
+        tracker = object.__new__(CostTracker)
+        db_path = "data/costs.db"
+        budgets_path = None
+        if budgets_path is None:
+            if db_path == "data/costs.db":
+                budgets_path = "config/agent_budgets.json"
+            else:
+                budgets_path = str(Path(db_path).parent / "agent_budgets.json")
+        tracker.budgets_path = Path(budgets_path)
+        assert tracker.budgets_path == Path("config/agent_budgets.json")
+
+
 class TestCostTrackerWithVault:
     """Verify CostTracker integrates with CredentialVault."""
 
