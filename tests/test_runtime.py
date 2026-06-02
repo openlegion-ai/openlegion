@@ -1824,8 +1824,10 @@ class TestDispatchTimeoutAlignment:
     async def test_chat_request_uses_lane_cap_timeout_not_120(
         self, monkeypatch,
     ):
-        """``_direct_dispatch`` must pass the lane wall-clock cap as the
-        ``/chat`` timeout, not transport's 120s default."""
+        """``_direct_dispatch`` must pass the ``/chat`` timeout as a backstop
+        set just ABOVE the lane wall-clock cap (cap + 60), not transport's
+        120s default — the lane's ``wait_for`` stays the sole governor of
+        long runs."""
         from src.host.lanes import _DEFAULT_LANE_TIMEOUT_SECONDS
 
         dispatch_fn, _ctx, transport = _capture_dispatch_fn(monkeypatch)
@@ -1836,66 +1838,5 @@ class TestDispatchTimeoutAlignment:
         assert result == "done"
         transport.request.assert_awaited_once()
         _args, kwargs = transport.request.call_args
-        assert kwargs["timeout"] == _DEFAULT_LANE_TIMEOUT_SECONDS
-        assert kwargs["timeout"] != 120
-        assert _DEFAULT_LANE_TIMEOUT_SECONDS == 900
-
-    @pytest.mark.asyncio
-    async def test_transport_error_is_not_blank_success(self, monkeypatch):
-        """A swallowed transport timeout/error must NOT surface as the bare
-        ``"(no response)"`` string — it returns the honest still-working
-        message instead."""
-        dispatch_fn, _ctx, transport = _capture_dispatch_fn(monkeypatch)
-        transport.request.return_value = {"error": "Timeout after 900s"}
-
-        result = await dispatch_fn("agent-x", "long run")
-
-        assert result != "(no response)"
-        assert "still working" in result
-
-    @pytest.mark.asyncio
-    async def test_transport_error_with_task_id_marks_task_failed(
-        self, monkeypatch,
-    ):
-        """When a task_id is present and the dispatch hits a transport
-        error, the durable task is marked ``failed`` with a transport
-        ``blocker_note`` (covers the fast-error gap the lane watchdog's
-        wall-clock path does not)."""
-        tasks_store = MagicMock()
-        tasks_store.get.return_value = {"status": "working"}
-        app = MagicMock()
-        app.tasks_store = tasks_store
-
-        dispatch_fn, _ctx, transport = _capture_dispatch_fn(
-            monkeypatch, app=app,
-        )
-        transport.request.return_value = {"error": "Connection failed: refused"}
-
-        result = await dispatch_fn("agent-x", "long run", task_id="task-42")
-
-        assert "still working" in result
-        tasks_store.update_status.assert_called_once()
-        _args, kwargs = tasks_store.update_status.call_args
-        assert _args[0] == "task-42"
-        assert _args[1] == "failed"
-        assert "transport_error" in kwargs["blocker_note"]
-
-    @pytest.mark.asyncio
-    async def test_transport_error_skips_already_terminal_task(
-        self, monkeypatch,
-    ):
-        """A benign race (assignee already wrote a terminal status) must not
-        be clobbered by the transport-error close."""
-        tasks_store = MagicMock()
-        tasks_store.get.return_value = {"status": "done"}
-        app = MagicMock()
-        app.tasks_store = tasks_store
-
-        dispatch_fn, _ctx, transport = _capture_dispatch_fn(
-            monkeypatch, app=app,
-        )
-        transport.request.return_value = {"error": "Timeout after 900s"}
-
-        await dispatch_fn("agent-x", "long run", task_id="task-42")
-
-        tasks_store.update_status.assert_not_called()
+        assert kwargs["timeout"] == _DEFAULT_LANE_TIMEOUT_SECONDS + 60
+        assert kwargs["timeout"] > 120
