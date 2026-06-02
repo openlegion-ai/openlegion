@@ -105,6 +105,27 @@ def test_remove_skill_invalid_name(tmp_path):
     assert "error" in remove_skill("../escape", tmp_path / "s")
 
 
+def test_remove_skill_rejects_catalog_wipe(tmp_path):
+    """A name resolving to the store dir itself (".", "", whitespace) must be
+    rejected — never rmtree the whole installed catalog."""
+    skills_dir = tmp_path / "skills_installed"
+    with patch("src.marketplace.subprocess.run", side_effect=_mock_clone_writing(SKILL_MD)):
+        install_skill("https://github.com/u/demo.git", skills_dir)
+    for bad in (".", "", "   ", "a/b"):
+        assert "error" in remove_skill(bad, skills_dir)
+    # The catalog and its installed pack survive.
+    assert skills_dir.is_dir()
+    assert (skills_dir / "demo-skill").exists()
+
+
+def test_install_skill_leaves_no_staging_dir(tmp_path):
+    """A successful install leaves no _tmp_install* staging dir behind."""
+    skills_dir = tmp_path / "skills_installed"
+    with patch("src.marketplace.subprocess.run", side_effect=_mock_clone_writing(SKILL_MD)):
+        install_skill("https://github.com/u/demo.git", skills_dir)
+    assert list(skills_dir.glob("_tmp_install*")) == []
+
+
 # ── operator tools: gating ───────────────────────────────────────────────────
 
 class _FakeMesh:

@@ -169,6 +169,13 @@ class SkillStore:
         if not directory.is_dir():
             return found
         for md_path in sorted(directory.glob("**/SKILL.md")):
+            # Skip packs under an underscore-prefixed directory — same
+            # convention as marketplace.list_tools. Crucially this hides the
+            # transient ``_tmp_install/`` staging dir an install clones into
+            # (up to the 60s clone timeout), which is bind-mounted live into
+            # every agent and otherwise unvalidated.
+            if any(p.startswith("_") for p in md_path.relative_to(directory).parts[:-1]):
+                continue
             skill = parse_skill_md(md_path, source=source)
             if skill is None:
                 continue

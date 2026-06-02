@@ -3745,7 +3745,8 @@ def create_mesh_app(
     @app.post("/mesh/skills/remove")
     async def remove_skill_pack(data: dict, request: Request) -> dict:
         """Remove an installed skill pack (operator-gated). Body: {name, caller?}"""
-        _require_skill_admin(request, data, "skills.remove:can_manage_fleet")
+        caller = _require_skill_admin(request, data, "skills.remove:can_manage_fleet")
+        await _check_rate_limit("skill_install", caller)
         name = str(data.get("name", "")).strip()
         if not name:
             raise HTTPException(400, "name is required")
@@ -3754,9 +3755,11 @@ def create_mesh_app(
             raise HTTPException(503, "Skills directory not available")
 
         from src import marketplace
-        result = marketplace.remove_skill(name, skills_installed)
+        result = await asyncio.to_thread(marketplace.remove_skill, name, skills_installed)
         if "error" in result:
-            raise HTTPException(404, result["error"])
+            # 404 only for a genuine miss; a rejected name is a bad request.
+            status = 404 if "not found" in result["error"].lower() else 400
+            raise HTTPException(status, result["error"])
         return result
 
     # === Create Custom Agent ===
