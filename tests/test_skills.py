@@ -162,6 +162,20 @@ def test_store_skips_malformed_packs(tmp_path):
     assert [s.name for s in store.list()] == ["good"]
 
 
+def test_store_skips_underscore_dirs(tmp_path):
+    """Packs under an underscore-prefixed dir (e.g. the _tmp_install staging
+    dir a clone writes into) must not surface."""
+    _write_skill(tmp_path, "real")
+    staging = tmp_path / "_tmp_install"
+    staging.mkdir()
+    (staging / "SKILL.md").write_text(
+        "---\nname: half-installed\ndescription: not ready\n---\nbody\n", encoding="utf-8",
+    )
+    store = SkillStore(bundled_dir=tmp_path, installed_dir=tmp_path / "nope")
+    assert [s.name for s in store.list()] == ["real"]
+    assert store.get("half-installed") is None
+
+
 # ── read_reference (Level 2) ──────────────────────────────────────────────
 
 def test_read_reference_happy_path(tmp_path):

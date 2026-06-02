@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from src.shared.utils import setup_logging
@@ -240,9 +241,9 @@ def install_skill(repo_url: str, skills_dir: Path, ref: str = "") -> dict:
 
     skills_dir.mkdir(parents=True, exist_ok=True)
 
-    tmp_dir = skills_dir / "_tmp_install"
-    if tmp_dir.exists():
-        shutil.rmtree(tmp_dir)
+    # Unique staging dir (under the store, underscore-prefixed so SkillStore
+    # skips it) — lets concurrent installs run without clobbering each other.
+    tmp_dir = Path(tempfile.mkdtemp(prefix="_tmp_install_", dir=skills_dir))
 
     clone_err = _clone_repo(repo_url, tmp_dir, ref)
     if clone_err:
@@ -283,7 +284,9 @@ def install_skill(repo_url: str, skills_dir: Path, ref: str = "") -> dict:
 
 def remove_skill(name: str, skills_dir: Path) -> dict:
     """Remove an installed skill pack."""
-    if ".." in name or "/" in name or "\\" in name:
+    # Strict allowlist — rejects "", ".", "..", and any path separator, so a
+    # name can never resolve to the store dir itself (which rmtree would wipe).
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
         return {"error": "Invalid skill name"}
     skill_dir = skills_dir / name
     if not skill_dir.exists():

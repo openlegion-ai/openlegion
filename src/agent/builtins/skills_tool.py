@@ -25,12 +25,12 @@ def _declared_requirements(metadata: dict) -> dict:
     env = metadata.get("required_environment_variables")
     if env:
         out["required_environment_variables"] = env
-    for vendor in metadata.get("metadata", {}).values() if isinstance(
-        metadata.get("metadata"), dict,
-    ) else []:
-        if isinstance(vendor, dict) and vendor.get("config"):
-            out["config"] = vendor["config"]
-            break
+    vendors = metadata.get("metadata")
+    if isinstance(vendors, dict):
+        for vendor in vendors.values():
+            if isinstance(vendor, dict) and vendor.get("config"):
+                out["config"] = vendor["config"]
+                break
     return out
 
 
