@@ -1906,7 +1906,8 @@ class TestStandaloneBlackboardIsolation:
         return loop
 
     def test_standalone_excludes_blackboard_tools(self):
-        """Standalone agents have _excluded_tools set to _BLACKBOARD_TOOLS."""
+        """Standalone agents exclude the blackboard tools (authoring tools may
+        also be excluded by the default-off tool-authoring gate)."""
         mesh = MagicMock()
         mesh.is_standalone = True
         loop = AgentLoop(
@@ -1914,10 +1915,11 @@ class TestStandaloneBlackboardIsolation:
             memory=MagicMock(get_tool_history=MagicMock(return_value=[])),
             tools=MagicMock(), llm=MagicMock(), mesh_client=mesh,
         )
-        assert loop._excluded_tools == _BLACKBOARD_TOOLS
+        assert _BLACKBOARD_TOOLS <= loop._excluded_tools
 
     def test_project_agent_no_exclusion(self):
-        """Project agents have _excluded_tools = None."""
+        """Project agents do NOT exclude blackboard tools (the authoring gate
+        may still exclude create_tool/reload_tools — orthogonal to this test)."""
         mesh = MagicMock()
         mesh.is_standalone = False
         loop = AgentLoop(
@@ -1925,7 +1927,7 @@ class TestStandaloneBlackboardIsolation:
             memory=MagicMock(get_tool_history=MagicMock(return_value=[])),
             tools=MagicMock(), llm=MagicMock(), mesh_client=mesh,
         )
-        assert loop._excluded_tools is None
+        assert not (_BLACKBOARD_TOOLS & (loop._excluded_tools or frozenset()))
 
     def test_standalone_task_prompt_no_blackboard(self):
         """Standalone agent task prompt omits blackboard references."""
