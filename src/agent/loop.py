@@ -133,6 +133,12 @@ _BLACKBOARD_TOOLS = frozenset({
     "claim_task", "hand_off", "check_inbox", "update_status", "complete_task",
 })
 
+# Agent-authored-Python tool surface — hidden from workers unless the advanced
+# OPENLEGION_ENABLE_TOOL_AUTHORING opt-in is set (Task 6: Skills are the default
+# extension path now). reload_tools is paired with create_tool and vestigial
+# without it (marketplace tools load at container start, not via runtime reload).
+_TOOL_AUTHORING_TOOLS = frozenset({"create_tool", "reload_tools"})
+
 # Read-only tools allowed during operator heartbeat (unsupervised execution).
 # The full operator allowlist is restricted to this subset so heartbeats
 # cannot mutate fleet state without user approval. ``check_inbox`` is
@@ -355,9 +361,17 @@ class AgentLoop:
             self._excluded_tools: frozenset[str] | None = None
         else:
             self._allowed_tools = None
-            # Standalone agents have no project blackboard — hide those tools
+            # Standalone agents have no project blackboard — hide those tools.
+            excluded: set[str] = (
+                set(_BLACKBOARD_TOOLS) if mesh_client.is_standalone else set()
+            )
+            # Demote agent-authored Python: hide create_tool/reload_tools unless
+            # the advanced authoring opt-in is set. Skills are the default path.
+            from src.agent.builtins.tool_authoring import tool_authoring_enabled
+            if not tool_authoring_enabled():
+                excluded |= _TOOL_AUTHORING_TOOLS
             self._excluded_tools: frozenset[str] | None = (
-                _BLACKBOARD_TOOLS if mesh_client.is_standalone else None
+                frozenset(excluded) if excluded else None
             )
         # Runtime-disabled tools — flips on top of the static allowlist
         # without requiring a restart. The mesh pushes these via the

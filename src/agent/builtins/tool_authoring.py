@@ -29,10 +29,28 @@ See ``docs/security-remediation-review-2026-05-29.md`` (M1, H15).
 from __future__ import annotations
 
 import ast
+import os
 import re
 from pathlib import Path
 
 from src.agent.tools import tool
+
+# Agent-authored Python tools are DEMOTED behind an explicit opt-in (Task 6 of
+# the Tools/Skills split). SKILL.md packs (skills_list / install_skill) are now
+# the default, safer extension path — data that orchestrates already-granted
+# tools — so casual self-authoring of in-process Python is off by default. Set
+# this env var truthy to enable the advanced create_tool path. When off,
+# ``create_tool`` is hidden from the agent's tool surface (see
+# ``_TOOL_AUTHORING_TOOLS`` in ``loop.py``) and self-rejects with a pointer to
+# Skills.
+TOOL_AUTHORING_ENABLED_ENV = "OPENLEGION_ENABLE_TOOL_AUTHORING"
+
+
+def tool_authoring_enabled() -> bool:
+    """True iff the advanced agent-authored-Python tool path is opted in."""
+    return os.environ.get(TOOL_AUTHORING_ENABLED_ENV, "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
 
 _FORBIDDEN_IMPORTS = frozenset({
     "os", "subprocess", "shutil", "ctypes",
@@ -255,6 +273,16 @@ def _ensure_tool_guide() -> None:
     },
 )
 def create_tool(name: str, code: str, *, workspace_manager=None) -> dict:
+    if not tool_authoring_enabled():
+        return {
+            "error": "tool_authoring_disabled",
+            "detail": (
+                "Authoring custom Python tools is disabled. Prefer a Skill: call "
+                "skills_list to find a saved procedure, or ask the operator to "
+                "install_skill <repo>. (An operator can set "
+                f"{TOOL_AUTHORING_ENABLED_ENV}=1 to enable advanced tool authoring.)"
+            ),
+        }
     if workspace_manager is None:
         return {"error": "No workspace_manager available"}
 
