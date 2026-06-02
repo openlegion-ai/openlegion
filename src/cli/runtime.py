@@ -562,7 +562,22 @@ class RuntimeContext:
                 self.health_monitor.register(agent_id)
 
     def _setup_dispatch(self) -> None:
-        from src.host.lanes import LaneManager
+        from src.host.lanes import _DEFAULT_LANE_TIMEOUT_SECONDS, LaneManager
+
+        # Long-run dispatch drop (prod incident): the mesh→agent ``/chat``
+        # call previously inherited transport's 120s default while a task
+        # run legitimately takes many minutes (loop MAX_ITERATIONS × 300s
+        # tool cap). The inner 120s timeout fired long before the lane's
+        # 900s wall-clock cap, returned ``"(no response)"`` as a *success*,
+        # and the lane treated it as a completed turn — silently dropping
+        # in-flight output. Align the inner ``/chat`` timeout with the SAME
+        # source the lane uses (``OPENLEGION_LANE_TIMEOUT_SECONDS``, 900s
+        # default) so the lane's wall-clock cap (its ``wait_for``) is the
+        # governing bound. Inner == cap by design: if the run exceeds the
+        # cap, the lane's ``wait_for`` fires first, cancels this coroutine
+        # (which cancels the in-flight httpx request), and runs the
+        # watchdog's failed-marking + back-edge path.
+        _chat_dispatch_timeout = _DEFAULT_LANE_TIMEOUT_SECONDS
 
         async def _direct_dispatch(
             agent_name: str, message: str,
@@ -594,8 +609,48 @@ class RuntimeContext:
                 result = await self.transport.request(
                     agent_name, "POST", "/chat", json={"message": message},
                     headers=extra_headers or None,
+                    timeout=_chat_dispatch_timeout,
                 )
-                response = result.get("response", "(no response)")
+                # A transport-layer error (timeout / connection / HTTP) is
+                # NOT a real agent reply — the agent may still be running.
+                # Surfacing it as a blank/"(no response)" success made long
+                # runs *look* completed (the lane recorded a finished turn)
+                # while the agent kept working and its output never reached
+                # the user. Render an honest "still working" message
+                # instead. The agent's loop persists partial/final
+                # transcript entries to its workspace independently, so the
+                # work is not lost — only this synchronous reply is.
+                if isinstance(result, dict) and result.get("error"):
+                    transport_err = result.get("error")
+                    logger.warning(
+                        "Dispatch to '%s' /chat returned transport error: %s",
+                        agent_name, transport_err,
+                    )
+                    # Close the durable task gap. ``Transport.request``
+                    # SWALLOWS timeout/connect/HTTP errors into an
+                    # ``{"error": ...}`` dict rather than raising, so the
+                    # lane records this as a *successful* completed turn —
+                    # its watchdog only fires on the wall-clock TimeoutError
+                    # path, and its generic ``except Exception`` branch does
+                    # NOT mark the durable task failed. After fix #1 the
+                    # long-run case is governed by the lane cap, but a FAST
+                    # transport error (connection refused, agent crash, HTTP
+                    # 5xx) returns here in well under the cap and would leave
+                    # a task carrying ``x-task-id`` stuck until the stale
+                    # reaper — the recipient's loop never ran, so its own
+                    # auto-close never fires. Mark it failed here, mirroring
+                    # the lane watchdog's blocker_note + already-terminal
+                    # pre-check (so we never clobber an assignee's real
+                    # back-edge payload on a benign race).
+                    await self._fail_task_on_transport_error(
+                        task_id, agent_name, transport_err,
+                    )
+                    response = (
+                        "(agent still working — its output is being saved "
+                        "to its workspace; check back shortly)"
+                    )
+                else:
+                    response = result.get("response") or "(no response)"
                 duration_ms = int((_time.time() - t0) * 1000)
                 if tid and self.trace_store:
                     self.trace_store.record(
@@ -651,6 +706,62 @@ class RuntimeContext:
 
         _dispatch_thread = threading.Thread(target=_run_dispatch_loop, daemon=True)
         _dispatch_thread.start()
+
+    async def _fail_task_on_transport_error(
+        self, task_id: str | None, agent_name: str, transport_err: object,
+    ) -> None:
+        """Mark a durable task ``failed`` after a swallowed transport error.
+
+        Covers the gap where ``Transport.request`` returns an
+        ``{"error": ...}`` dict (timeout / connect / HTTP) instead of
+        raising: the lane treats the dispatch as a successful turn, and the
+        recipient agent's loop never ran so its own auto-close never fired.
+        Without this, a task carrying ``x-task-id`` would dangle until the
+        stale-task reaper. Best-effort and idempotent — mirrors the lane
+        watchdog's already-terminal pre-check so a benign race (assignee
+        wrote a real terminal status) is never clobbered. No-op when there
+        is no task_id or no tasks store is wired yet.
+        """
+        if not task_id:
+            return
+        app = getattr(self, "_app", None)
+        tasks_store = getattr(app, "tasks_store", None) if app else None
+        if tasks_store is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+            pre = await loop.run_in_executor(None, lambda: tasks_store.get(task_id))
+            if pre is not None and pre.get("status") in (
+                "done", "failed", "cancelled",
+            ):
+                logger.info(
+                    "Dispatch transport-error close: task %s already "
+                    "terminal (status=%s) — skipping", task_id,
+                    pre.get("status"),
+                )
+                return
+            note = (
+                f"transport_error: dispatch to '{agent_name}' failed "
+                f"({transport_err})"
+            )[:500]
+            await loop.run_in_executor(
+                None,
+                lambda: tasks_store.update_status(
+                    task_id,
+                    "failed",
+                    actor="dispatch_transport_error",
+                    blocker_note=note,
+                    extra_payload={
+                        "error": "transport_error",
+                        "agent": agent_name,
+                    },
+                ),
+            )
+        except Exception as close_err:
+            logger.warning(
+                "Dispatch transport-error failed to close task %s: %s",
+                task_id, close_err,
+            )
 
     async def _handle_notify(self, agent_name: str, message: str) -> None:
         """Push an agent notification to REPL and all active channels."""
