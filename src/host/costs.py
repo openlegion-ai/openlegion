@@ -9,6 +9,8 @@ Storage: SQLite (lightweight, no external services).
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -36,15 +38,83 @@ def _default_budget() -> dict:
 class CostTracker:
     """Tracks token usage and cost per agent, enforces budgets."""
 
-    def __init__(self, db_path: str = "data/costs.db"):
+    def __init__(
+        self,
+        db_path: str = "data/costs.db",
+        budgets_path: str = "config/agent_budgets.json",
+    ):
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self.db = open_db(db_path)
         self.db.execute("PRAGMA journal_mode=WAL")
         self._init_schema()
+        # Per-agent budget overrides. Persisted to ``budgets_path`` so caps
+        # raised/lowered by the operator survive a mesh restart (otherwise
+        # they silently revert to the global default after a redeploy).
+        self.budgets_path = Path(budgets_path)
         self.budgets: dict[str, dict[str, float]] = {}
+        self._load_budgets()
         # ``_team_budgets`` (formerly ``_project_budgets``). Back-compat
         # property below exposes the legacy attribute name.
         self._team_budgets: dict[str, dict] = {}
+
+    def _load_budgets(self) -> None:
+        """Load per-agent budget overrides from disk (tolerant of missing/corrupt)."""
+        if not self.budgets_path.exists():
+            return
+        try:
+            data = json.loads(self.budgets_path.read_text())
+            if not isinstance(data, dict):
+                logger.warning(
+                    "agent_budgets file %s is not a JSON object; ignoring",
+                    self.budgets_path,
+                )
+                return
+            for agent, budget in data.items():
+                if (
+                    isinstance(budget, dict)
+                    and "daily_usd" in budget
+                    and "monthly_usd" in budget
+                ):
+                    self.budgets[agent] = {
+                        "daily_usd": float(budget["daily_usd"]),
+                        "monthly_usd": float(budget["monthly_usd"]),
+                    }
+        except (json.JSONDecodeError, OSError, ValueError, TypeError) as e:
+            logger.warning(
+                "Failed to load agent budgets from %s: %s", self.budgets_path, e
+            )
+
+    def _save_budgets(self) -> None:
+        """Persist per-agent budget overrides atomically (temp file + rename).
+
+        Tolerates write failures (logs, does not raise) so a transient disk
+        error never crashes the cost-tracking / LLM-proxy path.
+        """
+        try:
+            self.budgets_path.parent.mkdir(parents=True, exist_ok=True)
+            content = json.dumps(self.budgets, indent=2) + "\n"
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(self.budgets_path.parent), suffix=".tmp",
+            )
+            try:
+                with os.fdopen(fd, "w") as f:
+                    f.write(content)
+            except BaseException:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass  # already closed by fdopen
+                Path(tmp_path).unlink(missing_ok=True)
+                raise
+            try:
+                os.replace(tmp_path, self.budgets_path)
+            except Exception:
+                Path(tmp_path).unlink(missing_ok=True)
+                raise
+        except Exception as e:
+            logger.warning(
+                "Failed to persist agent budgets to %s: %s", self.budgets_path, e
+            )
 
     def _init_schema(self) -> None:
         self.db.executescript("""
@@ -69,7 +139,8 @@ class CostTracker:
         """Delete all cost records for an agent. Returns rows deleted."""
         cursor = self.db.execute("DELETE FROM usage WHERE agent = ?", (agent_id,))
         self.db.commit()
-        self.budgets.pop(agent_id, None)
+        if self.budgets.pop(agent_id, None) is not None:
+            self._save_budgets()
         return cursor.rowcount
 
     def set_budget(self, agent: str, daily_usd: float | None = None, monthly_usd: float | None = None) -> None:
@@ -80,6 +151,7 @@ class CostTracker:
             if monthly_usd is None:
                 monthly_usd = defaults["monthly_usd"]
         self.budgets[agent] = {"daily_usd": daily_usd, "monthly_usd": monthly_usd}
+        self._save_budgets()
 
     def _check_budget_post_hoc(self, agent: str) -> bool:
         """Check if agent exceeded daily/monthly budget. Returns True if over budget."""
