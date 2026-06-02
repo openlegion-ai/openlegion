@@ -10211,7 +10211,8 @@ function dashboard() {
           add('Input tokens', d.input_tokens ?? d.prompt_tokens);
           add('Output tokens', d.output_tokens ?? d.completion_tokens);
           add('Total tokens', d.total_tokens ?? d.tokens_used);
-          if (d.cost_usd != null) add('Cost', '$' + d.cost_usd.toFixed(6));
+          if (d.oauth) add('Cost', 'subscription (no per-call cost)');
+          else if (d.cost_usd != null) add('Cost', '$' + d.cost_usd.toFixed(6));
           if (d.duration_ms) add('Duration', d.duration_ms + 'ms');
           add('Service', d.service);
           add('Action', d.action);
@@ -10294,7 +10295,7 @@ function dashboard() {
           const model = (d.model || '').split('/').pop();
           if (!model) return `${d.service || 'api'}/${d.action || '?'}${d.streaming ? ' (streaming)' : ''}`;
           const tokens = (d.total_tokens || d.tokens_used || 0).toLocaleString();
-          const cost = d.cost_usd != null ? ` \u00b7 $${d.cost_usd.toFixed(4)}` : '';
+          const cost = d.oauth ? ' \u00b7 sub' : (d.cost_usd != null ? ` \u00b7 $${d.cost_usd.toFixed(4)}` : '');
           const dur = d.duration_ms ? ` \u00b7 ${d.duration_ms}ms` : '';
           const prompt = d.prompt_preview ? ` \u00b7 "${d.prompt_preview.substring(0, 40)}${d.prompt_preview.length > 40 ? '\u2026' : ''}"` : '';
           return `${model} \u00b7 ${tokens} tok${cost}${dur}${prompt}`;

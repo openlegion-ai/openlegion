@@ -2688,11 +2688,12 @@ async def test_oauth_tracks_usage_but_skips_budget_enforcement(monkeypatch):
     result = await v.execute_api_call(req, agent_id="test-agent")
 
     assert result.success
-    # Usage IS tracked now (spend visibility) ...
+    # Usage IS tracked now (token visibility) but with bill=False so the
+    # row records cost_usd=0 — OAuth (subscription) accrues no dollar spend.
     cost_tracker.track.assert_called_once_with(
-        "test-agent", "anthropic/claude-sonnet-4-6", 50, 25,
+        "test-agent", "anthropic/claude-sonnet-4-6", 50, 25, bill=False,
     )
-    # ... but no dollar enforcement runs on the OAuth path.
+    # ... and no dollar enforcement runs on the OAuth path.
     cost_tracker.preflight_check.assert_not_called()
 
 
@@ -3427,7 +3428,9 @@ async def test_codex_tracks_usage_but_skips_budget(monkeypatch):
     )
     result = await v.execute_api_call(req, agent_id="test-agent")
     assert result.success
+    # Tracked for visibility, but bill=False → cost_usd=0 (no dollar spend).
     cost_tracker.track.assert_called_once()
+    assert cost_tracker.track.call_args.kwargs.get("bill") is False
     cost_tracker.preflight_check.assert_not_called()
 
 
@@ -3462,6 +3465,69 @@ async def test_codex_stream_skips_cost_tracking(monkeypatch):
     assert any("done" in e for e in events)
     cost_tracker.track.assert_not_called()
     cost_tracker.preflight_check.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_codex_stream_done_frame_carries_oauth_flag(monkeypatch):
+    """The real Codex stream done-frame must include oauth=True.
+
+    Regression: downstream mesh telemetry (``llm_call`` events in
+    ``server.py``) keys the $0 subscription cost off this flag. Without it,
+    OpenAI Codex (ChatGPT subscription) streams report a metered estimate,
+    making the dashboard show per-call costs the user is never billed for.
+    Mirrors the Anthropic OAuth stream done-frame, which already sets it.
+    """
+    import json as _json
+
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv(
+        "OPENLEGION_SYSTEM_OPENAI_OAUTH",
+        '{"access_token":"tok","refresh_token":"ref","account_id":"acct","expires_at":9999999999}',
+    )
+    v = CredentialVault()
+
+    sse_lines = [
+        'data: ' + _json.dumps({"type": "response.output_text.delta", "delta": "hi"}),
+        'data: ' + _json.dumps({
+            "type": "response.completed",
+            "response": {"usage": {"input_tokens": 10, "output_tokens": 5}},
+        }),
+    ]
+
+    class _FakeResp:
+        status_code = 200
+        is_success = True
+
+        async def aiter_lines(self):
+            for line in sse_lines:
+                yield line
+
+    class _FakeStreamCM:
+        async def __aenter__(self):
+            return _FakeResp()
+
+        async def __aexit__(self, *exc):
+            return False
+
+    client = await v._get_http_client()
+    monkeypatch.setattr(client, "stream", lambda *a, **k: _FakeStreamCM())
+
+    req = APIProxyRequest(
+        service="llm", action="chat",
+        params={"model": "openai/gpt-5", "messages": [{"role": "user", "content": "hi"}]},
+    )
+
+    done = None
+    async for chunk in v._openai_oauth_chat_stream(req, "openai/gpt-5"):
+        if chunk.startswith("data: "):
+            parsed = _json.loads(chunk[6:].strip())
+            if parsed.get("type") == "done":
+                done = parsed
+
+    assert done is not None
+    assert done["oauth"] is True
+    assert done["content"] == "hi"
+    assert done["tokens_used"] == 15
 
 
 @pytest.mark.asyncio

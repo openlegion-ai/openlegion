@@ -2029,6 +2029,12 @@ def create_mesh_app(
                 output_tok = result.data.get("output_tokens", 0)
                 from src.host.costs import estimate_cost
                 fixed_cost = result.data.get("fixed_cost_usd", 0)
+                # OAuth (Anthropic/OpenAI subscription) calls have no per-call
+                # cost — the authoritative usage table already skips them in
+                # CredentialVault.execute_api_call. Mirror that here so the
+                # dashboard activity/trace feed doesn't show a metered estimate
+                # for subscription traffic.
+                is_oauth = bool(result.data.get("oauth"))
                 event_data = {
                     "service": api_request.service, "action": api_request.action,
                     "duration_ms": duration_ms,
@@ -2036,8 +2042,11 @@ def create_mesh_app(
                     "total_tokens": tokens,
                     "input_tokens": input_tok,
                     "output_tokens": output_tok,
-                    "cost_usd": fixed_cost if fixed_cost else estimate_cost(
-                        model, input_tokens=input_tok, output_tokens=output_tok, total_tokens=tokens,
+                    "oauth": is_oauth,
+                    "cost_usd": 0.0 if is_oauth else (
+                        fixed_cost if fixed_cost else estimate_cost(
+                            model, input_tokens=input_tok, output_tokens=output_tok, total_tokens=tokens,
+                        )
                     ),
                 }
                 if prompt_preview:
@@ -2129,6 +2138,10 @@ def create_mesh_app(
             try:
                 if event_bus is not None and (tokens or model):
                     from src.host.costs import estimate_cost
+                    # OAuth (subscription) streams carry oauth=True in the done
+                    # frame — report $0 to match the usage table, which never
+                    # records cost for OAuth (stream_llm returns before track()).
+                    is_oauth = bool(done_data.get("oauth"))
                     ev: dict = {
                         "service": api_request.service,
                         "action": api_request.action,
@@ -2137,7 +2150,8 @@ def create_mesh_app(
                         "total_tokens": tokens,
                         "input_tokens": 0,
                         "output_tokens": 0,
-                        "cost_usd": estimate_cost(model, total_tokens=tokens),
+                        "oauth": is_oauth,
+                        "cost_usd": 0.0 if is_oauth else estimate_cost(model, total_tokens=tokens),
                     }
                     if prompt_preview:
                         ev["prompt_preview"] = prompt_preview
