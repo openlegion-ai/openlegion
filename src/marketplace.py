@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 from src.shared.utils import setup_logging
@@ -94,6 +95,41 @@ def _validate_all_tools(directory: Path) -> list[str]:
     return errors
 
 
+def _clone_repo(repo_url: str, dest: Path, ref: str = "") -> str | None:
+    """Shallow-clone *repo_url* into *dest* with hardened git flags.
+
+    Shared by ``install_tool`` and ``install_skill``. Returns an error string
+    or None on success. Rejects non-https/ssh schemes and flag-injection refs;
+    disables hooks, symlinks, the ``ext`` transport, the system config, and
+    interactive credential prompts.
+    """
+    if not (repo_url.startswith("https://") or repo_url.startswith("git@")):
+        return "Invalid repo URL: only https:// and git@ schemes are allowed"
+    if ref and ref.startswith("-"):
+        return "Invalid ref: must not start with '-'"
+
+    clone_cmd = [
+        "git", "clone", "--depth", "1",
+        "-c", "protocol.ext.allow=never",
+        "-c", "core.hooksPath=/dev/null",
+        "-c", "core.symlinks=false",
+    ]
+    if ref:
+        clone_cmd += ["--branch", ref]
+    clone_cmd += ["--", repo_url, str(dest)]
+
+    result = subprocess.run(
+        clone_cmd,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"},
+    )
+    if result.returncode != 0:
+        return f"Git clone failed: {result.stderr.strip()}"
+    return None
+
+
 def install_tool(
     repo_url: str,
     marketplace_dir: Path,
@@ -105,38 +141,15 @@ def install_tool(
     """
     marketplace_dir.mkdir(parents=True, exist_ok=True)
 
-    # Validate URL scheme — only allow https:// and git@ (SSH)
-    if not (repo_url.startswith("https://") or repo_url.startswith("git@")):
-        return {"error": "Invalid repo URL: only https:// and git@ schemes are allowed"}
-
-    # Validate ref parameter against flag injection
-    if ref and ref.startswith("-"):
-        return {"error": "Invalid ref: must not start with '-'"}
-
     # Clone to temp directory first
     tmp_dir = marketplace_dir / "_tmp_install"
     if tmp_dir.exists():
         shutil.rmtree(tmp_dir)
 
-    clone_cmd = [
-        "git", "clone", "--depth", "1",
-        "-c", "protocol.ext.allow=never",
-        "-c", "core.hooksPath=/dev/null",
-        "-c", "core.symlinks=false",
-    ]
-    if ref:
-        clone_cmd += ["--branch", ref]
-    clone_cmd += ["--", repo_url, str(tmp_dir)]
-
-    result = subprocess.run(
-        clone_cmd,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"},
-    )
-    if result.returncode != 0:
-        return {"error": f"Git clone failed: {result.stderr.strip()}"}
+    clone_err = _clone_repo(repo_url, tmp_dir, ref)
+    if clone_err:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return {"error": clone_err}
 
     # Parse manifest
     manifest = _parse_tool_manifest(tmp_dir)
@@ -209,4 +222,76 @@ def remove_tool(name: str, marketplace_dir: Path) -> dict:
 
     shutil.rmtree(tool_dir)
     logger.info("Removed marketplace tool: %s", name)
+    return {"removed": True, "name": name}
+
+
+def install_skill(repo_url: str, skills_dir: Path, ref: str = "") -> dict:
+    """Clone a SKILL.md skill pack from a git repo and install it.
+
+    A skill is *data*, not code: unlike ``install_tool`` there is NO AST
+    validation and nothing is imported into the runtime. The pack's bundled
+    scripts (if any) only ever run later through the agent's already-granted
+    tools, inside the hardened container — installing the pack widens no
+    permission. We require a parseable ``SKILL.md`` at the repo root (name +
+    description) and a path-safe name.
+
+    Returns a status dict or ``{"error": ...}``.
+    """
+    from src.agent.skills import parse_skill_md
+
+    skills_dir.mkdir(parents=True, exist_ok=True)
+
+    # Unique staging dir (under the store, underscore-prefixed so SkillStore
+    # skips it) — lets concurrent installs run without clobbering each other.
+    tmp_dir = Path(tempfile.mkdtemp(prefix="_tmp_install_", dir=skills_dir))
+
+    clone_err = _clone_repo(repo_url, tmp_dir, ref)
+    if clone_err:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return {"error": clone_err}
+
+    skill = parse_skill_md(tmp_dir / "SKILL.md")
+    if skill is None:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return {
+            "error": (
+                "No valid SKILL.md found at the repo root "
+                "(requires name + description in YAML frontmatter)"
+            ),
+        }
+
+    final_dir = skills_dir / skill.name
+    if final_dir.exists():
+        shutil.rmtree(final_dir)
+    shutil.move(str(tmp_dir), str(final_dir))
+
+    git_dir = final_dir / ".git"
+    if git_dir.exists():
+        shutil.rmtree(git_dir)
+
+    metadata = {
+        "name": skill.name,
+        "version": skill.version or "unknown",
+        "description": skill.description,
+        "repo_url": repo_url,
+        "ref": ref,
+    }
+    (final_dir / ".installed.json").write_text(json.dumps(metadata, indent=2) + "\n")
+
+    logger.info("Installed skill pack: %s v%s", skill.name, metadata["version"])
+    return {"installed": True, **metadata}
+
+
+def remove_skill(name: str, skills_dir: Path) -> dict:
+    """Remove an installed skill pack."""
+    # Strict allowlist — rejects "", ".", "..", and any path separator, so a
+    # name can never resolve to the store dir itself (which rmtree would wipe).
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+        return {"error": "Invalid skill name"}
+    skill_dir = skills_dir / name
+    if not skill_dir.exists():
+        return {"error": f"Skill '{name}' not found"}
+
+    shutil.rmtree(skill_dir)
+    logger.info("Removed skill pack: %s", name)
     return {"removed": True, "name": name}

@@ -412,6 +412,7 @@ class DockerBackend(RuntimeBackend):
             "MESH_URL": f"http://{mesh_host}:{self.mesh_host_port}",
             "TOOLS_DIR": "/app/tools",
             "SKILLS_DIR": "/app/skills",
+            "SKILLS_INSTALLED_DIR": "/app/skills_installed",
             "MESH_AUTH_TOKEN": auth_token,
         }
         # Route system_prompt through INITIAL_INSTRUCTIONS for spawn compat
@@ -471,14 +472,24 @@ class DockerBackend(RuntimeBackend):
                 mp_path = marketplace_dir.as_posix()
             volumes[mp_path] = {"bind": "/app/marketplace_tools", "mode": "ro"}
 
-        # Bundled SKILL.md skill packs (read-only). Installed/custom packs
-        # live on the writable /data volume at /data/skills (see SkillStore).
+        # Bundled SKILL.md skill packs (read-only, shipped in the repo).
         skills_dir = self.project_root / "skills"
         if skills_dir.is_dir():
             sk_path = str(skills_dir)
             if platform.system() == "Windows":
                 sk_path = skills_dir.as_posix()
             volumes[sk_path] = {"bind": "/app/skills", "mode": "ro"}
+
+        # Operator-installed skill packs — one shared host dir bind-mounted
+        # read-only into every agent (NOT the per-agent /data volume), so an
+        # install is visible fleet-wide. Created up front so the bind always
+        # binds; new installs into it are then live (SkillStore re-scans).
+        skills_installed_dir = self.project_root / "skills_installed"
+        skills_installed_dir.mkdir(parents=True, exist_ok=True)
+        ski_path = str(skills_installed_dir)
+        if platform.system() == "Windows":
+            ski_path = skills_installed_dir.as_posix()
+        volumes[ski_path] = {"bind": "/app/skills_installed", "mode": "ro"}
 
         # Read-only uploads: user-managed files agents can read but never write.
         uploads_path = str(self.uploads_dir.as_posix() if platform.system() == "Windows" else self.uploads_dir)
@@ -1058,6 +1069,16 @@ class SandboxBackend(RuntimeBackend):
         else:
             skills_dest.mkdir(exist_ok=True)
 
+        # Copy operator-installed skill packs (shared host dir → workspace)
+        skills_installed_src = self.project_root / "skills_installed"
+        skills_installed_dest = ws / "skills_installed"
+        if skills_installed_src.is_dir():
+            if skills_installed_dest.exists():
+                shutil.rmtree(skills_installed_dest)
+            shutil.copytree(skills_installed_src, skills_installed_dest, symlinks=True)
+        else:
+            skills_installed_dest.mkdir(exist_ok=True)
+
         # Generate per-agent auth token for mesh request verification.
         # Task 4 invariant: every agent (including the operator) gets a
         # distinct token keyed by ``agent_id``; no fleet-shared token
@@ -1073,6 +1094,7 @@ class SandboxBackend(RuntimeBackend):
             "MESH_URL": f"http://host.docker.internal:{self.mesh_host_port}",
             "TOOLS_DIR": "/app/tools",
             "SKILLS_DIR": "/app/skills",
+            "SKILLS_INSTALLED_DIR": "/app/skills_installed",
             "AGENT_PORT": str(self.AGENT_PORT),
             "MESH_AUTH_TOKEN": auth_token,
         }

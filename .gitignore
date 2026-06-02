@@ -44,6 +44,8 @@ benchmark_report.md
 # Local-only demo recorder output (record.js + output snapshots)
 demo/
 agent_tools/_marketplace/
+# Operator-installed skill packs (shared, populated at runtime)
+skills_installed/
 uv.lock
 .claude/
 .openlegion
