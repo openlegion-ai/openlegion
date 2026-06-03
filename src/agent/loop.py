@@ -326,6 +326,21 @@ class AgentLoop:
         # tighter soft bound below them. Interactive chat (no task_id) is
         # completely unaffected.
         self.TASK_MAX_TOOL_ROUNDS = _clamp_env("OPENLEGION_TASK_MAX_TOOL_ROUNDS", 20, 1, 100)
+        # Item 3 (Codex r4): TASK_MAX and CHAT_MAX are independently
+        # env-clamped, so a misconfig (TASK_MAX > CHAT_MAX) could let a task
+        # exhaust the interactive CHAT_MAX_TOOL_ROUNDS bound — falling through
+        # to the ``tool_limit_reached`` exit — BEFORE its per-task cap ever
+        # fired. The whole design assumes TASK_MAX <= CHAT_MAX (the top-of-round
+        # cap break always wins). Enforce that invariant here so the effective
+        # per-task budget can never exceed the interactive ceiling.
+        if self.TASK_MAX_TOOL_ROUNDS > self.CHAT_MAX_TOOL_ROUNDS:
+            logger.info(
+                "TASK_MAX_TOOL_ROUNDS=%d exceeds CHAT_MAX_TOOL_ROUNDS=%d — "
+                "clamping the effective per-task budget to %d",
+                self.TASK_MAX_TOOL_ROUNDS, self.CHAT_MAX_TOOL_ROUNDS,
+                self.CHAT_MAX_TOOL_ROUNDS,
+            )
+            self.TASK_MAX_TOOL_ROUNDS = self.CHAT_MAX_TOOL_ROUNDS
         self.agent_id = agent_id
         self.role = role
         self.memory = memory
@@ -1702,6 +1717,46 @@ class AgentLoop:
         for t in tool_outputs:
             name = t.get("tool") or t.get("name") or ""
             if name and name not in _READ_ONLY_TOOLS:
+                return True
+        return False
+
+    @staticmethod
+    def _last_round_terminal_completion(tool_outputs: list[dict] | None) -> bool:
+        """True iff the most recent tool round closed the task for real.
+
+        A "genuine completion" is a SUCCESSFUL terminal coordination tool:
+
+          * ``complete_task`` whose output carries ``completed is True``
+          * ``hand_off`` whose output carries ``handed_off is True``
+
+        This is deliberately NARROWER than ``_has_outbound_effect``: a
+        ``notify_user`` / ``write_blackboard`` / ``publish_event`` is an
+        outbound side-effect but NOT a task completion, so it must NOT pre-empt
+        the convergence cap. A FAILED terminal tool (``handed_off=False`` /
+        ``complete_task_failed`` flag) is likewise NOT a completion — it is
+        handled by ``_chat_result_failure_reason`` (→ ``failed``) and must not
+        short-circuit the cap either.
+
+        Item 1 fix (Codex r4): the budgeted chat loop calls this AFTER tool
+        execution. When it returns True, the loop returns the NORMAL
+        (non-capped) result immediately so chat()'s done/handoff close runs,
+        instead of continuing to the next round's top-of-loop cap check that
+        would otherwise override the just-landed completion with ``blocked``.
+
+        Only the LAST round's outputs matter (the round that just executed),
+        but scanning the full accumulated list is equivalent and simpler: a
+        successful terminal tool anywhere in the turn means the task converged.
+        """
+        if not tool_outputs:
+            return False
+        for t in tool_outputs:
+            name = t.get("tool") or t.get("name") or ""
+            output = t.get("output")
+            if not isinstance(output, dict):
+                continue
+            if name == "complete_task" and output.get("completed") is True:
+                return True
+            if name == "hand_off" and output.get("handed_off") is True:
                 return True
         return False
 
@@ -3503,27 +3558,75 @@ class AgentLoop:
                 # task's terminal close (``_auto_close_task`` pops it), so it
                 # tracks only in-flight tasks. But sustained mesh-write
                 # failures (5xx) keep counts alive indefinitely, so cap the
-                # dict size: when adding a NEW task would exceed the bound,
-                # evict an arbitrary existing entry first. Re-incrementing an
-                # already-tracked task never grows the dict, so an in-flight
-                # task is never evicted out from under itself by this guard.
+                # dict size.
+                #
+                # Item 4 fix (Codex r4): the previous design evicted an
+                # ARBITRARY existing entry to make room for a new task. That
+                # was unsafe — the evicted entry could belong to a still-working
+                # task, which would then regain a FRESH full per-task budget on
+                # its next round (the exact failure the cap exists to prevent).
+                # New design: never evict a tracked entry. Once at the bound,
+                # simply DO NOT begin tracking a brand-new task (log a warning).
+                # An untracked task runs without the advisory per-task cap — but
+                # that only happens with 256 simultaneously in-flight tasks
+                # under sustained mesh-write failure, a far more benign outcome
+                # than silently resetting a live task's budget. A task already
+                # in the dict always keeps incrementing its own count.
                 if _task_id:
                     if (
                         _task_id not in self._task_round_counts
                         and len(self._task_round_counts)
                         >= self._TASK_ROUND_COUNTS_MAX
                     ):
-                        # Evict an arbitrary (effectively oldest-inserted on
-                        # CPython dicts) entry to keep the bound. Advisory
-                        # state only — a wrongly-evicted task just gets a fresh
-                        # budget on its next round, which is acceptable under
-                        # the degenerate sustained-failure regime this guards.
-                        self._task_round_counts.pop(
-                            next(iter(self._task_round_counts)), None,
+                        logger.warning(
+                            "task convergence count table at bound (%d) — not "
+                            "tracking new task=%s; it runs without the advisory "
+                            "per-task cap until an in-flight task closes",
+                            self._TASK_ROUND_COUNTS_MAX, _task_id,
                         )
-                    self._task_round_counts[_task_id] = (
-                        self._task_round_counts.get(_task_id, 0) + 1
+                    else:
+                        self._task_round_counts[_task_id] = (
+                            self._task_round_counts.get(_task_id, 0) + 1
+                        )
+
+                # Item 1 fix (Codex r4) — completion wins over the convergence
+                # cap. If THIS round landed a SUCCESSFUL terminal coordination
+                # tool (complete_task → completed / hand_off → handed_off), the
+                # task genuinely converged. Return the NORMAL (non-capped)
+                # result NOW so chat()'s done/handoff close path runs — instead
+                # of looping to the next round's top-of-loop cap check, which
+                # (when this round pushed the count to TASK_MAX) would break and
+                # mislabel a real completion as ``blocked``. Gated on
+                # ``_task_id`` so interactive chat is untouched. A non-terminal
+                # outbound (notify_user, write_blackboard, …) does NOT trip this
+                # — those still fall through to the cap, so a task that hit the
+                # cap doing non-terminal work is still closed ``blocked``.
+                if _task_id and AgentLoop._last_round_terminal_completion(
+                    tool_outputs
+                ):
+                    logger.info(
+                        "chat task=%s landed a terminal coordination tool this "
+                        "round — returning to let chat() close done/handoff "
+                        "(convergence cap does not pre-empt a real completion)",
+                        _task_id,
                     )
+                    self.state = "idle"
+                    self._chat_messages.append(
+                        {"role": "assistant", "content": ""}
+                    )
+                    self._log_chat_turn(
+                        user_message, "", tool_outputs, turn_id=turn_id,
+                    )
+                    return {
+                        "response": "",
+                        "tool_outputs": tool_outputs,
+                        "tokens_used": total_tokens,
+                        # Intentionally NOT ``task_convergence_capped``: this is
+                        # a genuine completion, so chat() runs its normal close.
+                        # ``silent_reply`` suppresses the empty-response marker
+                        # (the task closes done/handoff, no chat bubble wanted).
+                        "silent_reply": True,
+                    }
 
                 # Rebuild system prompt if operator playbook state changed
                 if self._is_operator:
