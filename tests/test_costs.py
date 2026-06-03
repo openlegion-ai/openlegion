@@ -14,7 +14,8 @@ class TestCostTracking:
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()
         self.db_path = os.path.join(self._tmpdir, "costs.db")
-        self.tracker = CostTracker(db_path=self.db_path)
+        self.budgets_path = os.path.join(self._tmpdir, "agent_budgets.json")
+        self.tracker = CostTracker(db_path=self.db_path, budgets_path=self.budgets_path)
 
     def teardown_method(self):
         self.tracker.close()
@@ -104,7 +105,8 @@ class TestBudgetEnforcement:
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()
         self.db_path = os.path.join(self._tmpdir, "costs.db")
-        self.tracker = CostTracker(db_path=self.db_path)
+        self.budgets_path = os.path.join(self._tmpdir, "agent_budgets.json")
+        self.tracker = CostTracker(db_path=self.db_path, budgets_path=self.budgets_path)
 
     def teardown_method(self):
         self.tracker.close()
@@ -142,7 +144,8 @@ class TestBudgetOverrunWarning:
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()
         self.db_path = os.path.join(self._tmpdir, "costs.db")
-        self.tracker = CostTracker(db_path=self.db_path)
+        self.budgets_path = os.path.join(self._tmpdir, "agent_budgets.json")
+        self.tracker = CostTracker(db_path=self.db_path, budgets_path=self.budgets_path)
 
     def teardown_method(self):
         self.tracker.close()
@@ -206,7 +209,8 @@ class TestProjectCostAggregation:
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()
         self.db_path = os.path.join(self._tmpdir, "costs.db")
-        self.tracker = CostTracker(db_path=self.db_path)
+        self.budgets_path = os.path.join(self._tmpdir, "agent_budgets.json")
+        self.tracker = CostTracker(db_path=self.db_path, budgets_path=self.budgets_path)
 
     def teardown_method(self):
         self.tracker.close()
@@ -251,7 +255,8 @@ class TestCostTrackerCleanup:
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()
         self.db_path = os.path.join(self._tmpdir, "costs.db")
-        self.tracker = CostTracker(db_path=self.db_path)
+        self.budgets_path = os.path.join(self._tmpdir, "agent_budgets.json")
+        self.tracker = CostTracker(db_path=self.db_path, budgets_path=self.budgets_path)
 
     def teardown_method(self):
         self.tracker.close()
@@ -282,6 +287,157 @@ class TestCostTrackerCleanup:
     def test_cleanup_nonexistent_agent(self):
         deleted = self.tracker.cleanup_agent("ghost")
         assert deleted == 0
+
+
+class TestBudgetPersistence:
+    """Per-agent budget overrides survive a CostTracker restart (Bug fix).
+
+    Regression: ``set_budget`` only mutated an in-memory dict, so caps
+    raised/lowered by the operator silently reverted to the global default
+    on the next mesh restart / redeploy.
+    """
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self._tmpdir, "costs.db")
+        self.budgets_path = os.path.join(self._tmpdir, "agent_budgets.json")
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_set_budget_persists_across_restart(self):
+        tracker = CostTracker(db_path=self.db_path, budgets_path=self.budgets_path)
+        tracker.set_budget("agent1", daily_usd=42.0, monthly_usd=999.0)
+        tracker.close()
+
+        # File was written.
+        assert os.path.exists(self.budgets_path)
+
+        # A fresh tracker (simulating a mesh restart) loads the override.
+        restarted = CostTracker(db_path=self.db_path, budgets_path=self.budgets_path)
+        assert restarted.budgets["agent1"] == {
+            "daily_usd": 42.0,
+            "monthly_usd": 999.0,
+        }
+        budget = restarted.check_budget("agent1")
+        assert budget["daily_limit"] == 42.0
+        assert budget["monthly_limit"] == 999.0
+        restarted.close()
+
+    def test_missing_file_yields_empty_budgets(self):
+        # No file on disk → empty overrides, no crash.
+        assert not os.path.exists(self.budgets_path)
+        tracker = CostTracker(db_path=self.db_path, budgets_path=self.budgets_path)
+        assert tracker.budgets == {}
+        tracker.close()
+
+    def test_corrupt_file_yields_empty_budgets_and_logs(self):
+        with open(self.budgets_path, "w") as f:
+            f.write("{not valid json")
+        with patch("src.host.costs.logger") as mock_logger:
+            tracker = CostTracker(db_path=self.db_path, budgets_path=self.budgets_path)
+            assert tracker.budgets == {}
+            mock_logger.warning.assert_called_once()
+        tracker.close()
+
+    def test_malformed_entry_skipped_other_entries_still_load(self):
+        # One bad row (non-numeric daily_usd) must not abort loading the rest:
+        # the good agent's budget loads, the bad one is skipped, no exception.
+        import json
+
+        with open(self.budgets_path, "w") as f:
+            json.dump(
+                {
+                    "good": {"daily_usd": 50, "monthly_usd": 1000},
+                    "bad": {"daily_usd": "oops", "monthly_usd": 5},
+                },
+                f,
+            )
+        with patch("src.host.costs.logger") as mock_logger:
+            tracker = CostTracker(db_path=self.db_path, budgets_path=self.budgets_path)
+            mock_logger.warning.assert_called_once()
+        assert tracker.budgets["good"] == {"daily_usd": 50.0, "monthly_usd": 1000.0}
+        assert "bad" not in tracker.budgets
+        tracker.close()
+
+    def test_cleanup_updates_persisted_file(self):
+        tracker = CostTracker(db_path=self.db_path, budgets_path=self.budgets_path)
+        tracker.set_budget("agent1", daily_usd=5.0, monthly_usd=100.0)
+        tracker.set_budget("agent2", daily_usd=7.0, monthly_usd=140.0)
+        tracker.cleanup_agent("agent1")
+        tracker.close()
+
+        # Removal is reflected on disk: a restart no longer sees agent1.
+        restarted = CostTracker(db_path=self.db_path, budgets_path=self.budgets_path)
+        assert "agent1" not in restarted.budgets
+        assert "agent2" in restarted.budgets
+        restarted.close()
+
+    def test_save_failure_does_not_crash(self):
+        from pathlib import Path
+
+        tracker = CostTracker(db_path=self.db_path, budgets_path=self.budgets_path)
+        # Point the persist path at an unwritable location so the write fails.
+        with patch.object(
+            tracker, "budgets_path",
+            Path("/proc/nonexistent/agent_budgets.json"),
+        ):
+            with patch("src.host.costs.logger") as mock_logger:
+                # Must not raise even though the write fails.
+                tracker.set_budget("agent1", daily_usd=1.0, monthly_usd=2.0)
+                mock_logger.warning.assert_called()
+        # In-memory mutation still applied.
+        assert tracker.budgets["agent1"] == {"daily_usd": 1.0, "monthly_usd": 2.0}
+        tracker.close()
+
+
+class TestBudgetsPathDerivation:
+    """When no ``budgets_path`` is passed, it is derived from ``db_path`` so
+    tests and tools pointing the db at a tmp dir never touch the real
+    ``config/agent_budgets.json``.
+    """
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self._tmpdir, "costs.db")
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_derives_budgets_path_alongside_tmp_db(self):
+        from pathlib import Path
+
+        config_file = Path("config/agent_budgets.json")
+        config_existed_before = config_file.exists()
+
+        # No budgets_path → co-located with the (tmp) db, NOT config/.
+        tracker = CostTracker(db_path=self.db_path)
+        expected = Path(self._tmpdir) / "agent_budgets.json"
+        assert tracker.budgets_path == expected
+
+        tracker.set_budget("agent1", daily_usd=3.0, monthly_usd=60.0)
+        tracker.close()
+
+        # The write landed under the tmp dir, not the real config dir.
+        assert expected.exists()
+        # And it did NOT create / mutate the real config file.
+        assert config_file.exists() == config_existed_before
+
+    def test_production_default_db_maps_to_config(self):
+        from pathlib import Path
+
+        # The production default db_path maps to the canonical config file
+        # (constructed without touching disk via __new__ + manual derivation).
+        tracker = object.__new__(CostTracker)
+        db_path = "data/costs.db"
+        budgets_path = None
+        if budgets_path is None:
+            if db_path == "data/costs.db":
+                budgets_path = "config/agent_budgets.json"
+            else:
+                budgets_path = str(Path(db_path).parent / "agent_budgets.json")
+        tracker.budgets_path = Path(budgets_path)
+        assert tracker.budgets_path == Path("config/agent_budgets.json")
 
 
 class TestCostTrackerWithVault:
