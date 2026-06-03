@@ -325,7 +325,7 @@ class AgentLoop:
         # daily budget preflight, lane wall-clock cap). It only ADDS a
         # tighter soft bound below them. Interactive chat (no task_id) is
         # completely unaffected.
-        self.TASK_MAX_TOOL_ROUNDS = _clamp_env("OPENLEGION_TASK_MAX_TOOL_ROUNDS", 12, 1, 100)
+        self.TASK_MAX_TOOL_ROUNDS = _clamp_env("OPENLEGION_TASK_MAX_TOOL_ROUNDS", 20, 1, 100)
         self.agent_id = agent_id
         self.role = role
         self.memory = memory
@@ -2280,9 +2280,12 @@ class AgentLoop:
     # ``__init__`` (env-clamped). This attr only exists so the constant is
     # discoverable next to the other CHAT_* bounds and gives a sane default
     # if an AgentLoop is ever constructed without running ``__init__``.
-    TASK_MAX_TOOL_ROUNDS = 12
-    # Inject the convergence wrap-up nudge when this many task rounds remain.
-    _TASK_CONVERGENCE_NUDGE_REMAINING = 2
+    TASK_MAX_TOOL_ROUNDS = 20
+    # Append the convergence wrap-up directive to the SYSTEM PROMPT (NOT a
+    # chat message — that would break LLM role-alternation, see Codex
+    # finding #1) once the per-task budget has this many rounds or fewer
+    # remaining. A second, harder escalation fires at ``<= 1`` remaining.
+    _TASK_CONVERGENCE_NUDGE_REMAINING = 4
     # Static blocker_note used when the per-task budget is exhausted without
     # a terminal coordination tool. Short + static-worded on purpose — never
     # interpolate untrusted task content into this note.
@@ -2290,6 +2293,21 @@ class AgentLoop:
         "convergence_cap: task hit its per-task round budget without "
         "completing — produce the deliverable and call complete_task or "
         "hand_off"
+    )
+    # System-prompt suffixes for the convergence nudge (Codex finding #1).
+    # Appended to THIS round's ``system`` string — never injected as a chat
+    # message — so the user/assistant/tool role-alternation the LLM call
+    # requires is preserved. Static-worded; no untrusted content.
+    _TASK_CONVERGENCE_SOFT_SUFFIX = (
+        "\n\n## Task wrap-up\n"
+        "You are nearing this task's per-task round budget. Wrap up this "
+        "task soon — produce your deliverable and call complete_task or "
+        "hand_off. Do not start new work."
+    )
+    _TASK_CONVERGENCE_FINAL_SUFFIX = (
+        "\n\n## Task wrap-up — FINAL ROUND\n"
+        "This is the final round for this task. Call complete_task or "
+        "hand_off now, or give your final answer. Do NOT start new work."
     )
 
     async def _auto_continue_session(self, system: str) -> None:
@@ -2535,14 +2553,23 @@ class AgentLoop:
                     #   3. Success → ``done`` with response prefix as
                     #      summary.
                     if task_id:
-                        # RC-1: per-task convergence cap reached. The agent
-                        # exhausted its per-task round budget without calling
-                        # a terminal coordination tool. Drive the task to a
-                        # TERMINAL ``blocked`` state with a short, static
-                        # blocker_note (never dangling ``working``, never
-                        # leaking untrusted task content). Checked BEFORE the
-                        # generic failure-reason scan so the convergence note
-                        # wins over the ``max_iterations_reached`` label the
+                        # RC-1 (Codex finding #3): per-task convergence cap
+                        # reached ONLY if the agent did NOT converge on its
+                        # own. ``task_convergence_capped`` is set exclusively
+                        # by ``_chat_inner``'s budget-exhausted fall-through —
+                        # the path where the model kept emitting tool_calls
+                        # past its per-task round budget. A genuine completion
+                        # (the model returned a final text reply, or closed the
+                        # task via complete_task / hand_off) DOES NOT set the
+                        # flag, so it falls through to the normal success path
+                        # below and closes ``done`` / handoff — the cap never
+                        # pre-empts a real completion. When the flag IS set,
+                        # drive the task to a TERMINAL ``blocked`` state with a
+                        # short, static blocker_note (never dangling
+                        # ``working``, never leaking untrusted task content).
+                        # Checked BEFORE the generic failure-reason scan so the
+                        # convergence note wins over the
+                        # ``max_iterations_reached`` label the
                         # ``tool_limit_reached`` envelope would otherwise emit.
                         if result.get("task_convergence_capped"):
                             logger.warning(
@@ -2732,14 +2759,6 @@ class AgentLoop:
         transitions, so a ``blocked`` close that wants a reason must pass
         ``blocker_note`` explicitly (e.g. the convergence-cap close).
         """
-        # RC-3: drop the advisory per-task convergence count once the task
-        # leaves the active ``working`` state — the budget is per-task, not
-        # forever, so a future task reusing the same id starts fresh. Only
-        # ``working`` keeps the count alive (it's the in-progress marker the
-        # chat() open transition uses); every other status is an end-of-
-        # involvement transition for this agent.
-        if status != "working":
-            self._task_round_counts.pop(task_id, None)
         try:
             await self.mesh_client.set_task_status(
                 task_id, status,
@@ -2747,6 +2766,17 @@ class AgentLoop:
                 error=error,
                 blocker_note=blocker_note,
             )
+            # RC-3 (Codex finding #4): drop the advisory per-task convergence
+            # count ONLY AFTER a successful NON-``working`` status write. The
+            # budget is per-task, not forever, so a terminal close frees it.
+            # ``working`` keeps the count alive (it's the in-progress marker
+            # the chat() open transition uses). Popping BEFORE the write
+            # raced: a 5xx / network failure left the task ``working`` on the
+            # mesh but wiped the local budget, so a re-wake would get a fresh
+            # full window. By popping only after success, a failed write keeps
+            # the accumulated budget intact.
+            if status != "working":
+                self._task_round_counts.pop(task_id, None)
         except Exception as e:
             # Discriminate HTTP errors: 4xx is usually "state machine said
             # no" (benign, e.g. concurrent transition already landed);
@@ -2759,6 +2789,12 @@ class AgentLoop:
                     "Auto-close %s → %s rejected by state machine (%s): %s",
                     task_id, status, http_status, e,
                 )
+                # RC-3 (Codex finding #4): a 4xx means the task is ALREADY in
+                # a terminal/incompatible state (a concurrent transition
+                # landed) — this agent's involvement is over, so it's safe to
+                # drop the advisory per-task convergence count.
+                if status != "working":
+                    self._task_round_counts.pop(task_id, None)
             else:
                 # No HTTP response or 5xx → the originating agent will
                 # never see this task close. Surface loudly so operators
@@ -3239,48 +3275,39 @@ class AgentLoop:
             steer_interrupts = 0
             for _round_idx in range(_task_loop_rounds):
                 self._bump_liveness()
-                # RC-1 convergence forcing function (task path only). Mirror
-                # the heartbeat wrap-up nudge + last-iteration tool-withhold
-                # (see execute_heartbeat ~line 1948-1979). ``_task_left`` is
-                # the rounds remaining in the WHOLE per-task budget, including
-                # prior wakes — so a re-woken near-exhausted task is nudged
-                # / withheld immediately, not given a fresh window.
-                _withhold_tools_for_task = False
+                # RC-1 convergence forcing function (task path only).
+                #
+                # Codex finding #1: the nudge is appended to THIS round's
+                # SYSTEM PROMPT — never injected as a ``user`` chat message.
+                # Appending a synthetic user message after a ``tool`` result
+                # (or after another user message) breaks the
+                # user→assistant→tool→assistant role-alternation the LLM call
+                # requires (Constraint #7). The system prompt is rebuildable
+                # per round, so a transient suffix is safe and leaves
+                # ``self._chat_messages`` untouched.
+                #
+                # Codex finding #2: TOOLS REMAIN AVAILABLE on every budgeted
+                # round. The agent converges by CALLING complete_task /
+                # hand_off, so withholding tools would PREVENT convergence and
+                # wrongly force a ``blocked`` close on the deliverable. There
+                # is no last-round tool-withhold on the task path.
+                #
+                # ``_task_left`` is the rounds remaining in the WHOLE per-task
+                # budget, including prior wakes — so a re-woken near-exhausted
+                # task is nudged immediately, not given a fresh window.
+                _round_system = system
                 if _task_id:
                     _task_left = _task_remaining - _round_idx
-                    if _task_left == self._TASK_CONVERGENCE_NUDGE_REMAINING:
-                        self._chat_messages.append({
-                            "role": "user",
-                            "content": (
-                                "[SYSTEM] You are near this task's limit — "
-                                "produce your deliverable now and call "
-                                "complete_task or hand_off; do not start new "
-                                "work."
-                            ),
-                            "_origin": "system:task_convergence",
-                        })
-                    elif _task_left <= 1:
-                        self._chat_messages.append({
-                            "role": "user",
-                            "content": (
-                                "[SYSTEM] LAST round for this task. Call "
-                                "complete_task or hand_off now, or give your "
-                                "final answer. Do NOT start new work."
-                            ),
-                            "_origin": "system:task_convergence",
-                        })
-                        # On the final round, withhold tools so the model is
-                        # forced to produce a terminal text response instead
-                        # of issuing yet another tool call (mirrors the
-                        # heartbeat's last-iteration tool-withhold).
-                        _withhold_tools_for_task = True
+                    if _task_left <= 1:
+                        _round_system = system + self._TASK_CONVERGENCE_FINAL_SUFFIX
+                    elif _task_left <= self._TASK_CONVERGENCE_NUDGE_REMAINING:
+                        _round_system = system + self._TASK_CONVERGENCE_SOFT_SUFFIX
                 _iter_tools = (
-                    None if _withhold_tools_for_task
-                    else self.skills.get_tool_definitions(**self._skill_filter_kw) or None
+                    self.skills.get_tool_definitions(**self._skill_filter_kw) or None
                 )
                 llm_response = await _llm_call_with_retry(
                     self.llm.chat,
-                    system=system,
+                    system=_round_system,
                     messages=self._chat_messages,
                     tools=_iter_tools,
                 )
@@ -3351,14 +3378,14 @@ class AgentLoop:
                         "tool_outputs": tool_outputs,
                         "tokens_used": total_tokens,
                     }
-                    if _withhold_tools_for_task:
-                        # RC-1: the per-task budget forced this round to run
-                        # tool-less. The agent was cut off at its convergence
-                        # cap rather than completing on its own — tag the
-                        # result so chat() drives the task to a TERMINAL
-                        # ``blocked`` state with the static convergence note,
-                        # never dangling ``working``.
-                        result_dict["task_convergence_capped"] = True
+                    # Codex finding #3: reaching this branch means the model
+                    # produced a final TEXT reply (no tool calls) of its own
+                    # accord — a genuine convergence. It must NOT be tagged
+                    # ``task_convergence_capped``; it flows to chat()'s normal
+                    # success path and closes ``done`` (or the lazy-completion
+                    # guard fires for a ghost reply). The convergence cap is
+                    # raised ONLY at the budget-exhausted fall-through below,
+                    # where the model kept emitting tool_calls past its budget.
                     if deliberate_silence:
                         # Mark a deliberate ``__SILENT__`` reply so the
                         # chat() empty-response fallback doesn't
@@ -3524,13 +3551,16 @@ class AgentLoop:
                 "tool_limit_reached": True,
             }
             if _task_id:
-                # RC-1: this fall-through is only reachable on the task path
-                # when the model kept emitting tool_calls even on the
-                # tool-withheld final round (or the env-set per-task budget
-                # exceeded CHAT_MAX_TOOL_ROUNDS). Either way the per-task
-                # convergence cap is the binding limit — tag so chat() closes
-                # the task ``blocked`` with the convergence note rather than a
-                # generic ``max_iterations_reached`` failure.
+                # RC-1 (Codex finding #3): this fall-through is reached on the
+                # task path ONLY when the model exhausted its per-task round
+                # budget while STILL emitting tool_calls — i.e. it never
+                # converged to a terminal complete_task / hand_off / final
+                # text of its own accord (which would have returned via the
+                # no-tool-calls branch above WITHOUT this flag). Tools were
+                # offered on every budgeted round, so this is a genuine
+                # non-convergence: tag so chat() closes the task ``blocked``
+                # with the static convergence note rather than a generic
+                # ``max_iterations_reached`` failure.
                 tool_limit_result["task_convergence_capped"] = True
             if deliberate_silence or marker_substituted:
                 tool_limit_result["silent_reply"] = True
