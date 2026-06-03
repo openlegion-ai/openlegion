@@ -87,16 +87,23 @@ class CostTracker:
                 )
                 return
             for agent, budget in data.items():
-                if (
-                    isinstance(budget, dict)
-                    and "daily_usd" in budget
-                    and "monthly_usd" in budget
-                ):
-                    self.budgets[agent] = {
-                        "daily_usd": float(budget["daily_usd"]),
-                        "monthly_usd": float(budget["monthly_usd"]),
-                    }
-        except (json.JSONDecodeError, OSError, ValueError, TypeError) as e:
+                try:
+                    if (
+                        isinstance(budget, dict)
+                        and "daily_usd" in budget
+                        and "monthly_usd" in budget
+                    ):
+                        self.budgets[agent] = {
+                            "daily_usd": float(budget["daily_usd"]),
+                            "monthly_usd": float(budget["monthly_usd"]),
+                        }
+                except (ValueError, TypeError) as e:
+                    logger.warning(
+                        "Skipping malformed agent budget for %s in %s: %s",
+                        agent, self.budgets_path, e,
+                    )
+                    continue
+        except (json.JSONDecodeError, OSError) as e:
             logger.warning(
                 "Failed to load agent budgets from %s: %s", self.budgets_path, e
             )

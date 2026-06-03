@@ -340,6 +340,26 @@ class TestBudgetPersistence:
             mock_logger.warning.assert_called_once()
         tracker.close()
 
+    def test_malformed_entry_skipped_other_entries_still_load(self):
+        # One bad row (non-numeric daily_usd) must not abort loading the rest:
+        # the good agent's budget loads, the bad one is skipped, no exception.
+        import json
+
+        with open(self.budgets_path, "w") as f:
+            json.dump(
+                {
+                    "good": {"daily_usd": 50, "monthly_usd": 1000},
+                    "bad": {"daily_usd": "oops", "monthly_usd": 5},
+                },
+                f,
+            )
+        with patch("src.host.costs.logger") as mock_logger:
+            tracker = CostTracker(db_path=self.db_path, budgets_path=self.budgets_path)
+            mock_logger.warning.assert_called_once()
+        assert tracker.budgets["good"] == {"daily_usd": 50.0, "monthly_usd": 1000.0}
+        assert "bad" not in tracker.budgets
+        tracker.close()
+
     def test_cleanup_updates_persisted_file(self):
         tracker = CostTracker(db_path=self.db_path, budgets_path=self.budgets_path)
         tracker.set_budget("agent1", daily_usd=5.0, monthly_usd=100.0)
