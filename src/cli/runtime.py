@@ -562,7 +562,25 @@ class RuntimeContext:
                 self.health_monitor.register(agent_id)
 
     def _setup_dispatch(self) -> None:
-        from src.host.lanes import LaneManager
+        from src.host.lanes import _DEFAULT_LANE_TIMEOUT_SECONDS, LaneManager
+
+        # Long-run dispatch drop (prod incident): the mesh→agent ``/chat``
+        # call previously inherited transport's 120s default while a task
+        # run legitimately takes many minutes (loop MAX_ITERATIONS × 300s
+        # tool cap). The inner 120s timeout fired long before the lane's
+        # 900s wall-clock cap, returned ``"(no response)"`` as a *success*,
+        # and the lane treated it as a completed turn — silently dropping
+        # in-flight output. The inner ``/chat`` timeout is set 60s ABOVE the
+        # agent's EFFECTIVE lane cap — which may be a per-agent
+        # ``watchdog_ttl_seconds`` override (set via
+        # ``LaneManager.set_agent_timeout``), not just the module default —
+        # computed per dispatch below. That keeps the lane's ``wait_for``
+        # watchdog the sole governor of long runs for EVERY agent: on a long
+        # run the lane fires first, cancels the dispatch coroutine
+        # (cancelling the in-flight httpx request), and runs its existing
+        # failed-marking + check_inbox back-edge. The inner timeout is only a
+        # backstop. ``_DEFAULT_LANE_TIMEOUT_SECONDS`` is the fallback when no
+        # lane manager is wired.
 
         async def _direct_dispatch(
             agent_name: str, message: str,
@@ -590,10 +608,16 @@ class RuntimeContext:
             # specific task once its loop returns.
             if task_id:
                 extra_headers["x-task-id"] = task_id
+            effective_cap = (
+                self.lane_manager.timeout_for(agent_name)
+                if self.lane_manager is not None
+                else _DEFAULT_LANE_TIMEOUT_SECONDS
+            )
             try:
                 result = await self.transport.request(
                     agent_name, "POST", "/chat", json={"message": message},
                     headers=extra_headers or None,
+                    timeout=effective_cap + 60,
                 )
                 response = result.get("response", "(no response)")
                 duration_ms = int((_time.time() - t0) * 1000)

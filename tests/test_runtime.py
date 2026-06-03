@@ -1762,3 +1762,116 @@ class TestBuildMcpServersEnv:
         }]
         with pytest.raises(ValueError):
             b._build_mcp_servers_env(servers, agent_id="a1")
+
+
+# ── Long-run dispatch timeout alignment (prod incident) ───────────
+#
+# Regression coverage for the production bug where heavy agent task runs
+# produced no visible output: the mesh→agent ``/chat`` call inherited
+# transport's 120s default while the lane allowed 900s, so the inner
+# timeout fired first, returned ``"(no response)"`` as a *success*, and
+# the lane recorded a completed turn while the agent kept working.
+
+
+def _capture_dispatch_fn(monkeypatch, *, app=None):
+    """Build a RuntimeContext (bypassing __init__) and capture the
+    ``_direct_dispatch`` closure that ``_setup_dispatch`` hands to the
+    LaneManager. Returns ``(dispatch_fn, ctx, transport_mock)``.
+
+    We monkeypatch ``LaneManager`` so construction doesn't require real
+    stores, and immediately stop the freshly-spawned dispatch event loop
+    so the daemon thread doesn't linger.
+    """
+    from unittest.mock import AsyncMock
+
+    from src.cli import runtime as runtime_mod
+
+    captured: dict = {}
+
+    class _FakeLaneManager:
+        def __init__(self, *args, dispatch_fn=None, **kwargs):
+            captured["dispatch_fn"] = dispatch_fn
+            self._per_agent_timeouts: dict[str, int] = {}
+
+        def get_queue_depth(self, agent):  # pragma: no cover - unused
+            return 0
+
+        def set_agent_timeout(self, agent, seconds):
+            if seconds is None:
+                self._per_agent_timeouts.pop(agent, None)
+                return
+            self._per_agent_timeouts[agent] = max(60, int(seconds))
+
+        def timeout_for(self, agent):
+            from src.host.lanes import _DEFAULT_LANE_TIMEOUT_SECONDS
+            return self._per_agent_timeouts.get(
+                agent, _DEFAULT_LANE_TIMEOUT_SECONDS,
+            )
+
+    monkeypatch.setattr("src.host.lanes.LaneManager", _FakeLaneManager)
+
+    ctx = runtime_mod.RuntimeContext.__new__(runtime_mod.RuntimeContext)
+    transport_mock = AsyncMock()
+    ctx.transport = transport_mock
+    ctx.trace_store = None
+    ctx.event_bus = None
+    ctx.health_monitor = None
+    ctx._app = app
+
+    async def _noop_notify(*a, **k):  # pragma: no cover - unused here
+        return None
+
+    ctx._handle_notify_origin = _noop_notify
+
+    ctx._setup_dispatch()
+    # Stop the loop the setup spun up so the daemon thread exits cleanly.
+    loop = ctx._dispatch_loop
+    if loop is not None:
+        loop.call_soon_threadsafe(loop.stop)
+
+    return captured["dispatch_fn"], ctx, transport_mock
+
+
+class TestDispatchTimeoutAlignment:
+    @pytest.mark.asyncio
+    async def test_chat_request_uses_lane_cap_timeout_not_120(
+        self, monkeypatch,
+    ):
+        """``_direct_dispatch`` must pass the ``/chat`` timeout as a backstop
+        set just ABOVE the lane wall-clock cap (cap + 60), not transport's
+        120s default — the lane's ``wait_for`` stays the sole governor of
+        long runs."""
+        dispatch_fn, ctx, transport = _capture_dispatch_fn(monkeypatch)
+        transport.request.return_value = {"response": "done"}
+
+        result = await dispatch_fn("agent-x", "do heavy work")
+
+        assert result == "done"
+        transport.request.assert_awaited_once()
+        _args, kwargs = transport.request.call_args
+        # With no per-agent override the timeout tracks the lane's effective
+        # cap (the module default) + 60 — not transport's 120s default.
+        assert kwargs["timeout"] == ctx.lane_manager.timeout_for("agent-x") + 60
+        assert kwargs["timeout"] > 120
+
+    @pytest.mark.asyncio
+    async def test_chat_request_tracks_per_agent_watchdog_ttl_override(
+        self, monkeypatch,
+    ):
+        """When an agent has a per-agent lane cap (e.g. from
+        ``settings.watchdog_ttl_seconds`` → ``set_agent_timeout``), the inner
+        ``/chat`` timeout must track THAT effective cap + 60, not the global
+        constant — otherwise a 960s hardcoded timeout would fire before an
+        1800s lane cap and re-introduce the dropped-output bug."""
+        dispatch_fn, ctx, transport = _capture_dispatch_fn(monkeypatch)
+        transport.request.return_value = {"response": "done"}
+
+        # Per-agent override (watchdog_ttl_seconds: 1800 in agents.yaml).
+        ctx.lane_manager.set_agent_timeout("some-agent", 1800)
+
+        result = await dispatch_fn("some-agent", "do heavy work")
+
+        assert result == "done"
+        transport.request.assert_awaited_once()
+        _args, kwargs = transport.request.call_args
+        assert kwargs["timeout"] == 1860  # 1800 (override) + 60
