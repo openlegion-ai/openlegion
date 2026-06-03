@@ -4187,28 +4187,41 @@ async def test_stream_retry_returns_silent_token_emits_no_marker():
 # over-iterate up to ~CHAT_MAX_TOOL_ROUNDS × session-continues LLM calls,
 # only stopped by the mesh-side 900s lane cap.
 #
-# REWORKED mechanism (Codex review findings):
+# PRE-ROUND-BOUNDARY mechanism (Codex r3 — 3rd iteration):
+#   The loop runs over the NORMAL interactive bound (CHAT_MAX_TOOL_ROUNDS).
+#   The per-task cap is a PRE-ROUND boundary: at the TOP of each iteration,
+#   BEFORE the LLM call, if the task's persisted round count has reached
+#   TASK_MAX_TOOL_ROUNDS the loop breaks and returns immediately. This is the
+#   ONLY place ``task_convergence_capped`` is set for tasks.
 #   #1 the convergence nudge lives in the SYSTEM PROMPT (the ``system``
 #      kwarg of the per-round llm.chat call), NEVER a synthetic ``user``
 #      chat message — so role-alternation is preserved.
-#   #2 TOOLS REMAIN AVAILABLE on every budgeted round (no tool-withhold) —
-#      the agent converges by CALLING complete_task / hand_off.
+#   #2 TOOLS REMAIN AVAILABLE on every round (no tool-withhold) — the agent
+#      converges by CALLING complete_task / hand_off.
 #   #3 the cap closes ``blocked`` ONLY if the agent did NOT converge; a
-#      genuine completion (final text, or a coordination-tool close) still
-#      closes ``done`` / handoff.
+#      genuine completion (final text, or a coordination-tool close) returns
+#      via the no-tool-calls path INSIDE the loop, before the next round's
+#      top-of-loop cap check — so the cap can NEVER override it.
 #   #4 ``_task_round_counts`` is popped only AFTER a successful non-working
-#      status write.
+#      status write, and is size-bounded (``_TASK_ROUND_COUNTS_MAX``).
 #   #5 default TASK_MAX_TOOL_ROUNDS is 20.
+#
+# Codex r3 BLOCKERS this suite pins:
+#   B1 a terminal complete_task / hand_off / final on the LAST budgeted round
+#      closes done/handoff, NOT blocked (the cap never pre-empts it).
+#   B2 an exhausted re-wake (count already >= cap) breaks at the first round
+#      top with NO additional LLM call and NO tool round.
 
 
 def _always_tool_calling_loop(*, task_max=4, tool_name="web_search"):
     """An AgentLoop whose mocked LLM ALWAYS returns a tool call (never
-    converges on its own). The per-task budget — not the response list —
-    must be the binding limit. Tools are offered on EVERY round; the model
-    is only forced text-less by the final ``tools=None`` force-compose exit
-    that runs AFTER the budgeted loop is exhausted. ``_auto_close_task`` is
-    replaced with an AsyncMock so terminal-close calls can be asserted
-    without standing up a real mesh client.
+    converges on its own). The per-task PRE-ROUND boundary — not the response
+    list — must be the binding limit. Tools are offered on EVERY round. Once
+    the persisted round count reaches the cap, the top-of-round boundary
+    breaks and ``_chat_inner`` returns immediately WITHOUT a force-compose
+    LLM call. ``_auto_close_task`` is replaced with an AsyncMock so
+    terminal-close calls can be asserted without standing up a real mesh
+    client.
     """
     loop = _make_loop()
     loop.TASK_MAX_TOOL_ROUNDS = task_max
@@ -4248,9 +4261,11 @@ async def test_task_never_converges_closes_blocked_not_working():
 
     assert result.get("task_convergence_capped") is True
 
-    # Bounded by the per-task budget (one extra force-compose call), NOT the
+    # Bounded EXACTLY by the per-task budget: the cap breaks at the top of the
+    # round whose count has reached TASK_MAX, so there are exactly task_max
+    # tool-round LLM calls and NO force-compose call. Far below the
     # interactive CHAT_MAX_TOOL_ROUNDS (30).
-    assert loop.llm.chat.await_count <= loop.TASK_MAX_TOOL_ROUNDS + 1
+    assert loop.llm.chat.await_count == loop.TASK_MAX_TOOL_ROUNDS
     assert loop.llm.chat.await_count < loop.CHAT_MAX_TOOL_ROUNDS
 
     # Terminal close: blocked with the static convergence note.
@@ -4311,10 +4326,11 @@ async def test_convergence_nudge_in_system_prompt_not_chat_messages():
 
 @pytest.mark.asyncio
 async def test_tools_remain_available_on_every_budgeted_round():
-    """(b) Tools are offered on EVERY budgeted round, including the final
-    one — the agent must be able to converge by CALLING complete_task /
-    hand_off. The only tools=None call is the post-budget force-compose that
-    runs AFTER the budgeted loop is exhausted (the agent never converged)."""
+    """(b) Tools are offered on EVERY round — the agent must be able to
+    converge by CALLING complete_task / hand_off. With the pre-round-boundary
+    redesign the cap path returns at the top of the round WITHOUT any
+    tools=None force-compose call, so NO llm.chat call ever withholds tools on
+    the task non-convergence path."""
     loop = _always_tool_calling_loop(task_max=3)
 
     await loop.chat("go", task_id="t-tools")
@@ -4323,34 +4339,36 @@ async def test_tools_remain_available_on_every_budgeted_round():
         c for c in loop.llm.chat.await_args_list
         if c.kwargs.get("tools") is None
     ]
-    # At most ONE tools=None call — the terminal force-compose — and it is
-    # the LAST llm call, never a budgeted round in the middle.
-    assert len(tools_none) <= 1, (
-        "tools must be offered on every budgeted round; a mid-loop tools=None "
-        "round means the (removed) tool-withhold is back"
+    assert tools_none == [], (
+        "tools must be offered on every round; the pre-round-boundary cap "
+        "returns without a tools=None force-compose, so no call may withhold "
+        "tools on the task path"
     )
-    if tools_none:
-        assert loop.llm.chat.await_args_list[-1].kwargs.get("tools") is None
-    # The budgeted rounds (all but the final force-compose) all had tools.
-    budgeted = loop.llm.chat.await_args_list[:-1] if tools_none else loop.llm.chat.await_args_list
-    assert all(c.kwargs.get("tools") is not None for c in budgeted)
+    assert all(
+        c.kwargs.get("tools") is not None for c in loop.llm.chat.await_args_list
+    )
+    # Exactly task_max tool-round calls — the cap broke at the next round top.
+    assert loop.llm.chat.await_count == 3
 
 
 @pytest.mark.asyncio
-async def test_task_converges_via_handoff_on_last_round_closes_done():
-    """(c) A task that CONVERGES by calling hand_off (outbound effect) and
-    then returning a final text closes ``done``/handoff — NOT ``blocked`` —
-    even when it does so right at the budget edge. The cap must NOT pre-empt
-    a genuine completion. Drives the REAL ``_auto_close_task``."""
+async def test_terminal_handoff_on_last_budgeted_round_closes_done_not_blocked():
+    """(B1 — Codex blocker #1) A task that calls hand_off (outbound effect)
+    and then returns its terminal text on the LAST budgeted round closes
+    ``done``/handoff — NOT ``blocked``. Drives the count to cap-1 right at the
+    terminal so the OLD shrunk-range bug (fall-through forcing
+    ``task_convergence_capped=True``) would have force-blocked it. With the
+    pre-round boundary the terminal no-tool-calls reply returns from INSIDE the
+    loop, before the next round's top-of-loop cap check can run. Drives the
+    REAL ``_auto_close_task``."""
     loop = _make_loop()
-    loop.TASK_MAX_TOOL_ROUNDS = 4
+    loop.TASK_MAX_TOOL_ROUNDS = 2
     loop.mesh_client.set_task_status = AsyncMock(return_value={"status": "done"})
-    # Budget 4. Round 1: research tool. Round 2: hand_off (outbound effect).
-    # Round 3 (still within budget, under the FINAL-round system nudge):
-    # terminal text → converges via the no-tool-calls branch, BEFORE the cap
-    # fall-through. The cap must NOT pre-empt this genuine completion.
+    # Budget 2. Round idx0 (count 0→1): hand_off (outbound effect). Round idx1
+    # (entry count 1 == cap-1, the LAST budgeted round): terminal text →
+    # converges via the no-tool-calls branch BEFORE the cap boundary, which
+    # would next fire at entry count 2.
     responses = [
-        _resp("", tool_calls=[ToolCallInfo(name="web_search", arguments={})]),
         _resp("", tool_calls=[ToolCallInfo(name="hand_off", arguments={"to": "bob"})]),
         _resp("Handed off to bob; done."),
     ]
@@ -4365,9 +4383,9 @@ async def test_task_converges_via_handoff_on_last_round_closes_done():
         return {"results": ["r"]}
     loop.skills.execute = AsyncMock(side_effect=_exec)
 
-    result = await loop.chat("research then delegate", task_id="t-converge")
+    result = await loop.chat("delegate", task_id="t-converge")
 
-    # NOT capped — converged genuinely.
+    # NOT capped — converged genuinely on the last budgeted round.
     assert result.get("task_convergence_capped") is not True
     statuses = [
         (c.args[1] if len(c.args) >= 2 else c.kwargs.get("status"))
@@ -4379,6 +4397,122 @@ async def test_task_converges_via_handoff_on_last_round_closes_done():
     assert "done" in statuses
     # Per-task state cleared by the terminal done close.
     assert "t-converge" not in loop._task_round_counts
+
+
+@pytest.mark.asyncio
+async def test_terminal_complete_task_on_last_budgeted_round_closes_done():
+    """(B1 — Codex blocker #1, complete_task variant) Same protection, with
+    ``complete_task`` as the terminal outbound tool on the last budgeted
+    round. Closes ``done``, never ``blocked``."""
+    loop = _make_loop()
+    loop.TASK_MAX_TOOL_ROUNDS = 2
+    loop.mesh_client.set_task_status = AsyncMock(return_value={"status": "done"})
+    # Round idx0 (count 0→1): complete_task. Round idx1 (entry count 1 ==
+    # cap-1, LAST budgeted round): terminal text → no-tool-calls return.
+    responses = [
+        _resp("", tool_calls=[ToolCallInfo(name="complete_task", arguments={})]),
+        _resp("All done."),
+    ]
+    loop.llm.chat = AsyncMock(side_effect=responses)
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "complete_task"}}]
+    )
+
+    async def _exec(name, *a, **k):
+        if name == "complete_task":
+            return {"completed": True}
+        return {"ok": True}
+    loop.skills.execute = AsyncMock(side_effect=_exec)
+
+    result = await loop.chat("finish it", task_id="t-complete")
+
+    assert result.get("task_convergence_capped") is not True
+    statuses = [
+        (c.args[1] if len(c.args) >= 2 else c.kwargs.get("status"))
+        for c in loop.mesh_client.set_task_status.await_args_list
+    ]
+    assert "blocked" not in statuses
+    assert "done" in statuses
+    assert "t-complete" not in loop._task_round_counts
+
+
+@pytest.mark.asyncio
+async def test_exhausted_rewake_blocks_immediately_no_extra_tool_round():
+    """(B2 — Codex blocker #2) A re-wake of a task whose persisted round count
+    is ALREADY at the cap must break at the FIRST round top and close
+    ``blocked`` WITHOUT executing any further LLM call or tool round. The old
+    mechanism (``_task_loop_rounds = max(1, 0) = 1``) granted one more
+    tool-enabled round on every re-wake — unbounded across re-wakes. The
+    pre-round boundary forbids it. Drives the REAL ``_auto_close_task``."""
+    loop = _make_loop()
+    loop.TASK_MAX_TOOL_ROUNDS = 3
+    loop.mesh_client.set_task_status = AsyncMock(return_value={"status": "blocked"})
+    # Pre-seed the persisted count AT the cap (a prior wake spent the budget;
+    # a 5xx kept the task 'working' so the count survived).
+    loop._task_round_counts["t-exhausted"] = 3
+
+    loop.llm.chat = AsyncMock(
+        side_effect=AssertionError("LLM must NOT be called on an exhausted re-wake")
+    )
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "web_search"}}]
+    )
+    loop.skills.execute = AsyncMock(
+        side_effect=AssertionError("no tool round may run on an exhausted re-wake")
+    )
+
+    result = await loop.chat("continue", task_id="t-exhausted")
+
+    # Capped immediately, with ZERO LLM calls and ZERO tool executions.
+    assert result.get("task_convergence_capped") is True
+    assert loop.llm.chat.await_count == 0, (
+        "an exhausted re-wake must break at the first round top BEFORE the LLM "
+        f"call; llm calls={loop.llm.chat.await_count}"
+    )
+    assert loop.skills.execute.await_count == 0
+    # Terminal blocked close with the static convergence note.
+    statuses = [
+        (c.args[1] if len(c.args) >= 2 else c.kwargs.get("status"))
+        for c in loop.mesh_client.set_task_status.await_args_list
+    ]
+    assert statuses and statuses[-1] == "blocked"
+
+
+@pytest.mark.asyncio
+async def test_task_round_counts_size_bounded_under_many_tasks():
+    """(#3 — Codex SHOULD) ``_task_round_counts`` stays bounded even when many
+    distinct tasks accumulate counts without their terminal close ever popping
+    them (the sustained mesh-write-failure regime). Adding a new task beyond
+    ``_TASK_ROUND_COUNTS_MAX`` evicts an existing entry instead of growing
+    unbounded. Exercised at the increment site directly via repeated
+    single-round task turns whose close is stubbed to a no-op (never pops)."""
+    loop = _make_loop()
+    loop.TASK_MAX_TOOL_ROUNDS = 5
+    loop._TASK_ROUND_COUNTS_MAX = 8     # small bound for the test
+    # Stub the terminal close to a no-op so entries are NEVER popped — this is
+    # the degenerate sustained-write-failure regime the bound guards.
+    loop._auto_close_task = AsyncMock(return_value=None)
+    loop.skills.get_tool_definitions = MagicMock(
+        return_value=[{"type": "function", "function": {"name": "web_search"}}]
+    )
+    loop.skills.execute = AsyncMock(return_value={"results": ["r"]})
+
+    # Each task: one tool round then a final text (converges) — one increment
+    # per distinct task_id. The final close is a no-op stub, so nothing pops.
+    for i in range(40):
+        loop.llm.chat = AsyncMock(side_effect=[
+            _resp("", tool_calls=[ToolCallInfo(name="web_search", arguments={})]),
+            _resp("done"),
+        ])
+        loop._chat_messages = []
+        await loop.chat("go", task_id=f"task-{i}")
+        assert len(loop._task_round_counts) <= loop._TASK_ROUND_COUNTS_MAX, (
+            f"_task_round_counts grew past the bound at iteration {i}: "
+            f"size={len(loop._task_round_counts)}"
+        )
+
+    # Stays at/under the bound after 40 distinct tasks despite no pops.
+    assert len(loop._task_round_counts) <= loop._TASK_ROUND_COUNTS_MAX
 
 
 @pytest.mark.asyncio
@@ -4441,9 +4575,10 @@ async def test_task_round_count_persists_across_wakes_tighten_only():
     result = await loop.chat("continue", task_id="t-persist")
 
     assert result.get("task_convergence_capped") is True
-    # Only ~2 rounds remained (6 - 4) → at most 2 tool rounds + 1 force-compose,
+    # Only 2 rounds remained (6 - 4) → exactly 2 tool rounds (counts 5, 6),
+    # then the next round top hits the cap and breaks (no force-compose).
     # NOT a fresh full budget of 6.
-    assert loop.llm.chat.await_count <= 3, (
+    assert loop.llm.chat.await_count == 2, (
         "second wake must resume from the persisted per-task count, not get "
         f"a fresh full budget; llm calls={loop.llm.chat.await_count}"
     )
