@@ -2271,7 +2271,14 @@ def create_mesh_app(
             extra={"extra_data": {"agent_id": agent_id, "credential": name}},
         )
 
-        value = credential_vault.resolve_credential(name)
+        # Async resolve so OAuth "connections" refresh their access token on
+        # demand (agents see a fresh bearer, never the refresh token). Plain
+        # credentials fall through to the in-memory lookup.
+        try:
+            value = await credential_vault.resolve_credential_async(name)
+        except Exception as exc:  # noqa: BLE001 — surface refresh failures as 502
+            logger.warning("Credential resolve failed for %s: %s", name, exc)
+            raise HTTPException(502, f"Credential resolve failed: {name}") from exc
         if value is None:
             raise HTTPException(404, f"Credential not found: {name}")
         return {"name": name, "value": value}
