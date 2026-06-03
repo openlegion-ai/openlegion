@@ -2124,3 +2124,131 @@ async def test_profile_denied_to_worker_omitting_requesting_agent(tmp_path):
         bb.close()
         costs.close()
         traces.close()
+
+
+# ── llm_call telemetry cost: OAuth (subscription) must report $0 ──────
+
+
+def _build_proxy_cost_app(tmp_path, vault):
+    """Build a minimal mesh app for exercising the /mesh/api cost telemetry.
+
+    ``vault`` is the (mocked) credential vault whose ``execute_api_call``
+    return value drives what the ``llm_call`` event reports. Returns
+    ``(app, event_bus, captured, cleanup)`` where ``captured`` accumulates
+    every emitted ``llm_call`` event dict (EventBus listeners run
+    synchronously inside emit()).
+    """
+    from src.dashboard.events import EventBus
+    from src.host.server import create_mesh_app
+
+    # The /mesh/api proxy runs _enforce_model_pin → is_model_compatible
+    # (the model-pin gate) before dispatch; stub the documented
+    # (compatible, reason) contract so the pin doesn't trip on the mock.
+    vault.is_model_compatible.return_value = (True, None)
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    perms.permissions["scout"] = AgentPermissions(
+        agent_id="scout", allowed_apis=["llm"],
+    )
+    router = MessageRouter(perms, {})
+    router.register_agent("scout", "http://scout:8400", [])
+
+    event_bus = EventBus()
+    captured: list[dict] = []
+    event_bus.add_listener(
+        lambda e: captured.append(e) if e.get("type") == "llm_call" else None,
+    )
+
+    app = create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
+        credential_vault=vault, event_bus=event_bus,
+    )
+    return app, event_bus, captured, bb.close
+
+
+async def _post_chat(app):
+    from httpx import ASGITransport, AsyncClient
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        return await client.post(
+            "/mesh/api",
+            params={"agent_id": "scout"},
+            json={
+                "service": "llm", "action": "chat",
+                "params": {
+                    "model": "anthropic/claude-sonnet-4-6",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_proxy_api_oauth_call_reports_zero_cost(tmp_path):
+    """OAuth (subscription) calls must emit an llm_call event with cost_usd=0.
+
+    Pins the dashboard activity/trace-feed contract: the authoritative
+    usage table already skips OAuth, and this telemetry event must agree.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from src.shared.types import APIProxyResponse
+
+    vault = MagicMock()
+    vault.execute_api_call = AsyncMock(return_value=APIProxyResponse(
+        success=True,
+        data={
+            "oauth": True, "content": "hi", "tokens_used": 1000,
+            "input_tokens": 700, "output_tokens": 300,
+            "model": "anthropic/claude-sonnet-4-6",
+        },
+    ))
+
+    app, _bus, captured, cleanup = _build_proxy_cost_app(tmp_path, vault)
+    try:
+        resp = await _post_chat(app)
+        assert resp.status_code == 200, resp.text
+        assert len(captured) == 1
+        data = captured[0]["data"]
+        assert data["oauth"] is True
+        assert data["cost_usd"] == 0.0
+        # Tokens are still reported — only the dollar cost is zeroed.
+        assert data["total_tokens"] == 1000
+    finally:
+        cleanup()
+
+
+@pytest.mark.asyncio
+async def test_proxy_api_metered_call_still_reports_cost(tmp_path):
+    """Regression guard (other direction): non-OAuth calls keep a real cost.
+
+    Ensures the OAuth zeroing didn't blanket-zero metered API-key traffic.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    from src.shared.types import APIProxyResponse
+
+    vault = MagicMock()
+    vault.execute_api_call = AsyncMock(return_value=APIProxyResponse(
+        success=True,
+        data={
+            "content": "hi", "tokens_used": 1000,
+            "input_tokens": 700, "output_tokens": 300,
+            "model": "anthropic/claude-sonnet-4-6",
+        },
+    ))
+
+    app, _bus, captured, cleanup = _build_proxy_cost_app(tmp_path, vault)
+    try:
+        resp = await _post_chat(app)
+        assert resp.status_code == 200, resp.text
+        assert len(captured) == 1
+        data = captured[0]["data"]
+        assert not data.get("oauth")
+        assert data["cost_usd"] > 0.0
+    finally:
+        cleanup()

@@ -710,13 +710,15 @@ class CredentialVault:
                 response = await handler(request)
 
                 if self.cost_tracker and agent_id and response.success and response.data:
-                    # M8: record usage even on the OAuth path. OAuth calls
-                    # carry no per-call dollar enforcement (``_needs_budget``
-                    # is False above, so no budget gate runs), but we still
-                    # TRACK the token spend so operators retain visibility
-                    # into OAuth consumption. Previously OAuth responses were
-                    # skipped entirely, leaving a blind spot. No $ semantics
-                    # are introduced — this is observability-only tracking.
+                    # M8: record usage even on the OAuth path so operators
+                    # retain token visibility into OAuth consumption (it was
+                    # previously skipped entirely, leaving a blind spot). But
+                    # OAuth (subscription) traffic carries NO dollar cost, so
+                    # it is tracked with ``bill=False`` → cost_usd=0. That
+                    # keeps observability while guaranteeing OAuth never
+                    # accrues spend and therefore never trips a budget cap
+                    # (the cap, reroute/retry gate and dashboard all read
+                    # SUM(cost_usd)). Metered API-key traffic bills normally.
                     tokens_used = response.data.get("tokens_used", 0)
                     if tokens_used:
                         model = response.data.get(
@@ -726,7 +728,10 @@ class CredentialVault:
                         prompt_tokens = raw_pt if raw_pt else int(tokens_used * 0.7)
                         raw_ct = response.data.get("output_tokens")
                         completion_tokens = raw_ct if raw_ct else (tokens_used - prompt_tokens)
-                        self.cost_tracker.track(agent_id, model, prompt_tokens, completion_tokens)
+                        self.cost_tracker.track(
+                            agent_id, model, prompt_tokens, completion_tokens,
+                            bill=not _is_oauth,
+                        )
 
                     fixed_cost = response.data.get("fixed_cost_usd")
                     if fixed_cost and fixed_cost > 0:
@@ -2888,6 +2893,10 @@ class CredentialVault:
                 "type": "done", "content": collected_content,
                 "tool_calls": collected_tool_calls,
                 "tokens_used": tokens_used, "model": model,
+                # Subscription auth — no per-call cost. Mirrors the Anthropic
+                # OAuth stream done-frame so downstream telemetry (mesh
+                # ``llm_call`` events) reports $0 instead of a metered estimate.
+                "oauth": True,
             }
             if collected_thinking:
                 done_data["thinking_content"] = collected_thinking

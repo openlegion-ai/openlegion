@@ -29,6 +29,40 @@ class TestCostTracking:
         assert spend["total_tokens"] == 1500
         assert spend["total_cost"] > 0
 
+    def test_track_oauth_records_tokens_at_zero_cost(self):
+        """bill=False (OAuth/subscription): tokens recorded, cost_usd=0."""
+        result = self.tracker.track(
+            "agent1", "anthropic/claude-sonnet-4-6", 1000, 500, bill=False,
+        )
+        assert result["cost"] == 0.0
+        assert result["over_budget"] is False
+        spend = self.tracker.get_spend("agent1", "today")
+        # Token visibility is preserved (observability) ...
+        assert spend["total_tokens"] == 1500
+        # ... but the spend total stays $0 — no dollar capture for OAuth.
+        assert spend["total_cost"] == 0.0
+
+    def test_oauth_usage_never_trips_budget_cap(self):
+        """A pure-OAuth agent stays within budget no matter the volume.
+
+        ``check_budget`` is the gate the reroute/retry path
+        (``_check_can_schedule``) and the dashboard read; it sums
+        ``cost_usd``. bill=False rows add $0, so a subscription-only agent
+        is always ``allowed`` even past a tiny dollar budget that metered
+        traffic would blow through instantly. (The forward-looking
+        ``preflight_check`` is deliberately NOT asserted here — it estimates
+        the *next* call's list price and is never invoked on the OAuth path,
+        which skips budget enforcement entirely; see
+        ``test_oauth_tracks_usage_but_skips_budget_enforcement``.)
+        """
+        self.tracker.set_budget("agent1", daily_usd=0.01, monthly_usd=0.01)
+        for _ in range(50):
+            self.tracker.track(
+                "agent1", "anthropic/claude-opus-4-1", 50_000, 10_000, bill=False,
+            )
+        assert self.tracker.check_budget("agent1")["allowed"] is True
+        assert self.tracker.get_spend("agent1", "today")["total_cost"] == 0.0
+
     def test_track_multiple_calls(self):
         self.tracker.track("agent1", "openai/gpt-4o-mini", 100, 50)
         self.tracker.track("agent1", "openai/gpt-4o-mini", 200, 100)

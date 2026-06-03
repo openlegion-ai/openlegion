@@ -203,10 +203,21 @@ class CostTracker:
 
     def track(
         self, agent: str, model: str, prompt_tokens: int, completion_tokens: int,
+        *, bill: bool = True,
     ) -> dict:
-        """Record a single LLM call. Returns {"cost": float, "over_budget": bool}."""
+        """Record a single LLM call. Returns {"cost": float, "over_budget": bool}.
+
+        ``bill=False`` records the token usage with ``cost_usd=0`` — used for
+        OAuth (subscription) traffic, which consumes tokens but incurs no
+        per-call dollar cost. Operators keep token visibility, while the
+        spend total stays $0 so subscription usage never accrues cost and
+        never trips a daily/monthly budget cap (the cap reads SUM(cost_usd)).
+        """
         total = prompt_tokens + completion_tokens
-        cost = estimate_cost(model, input_tokens=prompt_tokens, output_tokens=completion_tokens)
+        cost = (
+            estimate_cost(model, input_tokens=prompt_tokens, output_tokens=completion_tokens)
+            if bill else 0.0
+        )
 
         self.db.execute(
             "INSERT INTO usage (agent, model, prompt_tokens, completion_tokens, total_tokens, cost_usd) "
@@ -215,7 +226,12 @@ class CostTracker:
         )
         self.db.commit()
 
-        return {"cost": cost, "over_budget": self._check_budget_post_hoc(agent)}
+        # A non-billed (OAuth) row adds $0, so it can never push the agent
+        # over budget — short-circuit the post-hoc check to keep that
+        # guarantee explicit (and avoid attributing a metered overage to a
+        # subscription call).
+        over_budget = self._check_budget_post_hoc(agent) if bill else False
+        return {"cost": cost, "over_budget": over_budget}
 
     def track_fixed_cost(self, agent: str, model: str, cost_usd: float) -> dict:
         """Record a fixed-cost API call (e.g. image generation).
