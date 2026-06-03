@@ -118,13 +118,20 @@ def _clone_repo(repo_url: str, dest: Path, ref: str = "") -> str | None:
         clone_cmd += ["--branch", ref]
     clone_cmd += ["--", repo_url, str(dest)]
 
-    result = subprocess.run(
-        clone_cmd,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"},
-    )
+    try:
+        result = subprocess.run(
+            clone_cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"},
+        )
+    except subprocess.TimeoutExpired:
+        return "Git clone timed out"
+    except OSError as e:
+        # git missing from PATH, etc. — keep the string-error contract so the
+        # caller runs its staging-dir cleanup instead of surfacing a 500.
+        return f"Git clone could not start: {e}"
     if result.returncode != 0:
         return f"Git clone failed: {result.stderr.strip()}"
     return None
@@ -263,7 +270,11 @@ def install_skill(repo_url: str, skills_dir: Path, ref: str = "") -> dict:
     final_dir = skills_dir / skill.name
     if final_dir.exists():
         shutil.rmtree(final_dir)
-    shutil.move(str(tmp_dir), str(final_dir))
+    # os.replace = atomic rename within the store dir (tmp_dir is a sibling, so
+    # same filesystem). Unlike shutil.move, it never relocates the source
+    # *inside* an existing dir, so a concurrent same-name install degrades to
+    # last-writer-wins instead of silently nesting one pack inside another.
+    os.replace(tmp_dir, final_dir)
 
     git_dir = final_dir / ".git"
     if git_dir.exists():

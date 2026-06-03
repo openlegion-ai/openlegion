@@ -180,13 +180,20 @@ class SkillStore:
         found: dict[str, Skill] = {}
         if not directory.is_dir():
             return found
-        for md_path in sorted(directory.glob("**/SKILL.md")):
-            # Skip packs under an underscore-prefixed directory — same
-            # convention as marketplace.list_tools. Crucially this hides the
-            # transient ``_tmp_install/`` staging dir an install clones into
-            # (up to the 60s clone timeout), which is bind-mounted live into
-            # every agent and otherwise unvalidated.
-            if any(p.startswith("_") for p in md_path.relative_to(directory).parts[:-1]):
+        # Scan only pack-root SKILL.md files (one directory deep). A skill pack
+        # is one directory with SKILL.md at its root — both the bundled layout
+        # and exactly what install_skill writes. A recursive ``**`` scan would
+        # let an installed pack smuggle a nested ``sub/SKILL.md`` whose name
+        # shadows a bundled/other skill (installed overrides bundled) and that
+        # ``remove_skill <name>`` could never delete — it only knows the
+        # top-level dir. One level closes both holes.
+        for md_path in sorted(directory.glob("*/SKILL.md")):
+            # Skip underscore-prefixed pack dirs — same convention as
+            # marketplace.list_tools. Crucially this hides the transient
+            # ``_tmp_install_*`` staging dir an install clones into (up to the
+            # 60s clone timeout), bind-mounted live into every agent and as-yet
+            # unvalidated.
+            if md_path.parent.name.startswith("_"):
                 continue
             skill = parse_skill_md(md_path, source=source)
             if skill is None:
