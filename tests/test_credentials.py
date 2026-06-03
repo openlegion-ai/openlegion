@@ -189,6 +189,10 @@ async def test_handle_llm_failover_on_rate_limit(monkeypatch):
     v = CredentialVault(
         failover_config={"anthropic/claude-haiku-4-5-20251001": ["openai/gpt-4o-mini"]},
     )
+    # Skip same-model transient backoff sleeps so the test runs instantly.
+    async def _no_sleep(_seconds):
+        return None
+    v._transient_sleep = _no_sleep
 
     import litellm
 
@@ -220,7 +224,9 @@ async def test_handle_llm_failover_on_rate_limit(monkeypatch):
     assert result.success
     assert result.data["content"] == "hello from fallback"
     assert result.data["model"] == "openai/gpt-4o-mini"
-    assert call_count == 2
+    # anthropic exhausts its same-model transient retries (1 initial + 2
+    # retries = 3) BEFORE the chain falls over to the healthy openai model.
+    assert call_count == 4
 
 
 async def test_handle_llm_no_failover_on_bad_request(monkeypatch):
@@ -261,6 +267,11 @@ async def test_handle_llm_all_models_exhausted(monkeypatch):
     v = CredentialVault(
         failover_config={"anthropic/claude-haiku-4-5-20251001": ["openai/gpt-4o-mini"]},
     )
+    # Same-model transient retry now wraps each candidate; keep the test fast
+    # by skipping the backoff sleeps.
+    async def _no_sleep(_seconds):
+        return None
+    v._transient_sleep = _no_sleep
 
     import litellm
 
@@ -285,6 +296,225 @@ async def test_handle_llm_all_models_exhausted(monkeypatch):
     # numeric retry-substring backstop still recognizes it as retryable.
     assert result.status_code == 503
     assert "503" in result.error
+
+
+def _make_single_model_vault(monkeypatch):
+    """Vault with ONE model (no failover candidate) and a no-op backoff.
+
+    Reproduces the prod 503 incident shape: a solo agent on a single model
+    where failover cannot help because there is no other model to try.
+    """
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant")
+    monkeypatch.delenv("OPENLEGION_SYSTEM_OPENAI_API_KEY", raising=False)
+    v = CredentialVault(failover_config={})
+    slept: list[float] = []
+
+    async def _record_sleep(seconds):
+        slept.append(seconds)
+
+    v._transient_sleep = _record_sleep
+    return v, slept
+
+
+def _good_response():
+    resp = MagicMock()
+    resp.choices = [MagicMock()]
+    resp.choices[0].message.content = "recovered"
+    resp.choices[0].message.tool_calls = None
+    resp.usage = MagicMock()
+    resp.usage.total_tokens = 7
+    return resp
+
+
+def _chat_req():
+    return APIProxyRequest(
+        service="llm", action="chat",
+        params={
+            "model": "anthropic/claude-haiku-4-5-20251001",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+
+
+async def test_transient_503_retried_same_model_then_succeeds(monkeypatch):
+    """Prod 503 incident: a transient 503 on the only model is retried on
+    the SAME model and succeeds on a later attempt — not a task failure."""
+    v, slept = _make_single_model_vault(monkeypatch)
+    import litellm
+
+    call_count = 0
+
+    async def mock_acompletion(model, messages, api_key, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count < 3:
+            raise litellm.ServiceUnavailableError(
+                message="overloaded", model=model, llm_provider="anthropic",
+            )
+        return _good_response()
+
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        result = await v.execute_api_call(_chat_req())
+
+    assert result.success
+    assert result.data["content"] == "recovered"
+    # 1 initial + 2 retries — succeeded on the 3rd attempt, same model.
+    assert call_count == 3
+    assert result.data["model"] == "anthropic/claude-haiku-4-5-20251001"
+    # Backoff was deterministic and bounded.
+    assert slept == [0.5, 1.0]
+
+
+async def test_transient_429_retried_same_model_then_succeeds(monkeypatch):
+    """A transient 429 (rate limit) is retried on the same model and
+    succeeds on the second attempt."""
+    v, slept = _make_single_model_vault(monkeypatch)
+    import litellm
+
+    call_count = 0
+
+    async def mock_acompletion(model, messages, api_key, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise litellm.RateLimitError(
+                message="429 too many requests", model=model,
+                llm_provider="anthropic",
+            )
+        return _good_response()
+
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        result = await v.execute_api_call(_chat_req())
+
+    assert result.success
+    assert call_count == 2
+    assert slept == [0.5]
+
+
+async def test_transient_503_bounded_gives_up_after_max(monkeypatch):
+    """Persistent 503 is retried a BOUNDED number of times then surfaces a
+    clear masked error — no infinite retry, budget can't be blown."""
+    v, slept = _make_single_model_vault(monkeypatch)
+    import litellm
+
+    call_count = 0
+
+    async def mock_acompletion(model, messages, api_key, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise litellm.ServiceUnavailableError(
+            message="still down", model=model, llm_provider="anthropic",
+        )
+
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        result = await v.execute_api_call(_chat_req())
+
+    assert not result.success
+    # 1 initial + 2 retries = 3 attempts, then give up (single model, no
+    # failover candidate). Bounded — does not loop forever.
+    assert call_count == 3
+    assert slept == [0.5, 1.0]
+    assert result.status_code == 503
+    assert result.error == "Upstream service call failed (HTTP 503)."
+    assert "still down" not in (result.error or "")
+
+
+async def test_permanent_401_not_retried(monkeypatch):
+    """A permanent 401 auth failure fails immediately — no transient retry."""
+    v, slept = _make_single_model_vault(monkeypatch)
+    import litellm
+
+    call_count = 0
+
+    async def mock_acompletion(model, messages, api_key, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise litellm.AuthenticationError(
+            message="bad key", model=model, llm_provider="anthropic",
+        )
+
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        result = await v.execute_api_call(_chat_req())
+
+    assert not result.success
+    # Classified to LLMAuthError and surfaced on the FIRST attempt.
+    assert call_count == 1
+    assert slept == []
+    assert result.error_type == "auth_failure"
+
+
+async def test_permanent_400_bad_request_not_retried(monkeypatch):
+    """A permanent 400 bad-request fails immediately — no transient retry."""
+    v, slept = _make_single_model_vault(monkeypatch)
+    import litellm
+
+    call_count = 0
+
+    async def mock_acompletion(model, messages, api_key, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise litellm.BadRequestError(
+            message="invalid request", model=model, llm_provider="anthropic",
+        )
+
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        result = await v.execute_api_call(_chat_req())
+
+    assert not result.success
+    assert call_count == 1
+    assert slept == []
+    assert result.status_code == 400
+
+
+async def test_model_incompatible_404_not_retried(monkeypatch):
+    """A model-not-found (config error) fails immediately — no retry."""
+    v, slept = _make_single_model_vault(monkeypatch)
+    import litellm
+
+    call_count = 0
+
+    async def mock_acompletion(model, messages, api_key, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise litellm.NotFoundError(
+            message="model not found", model=model, llm_provider="anthropic",
+        )
+
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        result = await v.execute_api_call(_chat_req())
+
+    assert not result.success
+    assert call_count == 1
+    assert slept == []
+    assert result.error_type == "config_error"
+
+
+def test_is_transient_error_classification():
+    """Unit-level classification: transient statuses vs permanent ones."""
+    v = CredentialVault()
+
+    class _Err(Exception):
+        def __init__(self, status):
+            self.status_code = status
+
+    for status in (502, 503, 504, 429, 529):
+        assert v._is_transient_error(_Err(status)) is True, status
+    for status in (400, 401, 403, 404, 402, 200):
+        assert v._is_transient_error(_Err(status)) is False, status
+
+    # Connection / timeout faults to the provider are transient.
+    import httpx
+    assert v._is_transient_error(httpx.ConnectError("boom")) is True
+    assert v._is_transient_error(httpx.ReadTimeout("slow")) is True
+
+    # Typed permanent errors are never retried here.
+    from src.shared.errors import LLMAuthError, LLMConfigError
+    assert v._is_transient_error(
+        LLMAuthError("x", provider="anthropic"),
+    ) is False
+    assert v._is_transient_error(
+        LLMConfigError("x", provider="anthropic", model="m"),
+    ) is False
 
 
 async def test_handle_llm_empty_choices_triggers_failover(monkeypatch):
@@ -340,6 +570,10 @@ async def test_stream_failover(monkeypatch):
     v = CredentialVault(
         failover_config={"anthropic/claude-haiku-4-5-20251001": ["openai/gpt-4o-mini"]},
     )
+    # Skip same-model transient backoff sleeps so the test runs instantly.
+    async def _no_sleep(_seconds):
+        return None
+    v._transient_sleep = _no_sleep
 
     import litellm
 
@@ -371,7 +605,9 @@ async def test_stream_failover(monkeypatch):
         async for event in v.stream_llm(req):
             events.append(event)
 
-    assert call_count == 2
+    # anthropic stream-open exhausts its same-model transient retries (1
+    # initial + 2 retries = 3) BEFORE falling over to the openai stream.
+    assert call_count == 4
     # Should have text_delta and done events
     assert any("streamed" in e for e in events)
     assert any("done" in e for e in events)
