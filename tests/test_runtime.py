@@ -1875,3 +1875,250 @@ class TestDispatchTimeoutAlignment:
         transport.request.assert_awaited_once()
         _args, kwargs = transport.request.call_args
         assert kwargs["timeout"] == 1860  # 1800 (override) + 60
+
+
+# ── RC-2: dispatch-error surfacing + redaction ─────────────────────────────
+#
+# A transport/agent ``/chat`` error used to be returned as a bare
+# ``f"Error: {e}"`` string. The lane recorded that as a *successful* turn, so
+# the durable task never went through a structured failure close. Now a
+# dispatch error closes the durable task to ``failed`` with a REDACTED +
+# truncated ``blocker_note``. The error string is UNTRUSTED, so it must pass
+# through the central redactor before reaching the operator-visible note.
+
+
+def _tasks_store(tmp_path):
+    from src.host.orchestration import Tasks
+    return Tasks(db_path=str(tmp_path / "tasks.db"))
+
+
+def _app_with_tasks(store):
+    import types as _types
+    return _types.SimpleNamespace(tasks_store=store)
+
+
+class TestDispatchErrorRedaction:
+    """Unit tests for the pure note-builder helper."""
+
+    def test_note_is_redacted_url_query_secret(self):
+        from src.cli.runtime import _build_dispatch_error_note
+
+        secret = "supersecret_query_value_123"
+        exc = RuntimeError(
+            f"502 from https://api.example.com/run?api_key={secret}&x=1"
+        )
+        note = _build_dispatch_error_note(exc)
+
+        assert secret not in note
+        assert "[REDACTED]" in note
+        assert note.startswith("dispatch_error: ")
+
+    def test_note_is_redacted_token_shaped_secret(self):
+        from src.cli.runtime import _build_dispatch_error_note
+
+        token = "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        exc = RuntimeError(f"auth failed with token={token}")
+        note = _build_dispatch_error_note(exc)
+
+        assert token not in note
+        assert "[REDACTED]" in note
+
+    def test_note_truncated_to_500_chars(self):
+        from src.cli.runtime import _build_dispatch_error_note
+
+        exc = RuntimeError("x" * 2000)
+        note = _build_dispatch_error_note(exc)
+
+        assert len(note) <= 500
+
+    def test_empty_error_falls_back_to_class_name(self):
+        from src.cli.runtime import _build_dispatch_error_note
+
+        note = _build_dispatch_error_note(RuntimeError(""))
+        assert note == "dispatch_error: RuntimeError"
+
+
+class TestDispatchErrorSurfacing:
+    @pytest.mark.asyncio
+    async def test_transport_error_closes_task_failed_with_redacted_note(
+        self, monkeypatch, tmp_path,
+    ):
+        """A transport error WITH a task_id closes the durable task to
+        ``failed`` and stores a REDACTED, meaningful ``blocker_note`` — the
+        raw secret in the error string must NOT survive into the note."""
+        store = _tasks_store(tmp_path)
+        rec = store.create(creator="op", assignee="worker", title="do thing")
+        task_id = rec["id"]
+        # Move into a live (non-terminal) state so ``failed`` is a valid
+        # transition the dispatch-error close can perform.
+        store.update_status(task_id, "working", actor="worker")
+
+        dispatch_fn, ctx, transport = _capture_dispatch_fn(
+            monkeypatch, app=_app_with_tasks(store),
+        )
+        secret = "supersecret_query_value_123"
+        transport.request.side_effect = RuntimeError(
+            f"502 from https://api.example.com/run?api_key={secret}&x=1"
+        )
+
+        result = await dispatch_fn("worker", "go", task_id=task_id)
+
+        # Durable task is now terminal-failed with a redacted note.
+        fetched = store.get(task_id)
+        assert fetched["status"] == "failed"
+        note = fetched["blocker_note"]
+        assert note is not None
+        assert note.startswith("dispatch_error: ")
+        assert secret not in note
+        assert "[REDACTED]" in note
+        # Returned string is also non-leaky (no raw secret).
+        assert secret not in result
+
+    @pytest.mark.asyncio
+    async def test_stored_note_truncated_to_500_chars(
+        self, monkeypatch, tmp_path,
+    ):
+        store = _tasks_store(tmp_path)
+        rec = store.create(creator="op", assignee="worker", title="do thing")
+        task_id = rec["id"]
+        store.update_status(task_id, "working", actor="worker")
+
+        dispatch_fn, ctx, transport = _capture_dispatch_fn(
+            monkeypatch, app=_app_with_tasks(store),
+        )
+        transport.request.side_effect = RuntimeError("y" * 4000)
+
+        await dispatch_fn("worker", "go", task_id=task_id)
+
+        fetched = store.get(task_id)
+        assert fetched["status"] == "failed"
+        assert len(fetched["blocker_note"]) <= 500
+
+    @pytest.mark.asyncio
+    async def test_no_task_id_does_not_crash_and_is_non_leaky(
+        self, monkeypatch, tmp_path,
+    ):
+        """Manual chat / heartbeat path (no task_id): no durable task to
+        close, must not raise, and the returned string must be redacted."""
+        store = _tasks_store(tmp_path)
+        dispatch_fn, ctx, transport = _capture_dispatch_fn(
+            monkeypatch, app=_app_with_tasks(store),
+        )
+        secret = "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        transport.request.side_effect = RuntimeError(
+            f"boom token={secret}"
+        )
+
+        result = await dispatch_fn("worker", "hi")  # no task_id
+
+        assert secret not in result
+        assert "[REDACTED]" in result
+        assert result.startswith("dispatch_error: ")
+
+    @pytest.mark.asyncio
+    async def test_already_terminal_task_not_clobbered(
+        self, monkeypatch, tmp_path,
+    ):
+        """If the assignee already wrote a real terminal status during a race,
+        the dispatch-error close must NOT overwrite it."""
+        store = _tasks_store(tmp_path)
+        rec = store.create(creator="op", assignee="worker", title="do thing")
+        task_id = rec["id"]
+        store.update_status(task_id, "working", actor="worker")
+        # Assignee finished successfully before our close fires.
+        store.update_status(task_id, "done", actor="worker")
+
+        dispatch_fn, ctx, transport = _capture_dispatch_fn(
+            monkeypatch, app=_app_with_tasks(store),
+        )
+        transport.request.side_effect = RuntimeError("late error")
+
+        await dispatch_fn("worker", "go", task_id=task_id)
+
+        fetched = store.get(task_id)
+        # Real status preserved; not clobbered to ``failed``.
+        assert fetched["status"] == "done"
+
+    @pytest.mark.asyncio
+    async def test_already_blocked_task_not_clobbered(
+        self, monkeypatch, tmp_path,
+    ):
+        """An assignee-authored ``blocked`` status (and its meaningful
+        blocker_note) must NOT be overwritten by a dispatch transport error,
+        even though ``blocked → failed`` is a valid transition."""
+        store = _tasks_store(tmp_path)
+        rec = store.create(creator="op", assignee="worker", title="do thing")
+        task_id = rec["id"]
+        store.update_status(task_id, "working", actor="worker")
+        # Assignee blocked the task with a meaningful note before our close.
+        store.update_status(
+            task_id, "blocked", actor="worker",
+            blocker_note="waiting on credential CRED_FOO",
+        )
+
+        dispatch_fn, ctx, transport = _capture_dispatch_fn(
+            monkeypatch, app=_app_with_tasks(store),
+        )
+        transport.request.side_effect = RuntimeError("late dispatch error")
+
+        await dispatch_fn("worker", "go", task_id=task_id)
+
+        fetched = store.get(task_id)
+        # Status + the assignee's note both preserved.
+        assert fetched["status"] == "blocked"
+        assert fetched["blocker_note"] == "waiting on credential CRED_FOO"
+
+    @pytest.mark.asyncio
+    async def test_stored_note_strips_bearer_and_connstring(
+        self, monkeypatch, tmp_path,
+    ):
+        """A dispatch error carrying a ``Bearer`` auth value and a non-HTTP
+        connection-string password must have BOTH stripped from the stored,
+        operator-visible blocker_note (central-redactor regression)."""
+        store = _tasks_store(tmp_path)
+        rec = store.create(creator="op", assignee="worker", title="do thing")
+        task_id = rec["id"]
+        store.update_status(task_id, "working", actor="worker")
+
+        dispatch_fn, ctx, transport = _capture_dispatch_fn(
+            monkeypatch, app=_app_with_tasks(store),
+        )
+        bearer = "Bearer leakedBearerToken123"
+        conn = "postgres://dbuser:dbp4ss@db.internal:5432/main"
+        transport.request.side_effect = RuntimeError(
+            f"auth failed: {bearer}; dsn={conn}"
+        )
+
+        await dispatch_fn("worker", "go", task_id=task_id)
+
+        note = store.get(task_id)["blocker_note"]
+        assert "leakedBearerToken123" not in note
+        assert "dbp4ss" not in note
+        assert "dbuser" not in note
+        assert "[REDACTED]" in note
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_is_not_swallowed(
+        self, monkeypatch, tmp_path,
+    ):
+        """``asyncio.CancelledError`` MUST propagate so the lane's ``wait_for``
+        watchdog can still cancel a long run — the ``except Exception`` clause
+        must not catch it."""
+        import asyncio as _asyncio
+
+        store = _tasks_store(tmp_path)
+        rec = store.create(creator="op", assignee="worker", title="do thing")
+        task_id = rec["id"]
+        store.update_status(task_id, "working", actor="worker")
+
+        dispatch_fn, ctx, transport = _capture_dispatch_fn(
+            monkeypatch, app=_app_with_tasks(store),
+        )
+        transport.request.side_effect = _asyncio.CancelledError()
+
+        with pytest.raises(_asyncio.CancelledError):
+            await dispatch_fn("worker", "go", task_id=task_id)
+
+        # Task left untouched — the lane watchdog owns the timeout close.
+        fetched = store.get(task_id)
+        assert fetched["status"] == "working"

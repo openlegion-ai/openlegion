@@ -26,6 +26,7 @@ from src.shared.redaction import (
     SENSITIVE_QUERY_PARAMS,
     deep_redact,
     redact_string,
+    redact_text_with_urls,
     redact_url,
 )
 
@@ -68,6 +69,67 @@ class TestRedactString:
     def test_jwt_redacted_anywhere_in_string(self):
         jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signaturepartatleasttenchars"
         assert redact_string(f"Bearer {jwt}") == f"Bearer {_REDACTED}"
+
+
+# ── Unit tests: Bearer tokens + connection-string userinfo ──────────────────
+
+
+class TestBearerRedaction:
+    def test_bare_bearer_token_redacted(self):
+        assert redact_string("Bearer abc123") == f"Bearer {_REDACTED}"
+
+    def test_authorization_header_bearer_redacted(self):
+        out = redact_string("Authorization: Bearer s0me-Opaque_Token.value")
+        assert out == f"Authorization: Bearer {_REDACTED}"
+        assert "s0me-Opaque_Token" not in out
+
+    def test_bearer_case_insensitive(self):
+        # lowercase / uppercase keyword still triggers; the token is stripped.
+        assert redact_string("bearer abc123") == f"Bearer {_REDACTED}"
+        out = redact_string("BEARER xyzToken")
+        assert "xyzToken" not in out and _REDACTED in out
+
+    def test_bearer_no_false_positive_midword(self):
+        # ``Foobearer`` must not fire — the word-boundary lookbehind protects it.
+        assert redact_string("Foobearer notatoken") == "Foobearer notatoken"
+
+    def test_bearer_redacted_via_text_with_urls(self):
+        out = redact_text_with_urls("hdr Authorization: Bearer leakedToken123")
+        assert "leakedToken123" not in out
+        assert _REDACTED in out
+
+
+class TestConnectionStringRedaction:
+    def test_postgres_userinfo_password_redacted(self):
+        out = redact_string("postgres://app:s3cr3t@db.host:5432/main")
+        assert "s3cr3t" not in out
+        assert _REDACTED in out
+        assert "db.host:5432/main" in out  # scheme + host preserved
+
+    def test_redis_userinfo_redacted(self):
+        out = redact_string("redis://user:pass@cache:6379")
+        assert "pass" not in out
+        assert "user" not in out
+        assert "cache:6379" in out
+
+    def test_arbitrary_scheme_userinfo_redacted(self):
+        out = redact_string("mongodb+srv://u:p@cluster.example/db")
+        assert "u:p@" not in out
+        assert _REDACTED in out
+
+    def test_no_userinfo_left_untouched(self):
+        # No ``user:pass@`` — must not be mangled.
+        assert redact_string("postgres://db.host/main") == "postgres://db.host/main"
+
+    def test_conn_userinfo_via_text_with_urls(self):
+        out = redact_text_with_urls("DSN postgres://u:p@h/db failed to connect")
+        assert "u:p@" not in out
+        assert _REDACTED in out
+
+    def test_http_userinfo_still_handled_by_redact_url(self):
+        # Regression: web-scheme userinfo is stripped structurally by redact_url.
+        out = redact_url("https://alice:pw@host.example/admin")
+        assert "alice" not in out and "pw" not in out
 
 
 # ── Unit tests: redact_url ──────────────────────────────────────────────────
