@@ -684,18 +684,26 @@ def self_inbox_matrix(tmp_path):
 
 
 class TestSelfInboxCarveOut:
-    def test_empty_acl_can_read_own_inbox(self, self_inbox_matrix):
-        """An agent with no blackboard_read can read its own inbox."""
+    def test_empty_acl_can_read_own_task_event_inbox(self, self_inbox_matrix):
+        """An agent with no blackboard_read can read its own task_event inbox."""
         m = self_inbox_matrix
         assert m.can_read_blackboard(
             "content-creator", "inbox/content-creator/task_event/abc"
         ) is True
-        assert m.can_read_blackboard(
-            "content-creator", "inbox/content-creator/anything"
-        ) is True
 
-    def test_nonmatching_acl_can_read_own_inbox(self, self_inbox_matrix):
-        """A non-matching project-scoped read still allows own inbox."""
+    def test_empty_acl_other_own_inbox_kind_denied(self, self_inbox_matrix):
+        """Least privilege: a non-task_event own-inbox path is now DENIED.
+
+        The carve-out is scoped strictly to the back-edge task_event sub-path,
+        so any other kind under the agent's own inbox falls through to the
+        (empty) ACL and is denied."""
+        m = self_inbox_matrix
+        assert m.can_read_blackboard(
+            "content-creator", "inbox/content-creator/some-other-kind/x"
+        ) is False
+
+    def test_nonmatching_acl_can_read_own_task_event_inbox(self, self_inbox_matrix):
+        """A non-matching project-scoped read still allows own task_event inbox."""
         m = self_inbox_matrix
         assert m.can_read_blackboard(
             "scout", "inbox/scout/task_event/abc"

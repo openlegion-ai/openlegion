@@ -209,13 +209,16 @@ class PermissionMatrix:
                 agent_id == "operator"
                 or key.startswith(f"global/output/{agent_id}/")
             )
-        # Self-inbox carve-out: an agent may ALWAYS read its OWN inbox
-        # (back-edge task_event outcomes land at inbox/{agent}/task_event/).
-        # Strictly scoped to the caller's own verified id — narrower than the
-        # operator carve-out. Fixes already-provisioned agents with no ACL
-        # re-grant. The trailing slash enforces a full path-segment boundary
-        # so e.g. agent "dev" cannot match "inbox/dev-lead/...".
-        if key.startswith(f"inbox/{agent_id}/"):
+        # Self-inbox task_event carve-out: an agent may ALWAYS read its OWN
+        # back-edge task_event inbox (outcomes land at
+        # inbox/{agent}/task_event/ — the only thing ``check_inbox`` reads and
+        # the only producer). Strictly scoped to that one sub-path under the
+        # caller's own verified id — least privilege, narrower than both the
+        # operator carve-out and a whole-inbox grant. Fixes already-provisioned
+        # agents with no ACL re-grant. The trailing slash enforces a full
+        # path-segment boundary so e.g. agent "dev" cannot match
+        # "inbox/dev-lead/task_event/...".
+        if key.startswith(f"inbox/{agent_id}/task_event/"):
             return True
         perms = self.get_permissions(agent_id)
         return any(fnmatch.fnmatch(key, pattern) for pattern in perms.blackboard_read)
