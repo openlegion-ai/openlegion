@@ -175,6 +175,10 @@ class LaneManager:
             return
         self._per_agent_timeouts[agent] = max(60, int(seconds))
 
+    def timeout_for(self, agent: str) -> int:
+        """Public: the effective per-task wall-clock cap for ``agent`` (per-agent override or module default)."""
+        return self._timeout_for(agent)
+
     def _timeout_for(self, agent: str) -> int:
         """Resolve the per-task wall-clock cap for ``agent``."""
         return self._per_agent_timeouts.get(
