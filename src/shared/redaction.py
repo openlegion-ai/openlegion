@@ -77,6 +77,47 @@ SECRET_PATTERNS: list[re.Pattern[str]] = [
                r"(?![A-Za-z0-9._-])"),
 ]
 
+
+# ── Bearer token / connection-string userinfo redaction ─────────────────────
+#
+# These two shapes are NOT URL-query secrets (so ``redact_url`` misses them)
+# and don't match a provider-token prefix (so ``SECRET_PATTERNS`` misses them).
+# They're applied as a SEPARATE pass in ``redact_string`` so they take effect
+# everywhere ``redact_string`` runs (free-form logs, exception strings, the
+# final sweep inside ``redact_url`` / ``redact_text_with_urls``, and
+# ``deep_redact``).
+
+# ``Bearer <token>`` — case-insensitive on the ``Bearer`` keyword, covers both
+# ``Authorization: Bearer xyz`` and a bare ``Bearer xyz``. We keep the keyword
+# and replace only the credential so the shape stays readable. Anchored on a
+# preceding word boundary so we don't fire mid-word (e.g. ``Foobearer``); the
+# token run is non-whitespace so it stops at the next space / EOL.
+_BEARER_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?i:Bearer)\s+\S+",
+)
+
+
+def _redact_bearer(text: str) -> str:
+    return _BEARER_RE.sub("Bearer " + _REDACTED_VALUE, text)
+
+
+# Connection-string userinfo: ``scheme://user:password@host`` for ANY scheme
+# (postgres, redis, mongodb, amqp, mysql, …) — not just http/https, which
+# ``redact_url`` already strips. We replace BOTH the username and the password
+# (the username alone can leak account ownership), keeping the scheme + host so
+# the string stays diagnostically useful. Anchored on the ``scheme://`` prefix;
+# the userinfo run excludes ``/@`` so it can't cross past the authority.
+_CONN_USERINFO_RE = re.compile(
+    r"([A-Za-z][A-Za-z0-9+.\-]*://)"   # scheme://
+    r"[^/\s:@]+:[^/\s@]+@",            # user:password@
+)
+
+
+def _redact_conn_userinfo(text: str) -> str:
+    return _CONN_USERINFO_RE.sub(
+        lambda m: f"{m.group(1)}{_REDACTED_VALUE}:{_REDACTED_VALUE}@", text,
+    )
+
 # Backward-compat alias used by the old ``_REDACT_PATTERNS`` name in
 # ``src/browser/redaction.py`` and the agent-side browser_tool.  Existing
 # imports keep working.
@@ -293,11 +334,19 @@ def redact_url(url: str) -> str:
 
 
 def redact_string(text: str) -> str:
-    """Apply :data:`SECRET_PATTERNS` to ``text`` and return the result."""
+    """Apply :data:`SECRET_PATTERNS` to ``text`` and return the result.
+
+    Also strips two shapes that aren't provider-token prefixes nor URL-query
+    secrets: ``Bearer <token>`` auth values and ``scheme://user:pass@host``
+    connection-string userinfo (any scheme). See :func:`_redact_bearer` and
+    :func:`_redact_conn_userinfo`.
+    """
     if not text:
         return text
     for pattern in SECRET_PATTERNS:
         text = pattern.sub(_REDACTED_VALUE, text)
+    text = _redact_bearer(text)
+    text = _redact_conn_userinfo(text)
     return text
 
 

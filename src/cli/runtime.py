@@ -624,10 +624,14 @@ class RuntimeContext:
             )
             pre = None
         if pre is not None and pre.get("status") in (
-            "done", "failed", "cancelled"
+            "done", "failed", "cancelled", "blocked"
         ):
             # Already terminal (assignee or lane watchdog beat us) — do not
-            # clobber the real status/note.
+            # clobber the real status/note. ``blocked`` is included because
+            # ``blocked → failed`` is a *valid* transition: a dispatch
+            # transport error must not overwrite an assignee-authored
+            # ``blocked`` status (and its meaningful blocker_note) with a
+            # generic dispatch note.
             logger.info(
                 "Dispatch error: task %s already terminal (status=%s) — "
                 "skipping failed-close", task_id, pre.get("status"),

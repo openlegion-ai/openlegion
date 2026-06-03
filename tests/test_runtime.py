@@ -2040,6 +2040,64 @@ class TestDispatchErrorSurfacing:
         assert fetched["status"] == "done"
 
     @pytest.mark.asyncio
+    async def test_already_blocked_task_not_clobbered(
+        self, monkeypatch, tmp_path,
+    ):
+        """An assignee-authored ``blocked`` status (and its meaningful
+        blocker_note) must NOT be overwritten by a dispatch transport error,
+        even though ``blocked → failed`` is a valid transition."""
+        store = _tasks_store(tmp_path)
+        rec = store.create(creator="op", assignee="worker", title="do thing")
+        task_id = rec["id"]
+        store.update_status(task_id, "working", actor="worker")
+        # Assignee blocked the task with a meaningful note before our close.
+        store.update_status(
+            task_id, "blocked", actor="worker",
+            blocker_note="waiting on credential CRED_FOO",
+        )
+
+        dispatch_fn, ctx, transport = _capture_dispatch_fn(
+            monkeypatch, app=_app_with_tasks(store),
+        )
+        transport.request.side_effect = RuntimeError("late dispatch error")
+
+        await dispatch_fn("worker", "go", task_id=task_id)
+
+        fetched = store.get(task_id)
+        # Status + the assignee's note both preserved.
+        assert fetched["status"] == "blocked"
+        assert fetched["blocker_note"] == "waiting on credential CRED_FOO"
+
+    @pytest.mark.asyncio
+    async def test_stored_note_strips_bearer_and_connstring(
+        self, monkeypatch, tmp_path,
+    ):
+        """A dispatch error carrying a ``Bearer`` auth value and a non-HTTP
+        connection-string password must have BOTH stripped from the stored,
+        operator-visible blocker_note (central-redactor regression)."""
+        store = _tasks_store(tmp_path)
+        rec = store.create(creator="op", assignee="worker", title="do thing")
+        task_id = rec["id"]
+        store.update_status(task_id, "working", actor="worker")
+
+        dispatch_fn, ctx, transport = _capture_dispatch_fn(
+            monkeypatch, app=_app_with_tasks(store),
+        )
+        bearer = "Bearer leakedBearerToken123"
+        conn = "postgres://dbuser:dbp4ss@db.internal:5432/main"
+        transport.request.side_effect = RuntimeError(
+            f"auth failed: {bearer}; dsn={conn}"
+        )
+
+        await dispatch_fn("worker", "go", task_id=task_id)
+
+        note = store.get(task_id)["blocker_note"]
+        assert "leakedBearerToken123" not in note
+        assert "dbp4ss" not in note
+        assert "dbuser" not in note
+        assert "[REDACTED]" in note
+
+    @pytest.mark.asyncio
     async def test_cancelled_error_is_not_swallowed(
         self, monkeypatch, tmp_path,
     ):
