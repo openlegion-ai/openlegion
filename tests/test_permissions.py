@@ -653,6 +653,106 @@ class TestOperatorInboxGlobalCarveOut:
         # Sender may inspect only its own submitted output.
         assert m.can_read_blackboard("scout", "global/output/scout/ho_1") is True
 
+
+# ── Self-inbox carve-out: agents read their OWN back-edge inbox ────────
+#
+# Back-edge task_event outcomes (handoff/task-completion signalling) are
+# written by the mesh to ``inbox/{agent}/task_event/{id}``. ``check_inbox``
+# reads ``inbox/{agent}/task_event/`` but the agent's ``blackboard_read``
+# ACL never matched that path, so the read 403'd and ``check_inbox``
+# silently degraded to ``events=[]``. The carve-out lets an agent ALWAYS
+# read its OWN inbox, strictly scoped to the caller's verified id.
+
+
+@pytest.fixture()
+def self_inbox_matrix(tmp_path):
+    """PermissionMatrix where agents have empty / non-matching reads."""
+    cfg = {
+        "permissions": {
+            # No blackboard_read at all → deny-all default glob.
+            "content-creator": {},
+            # Non-matching project-scoped read.
+            "scout": {"blackboard_read": ["projects/x/*"]},
+            # ID-prefix collision target: "dev" must NOT match "dev-lead".
+            "dev": {"blackboard_read": []},
+            "dev-lead": {"blackboard_read": []},
+        },
+    }
+    path = tmp_path / "permissions.json"
+    path.write_text(json.dumps(cfg))
+    return PermissionMatrix(config_path=str(path))
+
+
+class TestSelfInboxCarveOut:
+    def test_empty_acl_can_read_own_task_event_inbox(self, self_inbox_matrix):
+        """An agent with no blackboard_read can read its own task_event inbox."""
+        m = self_inbox_matrix
+        assert m.can_read_blackboard(
+            "content-creator", "inbox/content-creator/task_event/abc"
+        ) is True
+
+    def test_empty_acl_other_own_inbox_kind_denied(self, self_inbox_matrix):
+        """Least privilege: a non-task_event own-inbox path is now DENIED.
+
+        The carve-out is scoped strictly to the back-edge task_event sub-path,
+        so any other kind under the agent's own inbox falls through to the
+        (empty) ACL and is denied."""
+        m = self_inbox_matrix
+        assert m.can_read_blackboard(
+            "content-creator", "inbox/content-creator/some-other-kind/x"
+        ) is False
+
+    def test_nonmatching_acl_can_read_own_task_event_inbox(self, self_inbox_matrix):
+        """A non-matching project-scoped read still allows own task_event inbox."""
+        m = self_inbox_matrix
+        assert m.can_read_blackboard(
+            "scout", "inbox/scout/task_event/abc"
+        ) is True
+        # Sanity: its real ACL still works for project keys.
+        assert m.can_read_blackboard("scout", "projects/x/notes") is True
+
+    def test_cross_agent_inbox_denied(self, self_inbox_matrix):
+        """An agent is STILL denied another agent's inbox."""
+        m = self_inbox_matrix
+        assert m.can_read_blackboard(
+            "content-creator", "inbox/other-agent/task_event/abc"
+        ) is False
+        assert m.can_read_blackboard(
+            "scout", "inbox/content-creator/task_event/abc"
+        ) is False
+
+    def test_id_prefix_collision_denied(self, self_inbox_matrix):
+        """Trailing-slash boundary: 'dev' cannot read 'dev-lead' inbox."""
+        m = self_inbox_matrix
+        assert m.can_read_blackboard(
+            "dev", "inbox/dev-lead/task_event/x"
+        ) is False
+        # But 'dev' reads its OWN inbox fine.
+        assert m.can_read_blackboard(
+            "dev", "inbox/dev/task_event/x"
+        ) is True
+
+    def test_existing_behavior_intact(self, self_inbox_matrix):
+        """Operator/global-output carve-outs, glob match, and deny-all
+        for a non-inbox key with empty ACL are all unchanged."""
+        m = self_inbox_matrix
+        # Trusted callers bypass everything.
+        assert m.can_read_blackboard("mesh", "inbox/anyone/x") is True
+        # Normal glob match still works.
+        assert m.can_read_blackboard("scout", "projects/x/file") is True
+        # Non-inbox key with empty ACL is still denied (no broadening).
+        assert m.can_read_blackboard(
+            "content-creator", "projects/social-media/post"
+        ) is False
+        # Global-output self carve-out unchanged.
+        assert m.can_read_blackboard(
+            "scout", "global/output/scout/ho_1"
+        ) is True
+        assert m.can_read_blackboard(
+            "scout", "global/output/analyst/ho_1"
+        ) is False
+
+
 # ── Task 3: can_spawn split ────────────────────────────────────────────
 #
 # Task 3 narrowed ``can_spawn`` to ephemeral spawning only (``/mesh/spawn``)
