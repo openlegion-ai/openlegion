@@ -391,6 +391,30 @@ async def test_transient_429_retried_same_model_then_succeeds(monkeypatch):
     assert slept == [0.5]
 
 
+async def test_transient_httpx_timeout_exception_retried_then_succeeds(monkeypatch):
+    """A bare ``httpx.TimeoutException`` (base class, not one of the named
+    subclasses) raised by the upstream is classified transient, retried on
+    the same model, and succeeds on the next attempt."""
+    v, slept = _make_single_model_vault(monkeypatch)
+    import httpx
+
+    call_count = 0
+
+    async def mock_acompletion(model, messages, api_key, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise httpx.TimeoutException("slow")
+        return _good_response()
+
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        result = await v.execute_api_call(_chat_req())
+
+    assert result.success
+    assert call_count == 2
+    assert slept == [0.5]
+
+
 async def test_transient_503_bounded_gives_up_after_max(monkeypatch):
     """Persistent 503 is retried a BOUNDED number of times then surfaces a
     clear masked error — no infinite retry, budget can't be blown."""
@@ -506,6 +530,11 @@ def test_is_transient_error_classification():
     import httpx
     assert v._is_transient_error(httpx.ConnectError("boom")) is True
     assert v._is_transient_error(httpx.ReadTimeout("slow")) is True
+    # Base classes must also classify as transient — they cover subtypes
+    # the specific subclasses above miss (e.g. httpx.ReadError).
+    assert v._is_transient_error(httpx.TimeoutException("slow")) is True
+    assert v._is_transient_error(httpx.NetworkError("net")) is True
+    assert v._is_transient_error(httpx.ReadError("partial")) is True
 
     # Typed permanent errors are never retried here.
     from src.shared.errors import LLMAuthError, LLMConfigError

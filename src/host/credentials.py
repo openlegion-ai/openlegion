@@ -1319,6 +1319,12 @@ class CredentialVault:
         if isinstance(
             error,
             (
+                # Base classes catch transient faults the specific
+                # subclasses below miss (e.g. ReadError, ConnectError
+                # subtypes). TimeoutException / NetworkError are genuinely
+                # transient, so widening to them is safe.
+                httpx.TimeoutException,
+                httpx.NetworkError,
                 httpx.ConnectError,
                 httpx.ConnectTimeout,
                 httpx.ReadTimeout,
