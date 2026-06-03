@@ -52,6 +52,27 @@ _OPENAI_TOKEN_URL = "https://auth.openai.com/oauth/token"
 _OPENAI_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 _OPENAI_OAUTH_REDIRECT_URI = "http://localhost:1455/auth/callback"
 
+# ── Same-model transient retry (prod 503 incident) ───────────
+# HTTP statuses that are TRANSIENT upstream-provider blips (Anthropic /
+# OpenAI outage, rate-limit, gateway hiccup). A single one of these must
+# not fail the agent's whole task — retry the SAME model briefly before
+# falling through to the failover chain. Failover alone does not cover a
+# provider-wide blip (the next chain model is on the same provider with
+# the same outage) nor a single-model agent (no failover candidate).
+#
+# Permanent statuses (400/401/403/404/402) are deliberately ABSENT — they
+# are handled by ``_is_permanent_error`` / ``_raise_typed_llm_error`` and
+# must keep their existing fast-fail behaviour.
+#   503 Service Unavailable, 502 Bad Gateway, 504 Gateway Timeout,
+#   429 Too Many Requests, 529 Anthropic "overloaded".
+_TRANSIENT_RETRY_STATUS_CODES = frozenset({502, 503, 504, 429, 529})
+# Bounded: total attempts per model = 1 initial + this many retries.
+_TRANSIENT_MAX_RETRIES = 2
+# Deterministic exponential backoff (seconds): attempt 0 → 0.5, 1 → 1.0.
+# No jitter so tests are deterministic; the sleep coroutine is injectable
+# via ``_transient_sleep`` so tests run instantly.
+_TRANSIENT_BACKOFF_BASE = 0.5
+
 
 def _model_supports_vision(model: str) -> bool:
     """Check if a model supports image content blocks.
@@ -416,6 +437,9 @@ class CredentialVault:
         self._failover_chain = FailoverChain(
             chains=chains, health=self._health_tracker,
         )
+        # Injectable backoff sleep so the same-model transient retry can be
+        # exercised instantly in tests. Defaults to ``asyncio.sleep``.
+        self._transient_sleep = asyncio.sleep
 
     async def _get_http_client(self) -> httpx.AsyncClient:
         if self._http_client is not None and not self._http_client.is_closed:
@@ -1268,6 +1292,100 @@ class CredentialVault:
         return False
 
     @staticmethod
+    def _is_transient_error(error: Exception) -> bool:
+        """Return True for transient upstream-provider blips worth retrying.
+
+        Prod 503 incident: a single transient ``HTTP 503`` from the
+        provider (Anthropic / OpenAI outage) failed an agent's whole task.
+        Failover only switches MODELS, which does not help a provider-wide
+        blip (next chain model = same provider, same outage) nor a
+        single-model agent (no failover candidate). This classifier drives
+        a bounded SAME-model retry before the failover loop moves on.
+
+        Transient (retry): 502/503/504/429/529 status codes, plus
+        connection / timeout / read errors talking to the provider.
+
+        Permanent errors (400/401/403/404/402, auth, model-incompatible)
+        are NOT classified here — they are caught by the typed-exception
+        and ``_is_permanent_error`` paths and keep their fast-fail.
+        """
+        # Typed permanent / config / auth errors must never be retried here.
+        if isinstance(error, (LLMAuthError, LLMConfigError)):
+            return False
+        status = getattr(error, "status_code", 0)
+        if status in _TRANSIENT_RETRY_STATUS_CODES:
+            return True
+        # Network-layer faults reaching the provider (no HTTP status).
+        if isinstance(
+            error,
+            (
+                # Base classes catch transient faults the specific
+                # subclasses below miss (e.g. ReadError, ConnectError
+                # subtypes). TimeoutException / NetworkError are genuinely
+                # transient, so widening to them is safe.
+                httpx.TimeoutException,
+                httpx.NetworkError,
+                httpx.ConnectError,
+                httpx.ConnectTimeout,
+                httpx.ReadTimeout,
+                httpx.WriteTimeout,
+                httpx.PoolTimeout,
+                httpx.RemoteProtocolError,
+            ),
+        ):
+            return True
+        try:
+            import litellm
+        except Exception:  # pragma: no cover - litellm always importable here
+            return False
+        return isinstance(
+            error,
+            (
+                litellm.ServiceUnavailableError,
+                litellm.RateLimitError,
+                litellm.Timeout,
+                litellm.APIConnectionError,
+                litellm.InternalServerError,
+            ),
+        )
+
+    async def _call_with_transient_retry(self, model: str, attempt_fn):
+        """Run ``attempt_fn()`` for a single model, retrying transient blips.
+
+        Bounded same-model retry-with-backoff that wraps ONE failover
+        candidate. On a transient upstream error (see ``_is_transient_error``)
+        it retries the same model up to ``_TRANSIENT_MAX_RETRIES`` times with
+        deterministic exponential backoff, then re-raises so the caller's
+        existing failover loop can fall through to the next model. Permanent
+        / typed errors propagate immediately on the first attempt — no retry.
+
+        This is the single mesh-side call site every agent (streaming and
+        non-streaming) routes through, so the fix benefits the whole fleet
+        without duplicating the agent-loop's own retry path.
+        """
+        last_error: Exception | None = None
+        for attempt in range(_TRANSIENT_MAX_RETRIES + 1):
+            try:
+                return await attempt_fn()
+            except Exception as e:
+                if not self._is_transient_error(e):
+                    raise
+                last_error = e
+                if attempt >= _TRANSIENT_MAX_RETRIES:
+                    raise
+                wait = _TRANSIENT_BACKOFF_BASE * (2 ** attempt)
+                logger.warning(
+                    "Transient upstream error for model='%s' (%s) — "
+                    "retrying same model in %.2fs (attempt %d/%d)",
+                    model, type(e).__name__, wait,
+                    attempt + 1, _TRANSIENT_MAX_RETRIES,
+                )
+                await self._transient_sleep(wait)
+        # Defensive: loop always returns or raises above.
+        assert last_error is not None  # noqa: S101
+        raise last_error
+
+    @staticmethod
     def _get_status_code(error: Exception) -> int:
         """Extract HTTP status code from a litellm exception."""
         return getattr(error, "status_code", 0)
@@ -1367,7 +1485,12 @@ class CredentialVault:
                 continue
             api_base = self._get_api_base_for_model(model)
             try:
-                result = await call_fn(model, api_key, api_base, auth_headers)
+                result = await self._call_with_transient_retry(
+                    model,
+                    lambda m=model, k=api_key, b=api_base, h=auth_headers: (
+                        call_fn(m, k, b, h)
+                    ),
+                )
                 self._health_tracker.record_success(model)
                 if model != requested_model:
                     logger.info(
@@ -1401,7 +1524,12 @@ class CredentialVault:
             if api_key or self._is_keyless_provider(fallback):
                 api_base = self._get_api_base_for_model(fallback)
                 try:
-                    result = await call_fn(fallback, api_key, api_base, auth_headers)
+                    result = await self._call_with_transient_retry(
+                        fallback,
+                        lambda m=fallback, k=api_key, b=api_base, h=auth_headers: (
+                            call_fn(m, k, b, h)
+                        ),
+                    )
                     self._health_tracker.record_success(fallback)
                     logger.info(f"Auto-fallback: '{requested_model}' → '{fallback}' succeeded")
                     return result, fallback
@@ -3018,14 +3146,22 @@ class CredentialVault:
                 }
                 if api_key:
                     llm_kwargs["api_key"] = api_key
-                try:
-                    response = await litellm.acompletion(**llm_kwargs)
-                except Exception as litellm_err:
-                    # Codex P1 r3: classify LiteLLM auth/config failures
-                    # in the streaming path too — symmetric with the
-                    # non-streaming wrapper above.
-                    self._raise_typed_llm_error(litellm_err, model=model)
-                    raise  # _raise_typed_llm_error re-raises on no match
+
+                async def _open_stream(_kwargs=llm_kwargs, _model=model):
+                    try:
+                        return await litellm.acompletion(**_kwargs)
+                    except Exception as litellm_err:
+                        # Codex P1 r3: classify LiteLLM auth/config failures
+                        # in the streaming path too — symmetric with the
+                        # non-streaming wrapper above.
+                        self._raise_typed_llm_error(litellm_err, model=_model)
+                        raise  # _raise_typed_llm_error re-raises on no match
+
+                # Same-model bounded transient retry before failover
+                # (prod 503 incident) — mirrors the non-streaming path.
+                response = await self._call_with_transient_retry(
+                    model, _open_stream,
+                )
                 used_model = model
                 if model != requested_model:
                     logger.info(f"Stream failover: '{requested_model}' → '{model}'")
@@ -3074,15 +3210,21 @@ class CredentialVault:
                         }
                         if api_key:
                             llm_kwargs["api_key"] = api_key
-                        try:
-                            response = await litellm.acompletion(**llm_kwargs)
-                        except Exception as litellm_err:
-                            # Codex P1 r3: same typed-error classification
-                            # in the last-resort fallback path.
-                            self._raise_typed_llm_error(
-                                litellm_err, model=fallback,
-                            )
-                            raise
+
+                        async def _open_fb_stream(_kwargs=llm_kwargs, _model=fallback):
+                            try:
+                                return await litellm.acompletion(**_kwargs)
+                            except Exception as litellm_err:
+                                # Codex P1 r3: same typed-error classification
+                                # in the last-resort fallback path.
+                                self._raise_typed_llm_error(
+                                    litellm_err, model=_model,
+                                )
+                                raise
+
+                        response = await self._call_with_transient_retry(
+                            fallback, _open_fb_stream,
+                        )
                         used_model = fallback
                         logger.info(f"Stream auto-fallback: '{requested_model}' → '{fallback}'")
                     except (LLMAuthError, LLMConfigError) as typed_err:
