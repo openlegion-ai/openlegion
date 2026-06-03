@@ -55,6 +55,36 @@ def _default_embedding_model(llm_model: str) -> str:
     return "none"
 
 
+# Cap on the operator-visible ``blocker_note`` written when a mesh→agent
+# ``/chat`` dispatch raises. Mirrors the lane watchdog's ``[:500]`` cap and
+# the mesh ``/mesh/tasks/{id}/status`` endpoint's 500-char ``error`` promotion.
+_DISPATCH_ERROR_NOTE_MAX = 500
+
+
+def _build_dispatch_error_note(exc: BaseException) -> str:
+    """Render a transport/agent dispatch error into a SAFE ``blocker_note``.
+
+    The exception string is UNTRUSTED — the ``/chat`` body it came from may
+    echo agent-authored content, secrets, or injection. It MUST NOT reach the
+    operator-visible ``blocker_note`` raw. We:
+
+    1. Run it through the central free-form redactor
+       (:func:`redact_text_with_urls`), which strips both token-shaped secrets
+       AND credential-keyed URL query-param values, and
+    2. Truncate to :data:`_DISPATCH_ERROR_NOTE_MAX` chars.
+
+    Returns a ``"dispatch_error: <redacted reason>"`` string. XSS in the note
+    is handled downstream by the dashboard's Jinja autoescape — this layer is
+    purely about redaction + truncation.
+    """
+    from src.shared.redaction import redact_text_with_urls
+
+    raw = str(exc).strip() or exc.__class__.__name__
+    safe = redact_text_with_urls(raw)
+    note = f"dispatch_error: {safe}"
+    return note[:_DISPATCH_ERROR_NOTE_MAX]
+
+
 class RuntimeContext:
     """Manages the full OpenLegion runtime lifecycle."""
 
@@ -561,6 +591,71 @@ class RuntimeContext:
             if self.health_monitor:
                 self.health_monitor.register(agent_id)
 
+    async def _close_task_on_dispatch_error(
+        self, task_id: str, exc: BaseException,
+    ) -> None:
+        """Mark a durable task ``failed`` after its mesh→agent dispatch raised.
+
+        Without this, ``_direct_dispatch`` used to return ``f"Error: {e}"`` —
+        an opaque string the lane recorded as a *successful* turn, so the
+        durable task never got the lane's structured failure close and the
+        operator saw a useless ``exception: Error:`` note. We mirror the lane
+        watchdog's terminal-status write here: pre-check for an
+        already-terminal status (so a real status written by the assignee
+        during a race isn't clobbered), then write a REDACTED + truncated
+        ``blocker_note``. Best-effort: a failure to close must never mask the
+        original error from the lane.
+        """
+        from src.host.orchestration import InvalidStatusTransition
+
+        tasks_store = getattr(getattr(self, "_app", None), "tasks_store", None)
+        if tasks_store is None:
+            return
+        note = _build_dispatch_error_note(exc)
+        loop = asyncio.get_running_loop()
+        try:
+            pre = await loop.run_in_executor(
+                None, lambda: tasks_store.get(task_id)
+            )
+        except Exception as pre_err:
+            logger.debug(
+                "Dispatch-error pre-check for task %s failed: %s",
+                task_id, pre_err,
+            )
+            pre = None
+        if pre is not None and pre.get("status") in (
+            "done", "failed", "cancelled"
+        ):
+            # Already terminal (assignee or lane watchdog beat us) — do not
+            # clobber the real status/note.
+            logger.info(
+                "Dispatch error: task %s already terminal (status=%s) — "
+                "skipping failed-close", task_id, pre.get("status"),
+            )
+            return
+        try:
+            await loop.run_in_executor(
+                None,
+                lambda: tasks_store.update_status(
+                    task_id,
+                    "failed",
+                    actor="dispatch",
+                    blocker_note=note,
+                    extra_payload={"error": "dispatch_error"},
+                ),
+            )
+        except InvalidStatusTransition as race_err:
+            # Benign race: task went terminal between pre-check and UPDATE.
+            logger.info(
+                "Dispatch-error close race: task %s went terminal (%s) — "
+                "skipping", task_id, race_err,
+            )
+        except Exception as close_err:
+            logger.warning(
+                "Dispatch-error failed to close task %s: %s",
+                task_id, close_err,
+            )
+
     def _setup_dispatch(self) -> None:
         from src.host.lanes import _DEFAULT_LANE_TIMEOUT_SECONDS, LaneManager
 
@@ -634,6 +729,11 @@ class RuntimeContext:
                         data={"message": message[:200], "response_length": len(response),
                               "source": "dispatch"})
                 return response
+            # NOTE: ``except Exception`` (NOT ``BaseException``/bare) is
+            # deliberate — ``asyncio.CancelledError`` MUST propagate so the
+            # lane's 900s ``wait_for`` watchdog can still cancel a long run and
+            # run its structured timeout close. Swallowing it here would wedge
+            # the lane.
             except Exception as e:
                 duration_ms = int((_time.time() - t0) * 1000)
                 if tid and self.trace_store:
@@ -642,7 +742,23 @@ class RuntimeContext:
                         event_type="chat_response", duration_ms=duration_ms,
                         status="error", error=str(e),
                     )
-                return f"Error: {e}"
+                # RC-2 fix: a transport/agent error used to be returned as a
+                # bare ``f"Error: {e}"`` string. The lane recorded that as a
+                # *successful* turn, so the durable task never went through a
+                # structured failure close — the failure surfaced only as an
+                # opaque ``exception: Error:`` note with no actionable signal,
+                # AND the raw (untrusted) error string could leak secrets.
+                #
+                # Now: when the wake carried an originating ``task_id``, close
+                # that durable task to ``failed`` with a REDACTED + truncated
+                # ``blocker_note`` (mirrors the lane watchdog's terminal write,
+                # with an already-terminal pre-check to avoid clobbering a real
+                # status on a race). The string we return is also redacted so
+                # the no-task path (manual chat / heartbeat) stays non-leaky.
+                note = _build_dispatch_error_note(e)
+                if task_id:
+                    await self._close_task_on_dispatch_error(task_id, e)
+                return note
 
         async def _direct_steer(agent_name: str, message: str) -> dict:
             try:
