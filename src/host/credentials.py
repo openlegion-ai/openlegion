@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 import httpx
 
 from src.agent.attachments import convert_openai_image_blocks
+from src.host.oauth_providers import get_provider
 from src.host.transcript import sanitize_for_provider
 from src.shared.errors import LLMAuthError, LLMConfigError, LLMTransientError
 from src.shared.models import KEYLESS_PROVIDERS, get_known_provider_names
@@ -216,6 +217,11 @@ def _remove_from_env(env_key: str, env_file: str = "") -> None:
 # ── Prefix constants ───────────────────────────────────────
 SYSTEM_PREFIX = "OPENLEGION_SYSTEM_"
 AGENT_PREFIX = "OPENLEGION_CRED_"
+# Structured OAuth "connections" minted by the integrations connect/callback
+# flow (Google Drive/Gmail/Calendar, etc.). Stored as JSON blobs, one env var
+# per connection. Agent-tier resolvable (subject to ``allowed_credentials``
+# globs) but resolve to a freshly-refreshed access token, never the raw blob.
+CONNECTION_PREFIX = "OPENLEGION_CONN_"
 
 # System credential patterns — used by is_system_credential() for
 # defense-in-depth permission checks and by CLI/dashboard for
@@ -412,6 +418,14 @@ class CredentialVault:
         self._openai_oauth_lock = asyncio.Lock()
         self._anthropic_oauth: dict | None = None
         self._anthropic_oauth_lock = asyncio.Lock()
+        # Structured third-party OAuth connections (integrations connect flow).
+        # ``connections[name]`` = {provider, access_token, refresh_token,
+        # expires_at, scopes, account}. Per-name locks serialize refresh so
+        # concurrent agent resolves don't double-refresh; ``_connection_locks``
+        # itself is guarded by ``_connection_locks_guard``.
+        self.connections: dict[str, dict] = {}
+        self._connection_locks: dict[str, asyncio.Lock] = {}
+        self._connection_locks_guard = asyncio.Lock()
         # ``_auth_failure_recorder`` (Fix 4 in seam follow-up): optional
         # callback ``(agent_id, provider, model, http_status) -> None``
         # invoked when an LLM call raises ``LLMAuthError`` during
@@ -512,6 +526,23 @@ class CredentialVault:
             "OPENLEGION_SYSTEM_ANTHROPIC_OAUTH", "Anthropic",
         )
 
+        # Phase 3: structured OAuth connections (integrations connect flow)
+        self.connections = {}
+        for key, value in os.environ.items():
+            if key.startswith(CONNECTION_PREFIX):
+                conn_name = key[len(CONNECTION_PREFIX):].lower()
+                try:
+                    parsed = json.loads(value)
+                except (json.JSONDecodeError, ValueError):
+                    logger.warning("Failed to parse connection %s: invalid JSON", conn_name)
+                    continue
+                if isinstance(parsed, dict) and parsed.get("access_token"):
+                    self.connections[conn_name] = parsed
+                else:
+                    logger.warning(
+                        "Failed to load connection %s: missing access_token", conn_name,
+                    )
+
         loaded_system = list(self.system_credentials.keys())
         loaded_agent = list(self.credentials.keys())
         if loaded_system:
@@ -553,12 +584,33 @@ class CredentialVault:
 
         System-tier credentials are never returned here — they are only
         accessible internally by the mesh proxy handlers.
+
+        For OAuth connections this returns the *current* (possibly stale)
+        access token without refreshing — sufficient for existence checks and
+        sync callers. Agent-facing resolution goes through
+        :meth:`resolve_credential_async`, which refreshes on demand.
         """
-        return self.credentials.get(name.lower())
+        lower = name.lower()
+        if lower in self.connections:
+            return self.connections[lower].get("access_token")
+        return self.credentials.get(lower)
+
+    async def resolve_credential_async(self, name: str) -> str | None:
+        """Resolve a credential, refreshing OAuth connection tokens on demand.
+
+        This is the agent-facing path (``$CRED{name}`` via ``/mesh/vault/resolve``):
+        a connection resolves to a freshly-refreshed access token so agents
+        never see a stale token and never touch the refresh token.
+        """
+        lower = name.lower()
+        if lower in self.connections:
+            return await self.ensure_connection_token(lower)
+        return self.credentials.get(lower)
 
     def list_credential_names(self) -> list[str]:
         """Return all credential names across both tiers (never values)."""
         combined = set(self.system_credentials.keys()) | set(self.credentials.keys())
+        combined |= set(self.connections.keys())
         if self._openai_oauth is not None:
             combined.add("openai_oauth")
         if self._anthropic_oauth is not None:
@@ -566,12 +618,13 @@ class CredentialVault:
         return sorted(combined)
 
     def list_agent_credential_names(self) -> list[str]:
-        """Return agent-tier credential names only.
+        """Return agent-tier resolvable credential names.
 
-        Since loading already sorts credentials into the correct tier,
-        this simply returns ``credentials`` keys — no filtering needed.
+        Includes both plain agent-tier secrets and OAuth connections — both are
+        resolvable by agents (subject to ``allowed_credentials`` globs) via
+        ``$CRED{name}``.
         """
-        return list(self.credentials.keys())
+        return list(self.credentials.keys()) + list(self.connections.keys())
 
     def list_system_credential_names(self) -> list[str]:
         """Return system-tier credential names only."""
@@ -600,6 +653,13 @@ class CredentialVault:
             if existed:
                 logger.info("Credential removed: anthropic_oauth")
             return existed
+        # OAuth connection removal (integrations connect flow)
+        if cred_key in self.connections:
+            self.connections.pop(cred_key, None)
+            self._connection_locks.pop(cred_key, None)
+            _remove_from_env(f"{CONNECTION_PREFIX}{name.upper()}")
+            logger.info("Connection removed: %s", cred_key)
+            return True
         if cred_key.endswith("_api_base"):
             existed = cred_key in self.api_bases
             self.api_bases.pop(cred_key, None)
@@ -624,7 +684,259 @@ class CredentialVault:
             return True
         if lower == "anthropic_oauth" and self._anthropic_oauth is not None:
             return True
+        if lower in self.connections:
+            return True
         return lower in self.credentials or lower in self.system_credentials
+
+    # ── OAuth integrations (connect/callback flow) ──────────────────────
+    #
+    # ``store_connection`` / ``ensure_connection_token`` generalize the
+    # OpenAI-OAuth refresh machinery (``_ensure_openai_oauth_token``) to
+    # arbitrary third-party data providers. Client id/secret are operator-owned
+    # (system-tier); agents only ever see a short-lived access token.
+
+    _CONNECTION_NAME_RE = re.compile(r"^[a-z0-9_]{1,64}$")
+
+    def has_oauth_client(self, provider) -> bool:
+        """True if the operator has configured client id+secret for *provider*."""
+        return bool(
+            self.system_credentials.get(provider.client_id_key)
+            and self.system_credentials.get(provider.client_secret_key)
+        )
+
+    def build_authorize_url(
+        self, provider, *, redirect_uri: str, state: str,
+        scopes: list[str], code_challenge: str | None = None,
+    ) -> str:
+        """Build the provider authorize URL for the consent redirect."""
+        from urllib.parse import urlencode
+        params = {
+            "client_id": self.system_credentials.get(provider.client_id_key, ""),
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "scope": " ".join(scopes),
+            "state": state,
+        }
+        params.update(provider.extra_authorize_params)
+        if provider.uses_pkce and code_challenge:
+            params["code_challenge"] = code_challenge
+            params["code_challenge_method"] = "S256"
+        return f"{provider.authorize_url}?{urlencode(params)}"
+
+    async def exchange_oauth_code(
+        self, provider, *, code: str, redirect_uri: str,
+        code_verifier: str | None = None,
+    ) -> dict:
+        """Exchange an authorization code for tokens. Returns a connection dict.
+
+        Does NOT persist — the caller stores via :meth:`store_connection` so the
+        connection name is decided at the dashboard layer. Raises ``RuntimeError``
+        on a failed exchange (error text is truncated; tokens never logged).
+        """
+        client_id = self.system_credentials.get(provider.client_id_key, "")
+        client_secret = self.system_credentials.get(provider.client_secret_key, "")
+        if not client_id or not client_secret:
+            raise RuntimeError(f"No OAuth client configured for {provider.key}")
+        data = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uri": redirect_uri,
+        }
+        if code_verifier:
+            data["code_verifier"] = code_verifier
+        client = await self._get_http_client()
+        try:
+            resp = await client.post(
+                provider.token_url, data=data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=30,
+            )
+        except (httpx.TimeoutException, httpx.ConnectError) as exc:
+            raise RuntimeError(f"{provider.key} token exchange failed: {exc}") from exc
+        if not resp.is_success:
+            raise RuntimeError(
+                f"{provider.key} token exchange failed "
+                f"(HTTP {resp.status_code}): {resp.text[:200]}"
+            )
+        payload = resp.json()
+        access = payload.get("access_token", "")
+        if not access:
+            raise RuntimeError(f"{provider.key} token exchange returned no access_token")
+        expires_in = int(payload.get("expires_in", 3600))
+        scope_str = payload.get("scope", "")
+        account = await self._fetch_oauth_account(provider, access)
+        return {
+            "provider": provider.key,
+            "access_token": access,
+            "refresh_token": payload.get("refresh_token", ""),
+            "expires_at": int(time.time()) + expires_in,
+            "scopes": scope_str.split() if scope_str else [],
+            "account": account,
+        }
+
+    async def _fetch_oauth_account(self, provider, access_token: str) -> str:
+        """Best-effort: which account did the user connect (for display only)."""
+        if not provider.userinfo_url:
+            return ""
+        try:
+            client = await self._get_http_client()
+            resp = await client.get(
+                provider.userinfo_url,
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=15,
+            )
+            if resp.is_success:
+                return str(resp.json().get(provider.userinfo_email_field, ""))
+        except Exception as exc:  # noqa: BLE001 — display-only, never fatal
+            logger.debug("userinfo fetch failed for %s: %s", provider.key, exc)
+        return ""
+
+    def store_connection(self, name: str, data: dict) -> str:
+        """Persist an OAuth connection (JSON blob) and return its $CRED handle.
+
+        Goes through the JSON env path rather than ``add_credential`` (which
+        strips whitespace and would corrupt the blob). Name must be a safe
+        env-key segment.
+        """
+        name = name.lower()
+        if not self._CONNECTION_NAME_RE.match(name):
+            raise ValueError(
+                "Connection name must be 1-64 chars of [a-z0-9_]",
+            )
+        if not data.get("access_token"):
+            raise ValueError("connection requires access_token")
+        self.connections[name] = data
+        _persist_to_env(f"{CONNECTION_PREFIX}{name.upper()}", json.dumps(data))
+        logger.info("Connection stored: %s (%s)", name, data.get("provider", ""))
+        return f"$CRED{{{name}}}"
+
+    async def _get_connection_lock(self, name: str) -> asyncio.Lock:
+        async with self._connection_locks_guard:
+            lock = self._connection_locks.get(name)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._connection_locks[name] = lock
+            return lock
+
+    async def ensure_connection_token(self, name: str) -> str:
+        """Return a valid access token for a connection, refreshing if needed.
+
+        Generalizes ``_ensure_openai_oauth_token``: 5-minute expiry buffer,
+        per-name lock with double-check. If the provider issued no refresh
+        token (offline access not granted, or a long-lived token), returns the
+        current token — a 401 then surfaces naturally to the agent rather than
+        failing the resolve.
+        """
+        name = name.lower()
+        conn = self.connections.get(name)
+        if conn is None:
+            raise RuntimeError(f"No connection: {name}")
+        now = int(time.time())
+        if conn.get("expires_at", 0) > now + 300:
+            return conn["access_token"]
+
+        lock = await self._get_connection_lock(name)
+        async with lock:
+            conn = self.connections.get(name)
+            if conn is None:
+                raise RuntimeError(f"No connection: {name}")
+            now = int(time.time())
+            if conn.get("expires_at", 0) > now + 300:
+                return conn["access_token"]
+            refresh_token = conn.get("refresh_token", "")
+            if not refresh_token:
+                return conn["access_token"]
+            provider = get_provider(conn.get("provider", ""))
+            if provider is None:
+                return conn["access_token"]
+            client_id = self.system_credentials.get(provider.client_id_key, "")
+            client_secret = self.system_credentials.get(provider.client_secret_key, "")
+            if not client_id or not client_secret:
+                return conn["access_token"]
+            client = await self._get_http_client()
+            try:
+                resp = await client.post(
+                    provider.token_url,
+                    data={
+                        "grant_type": "refresh_token",
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                        "refresh_token": refresh_token,
+                    },
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    timeout=30,
+                )
+            except (httpx.TimeoutException, httpx.ConnectError) as exc:
+                raise RuntimeError(
+                    f"{provider.key} token refresh request failed: {exc}",
+                ) from exc
+            if not resp.is_success:
+                raise RuntimeError(
+                    f"{provider.key} token refresh failed "
+                    f"(HTTP {resp.status_code}): {resp.text[:200]}"
+                )
+            payload = resp.json()
+            new_access = payload.get("access_token", "")
+            if not new_access:
+                raise RuntimeError(f"{provider.key} refresh returned no access_token")
+            expires_in = int(payload.get("expires_in", 3600))
+            updated = dict(conn)
+            updated["access_token"] = new_access
+            # Most providers (Google) do NOT re-issue a refresh token on
+            # refresh — keep the existing one unless a new one is returned.
+            updated["refresh_token"] = payload.get("refresh_token", refresh_token)
+            updated["expires_at"] = int(time.time()) + expires_in
+            # If the connection was disconnected while this refresh was in
+            # flight (remove_credential pops it without taking this lock), do
+            # NOT resurrect it: hand the token to the current caller but neither
+            # re-store nor re-persist it.
+            if name not in self.connections:
+                logger.info(
+                    "Connection %s removed during refresh; not persisting", name,
+                )
+                return new_access
+            self.connections[name] = updated
+            _persist_to_env(
+                f"{CONNECTION_PREFIX}{name.upper()}", json.dumps(updated),
+            )
+            logger.info("Connection token refreshed: %s", name)
+            return new_access
+
+    def list_connections(self) -> list[dict]:
+        """Return display metadata for all connections (never tokens)."""
+        return [
+            {
+                "name": name,
+                "provider": conn.get("provider", ""),
+                "account": conn.get("account", ""),
+                "scopes": conn.get("scopes", []),
+                "expires_at": conn.get("expires_at", 0),
+            }
+            for name, conn in sorted(self.connections.items())
+        ]
+
+    async def revoke_connection(self, name: str) -> None:
+        """Best-effort provider-side token revocation. Never raises."""
+        conn = self.connections.get(name.lower())
+        if not conn:
+            return
+        provider = get_provider(conn.get("provider", ""))
+        if provider is None or not provider.revoke_url:
+            return
+        token = conn.get("refresh_token") or conn.get("access_token")
+        if not token:
+            return
+        try:
+            client = await self._get_http_client()
+            await client.post(
+                provider.revoke_url, data={"token": token},
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=15,
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort, never fatal
+            logger.debug("Revoke failed for %s: %s", name, exc)
 
     def _register_handlers(self) -> None:
         """Register API call handlers for each supported service."""

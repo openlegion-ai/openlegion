@@ -793,6 +793,43 @@ def create_dashboard_router(
         if not request.headers.get("X-Requested-With"):
             raise HTTPException(403, "Missing X-Requested-With header")
 
+    # ── OAuth integrations (connect/callback) state + helpers ───────────
+    from src.host.oauth_state import OAuthStateStore
+    _oauth_state_store = OAuthStateStore()
+
+    def _oauth_session_hash(request: Request) -> str:
+        """Bind OAuth state to the caller's dashboard session (cookie hash).
+
+        Mirrors :func:`_conversations_session_id`. Falls back to a dev constant
+        when the ``ol_session`` cookie is absent (single-operator self-hosted).
+        """
+        raw = request.cookies.get("ol_session", "")
+        if not raw:
+            return "dev:operator"
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+    def _public_base_url(request: Request) -> str:
+        """Externally-reachable origin for building OAuth redirect URIs.
+
+        Prefers ``OPENLEGION_PUBLIC_BASE_URL`` (exact, what the operator
+        registered with the provider); otherwise derives from the forwarded
+        Host/proto Caddy sets. The redirect URI must match byte-for-byte across
+        the authorize call, the token exchange, and the provider registration.
+        """
+        explicit = os.environ.get("OPENLEGION_PUBLIC_BASE_URL", "").strip()
+        if explicit:
+            return explicit.rstrip("/")
+        proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+        host = (
+            request.headers.get("x-forwarded-host")
+            or request.headers.get("host")
+            or request.url.netloc
+        )
+        return f"{proto}://{host}"
+
+    def _oauth_redirect_uri(request: Request, provider_key: str) -> str:
+        return f"{_public_base_url(request)}/dashboard/integrations/{provider_key}/callback"
+
     def _mask_proxy_url(url: str) -> str:
         """Mask credentials in a proxy URL for display."""
         if not url:
@@ -4122,6 +4159,160 @@ def create_dashboard_router(
             raise HTTPException(status_code=404, detail=f"Credential '{name}' not found")
         masked = value[-4:].rjust(len(value), "*") if len(value) > 4 else "****"
         return {"name": name, "value": masked}
+
+    # ── OAuth integrations (one-click Connect) ──────────────
+    #
+    # Bring-your-own-app flow: the operator registers their own OAuth app and
+    # supplies client_id/secret once (POST .../setup, stored system-tier), then
+    # connects via the browser redirect dance. The resulting connection resolves
+    # as ``$CRED{<name>}`` with transparent token refresh — agents never touch
+    # the refresh token. The connect/callback GETs inherit ``_verify_dashboard_auth``
+    # (cookie rides Google's redirect) and are CSRF-exempt as safe methods; the
+    # single-use, session-bound ``state`` is the real CSRF guard.
+
+    @api_router.get("/api/integrations")
+    async def api_list_integrations(request: Request) -> dict:
+        """List providers, whether their client is configured, and connections."""
+        from src.host.oauth_providers import OAUTH_PROVIDERS
+        if credential_vault is None:
+            return {"providers": []}
+        conns_by_provider: dict[str, list] = {}
+        for c in credential_vault.list_connections():
+            conns_by_provider.setdefault(c["provider"], []).append(c)
+        providers = []
+        for key, p in OAUTH_PROVIDERS.items():
+            providers.append({
+                "key": key,
+                "label": p.label,
+                "configured": credential_vault.has_oauth_client(p),
+                "redirect_uri": _oauth_redirect_uri(request, key),
+                "scope_bundles": [
+                    {"key": b.key, "label": b.label, "description": b.description}
+                    for b in p.scope_bundles
+                ],
+                "connections": conns_by_provider.get(key, []),
+            })
+        return {"providers": providers}
+
+    @api_router.post("/api/integrations/{provider}/setup")
+    async def api_setup_integration(provider: str, request: Request) -> dict:
+        """Store the operator's OAuth client id/secret for a provider (system-tier)."""
+        from src.host.oauth_providers import get_provider
+        p = get_provider(provider)
+        if p is None:
+            raise HTTPException(404, f"Unknown provider: {provider}")
+        if credential_vault is None:
+            raise HTTPException(503, "Credential vault not available")
+        body = await request.json()
+        client_id = body.get("client_id", "").strip()
+        client_secret = body.get("client_secret", "").strip()
+        if not client_id or not client_secret:
+            raise HTTPException(400, "client_id and client_secret are required")
+        credential_vault.add_credential(p.client_id_key, client_id, system=True)
+        credential_vault.add_credential(p.client_secret_key, client_secret, system=True)
+        return {
+            "configured": True,
+            "provider": provider,
+            "redirect_uri": _oauth_redirect_uri(request, provider),
+        }
+
+    @api_router.get("/integrations/{provider}/connect")
+    async def integration_connect(
+        provider: str, request: Request, name: str = "", scopes: str = "",
+    ):
+        """Begin the OAuth dance: mint state, redirect to the provider consent."""
+        from fastapi.responses import RedirectResponse
+
+        from src.host.oauth_providers import generate_pkce, get_provider
+        p = get_provider(provider)
+        if p is None:
+            raise HTTPException(404, f"Unknown provider: {provider}")
+        if credential_vault is None:
+            raise HTTPException(503, "Credential vault not available")
+        if not credential_vault.has_oauth_client(p):
+            raise HTTPException(400, f"{p.label} OAuth client not configured")
+        bundle_keys = [s.strip() for s in scopes.split(",") if s.strip()]
+        # Reject unknown bundle keys rather than silently under-scoping a
+        # connection that would then look "connected" but lack data access.
+        unknown = [k for k in bundle_keys if p.bundle(k) is None]
+        if unknown:
+            raise HTTPException(400, f"Unknown scope bundle(s): {', '.join(unknown)}")
+        resolved_scopes = p.resolve_scopes(bundle_keys)
+        conn_name = re.sub(r"[^a-z0-9_]", "_", (name or provider).strip().lower())[:64]
+        conn_name = conn_name.strip("_") or provider
+        verifier, challenge = generate_pkce()
+        redirect_uri = _oauth_redirect_uri(request, provider)
+        state = _oauth_state_store.create(
+            provider=provider,
+            connection_name=conn_name,
+            scopes=tuple(resolved_scopes),
+            code_verifier=verifier,
+            redirect_uri=redirect_uri,
+            session_hash=_oauth_session_hash(request),
+        )
+        url = credential_vault.build_authorize_url(
+            p, redirect_uri=redirect_uri, state=state,
+            scopes=resolved_scopes, code_challenge=challenge,
+        )
+        return RedirectResponse(url, status_code=302)
+
+    @api_router.get("/integrations/{provider}/callback")
+    async def integration_callback(
+        provider: str, request: Request,
+        code: str = "", state: str = "", error: str = "",
+    ):
+        """Provider redirect target: validate state, exchange code, store conn."""
+        from fastapi.responses import RedirectResponse
+
+        from src.host.oauth_providers import get_provider
+        landing = "/dashboard/"
+
+        def _back(params: str):
+            return RedirectResponse(f"{landing}?{params}", status_code=302)
+
+        if error:
+            return _back(f"integration_error={re.sub(r'[^a-zA-Z0-9_-]', '', error)[:64]}")
+        p = get_provider(provider)
+        if p is None or credential_vault is None:
+            return _back("integration_error=unknown_provider")
+        pending = _oauth_state_store.consume(
+            state, session_hash=_oauth_session_hash(request),
+        )
+        if pending is None or pending.provider != provider or not code:
+            return _back("integration_error=invalid_state")
+        try:
+            conn = await credential_vault.exchange_oauth_code(
+                p, code=code, redirect_uri=pending.redirect_uri,
+                code_verifier=pending.code_verifier,
+            )
+            # A connection that needs refresh but came back without a refresh
+            # token would silently die at first expiry — reject it now with a
+            # clear, actionable error instead of storing a dead connection.
+            if p.refresh_required and not conn.get("refresh_token"):
+                logger.warning(
+                    "OAuth callback for %s returned no refresh_token; rejecting",
+                    provider,
+                )
+                return _back("integration_error=no_refresh_token")
+            credential_vault.store_connection(pending.connection_name, conn)
+        except Exception as exc:  # noqa: BLE001 — surface as a UI banner
+            logger.warning("OAuth callback exchange failed for %s: %s", provider, exc)
+            return _back("integration_error=exchange_failed")
+        logger.info(
+            "Integration connected: %s (%s)", pending.connection_name, provider,
+        )
+        return _back(f"integration_connected={pending.connection_name}")
+
+    @api_router.post("/api/integrations/{name}/disconnect")
+    async def api_disconnect_integration(name: str, request: Request) -> dict:
+        """Revoke (best-effort) and remove an OAuth connection."""
+        if credential_vault is None:
+            raise HTTPException(503, "Credential vault not available")
+        await credential_vault.revoke_connection(name)
+        existed = credential_vault.remove_credential(name)
+        if not existed:
+            raise HTTPException(404, f"Connection '{name}' not found")
+        return {"removed": True, "name": name}
 
     # ── External API key management ─────────────────────────
 

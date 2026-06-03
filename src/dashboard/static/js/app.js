@@ -483,7 +483,7 @@ function dashboard() {
       { id: 'costs', label: 'Costs' },
       { id: 'integrations', label: 'Integrations' },
       { id: 'automation', label: 'Automation' },
-      { id: 'apikeys', label: 'API Keys' },
+      { id: 'apikeys', label: 'API Keys & Connections' },
       { id: 'operator', label: 'Operator' },
       { id: 'browser', label: 'Browser' },
       { id: 'wallet', label: 'Wallet' },
@@ -527,6 +527,14 @@ function dashboard() {
     channels: [],
     channelConnectType: '',
     channelTokens: {},
+
+    // OAuth integrations (Google Drive/Gmail/Calendar via bring-your-own-app)
+    integrations: [],                 // [{ key, label, configured, redirect_uri, scope_bundles, connections }]
+    integrationSetup: {},             // { [providerKey]: { client_id, client_secret } } — setup form state
+    integrationSetupSaving: '',       // providerKey currently saving its OAuth client
+    integrationConnectName: {},       // { [providerKey]: connectionName } — defaults to provider key
+    integrationSelectedScopes: {},    // { [providerKey]: { [bundleKey]: bool } } — checkbox state
+    integrationDisconnecting: '',     // connection name currently being disconnected
 
 
     // Webhooks
@@ -866,7 +874,7 @@ function dashboard() {
                 this.fetchChannels(); this.fetchWebhooks(); this.fetchApiKeys();
               }
               if (route.systemTab === 'apikeys') {
-                this.fetchSettings();
+                this.fetchSettings(); this.loadIntegrations();
               }
               if (route.systemTab === 'settings') {
                 this.fetchBrowserSettings();
@@ -1157,6 +1165,10 @@ function dashboard() {
     init() {
       this._initTs = Date.now();  // track page load time to skip replayed events
       const cfg = window.__config || {};
+
+      // Surface the OAuth-integration callback result (?integration_connected /
+      // ?integration_error) as a toast, then scrub the query param.
+      this._handleIntegrationRedirect();
 
       // NOTE: the side panel is no longer restored from the legacy
       // ``ol_messenger_side_panel_open`` flag. Its only writer was the
@@ -2468,6 +2480,10 @@ function dashboard() {
           this.fetchChannels();
           this.fetchApiKeys();
         }
+        if (this.systemTab === 'apikeys') {
+          this.fetchSettings();
+          this.loadIntegrations();
+        }
         if (this.systemTab === 'network') {
           this.loadNetworkProxy();
         }
@@ -2498,7 +2514,7 @@ function dashboard() {
       this.systemTab = tabId;
       this._pushUrl(false);
       if (tabId === 'integrations') { this.fetchChannels(); this.fetchWebhooks(); this.fetchApiKeys(); }
-      if (tabId === 'apikeys') { this.fetchSettings(); }
+      if (tabId === 'apikeys') { this.fetchSettings(); this.loadIntegrations(); }
       if (tabId === 'storage') { this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails(); }
       if (tabId === 'network') { this.loadNetworkProxy(); }
       if (tabId === 'settings') { this.fetchBrowserSettings(); this.fetchSystemSettings(); }
@@ -9221,6 +9237,122 @@ function dashboard() {
         const resp = await fetch(`${window.__config.apiBase}/channels`);
         if (resp.ok) this.channels = (await resp.json()).channels || [];
       } catch (e) { console.warn('fetchChannels failed:', e); }
+    },
+
+    // ── OAuth integrations (Google Drive/Gmail/Calendar) ─────────────
+    // The connect/disconnect endpoints live under ``apiBase`` (/dashboard/api);
+    // the full-page consent redirect lives one level up at /dashboard/integrations.
+    _integrationsBase() {
+      // apiBase is "/dashboard/api" → strip the trailing "/api" for the
+      // browser-redirect connect route which is NOT under /api.
+      return (window.__config.apiBase || '').replace(/\/api$/, '');
+    },
+
+    async loadIntegrations() {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/integrations`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        this.integrations = data.providers || [];
+        // Seed per-provider form defaults without clobbering in-flight edits.
+        for (const p of this.integrations) {
+          if (!this.integrationSetup[p.key]) {
+            this.integrationSetup[p.key] = { client_id: '', client_secret: '' };
+          }
+          if (this.integrationConnectName[p.key] === undefined) {
+            this.integrationConnectName[p.key] = p.key;
+          }
+          if (!this.integrationSelectedScopes[p.key]) {
+            this.integrationSelectedScopes[p.key] = {};
+          }
+        }
+      } catch (e) { console.warn('loadIntegrations failed:', e); }
+    },
+
+    async setupIntegration(providerKey) {
+      if (this.integrationSetupSaving) return;
+      const form = this.integrationSetup[providerKey] || {};
+      const clientId = (form.client_id || '').trim();
+      const clientSecret = (form.client_secret || '').trim();
+      if (!clientId || !clientSecret) {
+        this.showToast('Client ID and Client Secret are required');
+        return;
+      }
+      this.integrationSetupSaving = providerKey;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/integrations/${encodeURIComponent(providerKey)}/setup`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ client_id: clientId, client_secret: clientSecret }),
+        });
+        if (resp.ok) {
+          this.showToast('OAuth app saved. You can now connect.');
+          this.integrationSetup[providerKey] = { client_id: '', client_secret: '' };
+          await this.loadIntegrations();
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Setup failed'}`);
+        }
+      } catch (e) { this.showToast(`Error: ${e.message || e}`); }
+      finally { this.integrationSetupSaving = ''; }
+    },
+
+    connectIntegration(providerKey) {
+      const name = (this.integrationConnectName[providerKey] || providerKey).trim() || providerKey;
+      const selected = this.integrationSelectedScopes[providerKey] || {};
+      const bundles = Object.keys(selected).filter(k => selected[k]);
+      if (!bundles.length) {
+        this.showToast('Select at least one access bundle to connect');
+        return;
+      }
+      const params = new URLSearchParams({ name, scopes: bundles.join(',') });
+      // Full-page navigation — the auth cookie rides Google's redirect back.
+      window.location.href = `${this._integrationsBase()}/integrations/${encodeURIComponent(providerKey)}/connect?${params.toString()}`;
+    },
+
+    async disconnectIntegration(name) {
+      if (this.integrationDisconnecting) return;
+      this.integrationDisconnecting = name;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/integrations/${encodeURIComponent(name)}/disconnect`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          credentials: 'same-origin',
+          body: '{}',
+        });
+        if (resp.ok) {
+          this.showToast(`Disconnected: ${name}`);
+          await this.loadIntegrations();
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Disconnect failed'}`);
+        }
+      } catch (e) { this.showToast(`Error: ${e.message || e}`); }
+      finally { this.integrationDisconnecting = ''; }
+    },
+
+    // Read ?integration_connected / ?integration_error from the OAuth callback
+    // redirect, surface a toast, then scrub the query param so a refresh
+    // doesn't re-toast.
+    _handleIntegrationRedirect() {
+      try {
+        const params = new URLSearchParams(window.location.search);
+        const connected = params.get('integration_connected');
+        const error = params.get('integration_error');
+        if (!connected && !error) return;
+        if (connected) {
+          this.showToast(`Connected: ${connected}`);
+        } else if (error) {
+          const pretty = String(error).replace(/_/g, ' ');
+          this.showToast(`Integration failed: ${pretty}`);
+        }
+        params.delete('integration_connected');
+        params.delete('integration_error');
+        const qs = params.toString();
+        const newUrl = window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash;
+        window.history.replaceState({}, '', newUrl);
+      } catch (e) { /* ignore */ }
     },
 
     _channelFields(type) {
