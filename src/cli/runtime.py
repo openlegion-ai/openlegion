@@ -487,28 +487,30 @@ class RuntimeContext:
             set_llm_max_tokens_env(agent_env, agent_cfg)
             if agent_id == _OPERATOR_AGENT_ID:
                 agent_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
-                # PR-L' — pass the boot greeting so the agent can seed
-                # its chat transcript on first start. Idempotency is
-                # gated agent-side on a sentinel file in /data/workspace,
-                # so subsequent restarts and chat-resets do NOT re-emit.
-                from src.shared.operator_playbooks import _OPERATOR_GREETING
-                agent_env["INITIAL_GREETING"] = _OPERATOR_GREETING
-                # Seed the runtime internet-access state from the
-                # operator's stored permission so a restart while the
-                # toggle is OFF doesn't briefly re-expose http_request /
-                # web_search. ``_load_permissions`` is cheap (JSON read);
-                # default-True matches the operator-by-default UX.
+                # NOTE: the operator no longer seeds a boot greeting into
+                # its chat transcript. The onboarding modal + in-chat
+                # starting-point card cover the first-run experience; a
+                # seeded assistant message stacked confusingly underneath
+                # that card.
+                # Seed the runtime internet/browser access state from the
+                # operator's stored permissions so a restart while a
+                # toggle is OFF doesn't briefly re-expose the gated tools.
+                # ``_load_permissions`` is cheap (JSON read); default-True
+                # matches the operator-by-default UX.
                 try:
                     from src.cli.config import _load_permissions
                     _op_perms = _load_permissions().get(
                         "permissions", {},
                     ).get(_OPERATOR_AGENT_ID, {})
-                    _internet_on = _op_perms.get("can_use_internet", True)
                     agent_env["OL_INTERNET_ACCESS_ENABLED"] = (
-                        "true" if _internet_on else "false"
+                        "true" if _op_perms.get("can_use_internet", True) else "false"
+                    )
+                    agent_env["OL_BROWSER_ACCESS_ENABLED"] = (
+                        "true" if _op_perms.get("can_use_browser", True) else "false"
                     )
                 except Exception:
                     agent_env["OL_INTERNET_ACCESS_ENABLED"] = "true"
+                    agent_env["OL_BROWSER_ACCESS_ENABLED"] = "true"
 
             # Project env vars
             project_name = agent_projects.get(agent_id)

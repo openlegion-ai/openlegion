@@ -7738,6 +7738,112 @@ def create_mesh_app(
         op_perms = perms.get("permissions", {}).get(_OPERATOR_AGENT_ID, {})
         return {"enabled": bool(op_perms.get("can_use_internet", False))}
 
+    @app.post("/mesh/operator/browser-access")
+    async def operator_browser_access(request: Request) -> dict:
+        """Toggle the operator's ability to use the browser_* tools.
+
+        Body: ``{"enabled": bool}``. Operator-only or internal callers.
+        Mirrors ``operator_internet_access``: (1) flip
+        ``operator.can_use_browser`` in permissions.json + reload the
+        mesh matrix; (2) push to the operator container's ``/config`` so
+        the agent loop hides/shows the browser_* tools immediately. The
+        permissions write is the source of truth; ``live`` reports
+        whether the container-side push succeeded.
+        """
+        _require_any_auth(request)
+        caller = _extract_verified_agent_id(request)
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
+            raise HTTPException(
+                403, "Only the operator can toggle browser access",
+            )
+
+        data = await request.json()
+        if "enabled" not in data:
+            raise HTTPException(400, "'enabled' is required")
+        enabled = data.get("enabled")
+        if not isinstance(enabled, bool):
+            raise HTTPException(400, "'enabled' must be a boolean")
+
+        from src.cli.config import (
+            _OPERATOR_AGENT_ID,
+            _load_permissions,
+            _save_permissions,
+        )
+
+        perms = _load_permissions()
+        op_perms = perms.setdefault("permissions", {}).setdefault(
+            _OPERATOR_AGENT_ID, {},
+        )
+        previous = bool(op_perms.get("can_use_browser", False))
+        op_perms["can_use_browser"] = enabled
+        _save_permissions(perms)
+        if permissions is not None:
+            permissions.reload()
+
+        hot_reload_ok = True
+        if transport is not None and _OPERATOR_AGENT_ID in router.agent_registry:
+            try:
+                result = await transport.request(
+                    _OPERATOR_AGENT_ID, "POST", "/config",
+                    json={"browser_access_enabled": enabled}, timeout=10,
+                )
+                if isinstance(result, dict) and "error" in result:
+                    hot_reload_ok = False
+                    logger.warning(
+                        "Operator /config push failed: %s", result["error"],
+                    )
+            except Exception as e:
+                hot_reload_ok = False
+                logger.warning("Operator /config push raised: %s", e)
+
+        blackboard.log_audit(
+            action="edit_agent",
+            target=_OPERATOR_AGENT_ID,
+            field="can_use_browser",
+            before_value=json.dumps(previous),
+            after_value=json.dumps(enabled),
+            undoable=False,
+        )
+
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "agent_config_updated", agent=_OPERATOR_AGENT_ID,
+                    data={
+                        "agent_id": _OPERATOR_AGENT_ID,
+                        "field": "can_use_browser",
+                        "live": hot_reload_ok,
+                    },
+                )
+            except Exception as e:
+                logger.debug(
+                    "agent_config_updated emit failed for browser-access: %s", e,
+                )
+
+        return {
+            "success": True,
+            "enabled": enabled,
+            "previous": previous,
+            "live": hot_reload_ok,
+        }
+
+    @app.get("/mesh/operator/browser-access")
+    async def operator_browser_access_status(request: Request) -> dict:
+        """Read the operator's current browser-access state.
+
+        Returned shape: ``{"enabled": bool}``.
+        """
+        _require_any_auth(request)
+        caller = _extract_verified_agent_id(request)
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
+            raise HTTPException(
+                403, "Only the operator can read browser-access state",
+            )
+        from src.cli.config import _OPERATOR_AGENT_ID, _load_permissions
+        perms = _load_permissions()
+        op_perms = perms.get("permissions", {}).get(_OPERATOR_AGENT_ID, {})
+        return {"enabled": bool(op_perms.get("can_use_browser", False))}
+
     @app.post("/mesh/changes/undo/{undo_token}")
     async def undo_change(undo_token: str, request: Request) -> dict:
         """Reverse a recent soft edit. 5-minute TTL.
