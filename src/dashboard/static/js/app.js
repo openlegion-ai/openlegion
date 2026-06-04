@@ -637,6 +637,11 @@ function dashboard() {
     onboardIsLlmProvider: false,
     onboardCustomModels: '',
     onboardCustomLabel: '',
+    // Initial setup modal — model selections + completion flag.
+    onboardOperatorModel: '',
+    onboardDefaultModel: '',
+    onboardFinishing: false,
+    _setupDone: false,
 
     // Phase -1 — Empty-fleet onboarding wizard (hypothesis test).
     // States: 'idle' (off) | 'ask' (chip card) | 'confirming' (operator
@@ -940,12 +945,25 @@ function dashboard() {
 
     // ── Computed ───────────────────────────────────────────
 
-    get showOnboarding() {
-      if (this.loading) return false;
-      // Show onboarding when settings haven't loaded yet (fallback) or when
-      // credentials are missing / no agents exist — prevents blank page.
-      if (!this.settingsData) return this.agents.length === 0;
-      return !this.settingsData.has_llm_credentials || this.agents.length === 0;
+    // Non-skippable initial-setup modal. Shows for genuinely-new
+    // installs until the user adds LLM access (a key OR OpenLegion
+    // credits) AND picks their Operator + Default agent models. Hidden
+    // for established installs (already have credentials + a real
+    // teammate) and once setup has been finished.
+    get showSetup() {
+      if (this.loading || !this.settingsData) return false;
+      if (this._setupDone) return false;
+      try { if (localStorage.getItem('ol_setup_done') === '1') return false; } catch (_) { /* ignore */ }
+      // Established install — don't interrupt returning users.
+      if (this.settingsData.has_llm_credentials && this.agents.some(a => a.id !== 'operator')) return false;
+      return true;
+    },
+
+    // Finish button is enabled only once LLM access is configured and
+    // both model choices are made.
+    get setupCanFinish() {
+      return !!(this.settingsData && this.settingsData.has_llm_credentials
+        && this.onboardOperatorModel && this.onboardDefaultModel);
     },
 
     get addAgentNameValid() {
@@ -2310,6 +2328,9 @@ function dashboard() {
       // localStorage and emit telemetry while the user sees nothing.
       // ``checkOperatorReady`` retries this on health transitions.
       if (this.wizard.step !== 'idle') return;
+      // Don't surface the in-chat starting-point card under the
+      // non-skippable setup modal — wait until setup is finished.
+      if (this.showSetup) return;
       if (!this.operatorReady) return;
       if (!this._isFirstVisit()) return;
       // Tutorial takes precedence — wizard fires only after the
@@ -2336,6 +2357,8 @@ function dashboard() {
     _maybeStartTutorial() {
       if (this.newUserTutorial.step !== 0) return;
       if (this.wizard && this.wizard.step !== 'idle') return;
+      // Setup modal owns the screen first — don't stack under it.
+      if (this.showSetup) return;
       try {
         if (localStorage.getItem('olSeenTutorial') === 'true') return;
       } catch (_) { /* private mode — show once per session */ }
@@ -9296,6 +9319,58 @@ function dashboard() {
         }
       } catch (e) { this.showToast(`Error: ${e.message}`); }
       finally { this.onboardSaving = false; }
+    },
+
+    // Complete the initial-setup modal: persist the Default agent model
+    // (mesh.yaml) and the Operator model, then mark setup done so the
+    // modal never reappears. The operator model hot-reloads live; the
+    // default model only matters for future agents (none exist yet at
+    // first setup), so no fleet restart is needed here.
+    async finishSetup() {
+      if (this.onboardFinishing) return;
+      if (!this.settingsData?.has_llm_credentials) {
+        this.showToast('Add an API key or use OpenLegion credits to continue.');
+        return;
+      }
+      if (!this.onboardOperatorModel || !this.onboardDefaultModel) {
+        this.showToast('Pick both an Operator model and a Default agent model.');
+        return;
+      }
+      this.onboardFinishing = true;
+      try {
+        const dmResp = await fetch(`${window.__config.apiBase}/default-model`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          body: JSON.stringify({ model: this.onboardDefaultModel }),
+        });
+        if (!dmResp.ok) {
+          const err = await dmResp.json().catch(() => ({}));
+          this.showToast(`Error setting default model: ${err.detail || dmResp.status}`);
+          return;
+        }
+        if (this.systemSettings) this.systemSettings.default_model = this.onboardDefaultModel;
+
+        const opResp = await fetch(`${window.__config.apiBase}/agents/operator/config`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          body: JSON.stringify({ model: this.onboardOperatorModel }),
+        });
+        if (!opResp.ok) {
+          const err = await opResp.json().catch(() => ({}));
+          this.showToast(`Error setting operator model: ${err.detail || opResp.status}`);
+          return;
+        }
+
+        try { localStorage.setItem('ol_setup_done', '1'); } catch (_) { /* ignore */ }
+        this._setupDone = true;
+        this.showToast('Setup complete — say hello to your Operator.');
+        this.fetchAgents();
+        this.fetchSettings();
+      } catch (e) {
+        this.showToast(`Setup failed: ${e.message}`);
+      } finally {
+        this.onboardFinishing = false;
+      }
     },
 
     // ── Channels ──────────────────────────────────────────
