@@ -605,7 +605,8 @@ def _add_agent_permissions(
         # explicit grants in ``_ensure_operator_agent`` get persisted to
         # permissions.json instead of being silently dropped.
         for key in (
-            "can_use_browser", "can_spawn", "can_manage_cron",
+            "can_use_browser", "can_use_internet", "can_spawn",
+            "can_manage_cron",
             "can_manage_fleet", "can_manage_teams", "can_edit_agent_config",
             "can_view_fleet_metrics",
             "can_request_user_credentials",
