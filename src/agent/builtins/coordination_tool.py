@@ -610,6 +610,23 @@ async def complete_task(task_key: str, *, mesh_client=None) -> dict:
 
     task_id = task_key.rsplit("/", 1)[-1] if "/" in task_key else task_key
     try:
+        # A handed-off report/notification task usually sits in ``pending``
+        # (or ``accepted``) because its assignee never moved it through
+        # ``working`` — the canonical case is the fleet operator clearing a
+        # completion report another agent handed it. The task state machine
+        # forbids ``pending → done`` directly (you may abandon un-started
+        # work, but not claim success on it), so a naive complete_task 400s
+        # and the task wedges, re-surfacing in check_inbox every cycle. Step
+        # it through ``working`` first so the terminal close is valid. The
+        # status probe is best-effort: if it fails we fall back to the
+        # direct close (preserving the original behaviour for tasks already
+        # in a completable state).
+        try:
+            current = await mesh_client.get_task(task_id)
+        except Exception:
+            current = None
+        if current and current.get("status") in ("pending", "accepted"):
+            await mesh_client.set_task_status(task_id, "working")
         record = await mesh_client.set_task_status(task_id, "done")
     except Exception as e:
         # Bug H: terminal transition — silent failure would leave the
