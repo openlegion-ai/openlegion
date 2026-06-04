@@ -1467,64 +1467,15 @@
                   </div>
                 </div>
 
-                <!-- First-run: no agents yet.
-                     TODO: seed an actual assistant message in the
-                     operator's chat history on first container boot
-                     so the chat opens with a warm greeting from the
-                     operator instead of a passive empty-state. The
-                     deeper version requires cross-container coordination
-                     (boot detection in src/cli/runtime.py + a one-shot
-                     assistant message persisted via the agent's
-                     transcript, with idempotent detection so restarts
-                     don't re-greet). For now we keep the welcoming
-                     empty-state UI below — it's the silent-operator
-                     mitigation per the PR-F audit. -->
-                <div x-show="wizard.step === 'idle' && !(chatHistories['operator'] || []).length && !chatLoadingAgents['operator'] && agents.filter(a => a.id !== 'operator').length === 0"
-                  class="flex-1 flex flex-col items-center justify-center px-4">
-                  <img src="/dashboard/static/avatars/operator.png" alt="Operator" class="w-10 h-10 rounded-full mb-3 opacity-80">
-                  <div class="text-sm font-semibold text-white mb-1">Hi — I'm your Operator.</div>
-                  <div class="text-[11px] text-gray-400 mb-1 max-w-md text-center leading-relaxed">
-                    I help you build and run AI agent teams. Tell me what you'd like your team to handle, in plain English.
-                  </div>
-                  <div class="text-[11px] text-gray-400 mb-5 max-w-md text-center leading-relaxed">
-                    Pick a starting point below or describe your own — I'll handle the setup.
-                  </div>
-                  <!-- Curated intent-based options — uniform size -->
-                  <div class="flex flex-col gap-1.5 w-full max-w-sm">
-                    <button @click="trackEmptyStateCta('operator_intent_content'); let el = document.getElementById('operator-chat-input'); if (el) { let s = Alpine.$data(el.closest('[x-data]')); if (s) { let chip = (maxAgents > 0 && maxAgents <= 1) ? 'I need a content agent for writing, editing, and research' : 'I need a content team — writing, editing, and research'; s.opMsg = chip + (s.opMsg ? ' ' + s.opMsg : ''); $nextTick(() => { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }); } }"
-                      class="flex items-center gap-3 w-full text-left px-4 py-2.5 rounded-lg bg-gray-800/50 border border-gray-700/50 hover:border-indigo-500/40 hover:bg-indigo-600/5 transition-all group">
-                      <svg class="w-4 h-4 text-gray-400 group-hover:text-indigo-400 shrink-0 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25"/></svg>
-                      <div class="min-w-0"><div class="text-xs text-gray-200 group-hover:text-white">Content &amp; Marketing</div></div>
-                    </button>
-                    <button @click="trackEmptyStateCta('operator_intent_research'); let el = document.getElementById('operator-chat-input'); if (el) { let s = Alpine.$data(el.closest('[x-data]')); if (s) { let chip = (maxAgents > 0 && maxAgents <= 1) ? 'I need a research agent to gather intelligence and produce reports' : 'I need a research team to gather intelligence and produce reports'; s.opMsg = chip + (s.opMsg ? ' ' + s.opMsg : ''); $nextTick(() => { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }); } }"
-                      class="flex items-center gap-3 w-full text-left px-4 py-2.5 rounded-lg bg-gray-800/50 border border-gray-700/50 hover:border-indigo-500/40 hover:bg-indigo-600/5 transition-all group">
-                      <svg class="w-4 h-4 text-gray-400 group-hover:text-indigo-400 shrink-0 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z"/></svg>
-                      <div class="min-w-0"><div class="text-xs text-gray-200 group-hover:text-white">Research &amp; Analysis</div></div>
-                    </button>
-                    <button @click="trackEmptyStateCta('operator_intent_sales'); let el = document.getElementById('operator-chat-input'); if (el) { let s = Alpine.$data(el.closest('[x-data]')); if (s) { let chip = (maxAgents > 0 && maxAgents <= 1) ? 'I need a sales agent for prospecting and outreach' : 'I need a sales team for prospecting and outreach'; s.opMsg = chip + (s.opMsg ? ' ' + s.opMsg : ''); $nextTick(() => { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }); } }"
-                      class="flex items-center gap-3 w-full text-left px-4 py-2.5 rounded-lg bg-gray-800/50 border border-gray-700/50 hover:border-indigo-500/40 hover:bg-indigo-600/5 transition-all group">
-                      <svg class="w-4 h-4 text-gray-400 group-hover:text-indigo-400 shrink-0 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M2.25 6.75c0 8.284 6.716 15 15 15h2.25a2.25 2.25 0 002.25-2.25v-1.372c0-.516-.351-.966-.852-1.091l-4.423-1.106c-.44-.11-.902.055-1.173.417l-.97 1.293c-.282.376-.769.542-1.21.38a12.035 12.035 0 01-7.143-7.143c-.162-.441.004-.928.38-1.21l1.293-.97c.363-.271.527-.734.417-1.173L6.963 3.102a1.125 1.125 0 00-1.091-.852H4.5A2.25 2.25 0 002.25 4.5v2.25z"/></svg>
-                      <div class="min-w-0"><div class="text-xs text-gray-200 group-hover:text-white">Sales &amp; Outreach</div></div>
-                    </button>
-                    <button @click="trackEmptyStateCta('operator_intent_devteam'); let el = document.getElementById('operator-chat-input'); if (el) { let s = Alpine.$data(el.closest('[x-data]')); if (s) { let chip = (maxAgents > 0 && maxAgents <= 1) ? 'I need a development agent for planning, coding, and code review' : 'I need a development team — planning, coding, and code review'; s.opMsg = chip + (s.opMsg ? ' ' + s.opMsg : ''); $nextTick(() => { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }); } }"
-                      class="flex items-center gap-3 w-full text-left px-4 py-2.5 rounded-lg bg-gray-800/50 border border-gray-700/50 hover:border-indigo-500/40 hover:bg-indigo-600/5 transition-all group">
-                      <svg class="w-4 h-4 text-gray-400 group-hover:text-indigo-400 shrink-0 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M17.25 6.75L22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3l-4.5 16.5"/></svg>
-                      <div class="min-w-0"><div class="text-xs text-gray-200 group-hover:text-white">Software Development</div></div>
-                    </button>
-                    <button @click="trackEmptyStateCta('operator_intent_other'); $nextTick(() => { let el = document.getElementById('operator-chat-input'); if (el) el.focus(); })"
-                      class="flex items-center gap-3 w-full text-left px-4 py-2.5 rounded-lg bg-transparent border border-gray-800/40 hover:border-gray-700/60 hover:bg-gray-800/20 transition-all group">
-                      <svg class="w-4 h-4 text-gray-500 group-hover:text-gray-400 shrink-0 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="M8.625 12a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H8.25m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0H12m4.125 0a.375.375 0 11-.75 0 .375.375 0 01.75 0zm0 0h-.375M21 12c0 4.556-4.03 8.25-9 8.25a9.764 9.764 0 01-2.555-.337A5.972 5.972 0 015.41 20.97a5.969 5.969 0 01-.474-.065 4.48 4.48 0 00.978-2.025c.09-.457-.133-.901-.467-1.226C3.93 16.178 3 14.189 3 12c0-4.556 4.03-8.25 9-8.25s9 3.694 9 8.25z"/></svg>
-                      <div class="min-w-0"><div class="text-xs text-gray-400 group-hover:text-gray-300">Something else&hellip;</div></div>
-                    </button>
-                  </div>
-                </div>
-
-                <!-- Regular empty state (has agents but no chat yet) -->
-                <div x-show="!(chatHistories['operator'] || []).length && !chatLoadingAgents['operator'] && agents.filter(a => a.id !== 'operator').length > 0"
+                <!-- Empty state — shown whenever the operator chat has no
+                     messages and the in-chat wizard isn't open. Covers
+                     both new users (who dismissed the wizard) and
+                     returning users between sessions. -->
+                <div x-show="wizard.step === 'idle' && !(chatHistories['operator'] || []).length && !chatLoadingAgents['operator']"
                   class="empty-state h-full justify-center">
                   <svg class="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
                   <div class="empty-state-title">Chat with your operator</div>
-                  <div class="empty-state-desc">Ask about team status, optimize teammates, or build new teams.</div>
+                  <div class="empty-state-desc">Tell me what you'd like your team to handle, or ask about status — I'll take it from here.</div>
                 </div>
               </div>
 
@@ -8953,133 +8904,6 @@
         </div>
       </div>
     </div>
-
-    <!-- New-user onboarding tutorial. Three skippable modal steps;
-         persists ``localStorage.olSeenTutorial`` on completion or
-         dismiss. Repurposed from the Phase-4 "What's new" tour
-         infrastructure — same modal chrome, focus trap, ESC handler
-         (wired in app.js), and mobile full-screen via ``sm:max-w-md``.
-         The audience is inverted: this fires for EMPTY fleets and runs
-         BEFORE the empty-fleet wizard. On natural completion, the
-         wizard auto-fires so the user lands directly in team-building. -->
-    <template x-if="newUserTutorial.step !== 0">
-      <div class="fixed inset-0 z-[150] flex items-center justify-center bg-black/70 backdrop-blur-sm p-0 sm:p-4"
-           data-testid="tutorial-overlay"
-           @click.self="dismissTutorial('overlay')">
-        <div role="dialog" aria-modal="true" :aria-labelledby="'tutorial-title-' + newUserTutorial.step"
-             data-testid="tutorial-modal"
-             class="relative w-full h-full sm:h-auto sm:max-w-md sm:rounded-2xl bg-gradient-to-b from-indigo-900/40 to-gray-900/95 sm:border sm:border-indigo-700/40 shadow-2xl overflow-y-auto sm:overflow-visible flex flex-col sm:block">
-          <!-- Step 1 — Welcome / what is OpenLegion -->
-          <template x-if="newUserTutorial.step === 1">
-            <div class="px-6 pt-8 pb-6 sm:pt-7 sm:pb-6 flex-1 flex flex-col">
-              <div class="flex items-start justify-between mb-3">
-                <div class="text-[11px] uppercase tracking-wide text-indigo-300/80">Step 1 of 3</div>
-                <button @click="dismissTutorial('skip_button')"
-                        data-testid="tutorial-skip"
-                        aria-label="Skip tutorial"
-                        class="text-gray-400 hover:text-gray-300 transition-colors p-1 -mr-1 -mt-1 rounded text-xs">
-                  Skip
-                </button>
-              </div>
-              <h2 id="tutorial-title-1" class="text-lg font-semibold text-white mb-2">
-                Welcome to OpenLegion
-              </h2>
-              <p class="text-sm text-gray-300 leading-relaxed mb-6 flex-1">
-                OpenLegion is your AI team manager. You hire AI workers, give them tasks,
-                and watch them deliver &mdash; like a small remote team.
-              </p>
-              <div class="flex items-center justify-end gap-2">
-                <button @click="dismissTutorial('skip_button')"
-                        class="text-xs font-medium px-4 py-2 rounded-lg bg-transparent hover:bg-gray-800/60 text-gray-400 transition-colors">
-                  Skip
-                </button>
-                <button @click="tutorialNext()"
-                        data-testid="tutorial-primary"
-                        class="text-xs font-medium px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">
-                  Show me how
-                </button>
-              </div>
-            </div>
-          </template>
-
-          <!-- Step 2 — Meet your Operator -->
-          <template x-if="newUserTutorial.step === 2">
-            <div class="px-6 pt-8 pb-6 sm:pt-7 sm:pb-6 flex-1 flex flex-col">
-              <div class="flex items-start justify-between mb-3">
-                <div class="text-[11px] uppercase tracking-wide text-indigo-300/80">Step 2 of 3</div>
-                <button @click="dismissTutorial('skip_button')"
-                        aria-label="Skip tutorial"
-                        class="text-gray-400 hover:text-gray-300 transition-colors p-1 -mr-1 -mt-1 rounded text-xs">
-                  Skip
-                </button>
-              </div>
-              <h2 id="tutorial-title-2" class="text-lg font-semibold text-white mb-3">
-                Meet your Operator
-              </h2>
-              <div class="rounded-xl bg-gray-900/60 border border-indigo-500/30 p-4 mb-4 flex items-center gap-3">
-                <div class="w-10 h-10 rounded-full bg-indigo-600/30 border border-indigo-400/50 flex items-center justify-center shrink-0">
-                  <!-- Chat-bubble pictogram pointing at the Chat tab. -->
-                  <svg class="w-5 h-5 text-indigo-300" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-                  </svg>
-                </div>
-                <div class="text-xs text-gray-300 leading-relaxed">You&rsquo;re in <span class="font-semibold text-indigo-200">Chat</span> &mdash; talk to your Operator here.</div>
-              </div>
-              <p class="text-sm text-gray-300 leading-relaxed mb-6 flex-1">
-                The Operator is your team lead. You talk to them in Chat (you&rsquo;re here
-                now). They route work, manage your team, and ping you when you&rsquo;re
-                needed.
-              </p>
-              <div class="flex items-center justify-between gap-2">
-                <button @click="tutorialBack()"
-                        class="text-xs font-medium px-4 py-2 rounded-lg bg-transparent hover:bg-gray-800/60 text-gray-400 transition-colors">
-                  Back
-                </button>
-                <button @click="tutorialNext()"
-                        data-testid="tutorial-primary"
-                        class="text-xs font-medium px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">
-                  Next
-                </button>
-              </div>
-            </div>
-          </template>
-
-          <!-- Step 3 — See what your team is doing -->
-          <template x-if="newUserTutorial.step === 3">
-            <div class="px-6 pt-8 pb-6 sm:pt-7 sm:pb-6 flex-1 flex flex-col">
-              <div class="flex items-start justify-between mb-3">
-                <div class="text-[11px] uppercase tracking-wide text-indigo-300/80">Step 3 of 3</div>
-              </div>
-              <h2 id="tutorial-title-3" class="text-lg font-semibold text-white mb-3">
-                See what your team is doing
-              </h2>
-              <div class="rounded-xl bg-gray-900/60 border border-indigo-500/30 p-4 mb-4 flex items-center gap-3">
-                <span class="inline-flex items-center justify-center min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-[11px] font-bold text-white">3</span>
-                <span class="text-gray-400">+</span>
-                <svg class="w-4 h-4 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/></svg>
-                <div class="text-xs text-gray-300 leading-relaxed flex-1">A red badge means something needs you.</div>
-              </div>
-              <p class="text-sm text-gray-300 leading-relaxed mb-6 flex-1">
-                <span class="font-semibold text-indigo-200">Work</span> shows what your team
-                has delivered and what&rsquo;s in progress. Anything that needs you shows
-                as a red badge in the top-right &mdash; across every tab.
-              </p>
-              <div class="flex items-center justify-between gap-2">
-                <button @click="tutorialBack()"
-                        class="text-xs font-medium px-4 py-2 rounded-lg bg-transparent hover:bg-gray-800/60 text-gray-400 transition-colors">
-                  Back
-                </button>
-                <button @click="tutorialNext()"
-                        data-testid="tutorial-primary"
-                        class="text-xs font-medium px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">
-                  Got it, let&rsquo;s build a team
-                </button>
-              </div>
-            </div>
-          </template>
-        </div>
-      </div>
-    </template>
 
     <!-- Minimized chat pill -->
     <div x-show="activeTab !== 'chat' && openChats.length > 0 && chatPanelMinimized" x-cloak
