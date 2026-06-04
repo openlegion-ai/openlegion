@@ -1512,6 +1512,49 @@ function dashboard() {
       };
       window.addEventListener('popstate', this._popstateHandler);
 
+      // ── iOS Safari keyboard-scroll recovery ──────────────────
+      // The whole app scrolls through inner containers (`main.overflow-auto`,
+      // the chat logs) while the document itself is deliberately locked:
+      // `<body class="h-[100dvh] overflow-hidden">`. That's the right model on
+      // desktop, but it has a nasty failure on iOS Safari.
+      //
+      // When the on-screen keyboard opens for a text field — in practice the
+      // chat composer, the only persistently-focused input — Safari tries to
+      // scroll the focused caret above the keyboard. The composer lives in a
+      // `position: fixed` panel (or the fixed-height chat tab), so Safari can't
+      // satisfy the caret-reveal by scrolling an inner container and instead
+      // scrolls the DOCUMENT (scrollingElement). On blur it frequently fails to
+      // restore that offset, leaving the entire UI shifted up with a dead strip
+      // at the bottom — which reads exactly as "I can't scroll the page anymore"
+      // until a reload or rotate. Intermittent, mobile-only, always right after
+      // using the chat — matches the reported symptom.
+      //
+      // Because the body is intentionally non-scrollable, ANY document-level
+      // scroll offset is spurious: snap it back to 0. We only do this once the
+      // field is blurred (keyboard dismissed) — while a field is focused we
+      // leave the offset alone so we don't fight Safari positioning the caret.
+      this._resetDocScroll = () => {
+        const ae = document.activeElement;
+        // Still typing → keyboard is up → let Safari keep the caret in view.
+        if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable)) {
+          return;
+        }
+        const se = document.scrollingElement || document.documentElement;
+        if (se && se.scrollTop !== 0) se.scrollTop = 0;
+        if (window.pageYOffset !== 0) window.scrollTo(0, 0);
+      };
+      // focusout bubbles (blur doesn't), so one listener covers every input in
+      // the app. Defer past the keyboard-dismiss reflow so the reset sticks.
+      this._focusOutResetHandler = () => { setTimeout(this._resetDocScroll, 50); };
+      document.addEventListener('focusout', this._focusOutResetHandler);
+      // The keyboard close often only settles on the visualViewport resize that
+      // follows it; catch that too (guarded by the activeElement check above so
+      // it no-ops mid-typing while the keyboard is animating in).
+      if (window.visualViewport) {
+        this._vvResetHandler = () => this._resetDocScroll();
+        window.visualViewport.addEventListener('resize', this._vvResetHandler);
+      }
+
       // Pause polling when tab is hidden to save resources
       document.addEventListener('visibilitychange', () => {
         if (document.hidden) {
@@ -1669,6 +1712,10 @@ function dashboard() {
       this.stopHeartbeatTimer();
       if (this._cmdPaletteHandler) document.removeEventListener('keydown', this._cmdPaletteHandler);
       if (this._popstateHandler) window.removeEventListener('popstate', this._popstateHandler);
+      if (this._focusOutResetHandler) document.removeEventListener('focusout', this._focusOutResetHandler);
+      if (this._vvResetHandler && window.visualViewport) {
+        window.visualViewport.removeEventListener('resize', this._vvResetHandler);
+      }
     },
 
     // ── Phase 1 — Board UX overhaul helpers ──────────────────
