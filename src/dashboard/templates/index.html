@@ -3053,6 +3053,12 @@
                               Browser
                             </span>
                             <span class="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded"
+                              :class="agentConfigs[selectedAgent]?.can_use_internet ? 'bg-indigo-900/30 text-indigo-400 border border-indigo-800/50' : 'bg-gray-800 text-gray-500 border border-gray-700'"
+                              title="Use http_request and web_search to reach the internet">
+                              <span class="w-1.5 h-1.5 rounded-full" :class="agentConfigs[selectedAgent]?.can_use_internet ? 'bg-indigo-400' : 'bg-gray-600'"></span>
+                              Internet
+                            </span>
+                            <span class="inline-flex items-center gap-1.5 text-xs px-2 py-1 rounded"
                               :class="agentConfigs[selectedAgent]?.can_spawn ? 'bg-indigo-900/30 text-indigo-400 border border-indigo-800/50' : 'bg-gray-800 text-gray-500 border border-gray-700'"
                               title="Create sub-agents for parallel work">
                               <span class="w-1.5 h-1.5 rounded-full" :class="agentConfigs[selectedAgent]?.can_spawn ? 'bg-indigo-400' : 'bg-gray-600'"></span>
@@ -3389,6 +3395,15 @@
                                     :class="editForm.can_use_browser ? 'translate-x-3' : ''"></span>
                                 </button>
                                 <span class="text-xs" :class="editForm.can_use_browser ? 'text-gray-200' : 'text-gray-400'">Browser</span>
+                              </label>
+                              <label class="flex items-center gap-2 cursor-pointer">
+                                <button type="button" @click="editForm.can_use_internet = !editForm.can_use_internet"
+                                  class="relative inline-flex w-7 h-4 rounded-full transition-colors flex-shrink-0"
+                                  :class="editForm.can_use_internet ? 'bg-indigo-600' : 'bg-gray-700'">
+                                  <span class="absolute top-0.5 left-0.5 w-3 h-3 rounded-full bg-white transition-transform"
+                                    :class="editForm.can_use_internet ? 'translate-x-3' : ''"></span>
+                                </button>
+                                <span class="text-xs" :class="editForm.can_use_internet ? 'text-gray-200' : 'text-gray-400'">Internet</span>
                               </label>
                               <label class="flex items-center gap-2 cursor-pointer">
                                 <button type="button" @click="editForm.can_spawn = !editForm.can_spawn"
@@ -6750,11 +6765,15 @@
                immediately (no restart). ``null`` = state not yet
                fetched; ``opInternetLoading`` debounces double-clicks. -->
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-5"
-               x-data="{ opInternetEnabled: null, opInternetLoading: false, opInternetLive: true }"
+               x-data="{ opInternetEnabled: null, opInternetLoading: false, opInternetLive: true, opBrowserEnabled: null, opBrowserLoading: false, opBrowserLive: true }"
                x-init="(async () => {
                  try {
                    const r = await fetch(`${window.__config.apiBase}/operator/internet-access`);
                    if (r.ok) { const d = await r.json(); opInternetEnabled = !!d.enabled; }
+                 } catch (e) { /* leave null → toggle disabled */ }
+                 try {
+                   const r2 = await fetch(`${window.__config.apiBase}/operator/browser-access`);
+                   if (r2.ok) { const d2 = await r2.json(); opBrowserEnabled = !!d2.enabled; }
                  } catch (e) { /* leave null → toggle disabled */ }
                })()"
                data-testid="operator-capabilities-card">
@@ -6807,6 +6826,60 @@
               </button>
             </div>
             <div x-show="opInternetEnabled === true && !opInternetLive"
+                 class="mt-2 text-[11px] text-amber-400">
+              Saved — restart the operator to fully apply
+              (the container couldn't be reached for live update).
+            </div>
+
+            <!-- Browser access — mirrors the internet toggle. Flips the
+                 operator's ``can_use_browser`` permission via the
+                 dedicated ``/api/operator/browser-access`` endpoint which
+                 pushes to the running container so the browser_* tools
+                 appear/disappear from the next LLM call (no restart). -->
+            <div class="flex items-center justify-between gap-3 mt-4 pt-4 border-t border-gray-800/60">
+              <div class="min-w-0 flex-1">
+                <div class="text-xs text-gray-200">Browser access</div>
+                <div class="text-[11px] text-gray-400 mt-0.5">
+                  Lets the operator drive its own web browser
+                  (<code class="text-gray-400">browser_navigate</code>,
+                  <code class="text-gray-400">browser_click</code>, …) to
+                  navigate sites directly. Off-toggle filters them out of
+                  the next LLM call — no container restart needed.
+                </div>
+              </div>
+              <button type="button"
+                @click="(async () => {
+                  if (opBrowserEnabled === null || opBrowserLoading) return;
+                  const next = !opBrowserEnabled;
+                  opBrowserLoading = true;
+                  try {
+                    const r = await fetch(`${window.__config.apiBase}/operator/browser-access`, {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                      body: JSON.stringify({ enabled: next }),
+                    });
+                    const d = await r.json().catch(() => ({}));
+                    if (!r.ok) { showToast(d.detail || `Toggle failed (HTTP ${r.status})`); return; }
+                    opBrowserEnabled = !!d.enabled;
+                    opBrowserLive = d.live !== false;
+                    showToast(opBrowserEnabled ? 'Browser access enabled.' : 'Browser access disabled.');
+                  } catch (e) {
+                    showToast(`Toggle failed: ${e.message || e}`);
+                  } finally {
+                    opBrowserLoading = false;
+                  }
+                })()"
+                :disabled="opBrowserEnabled === null || opBrowserLoading"
+                :aria-pressed="opBrowserEnabled === true"
+                :aria-label="opBrowserEnabled ? 'Disable browser access for operator' : 'Enable browser access for operator'"
+                :class="opBrowserEnabled === null ? 'bg-gray-700 cursor-wait' : (opBrowserEnabled ? 'bg-emerald-600 hover:bg-emerald-500' : 'bg-gray-700 hover:bg-gray-600')"
+                class="relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:opacity-60"
+                data-testid="operator-browser-toggle">
+                <span :class="opBrowserEnabled ? 'translate-x-5' : 'translate-x-1'"
+                      class="inline-block h-3 w-3 transform rounded-full bg-white transition-transform"></span>
+              </button>
+            </div>
+            <div x-show="opBrowserEnabled === true && !opBrowserLive"
                  class="mt-2 text-[11px] text-amber-400">
               Saved — restart the operator to fully apply
               (the container couldn't be reached for live update).

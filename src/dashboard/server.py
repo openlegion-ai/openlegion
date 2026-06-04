@@ -2496,6 +2496,7 @@ def create_dashboard_router(
             "system_credentials": system_cred_names,
             "resolved_credentials": resolved,
             "can_use_browser": agent_perms.can_use_browser if agent_perms else False,
+            "can_use_internet": agent_perms.can_use_internet if agent_perms else False,
             "can_spawn": agent_perms.can_spawn if agent_perms else False,
             "can_manage_cron": agent_perms.can_manage_cron if agent_perms else False,
             "can_use_wallet": agent_perms.can_use_wallet if agent_perms else False,
@@ -3200,6 +3201,7 @@ def create_dashboard_router(
             "allowed_apis": perms.allowed_apis,
             "available_credentials": available_creds,
             "can_use_browser": perms.can_use_browser,
+            "can_use_internet": perms.can_use_internet,
             "can_spawn": perms.can_spawn,
             "can_manage_cron": perms.can_manage_cron,
         }
@@ -3229,7 +3231,7 @@ def create_dashboard_router(
                 raise HTTPException(status_code=400, detail="allowed_apis must be a list of strings")
             agent_perms["allowed_apis"] = val
             updated.append("allowed_apis")
-        for flag in ("can_use_browser", "can_spawn", "can_manage_cron", "can_use_wallet"):
+        for flag in ("can_use_browser", "can_use_internet", "can_spawn", "can_manage_cron", "can_use_wallet"):
             if flag in body:
                 agent_perms[flag] = bool(body[flag])
                 updated.append(flag)

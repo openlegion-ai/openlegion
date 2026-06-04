@@ -6086,6 +6086,7 @@ function dashboard() {
         budget_monthly: cfg.budget?.monthly_usd || '',
         thinking: cfg.thinking || 'off',
         can_use_browser: cfg.can_use_browser ?? false,
+        can_use_internet: cfg.can_use_internet ?? false,
         can_spawn: cfg.can_spawn ?? false,
         can_manage_cron: cfg.can_manage_cron ?? false,
         can_use_wallet: cfg.can_use_wallet ?? false,
@@ -6509,7 +6510,7 @@ function dashboard() {
       const credsChanged = JSON.stringify(newCreds) !== JSON.stringify(oldCreds);
       const permBody = {};
       if (credsChanged) permBody.allowed_credentials = newCreds;
-      for (const flag of ['can_use_browser', 'can_spawn', 'can_manage_cron', 'can_use_wallet']) {
+      for (const flag of ['can_use_browser', 'can_use_internet', 'can_spawn', 'can_manage_cron', 'can_use_wallet']) {
         if (this.editForm[flag] !== (cfg[flag] ?? false)) permBody[flag] = this.editForm[flag];
       }
       // Wallet allowed chains (from checkbox state)
