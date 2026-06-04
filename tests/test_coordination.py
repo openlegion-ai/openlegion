@@ -1,6 +1,6 @@
 """Tests for coordination tools: hand_off, check_inbox, update_status."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
@@ -33,6 +33,11 @@ def _make_mesh_client(agent_id="scout", standalone=False):
         "status": "pending",
     })
     mc.list_task_inbox = AsyncMock(return_value=[])
+    # Default to a task already in a completable state so complete_task's
+    # pre-close status probe is a no-op unless a test overrides it.
+    mc.get_task = AsyncMock(return_value={
+        "id": "task_abc123def456", "status": "working",
+    })
     mc.set_task_status = AsyncMock(return_value={
         "id": "task_abc123def456", "status": "done",
     })
@@ -549,6 +554,60 @@ class TestCoordination:
         await complete_task("tasks/analyst/ho_abc", mesh_client=mc)
 
         mc.set_task_status.assert_called_once_with("ho_abc", "done")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("start_status", ["pending", "accepted"])
+    async def test_complete_task_advances_handoff_through_working(
+        self, start_status,
+    ):
+        """A not-yet-``working`` handoff/report task (the operator clearing
+        a completion report it never moved through ``working``) is stepped
+        through ``working`` so the terminal close is a valid transition
+        instead of a ``pending/accepted → done`` 400 that wedges the
+        inbox."""
+        from src.agent.builtins.coordination_tool import complete_task
+
+        mc = _make_mesh_client(agent_id="operator")
+        mc.get_task.return_value = {"id": "task_da9", "status": start_status}
+        mc.set_task_status.return_value = {"id": "task_da9", "status": "done"}
+
+        result = await complete_task("task_da9", mesh_client=mc)
+
+        assert result["completed"] is True
+        assert mc.set_task_status.await_args_list == [
+            call("task_da9", "working"),
+            call("task_da9", "done"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_complete_task_blocked_closes_directly(self):
+        """``blocked → done`` is already a valid transition, so a blocked
+        task is closed directly without an intermediate ``working`` step."""
+        from src.agent.builtins.coordination_tool import complete_task
+
+        mc = _make_mesh_client(agent_id="operator")
+        mc.get_task.return_value = {"id": "task_blk", "status": "blocked"}
+        mc.set_task_status.return_value = {"id": "task_blk", "status": "done"}
+
+        result = await complete_task("task_blk", mesh_client=mc)
+
+        assert result["completed"] is True
+        mc.set_task_status.assert_called_once_with("task_blk", "done")
+
+    @pytest.mark.asyncio
+    async def test_complete_task_probe_failure_falls_back_to_direct_close(self):
+        """If the status probe fails, complete_task still attempts the
+        direct close — preserving behaviour for already-completable tasks."""
+        from src.agent.builtins.coordination_tool import complete_task
+
+        mc = _make_mesh_client(agent_id="analyst")
+        mc.get_task.side_effect = RuntimeError("mesh hiccup")
+        mc.set_task_status.return_value = {"id": "task_xyz", "status": "done"}
+
+        result = await complete_task("task_xyz", mesh_client=mc)
+
+        assert result["completed"] is True
+        mc.set_task_status.assert_called_once_with("task_xyz", "done")
 
     @pytest.mark.asyncio
     async def test_update_status_single_active_no_task_id(self):
