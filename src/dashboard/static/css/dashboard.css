@@ -634,6 +634,25 @@
   scrollbar-color: rgba(55, 55, 75, 0.6) transparent;
 }
 
+/* ── Scroll containment ──────────────────────────────
+   The body is a non-scrolling shell (`h-[100dvh] overflow-hidden`) and ALL
+   real scrolling happens in inner containers. Without containment, when an
+   inner scroller hits its top/bottom edge the overscroll *chains* outward to
+   that locked body — on iOS this produces a dead rubber-band that reads as a
+   frozen page (the same symptom class as the keyboard-scroll bug). Stop the
+   chain at each primary scroller, and kill any document-level bounce outright.
+   Additive + gracefully ignored on browsers without `overscroll-behavior`. */
+html, body {
+  overscroll-behavior: none;
+}
+
+main,
+[id^="chat-messages-"],
+[id^="side-chat-messages-"],
+.custom-scrollbar {
+  overscroll-behavior: contain;
+}
+
 /* ── Scrollbar-hidden utility for tab strips ───────── */
 
 .hide-scrollbar {
