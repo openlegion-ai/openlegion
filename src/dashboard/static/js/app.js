@@ -6593,6 +6593,8 @@ function dashboard() {
           if (permResp.ok) {
             const permResult = await permResp.json();
             allUpdated.push(...permResult.updated);
+            // Capability changes apply live — the permissions endpoint
+            // reloads the mesh matrix, so no restart is needed here.
           } else {
             const err = await permResp.json();
             this.showToast(`Error updating permissions: ${err.detail || 'Update failed'}`);
@@ -7660,6 +7662,11 @@ function dashboard() {
           if (resp.ok) {
             const data = await resp.json();
             if (data.updated?.length) this.showToast(`Updated ${data.updated.join(', ')}`);
+            // Execution-limit settings are env-seeded at launch — apply
+            // them automatically so the change isn't silently stale.
+            if (data.restart_required) {
+              await this._restartAllAgentsAuto('Applying setting — restarting agents…');
+            }
           } else {
             const err = await resp.json().catch(() => ({}));
             this.showToast(`Error: ${err.detail || 'Update failed'}`);
@@ -7679,11 +7686,71 @@ function dashboard() {
         if (resp.ok) {
           if (this.systemSettings) this.systemSettings.default_model = model;
           this.showToast(`Default model set to ${model}`);
+          // Agents resolve their model at launch, so the new default
+          // only takes effect for default-model agents after a restart.
+          // Auto-apply so the change isn't silently stale.
+          await this._restartAllAgentsAuto('Applying default model — restarting agents…');
         } else {
           const err = await resp.json().catch(() => ({}));
           this.showToast(`Error: ${err.detail || 'Update failed'}`);
         }
       } catch (e) { console.warn('saveDefaultModel failed:', e); }
+    },
+
+    // Restart the whole fleet WITHOUT a confirmation prompt. Used to
+    // auto-apply dashboard changes that are only picked up at container
+    // launch (execution limits, default model). The user-facing
+    // ``restartAllAgents`` keeps its confirm dialog for manual use.
+    async _restartAllAgentsAuto(reason) {
+      this._restartingAll = true;
+      this.showToast(reason || 'Applying changes — restarting agents…');
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/restart-agents`, { method: 'POST' });
+        if (resp.ok) {
+          const data = await resp.json();
+          const agents = Object.entries(data.restarted || {});
+          const ok = agents.filter(([, s]) => s === 'ready').length;
+          this.showToast(`Applied — restarted ${ok}/${agents.length} agents`);
+          this.fetchAgents();
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Saved, but restart failed: ${err.detail || resp.status}`);
+        }
+      } catch (e) { this.showToast(`Saved, but restart failed: ${e.message}`); }
+      this._restartingAll = false;
+    },
+
+    // Operator Settings → model change. PUTs the operator config (which
+    // hot-reloads the model live when possible) and auto-restarts the
+    // operator if the server reports the change needs a bounce.
+    async saveOperatorModel(model) {
+      if (!model) return;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/operator/config`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          body: JSON.stringify({ model }),
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Update failed'}`);
+          return;
+        }
+        const data = await resp.json().catch(() => ({}));
+        if (data.restart_required) {
+          this.showToast('Operator model set — restarting operator…');
+          const r = await fetch(`${window.__config.apiBase}/agents/operator/restart`, { method: 'POST' });
+          if (r.ok) {
+            const d = await r.json().catch(() => ({}));
+            this.showToast(d.ready ? 'Operator restarted and ready' : 'Operator restarting…');
+          } else {
+            this.showToast('Operator model saved, restart failed');
+          }
+        } else {
+          this.showToast(`Operator model set to ${model}`);
+        }
+        this.fetchAgents();
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
     },
 
     restartAllAgents() {

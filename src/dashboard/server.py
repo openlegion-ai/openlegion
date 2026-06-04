@@ -5879,6 +5879,17 @@ def create_dashboard_router(
         "health_restart_window": (int, 60, 86400),
     }
 
+    # Settings seeded into agent containers as env vars at launch — they
+    # only take effect after the agent restarts (the restart-agents path
+    # re-reads settings.json). The dashboard auto-restarts the fleet when
+    # one of these changes so the user never has stale config silently
+    # in effect. Budgets are per-new-agent defaults and health_* apply
+    # live above, so neither needs a restart.
+    _RESTART_REQUIRED_SETTINGS: frozenset[str] = frozenset({
+        "max_iterations", "chat_max_tool_rounds",
+        "chat_max_total_rounds", "tool_timeout",
+    })
+
     _SYSTEM_SETTINGS_DEFAULTS: dict[str, float | int] = {
         "default_daily_budget": 10.0,
         "default_monthly_budget": 200.0,
@@ -5946,7 +5957,8 @@ def create_dashboard_router(
                 if cfg_key in updated:
                     setattr(health_monitor, attr, settings[cfg_key])
 
-        return {"updated": updated}
+        restart_required = bool(set(updated) & _RESTART_REQUIRED_SETTINGS)
+        return {"updated": updated, "restart_required": restart_required}
 
     @api_router.post("/api/default-model")
     async def api_set_default_model(request: Request) -> dict:

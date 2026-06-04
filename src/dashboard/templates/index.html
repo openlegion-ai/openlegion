@@ -6652,7 +6652,7 @@
                     </div>
                   </div>
                   <div class="flex items-center gap-2">
-                    <button @click="if(opModelValue.trim()) { fetch(window.__config.apiBase + '/agents/operator/config', { method: 'PUT', headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({model: opModelValue.trim()}) }).then(() => { fetchAgents(); opModelEditing = false; }); }"
+                    <button @click="if(opModelValue.trim()) { saveOperatorModel(opModelValue.trim()).then(() => { opModelEditing = false; }); }"
                       class="text-xs px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors">Save</button>
                     <button @click="opModelEditing = false; _opModelDropdownOpen = false"
                       class="text-xs px-2.5 py-1 rounded bg-gray-700 hover:bg-gray-600 text-gray-400 transition-colors">Cancel</button>
