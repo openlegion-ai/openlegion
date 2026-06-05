@@ -2407,9 +2407,7 @@ function dashboard() {
           this.fetchApiKeys();
           this.loadIntegrations();
         }
-        if (this.systemTab === 'apikeys') {
-          this.fetchSettings();
-        }
+        // apikeys needs only fetchSettings(), already called unconditionally above.
         if (this.systemTab === 'network') {
           this.loadNetworkProxy();
         }

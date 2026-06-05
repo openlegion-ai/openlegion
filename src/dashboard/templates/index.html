@@ -4948,7 +4948,7 @@
         <div class="text-xs text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">Connected services<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Let your agents act on your accounts. Connect Google (Drive, Gmail, Calendar) with one-click OAuth — register your own Google Cloud OAuth client once, then connect accounts. Agents resolve the connection by name with transparent token refresh; they never see the tokens.</span></span></div>
         <div class="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-6 chat-grid">
           <template x-for="prov in integrations" :key="prov.key">
-            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4" :class="integrations.length === 1 ? 'xl:col-span-2' : ''">
               <div class="flex items-center justify-between mb-3">
                 <div class="flex items-center gap-2">
                   <div class="w-2 h-2 rounded-full" :class="prov.configured ? 'bg-emerald-400' : 'bg-gray-600'"></div>
@@ -5051,7 +5051,7 @@
         <div class="text-xs text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">Channels<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Messaging platform integrations. Connect Telegram, Discord, Slack, or WhatsApp so users can chat with agents from those platforms.</span></span></div>
         <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 mb-6 chat-grid">
           <template x-for="ch in channels" :key="ch.type">
-            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 self-start transition-all" :class="channelConnectType === ch.type ? 'sm:col-span-2 xl:col-span-3' : ''">
+            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4" :class="channelConnectType === ch.type ? 'sm:col-span-2 xl:col-span-3' : ''">
               <div class="flex items-center justify-between mb-3">
                 <div class="flex items-center gap-2">
                   <div class="w-2 h-2 rounded-full" :class="ch.connected ? 'bg-emerald-400' : 'bg-gray-600'"></div>
@@ -5371,7 +5371,6 @@
             <a :href="settingsData.app_url + '/credits'" target="_blank" rel="noopener noreferrer" class="ml-auto text-[11px] text-indigo-400 hover:text-indigo-300 normal-case tracking-normal font-normal">Manage credits &rarr;</a>
           </template>
         </div>
-
 
         <div class="mb-6" x-show="settingsData">
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
