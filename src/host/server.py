@@ -3793,6 +3793,66 @@ def create_mesh_app(
             raise HTTPException(status, result["error"])
         return result
 
+    # === Skill assignment (per-agent + fleet-wide) ===
+
+    def _clean_skill_names(value) -> list[str]:
+        """Validate + normalise a skill-name list (sorted, de-duped, path-safe)."""
+        if not isinstance(value, list):
+            raise HTTPException(400, "skills must be a list of names")
+        cleaned: set[str] = set()
+        for s in value:
+            if not isinstance(s, str):
+                raise HTTPException(400, "skill names must be strings")
+            s = s.strip()
+            if not s:
+                continue
+            if not all((c.isascii() and c.isalnum()) or c in "_-" for c in s):
+                raise HTTPException(400, f"Invalid skill name: {s!r}")
+            cleaned.add(s)
+        return sorted(cleaned)
+
+    @app.get("/mesh/skills/mine")
+    async def my_skills(request: Request) -> dict:
+        """Effective skill-pack names for the calling agent (fleet ∪ per-agent).
+
+        Caller is resolved from the request identity, so an agent only ever
+        sees its own assignment. Used by skills_list / skill_view to scope
+        discovery per agent.
+        """
+        caller = _resolve_agent_id("unknown", request)
+        return {"skills": permissions.get_effective_skills(caller)}
+
+    @app.post("/mesh/skills/assign")
+    async def assign_agent_skills(data: dict, request: Request) -> dict:
+        """Set an agent's per-agent skill allowlist. Body: {agent_id, skills[], caller?}"""
+        caller = _require_skill_admin(request, data, "skills.assign:can_manage_fleet")
+        await _check_rate_limit("skill_install", caller)
+        agent_id = str(data.get("agent_id", "")).strip()
+        if not agent_id:
+            raise HTTPException(400, "agent_id is required")
+        skills = _clean_skill_names(data.get("skills", []))
+
+        from src.cli.config import _load_permissions, _save_permissions
+        perms = _load_permissions()
+        perms.setdefault("permissions", {}).setdefault(agent_id, {})["allowed_skills"] = skills
+        _save_permissions(perms)
+        permissions.reload()
+        return {"assigned": True, "agent_id": agent_id, "skills": skills}
+
+    @app.post("/mesh/skills/fleet")
+    async def set_fleet_skills(data: dict, request: Request) -> dict:
+        """Set the fleet-wide skill allowlist (applies to every agent). Body: {skills[], caller?}"""
+        caller = _require_skill_admin(request, data, "skills.fleet:can_manage_fleet")
+        await _check_rate_limit("skill_install", caller)
+        skills = _clean_skill_names(data.get("skills", []))
+
+        from src.cli.config import _load_permissions, _save_permissions
+        perms = _load_permissions()
+        perms["fleet_skills"] = skills
+        _save_permissions(perms)
+        permissions.reload()
+        return {"fleet_skills": skills}
+
     # === Create Custom Agent ===
 
     @app.post("/mesh/agents/create")

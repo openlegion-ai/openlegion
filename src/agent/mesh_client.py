@@ -830,6 +830,22 @@ class MeshClient:
         _raise_with_body(response)
         return response.json()
 
+    async def list_my_skills(self) -> list[str]:
+        """Skill-pack names assigned to THIS agent (effective: fleet ∪ per-agent).
+
+        The mesh resolves the caller from the request's agent identity, so an
+        agent only ever learns its own assignment. Used by skills_list /
+        skill_view to scope discovery per agent.
+        """
+        client = await self._get_client()
+        response = await client.get(
+            f"{self.mesh_url}/mesh/skills/mine",
+            timeout=10,
+            headers=self._trace_headers(),
+        )
+        _raise_with_body(response)
+        return response.json().get("skills", [])
+
     # === Browser (shared browser service via mesh proxy) ===
 
     # === Operator agent config management ===

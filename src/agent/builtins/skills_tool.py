@@ -9,8 +9,36 @@ orchestrate Tools the agent is already allowed to call. See
 
 from __future__ import annotations
 
+import os
+
 from src.agent.skills import SkillStore, render_text
 from src.agent.tools import tool
+from src.shared.utils import setup_logging
+
+logger = setup_logging("agent.skills_tool")
+
+
+def _is_operator() -> bool:
+    """Defence-in-depth: only the operator agent has ALLOWED_TOOLS set."""
+    return os.environ.get("ALLOWED_TOOLS", "") != ""
+
+
+async def _allowed_skill_names(mesh_client) -> set[str] | None:
+    """Names this agent may see, or ``None`` to mean 'no filter — full catalog'.
+
+    The operator (fleet manager) and standalone single-agent runs see the whole
+    catalog; everyone else sees only their effective assignment (fleet-wide ∪
+    per-agent), fetched fresh from the mesh so operator edits take effect with
+    no restart. A fetch error fails CLOSED (empty set, skills hidden) rather
+    than open — the whole point is to keep agents from seeing skills not theirs.
+    """
+    if mesh_client is None or getattr(mesh_client, "is_standalone", False) or _is_operator():
+        return None
+    try:
+        return set(await mesh_client.list_my_skills())
+    except Exception as e:
+        logger.warning("Could not fetch assigned skills (%s); hiding skills this call", e)
+        return set()
 
 
 def _declared_requirements(metadata: dict) -> dict:
@@ -45,8 +73,11 @@ def _declared_requirements(metadata: dict) -> dict:
     ),
     parameters={},
 )
-def skills_list() -> dict:
+async def skills_list(*, mesh_client=None) -> dict:
+    allowed = await _allowed_skill_names(mesh_client)
     skills = SkillStore().list()
+    if allowed is not None:
+        skills = [s for s in skills if s.name in allowed]
     return {
         "skills": [{"name": s.name, "description": s.description} for s in skills],
         "count": len(skills),
@@ -77,7 +108,16 @@ def skills_list() -> dict:
         },
     },
 )
-def skill_view(name: str, path: str = "") -> dict:
+async def skill_view(name: str, path: str = "", *, mesh_client=None) -> dict:
+    allowed = await _allowed_skill_names(mesh_client)
+    if allowed is not None and name not in allowed:
+        # Don't leak existence of skills the agent isn't assigned — same message
+        # whether the pack is unassigned or absent.
+        return {
+            "error": (
+                f"Skill '{name}' not found. Call skills_list to see available skills."
+            ),
+        }
     store = SkillStore()
     skill = store.get(name)
     if skill is None:

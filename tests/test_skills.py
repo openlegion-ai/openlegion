@@ -251,10 +251,10 @@ def tool_store(tmp_path, monkeypatch):
     return bundled
 
 
-def test_skills_list_tool_level0(tool_store):
+async def test_skills_list_tool_level0(tool_store):
     _write_skill(tool_store, "research", description="Research a competitor",
                  body="LONG BODY " * 100)
-    result = skills_tool.skills_list()
+    result = await skills_tool.skills_list()
     assert result["count"] == 1
     entry = result["skills"][0]
     assert entry == {"name": "research", "description": "Research a competitor"}
@@ -262,31 +262,31 @@ def test_skills_list_tool_level0(tool_store):
     assert "LONG BODY" not in str(result)
 
 
-def test_skill_view_tool_level1(tool_store):
+async def test_skill_view_tool_level1(tool_store):
     _write_skill(tool_store, "research", description="d", body="# Procedure\nDo it.")
-    result = skills_tool.skill_view("research")
+    result = await skills_tool.skill_view("research")
     assert result["name"] == "research"
     assert result["body"] == "# Procedure\nDo it."
     assert "error" not in result
 
 
-def test_skill_view_tool_unknown(tool_store):
-    result = skills_tool.skill_view("nope")
+async def test_skill_view_tool_unknown(tool_store):
+    result = await skills_tool.skill_view("nope")
     assert "error" in result and "not found" in result["error"]
 
 
-def test_skill_view_tool_reference(tool_store):
+async def test_skill_view_tool_reference(tool_store):
     _write_skill(tool_store, "research")
     (tool_store / "research" / "references").mkdir()
     (tool_store / "research" / "references" / "tpl.md").write_text("TEMPLATE", encoding="utf-8")
-    result = skills_tool.skill_view("research", "references/tpl.md")
+    result = await skills_tool.skill_view("research", "references/tpl.md")
     assert result["content"] == "TEMPLATE"
     assert result["path"] == "references/tpl.md"
 
 
-def test_skill_view_tool_bad_reference(tool_store):
+async def test_skill_view_tool_bad_reference(tool_store):
     _write_skill(tool_store, "research")
-    result = skills_tool.skill_view("research", "../escape.md")
+    result = await skills_tool.skill_view("research", "../escape.md")
     assert "error" in result
 
 
@@ -321,24 +321,24 @@ def test_render_text_noop_without_token(tmp_path):
     assert render_text(skill.body, skill) == "no tokens here"
 
 
-def test_skill_view_substitutes_skill_dir(tool_store):
+async def test_skill_view_substitutes_skill_dir(tool_store):
     pack = _write_skill(tool_store, "research", body="exec ${SKILL_DIR}/scripts/x.py").parent
-    result = skills_tool.skill_view("research")
+    result = await skills_tool.skill_view("research")
     assert "${SKILL_DIR}" not in result["body"]
     assert str(pack) in result["body"]
 
 
-def test_skill_view_substitutes_in_reference(tool_store):
+async def test_skill_view_substitutes_in_reference(tool_store):
     _write_skill(tool_store, "research")
     refs = tool_store / "research" / "references"
     refs.mkdir()
     (refs / "r.md").write_text("see ${SKILL_DIR}/scripts/x.py", encoding="utf-8")
-    result = skills_tool.skill_view("research", "references/r.md")
+    result = await skills_tool.skill_view("research", "references/r.md")
     assert "${SKILL_DIR}" not in result["content"]
     assert str(tool_store / "research") in result["content"]
 
 
-def test_skill_view_surfaces_declared_requirements(tool_store):
+async def test_skill_view_surfaces_declared_requirements(tool_store):
     _write_skill(
         tool_store, "research",
         extra_frontmatter=(
@@ -350,14 +350,14 @@ def test_skill_view_surfaces_declared_requirements(tool_store):
             "      - {key: max_sources, default: '10'}\n"
         ),
     )
-    result = skills_tool.skill_view("research")
+    result = await skills_tool.skill_view("research")
     assert result["required_environment_variables"][0]["name"] == "API_KEY"
     assert result["config"][0]["key"] == "max_sources"
 
 
-def test_skill_view_plain_skill_has_no_requirements(tool_store):
+async def test_skill_view_plain_skill_has_no_requirements(tool_store):
     _write_skill(tool_store, "plain")
-    result = skills_tool.skill_view("plain")
+    result = await skills_tool.skill_view("plain")
     assert "required_environment_variables" not in result
     assert "config" not in result
 
