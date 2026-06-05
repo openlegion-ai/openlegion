@@ -3325,7 +3325,14 @@ def create_dashboard_router(
         body = await request.json()
         from src.cli.config import _load_permissions, _save_permissions
         perms_data = _load_permissions()
-        agent_perms = perms_data.get("permissions", {}).get(agent_id, {})
+        agents = perms_data.setdefault("permissions", {})
+        # Materialize full effective permissions before a partial write, so an
+        # agent that had no explicit entry (was using the "default" template)
+        # doesn't get dropped to a sparse record that strips its other grants
+        # (Codex review). No-op for agents that already have an entry.
+        if agent_id not in agents:
+            agents[agent_id] = permissions.get_permissions(agent_id).model_dump(exclude={"agent_id"})
+        agent_perms = agents[agent_id]
 
         updated = []
         if "allowed_credentials" in body:

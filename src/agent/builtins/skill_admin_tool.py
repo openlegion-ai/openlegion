@@ -127,6 +127,10 @@ async def list_skill_assignments(*, mesh_client=None, **_kw) -> dict:
             "default": "add",
         },
     },
+    # Read-modify-write against the full-list assign endpoints — must not run
+    # concurrently with another assign_skill or a parallel pair would compute
+    # from the same baseline and the later write would drop the earlier change.
+    parallel_safe=False,
 )
 async def assign_skill(
     skill: str,

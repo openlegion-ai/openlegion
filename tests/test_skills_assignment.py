@@ -70,6 +70,35 @@ def test_fleet_skills_fail_closed_on_missing_file(tmp_path):
     assert pm.get_effective_skills("a") == []
 
 
+def test_assign_preserves_default_template_grants(tmp_path):
+    """Materializing effective perms before a partial skill write must NOT strip
+    grants an agent inherited from the 'default' template (Codex review must-fix:
+    a bare {allowed_skills} write would drop the agent out of default fallback)."""
+    import json as _json
+
+    cfg = _perms_file(tmp_path, {
+        "permissions": {"default": {"allowed_apis": ["svc"], "can_use_browser": True}},
+    })
+    pm = PermissionMatrix(config_path=cfg)
+    # 'worker' has no explicit entry → inherits the default template.
+    assert pm.get_permissions("worker").allowed_apis == ["svc"]
+    assert pm.get_permissions("worker").can_use_browser is True
+
+    # Replicate the endpoint's materialize-then-write.
+    data = _json.loads((tmp_path / "permissions.json").read_text())
+    agents = data.setdefault("permissions", {})
+    if "worker" not in agents:
+        agents["worker"] = pm.get_permissions("worker").model_dump(exclude={"agent_id"})
+    agents["worker"]["allowed_skills"] = ["alpha"]
+    (tmp_path / "permissions.json").write_text(_json.dumps(data))
+    pm.reload()
+
+    # Skill assigned AND the inherited grants survive.
+    assert pm.get_permissions("worker").allowed_skills == ["alpha"]
+    assert pm.get_permissions("worker").allowed_apis == ["svc"]
+    assert pm.get_permissions("worker").can_use_browser is True
+
+
 def test_reload_picks_up_new_assignment(tmp_path):
     cfg = _perms_file(tmp_path, {"permissions": {"a": {}}})
     pm = PermissionMatrix(config_path=cfg)

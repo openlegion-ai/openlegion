@@ -3830,11 +3830,21 @@ def create_mesh_app(
         agent_id = str(data.get("agent_id", "")).strip()
         if not agent_id:
             raise HTTPException(400, "agent_id is required")
+        if agent_id == "default":
+            raise HTTPException(400, "Use /mesh/skills/fleet for fleet-wide assignment; 'default' is reserved.")
+        agent_id = _validate_agent_id(agent_id)
         skills = _clean_skill_names(data.get("skills", []))
 
         from src.cli.config import _load_permissions, _save_permissions
         perms = _load_permissions()
-        perms.setdefault("permissions", {}).setdefault(agent_id, {})["allowed_skills"] = skills
+        agents = perms.setdefault("permissions", {})
+        # Materialize the agent's full effective permissions before this partial
+        # write. Writing a bare {"allowed_skills": ...} for an agent that had no
+        # explicit entry would drop it out of the "default" template fallback in
+        # get_permissions and silently strip every other grant (Codex review).
+        if agent_id not in agents:
+            agents[agent_id] = permissions.get_permissions(agent_id).model_dump(exclude={"agent_id"})
+        agents[agent_id]["allowed_skills"] = skills
         _save_permissions(perms)
         permissions.reload()
         return {"assigned": True, "agent_id": agent_id, "skills": skills}
