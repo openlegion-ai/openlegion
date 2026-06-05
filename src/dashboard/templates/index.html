@@ -3774,6 +3774,60 @@
                   </div>
                   <!-- END FILES TAB -->
 
+                  <!-- ═══ SKILLS TAB (per-agent assignment) ═══ -->
+                  <div x-show="identityTab === 'skills'">
+                    <div x-show="agentSkills === null || agentSkillsLoading" class="py-6 text-center text-gray-500 text-sm">
+                      <svg class="animate-spin h-4 w-4 inline mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+                      Loading skills...
+                    </div>
+                    <!-- Empty catalog -->
+                    <div x-show="agentSkills !== null && !agentSkillsLoading && agentSkills.length === 0" class="py-6 text-center text-gray-500 text-sm">
+                      No skills installed. Add skills in Settings &rarr; Skills.
+                    </div>
+                    <div x-show="agentSkills !== null && !agentSkillsLoading && agentSkills.length > 0">
+                      <div class="flex items-center justify-between mb-2">
+                        <span class="text-[11px] text-gray-500" x-text="(agentSkills || []).length + ' skills in catalog'"></span>
+                        <div class="flex items-center gap-2 text-[11px] text-gray-500">
+                          <span class="flex items-center gap-1"><span class="inline-block w-1.5 h-1.5 rounded-full bg-indigo-500"></span>bundled</span>
+                          <span class="flex items-center gap-1"><span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500"></span>installed</span>
+                        </div>
+                      </div>
+                      <div class="space-y-1.5">
+                        <template x-for="skill in (agentSkills || [])" :key="skill.name">
+                          <div class="bg-gray-800/50 rounded px-3 py-2 border border-gray-800">
+                            <div class="flex items-center gap-2">
+                              <span class="text-xs font-mono text-indigo-400 flex-1 min-w-0 truncate" x-text="skill.name"></span>
+                              <!-- Fleet badge -->
+                              <span x-show="skill.fleet_assigned"
+                                class="flex-shrink-0 text-[11px] px-1.5 py-0.5 rounded font-medium leading-none bg-sky-900/50 text-sky-400 border border-sky-800/50"
+                                title="Assigned fleet-wide in Settings → Skills.">all agents</span>
+                              <!-- Provenance badge -->
+                              <span class="flex-shrink-0 text-[11px] px-1.5 py-0.5 rounded font-medium leading-none"
+                                :class="{
+                                  'bg-indigo-900/50 text-indigo-400 border border-indigo-800/50': skill.provenance === 'bundled',
+                                  'bg-emerald-900/50 text-emerald-400 border border-emerald-800/50': skill.provenance === 'installed',
+                                }"
+                                x-text="skill.provenance || 'bundled'"></span>
+                              <!-- Per-agent toggle -->
+                              <label class="flex-shrink-0 inline-flex items-center cursor-pointer"
+                                :class="(skill.fleet_assigned || agentSkillsSaving) && 'opacity-60 cursor-not-allowed'"
+                                :title="skill.fleet_assigned ? 'Assigned fleet-wide in Settings → Skills.' : ''">
+                                <input type="checkbox"
+                                  class="sr-only peer"
+                                  :checked="skill.fleet_assigned || skill.agent_assigned"
+                                  :disabled="skill.fleet_assigned || agentSkillsSaving"
+                                  @change="toggleAgentSkill(selectedAgent, skill)">
+                                <div class="relative w-8 h-4 bg-gray-700 rounded-full peer-checked:bg-indigo-600 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:after:translate-x-4"></div>
+                              </label>
+                            </div>
+                            <div x-show="skill.description" class="text-[11px] text-gray-400 mt-0.5" x-text="skill.description"></div>
+                          </div>
+                        </template>
+                      </div>
+                    </div>
+                  </div>
+                  <!-- END SKILLS TAB -->
+
                   </div><!-- /workspace tabs container (operator + non-operator) -->
                 </div>
               </div>
@@ -4956,6 +5010,79 @@
           </div>
         </div>
         </div><!-- /automation sub-tab -->
+
+        <!-- Skills sub-tab (fleet catalog + install) -->
+        <div x-show="systemTab === 'skills'" class="space-y-4">
+          <!-- Install from repo -->
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <div class="text-xs text-gray-400 uppercase tracking-wider mb-3">Install from repo</div>
+            <div class="flex flex-col sm:flex-row gap-2">
+              <input type="text" x-model="skillInstallRepo" placeholder="https://github.com/owner/repo"
+                class="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-indigo-600"
+                @keydown.enter="installSkill()">
+              <input type="text" x-model="skillInstallRef" placeholder="ref (optional)"
+                class="sm:w-40 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-indigo-600"
+                @keydown.enter="installSkill()">
+              <button @click="installSkill()"
+                :disabled="skillInstalling || !skillInstallRepo.trim()"
+                class="px-4 py-2 rounded bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                x-text="skillInstalling ? 'Installing…' : 'Install'"></button>
+            </div>
+            <div class="text-[11px] text-gray-500 mt-2">Install a SKILL.md pack from a git repository. It becomes available in the catalog below.</div>
+          </div>
+
+          <!-- Catalog -->
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <div class="flex items-center justify-between mb-3">
+              <div class="text-xs text-gray-400 uppercase tracking-wider">Skills catalog</div>
+              <div class="flex items-center gap-2 text-[11px] text-gray-500">
+                <span class="flex items-center gap-1"><span class="inline-block w-1.5 h-1.5 rounded-full bg-indigo-500"></span>bundled</span>
+                <span class="flex items-center gap-1"><span class="inline-block w-1.5 h-1.5 rounded-full bg-emerald-500"></span>installed</span>
+              </div>
+            </div>
+            <div x-show="fleetSkillsCatalog === null || fleetSkillsCatalogLoading" class="py-6 text-center text-gray-500 text-sm">
+              <svg class="animate-spin h-4 w-4 inline mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg>
+              Loading catalog...
+            </div>
+            <div x-show="fleetSkillsCatalog !== null && !fleetSkillsCatalogLoading && fleetSkillsCatalog.length === 0" class="py-6 text-center text-gray-500 text-sm">
+              No skills installed yet. Install one from a repo above.
+            </div>
+            <div x-show="fleetSkillsCatalog !== null && !fleetSkillsCatalogLoading && fleetSkillsCatalog.length > 0" class="space-y-1.5">
+              <template x-for="skill in (fleetSkillsCatalog || [])" :key="skill.name">
+                <div class="bg-gray-800/50 rounded px-3 py-2 border border-gray-800">
+                  <div class="flex items-center gap-2">
+                    <span class="text-xs font-mono text-indigo-400 flex-1 min-w-0 truncate" x-text="skill.name"></span>
+                    <span x-show="skill.version" class="flex-shrink-0 text-[11px] text-gray-500 font-mono" x-text="'v' + skill.version"></span>
+                    <span class="flex-shrink-0 text-[11px] px-1.5 py-0.5 rounded font-medium leading-none"
+                      :class="{
+                        'bg-indigo-900/50 text-indigo-400 border border-indigo-800/50': skill.provenance === 'bundled',
+                        'bg-emerald-900/50 text-emerald-400 border border-emerald-800/50': skill.provenance === 'installed',
+                      }"
+                      x-text="skill.provenance || 'bundled'"></span>
+                    <!-- Fleet-wide toggle -->
+                    <label class="flex-shrink-0 inline-flex items-center gap-1.5 cursor-pointer"
+                      :class="fleetSkillsSaving && 'opacity-60 cursor-not-allowed'"
+                      title="Assign fleet-wide (every agent)">
+                      <span class="text-[11px] text-gray-400">Fleet-wide</span>
+                      <input type="checkbox" class="sr-only peer"
+                        :checked="skill.fleet_assigned"
+                        :disabled="fleetSkillsSaving"
+                        @change="toggleFleetSkill(skill)">
+                      <div class="relative w-8 h-4 bg-gray-700 rounded-full peer-checked:bg-indigo-600 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:after:translate-x-4"></div>
+                    </label>
+                    <!-- Remove (installed only) -->
+                    <button x-show="skill.provenance === 'installed'"
+                      @click="removeSkill(skill.name)"
+                      :disabled="skillRemoving === skill.name"
+                      class="flex-shrink-0 text-[11px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                      x-text="skillRemoving === skill.name ? 'Removing…' : 'Remove'"></button>
+                  </div>
+                  <div x-show="skill.description" class="text-[11px] text-gray-400 mt-0.5" x-text="skill.description"></div>
+                </div>
+              </template>
+            </div>
+          </div>
+        </div><!-- /skills sub-tab -->
 
         <!-- Integrations sub-tab (Connected services + Channels + Developer/API) -->
         <div x-show="systemTab === 'integrations'">
