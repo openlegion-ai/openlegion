@@ -605,7 +605,8 @@ def _add_agent_permissions(
         # explicit grants in ``_ensure_operator_agent`` get persisted to
         # permissions.json instead of being silently dropped.
         for key in (
-            "can_use_browser", "can_spawn", "can_manage_cron",
+            "can_use_browser", "can_use_internet", "can_spawn",
+            "can_manage_cron",
             "can_manage_fleet", "can_manage_teams", "can_edit_agent_config",
             "can_view_fleet_metrics",
             "can_request_user_credentials",
@@ -1754,6 +1755,20 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     # agent's runtime filters these out of the effective allowlist when
     # the Operator Settings → Internet access toggle is OFF).
     "http_request", "web_search",
+    # Browser access (gated by ``can_use_browser`` permission — the
+    # agent's runtime filters these out of the effective allowlist when
+    # the Operator Settings → Browser access toggle is OFF). Mirrors the
+    # full worker browser surface from ``builtins/browser_tool.py`` so
+    # the operator can navigate the web directly. ``request_browser_login``
+    # (above) remains the delegation path for landing a worker's cookies.
+    "browser_navigate", "browser_warmup", "browser_get_elements",
+    "browser_wait_for", "browser_screenshot", "browser_click",
+    "browser_click_xy", "browser_type", "browser_hover", "browser_scroll",
+    "browser_reset", "browser_press_key", "browser_go_back",
+    "browser_go_forward", "browser_switch_tab", "browser_find_text",
+    "browser_fill_form", "browser_open_tab", "browser_inspect_requests",
+    "browser_detect_captcha", "browser_upload_file", "browser_solve_captcha",
+    "browser_download",
 ]
 
 # Reference list documenting the tools operator uses on heartbeat. The
@@ -2091,6 +2106,13 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
         if "can_use_internet" not in op_perms:
             op_perms["can_use_internet"] = True
             needs_update = True
+        # Browser access: backfill True for existing operators that
+        # predate the field. Idempotent — once set (True OR False), the
+        # ``not in`` guard skips so the user's explicit OFF choice in
+        # Operator Settings is preserved across restarts.
+        if "can_use_browser" not in op_perms:
+            op_perms["can_use_browser"] = True
+            needs_update = True
         if needs_update:
             perms.setdefault("permissions", {})[_OPERATOR_AGENT_ID] = op_perms
             _save_permissions(perms)
@@ -2113,17 +2135,17 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
         _OPERATOR_AGENT_ID,
         permissions={
             "can_spawn": True,
-            # Operator has ``can_use_browser=False`` by design: it
-            # coordinates the fleet but does not drive browsers itself.
-            # ``request_browser_login`` / ``request_captcha_help``
-            # work through the delegation path — operator calls the
-            # skill with ``agent_id=target_worker`` so cookies / session
-            # state land in the worker's browser profile (the agent
-            # that will actually use them). See
-            # ``src/shared/operator_playbooks.py`` for the documented
-            # delegation pattern and ``tests/test_operator_config.py``
-            # for the design test.
-            "can_use_browser": False,
+            # Operator gets ``can_use_browser=True`` by default so it can
+            # browse the web directly to help users navigate and answer
+            # questions without first spinning up a worker. The dashboard
+            # surfaces a toggle in Operator Settings → "Browser access"
+            # that flips this off when the user wants the operator
+            # sandboxed (mirrors the internet-access toggle). The
+            # delegation path (``request_browser_login`` with
+            # ``agent_id=target_worker``) still works for landing a
+            # worker's session cookies — see
+            # ``src/shared/operator_playbooks.py``.
+            "can_use_browser": True,
             # Operator gets internet (HTTPS + web search) by default so
             # it can fetch reference material and answer factual
             # questions without delegating to a worker. The dashboard

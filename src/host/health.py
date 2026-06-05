@@ -554,9 +554,9 @@ class HealthMonitor:
             restart_env: dict[str, str] = {}
             if agent_id == _OPERATOR_AGENT_ID:
                 restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
-                # Re-seed the internet-access flag so a health-restart
-                # doesn't undo the user's toggle. Same logic as
-                # cli/runtime.py.
+                # Re-seed the internet/browser access flags so a
+                # health-restart doesn't undo the user's toggle. Same
+                # logic as cli/runtime.py.
                 try:
                     _op_perms = _load_permissions().get(
                         "permissions", {},
@@ -564,8 +564,12 @@ class HealthMonitor:
                     restart_env["OL_INTERNET_ACCESS_ENABLED"] = (
                         "true" if _op_perms.get("can_use_internet", True) else "false"
                     )
+                    restart_env["OL_BROWSER_ACCESS_ENABLED"] = (
+                        "true" if _op_perms.get("can_use_browser", True) else "false"
+                    )
                 except Exception:
                     restart_env["OL_INTERNET_ACCESS_ENABLED"] = "true"
+                    restart_env["OL_BROWSER_ACCESS_ENABLED"] = "true"
 
             loop = asyncio.get_running_loop()
             # Load fresh config for proxy resolution

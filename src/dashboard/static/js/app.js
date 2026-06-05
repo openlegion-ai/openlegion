@@ -637,6 +637,11 @@ function dashboard() {
     onboardIsLlmProvider: false,
     onboardCustomModels: '',
     onboardCustomLabel: '',
+    // Initial setup modal — model selections + completion flag.
+    onboardOperatorModel: '',
+    onboardDefaultModel: '',
+    onboardFinishing: false,
+    _setupDone: false,
 
     // Phase -1 — Empty-fleet onboarding wizard (hypothesis test).
     // States: 'idle' (off) | 'ask' (chip card) | 'confirming' (operator
@@ -648,17 +653,6 @@ function dashboard() {
     _wizardLastTrack: '',  // dedupe key for step_advanced events
     _wizardBuildPoll: null,
     _wizardCompleteTimer: null,
-
-    // New-user onboarding tutorial. Three modal steps that orient a
-    // brand-new user on the layout + Operator concept. Skippable;
-    // persists to ``localStorage.olSeenTutorial = 'true'`` on completion
-    // or skip. Repurposed from the Phase-4 "What's new" tour
-    // infrastructure, but the audience is inverted: tutorial fires for
-    // EMPTY fleets (new users) and runs BEFORE the empty-fleet wizard.
-    // Once tutorial completes, ``_maybeStartWizard`` takes over.
-    newUserTutorial: { step: 0 },  // 0 = closed; 1..3 = visible
-    _newUserTutorialPrevFocus: null,
-    _newUserTutorialKeyHandler: null,
 
     // Track the element focused before the side panel opened so ESC
     // restores focus to the original trigger on close.
@@ -940,12 +934,25 @@ function dashboard() {
 
     // ── Computed ───────────────────────────────────────────
 
-    get showOnboarding() {
-      if (this.loading) return false;
-      // Show onboarding when settings haven't loaded yet (fallback) or when
-      // credentials are missing / no agents exist — prevents blank page.
-      if (!this.settingsData) return this.agents.length === 0;
-      return !this.settingsData.has_llm_credentials || this.agents.length === 0;
+    // Non-skippable initial-setup modal. Shows for genuinely-new
+    // installs until the user adds LLM access (a key OR OpenLegion
+    // credits) AND picks their Operator + Default agent models. Hidden
+    // for established installs (already have credentials + a real
+    // teammate) and once setup has been finished.
+    get showSetup() {
+      if (this.loading || !this.settingsData) return false;
+      if (this._setupDone) return false;
+      try { if (localStorage.getItem('ol_setup_done') === '1') return false; } catch (_) { /* ignore */ }
+      // Established install — don't interrupt returning users.
+      if (this.settingsData.has_llm_credentials && this.agents.some(a => a.id !== 'operator')) return false;
+      return true;
+    },
+
+    // Finish button is enabled only once LLM access is configured and
+    // both model choices are made.
+    get setupCanFinish() {
+      return !!(this.settingsData && this.settingsData.has_llm_credentials
+        && this.onboardOperatorModel && this.onboardDefaultModel);
     },
 
     get addAgentNameValid() {
@@ -1209,21 +1216,6 @@ function dashboard() {
         }
         if (active) this.activeTeam = active;
       } catch (_) { /* ignore */ }
-
-      // Migration: users who saw the legacy "What's new" tour (Phase 4)
-      // had the ``olSeenWhatsNew`` flag set. Those users had non-empty
-      // fleets — they're not new — and shouldn't see the new-user
-      // tutorial either. Carry the flag forward so the tutorial stays
-      // suppressed for everyone who already passed through the legacy
-      // tour. Idempotent — only writes when ``olSeenTutorial`` is unset.
-      try {
-        if (
-          localStorage.getItem('olSeenWhatsNew') === 'true' &&
-          !localStorage.getItem('olSeenTutorial')
-        ) {
-          localStorage.setItem('olSeenTutorial', 'true');
-        }
-      } catch (_) { /* private mode — ignore */ }
 
       // Build credential service options from server-injected providers
       const allProviders = cfg.allProviders || [];
@@ -1749,7 +1741,7 @@ function dashboard() {
       try {
         if (this.messengerSidePanelOpen) {
           // Capture the previously focused element so ESC can restore
-          // focus on close (mirrors _newUserTutorialPrevFocus pattern).
+          // focus on close.
           try { this._messengerSidePanelPrevFocus = document.activeElement; } catch (_) {}
           localStorage.setItem('ol_messenger_side_panel_open', '1');
           // Open Operator by default if no chat is active.
@@ -1867,7 +1859,6 @@ function dashboard() {
       // wizard. Without this, an operator that boots slowly (e.g.
       // first start) would have skipped wizard kickoff at fetchAgents.
       if (!wasReady && this.operatorReady) {
-        try { this._maybeStartTutorial(); } catch (_) { /* ignore */ }
         try { this._maybeStartWizard(); } catch (_) { /* ignore */ }
       }
     },
@@ -2004,9 +1995,11 @@ function dashboard() {
     },
 
     trackEmptyStateCta(sectionId) {
-      // Wired from any empty-state CTA button in the template. Caller
-      // passes a stable ``section_id`` so we can compare CTA traction
-      // across the surfaces Phase 1+ may rework.
+      // Phase-0 baseline telemetry hook. Currently unwired — the operator
+      // empty-state intent chips that called it were removed when
+      // onboarding collapsed into the single setup modal — but retained
+      // (like trackSubtabUsage) so a future empty-state CTA can re-wire it
+      // without re-introducing the helper. See TestPhase0FrontendWiring.
       this.track('empty_state_cta_click', { section_id: sectionId || 'unknown' });
       this._trackFirstAction('empty_state_cta_click');
     },
@@ -2357,129 +2350,12 @@ function dashboard() {
       // localStorage and emit telemetry while the user sees nothing.
       // ``checkOperatorReady`` retries this on health transitions.
       if (this.wizard.step !== 'idle') return;
+      // Don't surface the in-chat starting-point card under the
+      // non-skippable setup modal — wait until setup is finished.
+      if (this.showSetup) return;
       if (!this.operatorReady) return;
       if (!this._isFirstVisit()) return;
-      // Tutorial takes precedence — wizard fires only after the
-      // tutorial completes (or was already seen). The completion
-      // handler in ``_completeTutorial`` re-invokes ``_maybeStartWizard``
-      // when the user reaches the final step naturally.
-      if (this.newUserTutorial && this.newUserTutorial.step !== 0) return;
       this.startWizard();
-    },
-
-    // ── New-user onboarding tutorial ──────────────────────────
-    //
-    // 3-step modal that orients a brand-new user on the layout +
-    // Operator concept. Detection: agents.length === 0 (excluding
-    // operator) AND ``localStorage.olSeenTutorial !== 'true'`` AND no
-    // active wizard. Runs BEFORE the empty-fleet wizard — the wizard
-    // is gated on ``newUserTutorial.step === 0`` so the two never
-    // overlap. On completion of step 3, we dismiss the tutorial and
-    // immediately fire the wizard so the user lands directly in the
-    // team-building flow. On any exit path — skip, dismiss, or
-    // reaching step 3 — we set the seen flag so the tutorial never
-    // re-shows for that browser.
-
-    _maybeStartTutorial() {
-      if (this.newUserTutorial.step !== 0) return;
-      if (this.wizard && this.wizard.step !== 'idle') return;
-      try {
-        if (localStorage.getItem('olSeenTutorial') === 'true') return;
-      } catch (_) { /* private mode — show once per session */ }
-      // Use the canonical first-visit detector — covers empty fleet AND
-      // "no real user message in operator history". A returning user
-      // who deleted their fleet but already chatted with the operator
-      // is NOT a new user; suppressing the tutorial in that case
-      // matches the wizard's gating semantics.
-      if (!this._isFirstVisit()) return;
-      this.startTutorial();
-    },
-
-    startTutorial() {
-      this.newUserTutorial = { step: 1 };
-      this.track('tutorial_started', {});
-      // Capture focus + install ESC handler. Focus the modal on next
-      // tick so screen-readers announce the dialog.
-      try { this._newUserTutorialPrevFocus = document.activeElement; } catch (_) {}
-      this._newUserTutorialKeyHandler = (e) => {
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          this.dismissTutorial('escape');
-        } else if (e.key === 'Tab') {
-          // Lightweight focus trap — keep tab cycling inside the modal.
-          const root = document.querySelector('[data-testid="tutorial-modal"]');
-          if (!root) return;
-          const focusable = root.querySelectorAll(
-            'button:not([disabled]), [href], [tabindex]:not([tabindex="-1"])'
-          );
-          if (focusable.length === 0) return;
-          const first = focusable[0];
-          const last = focusable[focusable.length - 1];
-          if (e.shiftKey && document.activeElement === first) {
-            e.preventDefault();
-            last.focus();
-          } else if (!e.shiftKey && document.activeElement === last) {
-            e.preventDefault();
-            first.focus();
-          }
-        }
-      };
-      window.addEventListener('keydown', this._newUserTutorialKeyHandler);
-      this.$nextTick(() => {
-        const root = document.querySelector('[data-testid="tutorial-modal"]');
-        const target = root && root.querySelector('[data-testid="tutorial-primary"]');
-        if (target && typeof target.focus === 'function') target.focus();
-      });
-    },
-
-    tutorialNext() {
-      if (this.newUserTutorial.step >= 3) {
-        this._completeTutorial('completed');
-        return;
-      }
-      this.newUserTutorial.step += 1;
-      this.track('tutorial_step', { step: this.newUserTutorial.step });
-      this.$nextTick(() => {
-        const root = document.querySelector('[data-testid="tutorial-modal"]');
-        const target = root && root.querySelector('[data-testid="tutorial-primary"]');
-        if (target && typeof target.focus === 'function') target.focus();
-      });
-    },
-
-    tutorialBack() {
-      if (this.newUserTutorial.step > 1) {
-        this.newUserTutorial.step -= 1;
-        this.track('tutorial_step', { step: this.newUserTutorial.step, direction: 'back' });
-      }
-    },
-
-    dismissTutorial(reason) {
-      this._completeTutorial(reason || 'dismissed');
-    },
-
-    _completeTutorial(reason) {
-      const lastStep = this.newUserTutorial.step;
-      try { localStorage.setItem('olSeenTutorial', 'true'); } catch (_) {}
-      this.newUserTutorial = { step: 0 };
-      this.track('tutorial_finished', { reason: reason, lastStep: lastStep });
-      if (this._newUserTutorialKeyHandler) {
-        window.removeEventListener('keydown', this._newUserTutorialKeyHandler);
-        this._newUserTutorialKeyHandler = null;
-      }
-      try {
-        if (this._newUserTutorialPrevFocus && this._newUserTutorialPrevFocus.focus) {
-          this._newUserTutorialPrevFocus.focus();
-        }
-      } catch (_) {}
-      this._newUserTutorialPrevFocus = null;
-      // On natural completion (Got it on step 3), hand off to the
-      // empty-fleet wizard so the user lands directly in team-building.
-      // Skip / ESC / overlay-click do NOT auto-fire the wizard — the
-      // user signaled they want out, respect that.
-      if (reason === 'completed') {
-        this.track('tutorial_to_wizard_transition', {});
-        try { this._maybeStartWizard(); } catch (_) { /* ignore */ }
-      }
     },
 
     // ── Tab switching ─────────────────────────────────────
@@ -5240,12 +5116,6 @@ function dashboard() {
           this._fetchCoordination();
           // Update operator readiness for the Chat tab
           this.checkOperatorReady();
-          // New-user onboarding tutorial — runs FIRST when both are
-          // eligible. ``_maybeStartWizard`` gates on
-          // ``newUserTutorial.step === 0`` so the wizard never fires
-          // while the tutorial is open. On natural completion of the
-          // tutorial, ``_completeTutorial`` re-invokes the wizard.
-          this._maybeStartTutorial();
           // Phase -1 wizard — first-visit detection runs after every
           // ``fetchAgents`` resolve so a freshly-spawned agent (still
           // loading at init time) doesn't pop the wizard. Re-entrant
@@ -6133,6 +6003,7 @@ function dashboard() {
         budget_monthly: cfg.budget?.monthly_usd || '',
         thinking: cfg.thinking || 'off',
         can_use_browser: cfg.can_use_browser ?? false,
+        can_use_internet: cfg.can_use_internet ?? false,
         can_spawn: cfg.can_spawn ?? false,
         can_manage_cron: cfg.can_manage_cron ?? false,
         can_use_wallet: cfg.can_use_wallet ?? false,
@@ -6556,7 +6427,7 @@ function dashboard() {
       const credsChanged = JSON.stringify(newCreds) !== JSON.stringify(oldCreds);
       const permBody = {};
       if (credsChanged) permBody.allowed_credentials = newCreds;
-      for (const flag of ['can_use_browser', 'can_spawn', 'can_manage_cron', 'can_use_wallet']) {
+      for (const flag of ['can_use_browser', 'can_use_internet', 'can_spawn', 'can_manage_cron', 'can_use_wallet']) {
         if (this.editForm[flag] !== (cfg[flag] ?? false)) permBody[flag] = this.editForm[flag];
       }
       // Wallet allowed chains (from checkbox state)
@@ -6640,6 +6511,8 @@ function dashboard() {
           if (permResp.ok) {
             const permResult = await permResp.json();
             allUpdated.push(...permResult.updated);
+            // Capability changes apply live — the permissions endpoint
+            // reloads the mesh matrix, so no restart is needed here.
           } else {
             const err = await permResp.json();
             this.showToast(`Error updating permissions: ${err.detail || 'Update failed'}`);
@@ -7707,6 +7580,11 @@ function dashboard() {
           if (resp.ok) {
             const data = await resp.json();
             if (data.updated?.length) this.showToast(`Updated ${data.updated.join(', ')}`);
+            // Execution-limit settings are env-seeded at launch — apply
+            // them automatically so the change isn't silently stale.
+            if (data.restart_required) {
+              await this._restartAllAgentsAuto('Applying setting — restarting agents…');
+            }
           } else {
             const err = await resp.json().catch(() => ({}));
             this.showToast(`Error: ${err.detail || 'Update failed'}`);
@@ -7726,11 +7604,71 @@ function dashboard() {
         if (resp.ok) {
           if (this.systemSettings) this.systemSettings.default_model = model;
           this.showToast(`Default model set to ${model}`);
+          // Agents resolve their model at launch, so the new default
+          // only takes effect for default-model agents after a restart.
+          // Auto-apply so the change isn't silently stale.
+          await this._restartAllAgentsAuto('Applying default model — restarting agents…');
         } else {
           const err = await resp.json().catch(() => ({}));
           this.showToast(`Error: ${err.detail || 'Update failed'}`);
         }
       } catch (e) { console.warn('saveDefaultModel failed:', e); }
+    },
+
+    // Restart the whole fleet WITHOUT a confirmation prompt. Used to
+    // auto-apply dashboard changes that are only picked up at container
+    // launch (execution limits, default model). The user-facing
+    // ``restartAllAgents`` keeps its confirm dialog for manual use.
+    async _restartAllAgentsAuto(reason) {
+      this._restartingAll = true;
+      this.showToast(reason || 'Applying changes — restarting agents…');
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/restart-agents`, { method: 'POST' });
+        if (resp.ok) {
+          const data = await resp.json();
+          const agents = Object.entries(data.restarted || {});
+          const ok = agents.filter(([, s]) => s === 'ready').length;
+          this.showToast(`Applied — restarted ${ok}/${agents.length} agents`);
+          this.fetchAgents();
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Saved, but restart failed: ${err.detail || resp.status}`);
+        }
+      } catch (e) { this.showToast(`Saved, but restart failed: ${e.message}`); }
+      this._restartingAll = false;
+    },
+
+    // Operator Settings → model change. PUTs the operator config (which
+    // hot-reloads the model live when possible) and auto-restarts the
+    // operator if the server reports the change needs a bounce.
+    async saveOperatorModel(model) {
+      if (!model) return;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/operator/config`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          body: JSON.stringify({ model }),
+        });
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Update failed'}`);
+          return;
+        }
+        const data = await resp.json().catch(() => ({}));
+        if (data.restart_required) {
+          this.showToast('Operator model set — restarting operator…');
+          const r = await fetch(`${window.__config.apiBase}/agents/operator/restart`, { method: 'POST' });
+          if (r.ok) {
+            const d = await r.json().catch(() => ({}));
+            this.showToast(d.ready ? 'Operator restarted and ready' : 'Operator restarting…');
+          } else {
+            this.showToast('Operator model saved, restart failed');
+          }
+        } else {
+          this.showToast(`Operator model set to ${model}`);
+        }
+        this.fetchAgents();
+      } catch (e) { this.showToast(`Error: ${e.message}`); }
     },
 
     restartAllAgents() {
@@ -9275,6 +9213,66 @@ function dashboard() {
         }
       } catch (e) { this.showToast(`Error: ${e.message}`); }
       finally { this.onboardSaving = false; }
+    },
+
+    // Complete the initial-setup modal: persist the Default agent model
+    // (mesh.yaml) and the Operator model, then mark setup done so the
+    // modal never reappears. The operator model hot-reloads live; the
+    // default model only matters for future agents (none exist yet at
+    // first setup), so no fleet restart is needed here.
+    async finishSetup() {
+      if (this.onboardFinishing) return;
+      if (!this.settingsData?.has_llm_credentials) {
+        this.showToast('Add an API key or use OpenLegion credits to continue.');
+        return;
+      }
+      if (!this.onboardOperatorModel || !this.onboardDefaultModel) {
+        this.showToast('Pick both an Operator model and a Default agent model.');
+        return;
+      }
+      this.onboardFinishing = true;
+      try {
+        const dmResp = await fetch(`${window.__config.apiBase}/default-model`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          body: JSON.stringify({ model: this.onboardDefaultModel }),
+        });
+        if (!dmResp.ok) {
+          const err = await dmResp.json().catch(() => ({}));
+          this.showToast(`Error setting default model: ${err.detail || dmResp.status}`);
+          return;
+        }
+        if (this.systemSettings) this.systemSettings.default_model = this.onboardDefaultModel;
+
+        const opResp = await fetch(`${window.__config.apiBase}/agents/operator/config`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+          body: JSON.stringify({ model: this.onboardOperatorModel }),
+        });
+        if (!opResp.ok) {
+          const err = await opResp.json().catch(() => ({}));
+          this.showToast(`Error setting operator model: ${err.detail || opResp.status}`);
+          return;
+        }
+        // The model normally hot-reloads live, but if the container
+        // couldn't be reached the server asks for a restart — honour it
+        // so the operator isn't left on its boot default. Mirrors
+        // saveOperatorModel().
+        const opData = await opResp.json().catch(() => ({}));
+        if (opData.restart_required) {
+          await fetch(`${window.__config.apiBase}/agents/operator/restart`, { method: 'POST' }).catch(() => {});
+        }
+
+        try { localStorage.setItem('ol_setup_done', '1'); } catch (_) { /* ignore */ }
+        this._setupDone = true;
+        this.showToast('Setup complete — say hello to your Operator.');
+        this.fetchAgents();
+        this.fetchSettings();
+      } catch (e) {
+        this.showToast(`Setup failed: ${e.message}`);
+      } finally {
+        this.onboardFinishing = false;
+      }
     },
 
     // ── Channels ──────────────────────────────────────────

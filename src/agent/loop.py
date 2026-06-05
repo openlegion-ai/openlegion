@@ -133,6 +133,26 @@ _BLACKBOARD_TOOLS = frozenset({
     "claim_task", "hand_off", "check_inbox", "update_status", "complete_task",
 })
 
+# Runtime-toggleable capability gates. Each gate maps to the set of tools
+# hidden from the LLM surface when that capability is switched OFF (via the
+# Operator Settings toggles → agent ``/config`` push, or the boot-time env
+# seed). Folding both gates through a single ``_disabled_gates`` set lets the
+# internet and browser toggles coexist without one clobbering the other.
+_RUNTIME_GATE_TOOLS: dict[str, frozenset[str]] = {
+    "internet": frozenset({"http_request", "web_search"}),
+    # Mirrors the @skill names in ``builtins/browser_tool.py``.
+    "browser": frozenset({
+        "browser_navigate", "browser_warmup", "browser_get_elements",
+        "browser_wait_for", "browser_screenshot", "browser_click",
+        "browser_click_xy", "browser_type", "browser_hover", "browser_scroll",
+        "browser_reset", "browser_press_key", "browser_go_back",
+        "browser_go_forward", "browser_switch_tab", "browser_find_text",
+        "browser_fill_form", "browser_open_tab", "browser_inspect_requests",
+        "browser_detect_captcha", "browser_upload_file",
+        "browser_solve_captcha", "browser_download",
+    }),
+}
+
 # Read-only tools allowed during operator heartbeat (unsupervised execution).
 # The full operator allowlist is restricted to this subset so heartbeats
 # cannot mutate fleet state without user approval. ``check_inbox`` is
@@ -397,14 +417,21 @@ class AgentLoop:
         # effective surface). Empty by default; populated only when
         # mesh explicitly tells the agent to hide tools.
         #
-        # Boot-time seeding: ``OL_INTERNET_ACCESS_ENABLED=false`` env
-        # var sets the runtime filter immediately so a restart while
-        # the toggle is OFF doesn't briefly re-expose the tools. Mesh
-        # passes this env var when launching the operator container
-        # based on ``operator.can_use_internet`` in permissions.json.
-        self._runtime_disabled_tools: frozenset[str] = frozenset()
+        # Boot-time seeding: ``OL_INTERNET_ACCESS_ENABLED=false`` /
+        # ``OL_BROWSER_ACCESS_ENABLED=false`` env vars set the runtime
+        # filter immediately so a restart while a toggle is OFF doesn't
+        # briefly re-expose the tools. Mesh passes these env vars when
+        # launching the operator container based on
+        # ``operator.can_use_internet`` / ``can_use_browser`` in
+        # permissions.json. Both gates are tracked independently so one
+        # toggle never clobbers the other.
+        self._disabled_gates: set[str] = set()
         if os.environ.get("OL_INTERNET_ACCESS_ENABLED", "true").lower() == "false":
-            self._runtime_disabled_tools = frozenset({"http_request", "web_search"})
+            self._disabled_gates.add("internet")
+        if os.environ.get("OL_BROWSER_ACCESS_ENABLED", "true").lower() == "false":
+            self._disabled_gates.add("browser")
+        self._runtime_disabled_tools: frozenset[str] = frozenset()
+        self._recompute_runtime_disabled()
         self._skills_reloaded: bool = False
         self._is_operator: bool = allowed_tools is not None
         self._operator_playbook_state: dict[str, int] = {}  # playbook -> turns since trigger
@@ -463,11 +490,32 @@ class AgentLoop:
             )
         return kw
 
-    def set_runtime_disabled_tools(self, tools: list[str] | set[str]) -> None:
-        """Replace the runtime-disabled-tool set.
+    def _recompute_runtime_disabled(self) -> None:
+        """Rebuild ``_runtime_disabled_tools`` from the active gate set."""
+        tools: set[str] = set()
+        for gate in self._disabled_gates:
+            tools |= _RUNTIME_GATE_TOOLS.get(gate, frozenset())
+        self._runtime_disabled_tools = frozenset(tools)
 
-        Called by the agent's ``/config`` endpoint when the mesh pushes
-        a permission change. Empty input clears the filter.
+    def set_runtime_gate(self, gate: str, enabled: bool) -> None:
+        """Flip a single capability gate (``internet`` / ``browser``).
+
+        Called by the agent's ``/config`` endpoint when the mesh pushes a
+        permission change. ``enabled=True`` clears the gate (tools become
+        visible again); ``enabled=False`` hides that gate's tools. Other
+        gates are untouched, so the internet and browser toggles compose.
+        """
+        if enabled:
+            self._disabled_gates.discard(gate)
+        else:
+            self._disabled_gates.add(gate)
+        self._recompute_runtime_disabled()
+
+    def set_runtime_disabled_tools(self, tools: list[str] | set[str]) -> None:
+        """Replace the runtime-disabled-tool set directly.
+
+        Retained for callers/tests that set the raw tool set. Prefer
+        ``set_runtime_gate`` for the internet/browser capability toggles.
         """
         self._runtime_disabled_tools = frozenset(tools or ())
 

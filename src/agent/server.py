@@ -621,6 +621,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         thinking = body.get("thinking") if "thinking" in body else None
         max_tokens = body.get("max_tokens") if "max_tokens" in body else None
         internet = body.get("internet_access_enabled") if "internet_access_enabled" in body else None
+        browser = body.get("browser_access_enabled") if "browser_access_enabled" in body else None
         if "model" in body and (not isinstance(model, str) or not model):
             raise HTTPException(400, "model must be a non-empty string")
         if "thinking" in body and thinking not in LLMClient.VALID_THINKING_LEVELS:
@@ -640,6 +641,10 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             raise HTTPException(
                 400, "internet_access_enabled must be a boolean",
             )
+        if "browser_access_enabled" in body and not isinstance(browser, bool):
+            raise HTTPException(
+                400, "browser_access_enabled must be a boolean",
+            )
 
         updated: dict = {}
         if "model" in body:
@@ -654,16 +659,15 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         if "internet_access_enabled" in body:
             # Mesh-side push from the Operator Settings → Internet
             # access toggle. When False, hide http_request + web_search
-            # from the next LLM tool surface so the operator can't call
-            # them. When True, clear the runtime-disabled set so the
-            # static allowlist takes over again.
-            disabled = (
-                frozenset()
-                if internet
-                else frozenset({"http_request", "web_search"})
-            )
-            loop.set_runtime_disabled_tools(disabled)
+            # from the next LLM tool surface; when True, restore them.
+            loop.set_runtime_gate("internet", internet)
             updated["internet_access_enabled"] = internet
+        if "browser_access_enabled" in body:
+            # Mesh-side push from the Operator Settings → Browser access
+            # toggle. When False, hide the browser_* tools from the next
+            # LLM tool surface; when True, restore them.
+            loop.set_runtime_gate("browser", browser)
+            updated["browser_access_enabled"] = browser
         return {"updated": updated}
 
     @app.get("/workspace-logs")

@@ -74,7 +74,11 @@ class TestEnsureOperatorCreates(_TempConfigMixin):
             perms = json.load(f)
         assert "operator" in perms["permissions"]
         assert perms["permissions"]["operator"]["can_spawn"] is True
-        assert perms["permissions"]["operator"]["can_use_browser"] is False
+        # Operator gets browser + internet on by default so it can navigate
+        # the web directly to help users; both are togglable in Operator
+        # Settings. See _ensure_operator_agent in src/cli/config.py.
+        assert perms["permissions"]["operator"]["can_use_browser"] is True
+        assert perms["permissions"]["operator"]["can_use_internet"] is True
 
         # Check skills dir created
         skills_dir = Path(self._tmpdir) / "skills" / "operator"
@@ -387,14 +391,22 @@ class TestOperatorConstants:
         assert "write_file" not in _OPERATOR_ALLOWED_TOOLS
 
     def test_request_browser_login_in_allowlist(self):
-        """Operator must be allowed to delegate browser login requests to workers.
+        """Operator must be able to delegate browser login requests to workers.
 
-        Operator itself has ``can_use_browser: False`` by design — it uses
-        the delegation path (``request_browser_login(agent_id=worker)``)
-        so session cookies land in the worker's browser profile.
+        Even though the operator now has its own browser access, the
+        delegation path (``request_browser_login(agent_id=worker)``)
+        remains the way to land session cookies in a *worker's* browser
+        profile.
         """
         from src.cli.config import _OPERATOR_ALLOWED_TOOLS
         assert "request_browser_login" in _OPERATOR_ALLOWED_TOOLS
+
+    def test_browser_tools_in_allowlist(self):
+        """Operator's curated allowlist exposes the browser_* surface so the
+        Browser-access toggle (can_use_browser) has tools to gate."""
+        from src.cli.config import _OPERATOR_ALLOWED_TOOLS
+        assert "browser_navigate" in _OPERATOR_ALLOWED_TOOLS
+        assert "browser_click" in _OPERATOR_ALLOWED_TOOLS
 
     def test_operator_agent_id(self):
         from src.cli.config import _OPERATOR_AGENT_ID

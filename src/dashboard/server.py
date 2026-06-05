@@ -2496,6 +2496,7 @@ def create_dashboard_router(
             "system_credentials": system_cred_names,
             "resolved_credentials": resolved,
             "can_use_browser": agent_perms.can_use_browser if agent_perms else False,
+            "can_use_internet": agent_perms.can_use_internet if agent_perms else False,
             "can_spawn": agent_perms.can_spawn if agent_perms else False,
             "can_manage_cron": agent_perms.can_manage_cron if agent_perms else False,
             "can_use_wallet": agent_perms.can_use_wallet if agent_perms else False,
@@ -2900,7 +2901,7 @@ def create_dashboard_router(
             restart_env: dict[str, str] = {}
             if agent_id == _OPERATOR_AGENT_ID:
                 restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
-                # Re-seed internet-access flag on restart so the
+                # Re-seed internet/browser access flags on restart so the
                 # operator's toggle state survives the bounce. Default
                 # True matches the operator-by-default UX.
                 try:
@@ -2910,8 +2911,12 @@ def create_dashboard_router(
                     restart_env["OL_INTERNET_ACCESS_ENABLED"] = (
                         "true" if _op_perms.get("can_use_internet", True) else "false"
                     )
+                    restart_env["OL_BROWSER_ACCESS_ENABLED"] = (
+                        "true" if _op_perms.get("can_use_browser", True) else "false"
+                    )
                 except Exception:
                     restart_env["OL_INTERNET_ACCESS_ENABLED"] = "true"
+                    restart_env["OL_BROWSER_ACCESS_ENABLED"] = "true"
             # Proxy goes in env_overrides (not runtime.extra_env) so
             # concurrent single-agent restarts don't stomp each other.
             _proxy_url = resolve_agent_proxy(
@@ -3196,6 +3201,7 @@ def create_dashboard_router(
             "allowed_apis": perms.allowed_apis,
             "available_credentials": available_creds,
             "can_use_browser": perms.can_use_browser,
+            "can_use_internet": perms.can_use_internet,
             "can_spawn": perms.can_spawn,
             "can_manage_cron": perms.can_manage_cron,
         }
@@ -3225,7 +3231,7 @@ def create_dashboard_router(
                 raise HTTPException(status_code=400, detail="allowed_apis must be a list of strings")
             agent_perms["allowed_apis"] = val
             updated.append("allowed_apis")
-        for flag in ("can_use_browser", "can_spawn", "can_manage_cron", "can_use_wallet"):
+        for flag in ("can_use_browser", "can_use_internet", "can_spawn", "can_manage_cron", "can_use_wallet"):
             if flag in body:
                 agent_perms[flag] = bool(body[flag])
                 updated.append(flag)
@@ -5410,6 +5416,76 @@ def create_dashboard_router(
             raise HTTPException(resp.status_code, detail)
         return resp.json()
 
+    # ── Operator: browser access toggle ───────────────────────
+
+    @api_router.get("/api/operator/browser-access")
+    async def api_operator_browser_access_status() -> dict:
+        """Return the operator's current browser-access state.
+
+        Proxies to mesh ``GET /mesh/operator/browser-access``. The
+        Operator Settings UI calls this on mount to render the toggle.
+        """
+        import httpx
+        url = f"http://127.0.0.1:{mesh_port}/mesh/operator/browser-access"
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    url,
+                    headers={"x-mesh-internal": "1", "X-Agent-ID": "operator"},
+                )
+        except Exception as e:
+            logger.warning("operator browser-access status proxy failed: %s", e)
+            raise HTTPException(502, f"Mesh unreachable: {e}")
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except Exception:
+                detail = resp.text
+            raise HTTPException(resp.status_code, detail)
+        return resp.json()
+
+    @api_router.post("/api/operator/browser-access")
+    async def api_operator_browser_access_set(request: Request) -> dict:
+        """Flip the operator's browser access on/off.
+
+        Body: ``{"enabled": bool}``. Proxies to mesh
+        ``POST /mesh/operator/browser-access``. Response shape:
+        ``{success, enabled, previous, live}``.
+        """
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict) or "enabled" not in body:
+            raise HTTPException(400, "'enabled' is required")
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            raise HTTPException(400, "'enabled' must be a boolean")
+        import httpx
+        url = f"http://127.0.0.1:{mesh_port}/mesh/operator/browser-access"
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    url,
+                    json={"enabled": enabled},
+                    headers={
+                        "X-Requested-With": "XMLHttpRequest",
+                        "x-mesh-internal": "1",
+                        "X-Agent-ID": "operator",
+                        "Content-Type": "application/json",
+                    },
+                )
+        except Exception as e:
+            logger.warning("operator browser-access set proxy failed: %s", e)
+            raise HTTPException(502, f"Mesh unreachable: {e}")
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except Exception:
+                detail = resp.text
+            raise HTTPException(resp.status_code, detail)
+        return resp.json()
+
     # ── Queue status ─────────────────────────────────────────
 
     @api_router.get("/api/queues")
@@ -5805,6 +5881,17 @@ def create_dashboard_router(
         "health_restart_window": (int, 60, 86400),
     }
 
+    # Settings seeded into agent containers as env vars at launch — they
+    # only take effect after the agent restarts (the restart-agents path
+    # re-reads settings.json). The dashboard auto-restarts the fleet when
+    # one of these changes so the user never has stale config silently
+    # in effect. Budgets are per-new-agent defaults and health_* apply
+    # live above, so neither needs a restart.
+    _RESTART_REQUIRED_SETTINGS: frozenset[str] = frozenset({
+        "max_iterations", "chat_max_tool_rounds",
+        "chat_max_total_rounds", "tool_timeout",
+    })
+
     _SYSTEM_SETTINGS_DEFAULTS: dict[str, float | int] = {
         "default_daily_budget": 10.0,
         "default_monthly_budget": 200.0,
@@ -5872,7 +5959,8 @@ def create_dashboard_router(
                 if cfg_key in updated:
                     setattr(health_monitor, attr, settings[cfg_key])
 
-        return {"updated": updated}
+        restart_required = bool(set(updated) & _RESTART_REQUIRED_SETTINGS)
+        return {"updated": updated, "restart_required": restart_required}
 
     @api_router.post("/api/default-model")
     async def api_set_default_model(request: Request) -> dict:
@@ -5954,7 +6042,11 @@ def create_dashboard_router(
 
         # Restart all agents in parallel
         _network_cfg = cfg.get("network", {})
-        from src.cli.config import _OPERATOR_AGENT_ID, _OPERATOR_ALLOWED_TOOLS
+        from src.cli.config import (
+            _OPERATOR_AGENT_ID,
+            _OPERATOR_ALLOWED_TOOLS,
+            _load_permissions,
+        )
 
         async def _restart_one(agent_id: str) -> tuple[str, str]:
             agent_cfg = agents_cfg.get(agent_id, {})
@@ -5969,6 +6061,25 @@ def create_dashboard_router(
                 _restart_env: dict[str, str] = {}
                 if agent_id == _OPERATOR_AGENT_ID:
                     _restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
+                    # Re-seed internet/browser access flags so a fleet
+                    # restart (incl. the dashboard's auto-restart on
+                    # restart-gated setting changes) doesn't silently
+                    # re-enable a capability the operator toggled OFF.
+                    # Mirrors the single-agent restart path; default True
+                    # matches the operator-by-default UX.
+                    try:
+                        _op_perms = _load_permissions().get(
+                            "permissions", {},
+                        ).get(_OPERATOR_AGENT_ID, {})
+                        _restart_env["OL_INTERNET_ACCESS_ENABLED"] = (
+                            "true" if _op_perms.get("can_use_internet", True) else "false"
+                        )
+                        _restart_env["OL_BROWSER_ACCESS_ENABLED"] = (
+                            "true" if _op_perms.get("can_use_browser", True) else "false"
+                        )
+                    except Exception:
+                        _restart_env["OL_INTERNET_ACCESS_ENABLED"] = "true"
+                        _restart_env["OL_BROWSER_ACCESS_ENABLED"] = "true"
                 _proxy_url = resolve_agent_proxy(agent_id, agents_cfg, _network_cfg)
                 _proxy_env = build_proxy_env_vars(
                     _proxy_url, _network_cfg.get("no_proxy", ""),

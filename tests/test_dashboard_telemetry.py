@@ -494,9 +494,7 @@ class TestPhase0FrontendWiring:
 
         The Summaries / Kanban / Activity sub-nav was deleted along with
         the kanban + activity surfaces. ``switchHomeTab`` calls should
-        no longer appear in the rendered template. trackSubtabUsage
-        itself is kept in app.js for empty-state CTA telemetry — see
-        test_empty_state_cta_buttons_emit_telemetry.
+        no longer appear in the rendered template.
         """
         html = _TEMPLATE.read_text(encoding="utf-8")
         assert "switchHomeTab(" not in html
@@ -511,20 +509,3 @@ class TestPhase0FrontendWiring:
         # raw call path.
         assert '@click="action.handler()"' not in html
 
-    def test_empty_state_cta_buttons_emit_telemetry(self):
-        html = _TEMPLATE.read_text(encoding="utf-8")
-        # Each empty-state intent chip on the operator empty state has a
-        # stable section_id so we can compare CTA traction across them.
-        # ``recently_delivered_view_all`` was retired in Phase 3 when the
-        # Workplace sub-tab bar collapsed into the single-scroll Home
-        # layout — there's no "View all →" button to instrument anymore.
-        for section_id in (
-            "operator_intent_content",
-            "operator_intent_research",
-            "operator_intent_sales",
-            "operator_intent_devteam",
-            "operator_intent_other",
-        ):
-            assert f"trackEmptyStateCta('{section_id}')" in html, (
-                f"missing trackEmptyStateCta call for: {section_id}"
-            )
