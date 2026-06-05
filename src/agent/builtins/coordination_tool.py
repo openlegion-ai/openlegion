@@ -221,11 +221,32 @@ async def hand_off(
             parsed_data = json.loads(data)
         except json.JSONDecodeError:
             parsed_data = {"text": data}
-        artifact_ref = f"output/{mesh_client.agent_id}/{generate_id('ho')}"
+        # Operator-bound handoff reports publish their output to the
+        # ``global/output/{sender}/`` namespace rather than the sender's
+        # team scope. That namespace is the one the operator's read
+        # carve-out (mesh_tool.read_blackboard) AND the permission model
+        # already target: permissions.can_read_blackboard restricts
+        # ``global/output/`` to the operator + the writing agent's own
+        # prefix, so the report is readable by exactly the operator and
+        # its author — nobody else. Writing it team-scoped (the prior
+        # behaviour) left it unreadable by the team-less operator while
+        # needlessly exposing it to the sender's whole team. ``to ==
+        # "operator"`` is the robust signal: it holds even when the fleet
+        # roster lookup above failed and ``target_is_global`` is unknown.
+        # ``global_scope`` keeps the key un-prefixed so it lands exactly
+        # at the key we record in ``artifact_refs``.
+        operator_bound = to == "operator"
+        if operator_bound:
+            artifact_ref = (
+                f"global/output/{mesh_client.agent_id}/{generate_id('ho')}"
+            )
+        else:
+            artifact_ref = f"output/{mesh_client.agent_id}/{generate_id('ho')}"
         try:
             await mesh_client.write_blackboard(
                 artifact_ref, parsed_data, ttl=_HANDOFF_TTL,
                 project=write_project,
+                global_scope=operator_bound,
             )
         except Exception as e:
             # Bug H: a bare ``{"error": ...}`` envelope lets agents

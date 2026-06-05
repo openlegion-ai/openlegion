@@ -99,6 +99,23 @@ _STANDALONE_ERROR = (
 )
 
 
+def _is_operator(mesh_client) -> bool:
+    """True for the fleet operator — the trusted, team-less coordinator.
+
+    The operator runs with ``team_name=None`` (so ``is_standalone`` is
+    True), but unlike an untrusted solo worker it is authorized for every
+    blackboard op on the mesh (``_caller_is_operator`` bypass host-side +
+    ``blackboard_read/write: ["*"]``; CLAUDE.md Constraint #12). Its
+    agent-side tools must mirror that, or the operator hits a misleading
+    "not assigned to a project" error — and can loop — when reading or
+    listing team data it is entitled to monitor. Operator reads/lists run
+    in global scope (raw keys, every team visible); its other blackboard
+    ops pass through unscoped and the mesh applies the real ACL. Workers
+    are unaffected — they stay scoped and standalone-blocked as before.
+    """
+    return getattr(mesh_client, "agent_id", "") == "operator"
+
+
 def _parse_json_value(value):
     """Parse a string as JSON, falling back to a ``{"text": ...}`` wrapper."""
     if not isinstance(value, str):
@@ -140,20 +157,11 @@ def _sanitize_value(value):
 async def read_blackboard(key: str, *, mesh_client=None) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    operator_global_read = (
-        getattr(mesh_client, "agent_id", "") == "operator"
-        and (
-            key.startswith("global/output/")
-            or key.startswith("global/tasks/operator/")
-        )
-    )
-    if mesh_client.is_standalone and not operator_global_read:
+    is_operator = _is_operator(mesh_client)
+    if mesh_client.is_standalone and not is_operator:
         return {"error": _STANDALONE_ERROR}
     try:
-        if operator_global_read:
-            entry = await mesh_client.read_blackboard(key, global_scope=True)
-        else:
-            entry = await mesh_client.read_blackboard(key)
+        entry = await mesh_client.read_blackboard(key, global_scope=is_operator)
         if entry is None:
             return {"key": key, "exists": False, "value": None}
         value = _sanitize_value(entry.get("value", entry))
@@ -194,7 +202,7 @@ async def read_blackboard(key: str, *, mesh_client=None) -> dict:
 async def write_blackboard(key: str, value: str, *, mesh_client=None) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    if mesh_client.is_standalone:
+    if mesh_client.is_standalone and not _is_operator(mesh_client):
         return {"error": _STANDALONE_ERROR}
     parsed = _parse_json_value(value)
     try:
@@ -226,10 +234,11 @@ async def write_blackboard(key: str, value: str, *, mesh_client=None) -> dict:
 async def list_blackboard(prefix: str = "", *, mesh_client=None) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    if mesh_client.is_standalone:
+    is_operator = _is_operator(mesh_client)
+    if mesh_client.is_standalone and not is_operator:
         return {"error": _STANDALONE_ERROR}
     try:
-        entries = await mesh_client.list_blackboard(prefix)
+        entries = await mesh_client.list_blackboard(prefix, global_scope=is_operator)
         items = []
         for entry in entries:
             raw = dumps_safe(entry.get("value", {}))
@@ -271,7 +280,7 @@ async def publish_event(
 ) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    if mesh_client.is_standalone:
+    if mesh_client.is_standalone and not _is_operator(mesh_client):
         return {"error": _STANDALONE_ERROR}
     parsed = _parse_json_value(data)
     try:
@@ -302,7 +311,7 @@ async def publish_event(
 async def subscribe_event(topic: str, *, mesh_client=None) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    if mesh_client.is_standalone:
+    if mesh_client.is_standalone and not _is_operator(mesh_client):
         return {"error": _STANDALONE_ERROR}
     try:
         result = await mesh_client.subscribe_topic(topic)
@@ -332,7 +341,7 @@ async def subscribe_event(topic: str, *, mesh_client=None) -> dict:
 async def watch_blackboard(pattern: str, *, mesh_client=None) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    if mesh_client.is_standalone:
+    if mesh_client.is_standalone and not _is_operator(mesh_client):
         return {"error": _STANDALONE_ERROR}
     try:
         result = await mesh_client.watch_blackboard(pattern)
@@ -363,7 +372,7 @@ async def watch_blackboard(pattern: str, *, mesh_client=None) -> dict:
 async def claim_task(key: str, claim_value: str, *, mesh_client=None) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    if mesh_client.is_standalone:
+    if mesh_client.is_standalone and not _is_operator(mesh_client):
         return {"error": _STANDALONE_ERROR}
     parsed = _parse_json_value(claim_value)
     try:
