@@ -846,6 +846,41 @@ class MeshClient:
         _raise_with_body(response)
         return response.json().get("skills", [])
 
+    async def get_skill_assignments(self) -> dict:
+        """Current fleet + per-agent skill assignment (operator-gated read)."""
+        client = await self._get_client()
+        response = await client.get(
+            f"{self.mesh_url}/mesh/skills/assignments",
+            timeout=10,
+            headers=self._trace_headers(),
+        )
+        _raise_with_body(response)
+        return response.json()
+
+    async def assign_skills(self, agent_id: str, skills: list[str]) -> dict:
+        """Replace an agent's per-agent skill allowlist (operator-gated)."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/skills/assign",
+            json={"agent_id": agent_id, "skills": skills},
+            timeout=30,
+            headers=self._trace_headers(),
+        )
+        _raise_with_body(response)
+        return response.json()
+
+    async def set_fleet_skills(self, skills: list[str]) -> dict:
+        """Replace the fleet-wide skill allowlist (operator-gated)."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/skills/fleet",
+            json={"skills": skills},
+            timeout=30,
+            headers=self._trace_headers(),
+        )
+        _raise_with_body(response)
+        return response.json()
+
     # === Browser (shared browser service via mesh proxy) ===
 
     # === Operator agent config management ===

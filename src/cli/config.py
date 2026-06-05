@@ -1713,6 +1713,7 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     # operator can see which skills its workers can draw on. install_skill /
     # remove_skill are operator-gated + user-origin-gated mutations.
     "skills_list", "skill_view", "install_skill", "remove_skill",
+    "list_skill_assignments", "assign_skill",
     # Workflow awareness — operator-only chain inspection + single-task
     # blocking primitive (see _HEARTBEAT_TOOLS in src/agent/loop.py for
     # the heartbeat surface; both tools self-reject for non-operators).

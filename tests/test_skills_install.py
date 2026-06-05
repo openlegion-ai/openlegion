@@ -129,9 +129,12 @@ def test_install_skill_leaves_no_staging_dir(tmp_path):
 # ── operator tools: gating ───────────────────────────────────────────────────
 
 class _FakeMesh:
-    def __init__(self):
+    def __init__(self, assignments=None):
         self.installed = None
         self.removed = None
+        self.assigned = None
+        self.fleet = None
+        self._assignments = assignments or {"fleet_skills": [], "per_agent": {}}
 
     async def install_skill(self, repo_url, ref=""):
         self.installed = (repo_url, ref)
@@ -140,6 +143,17 @@ class _FakeMesh:
     async def remove_skill(self, name):
         self.removed = name
         return {"removed": True, "name": name}
+
+    async def get_skill_assignments(self):
+        return self._assignments
+
+    async def assign_skills(self, agent_id, skills):
+        self.assigned = (agent_id, skills)
+        return {"assigned": True, "agent_id": agent_id, "skills": skills}
+
+    async def set_fleet_skills(self, skills):
+        self.fleet = skills
+        return {"fleet_skills": skills}
 
 
 async def test_install_tool_requires_operator(monkeypatch):
@@ -177,6 +191,99 @@ async def test_remove_tool_forwards_to_mesh(monkeypatch):
     )
     assert result["removed"] is True
     assert mesh.removed == "demo-skill"
+
+
+# ── operator tools: assign_skill / list_skill_assignments ────────────────────
+
+async def test_assign_skill_requires_operator(monkeypatch):
+    monkeypatch.delenv("ALLOWED_TOOLS", raising=False)
+    result = await skill_admin_tool.assign_skill("alpha", agent_id="a", mesh_client=_FakeMesh())
+    assert "only available to the operator" in result["error"]
+
+
+async def test_assign_skill_requires_user_origin(monkeypatch):
+    monkeypatch.setenv("ALLOWED_TOOLS", "assign_skill")
+    monkeypatch.setattr("src.agent.loop._last_message_is_user_origin", lambda m: False)
+    result = await skill_admin_tool.assign_skill(
+        "alpha", agent_id="a", mesh_client=_FakeMesh(), _messages=[{"role": "user"}],
+    )
+    assert result["error"] == "provenance_check_failed"
+
+
+async def test_assign_skill_requires_target(monkeypatch):
+    monkeypatch.setenv("ALLOWED_TOOLS", "assign_skill")
+    monkeypatch.setattr("src.agent.loop._last_message_is_user_origin", lambda m: True)
+    result = await skill_admin_tool.assign_skill(
+        "alpha", mesh_client=_FakeMesh(), _messages=[{"role": "user"}],
+    )
+    assert "agent_id" in result["error"]
+
+
+async def test_assign_skill_add_per_agent_merges(monkeypatch):
+    monkeypatch.setenv("ALLOWED_TOOLS", "assign_skill")
+    monkeypatch.setattr("src.agent.loop._last_message_is_user_origin", lambda m: True)
+    mesh = _FakeMesh({"fleet_skills": [], "per_agent": {"alice": ["alpha"]}})
+    result = await skill_admin_tool.assign_skill(
+        "beta", agent_id="alice", action="add", mesh_client=mesh, _messages=[{"role": "user"}],
+    )
+    # Merges onto the existing per-agent list (full-list set semantics).
+    assert mesh.assigned == ("alice", ["alpha", "beta"])
+    assert result["assigned"] is True
+
+
+async def test_assign_skill_remove_per_agent(monkeypatch):
+    monkeypatch.setenv("ALLOWED_TOOLS", "assign_skill")
+    monkeypatch.setattr("src.agent.loop._last_message_is_user_origin", lambda m: True)
+    mesh = _FakeMesh({"fleet_skills": [], "per_agent": {"alice": ["alpha", "beta"]}})
+    await skill_admin_tool.assign_skill(
+        "beta", agent_id="alice", action="remove", mesh_client=mesh, _messages=[{"role": "user"}],
+    )
+    assert mesh.assigned == ("alice", ["alpha"])
+
+
+async def test_assign_skill_fleet(monkeypatch):
+    monkeypatch.setenv("ALLOWED_TOOLS", "assign_skill")
+    monkeypatch.setattr("src.agent.loop._last_message_is_user_origin", lambda m: True)
+    mesh = _FakeMesh({"fleet_skills": ["common"], "per_agent": {}})
+    await skill_admin_tool.assign_skill(
+        "extra", fleet=True, action="add", mesh_client=mesh, _messages=[{"role": "user"}],
+    )
+    assert mesh.fleet == ["common", "extra"]
+    assert mesh.assigned is None  # per-agent path untouched
+
+
+async def test_assign_skill_remove_notes_fleet_override(monkeypatch):
+    monkeypatch.setenv("ALLOWED_TOOLS", "assign_skill")
+    monkeypatch.setattr("src.agent.loop._last_message_is_user_origin", lambda m: True)
+    # 'shared' is fleet-wide; removing it from one agent has no real effect.
+    mesh = _FakeMesh({"fleet_skills": ["shared"], "per_agent": {"alice": ["shared"]}})
+    result = await skill_admin_tool.assign_skill(
+        "shared", agent_id="alice", action="remove", mesh_client=mesh, _messages=[{"role": "user"}],
+    )
+    assert "fleet-wide" in result.get("note", "")
+
+
+async def test_assign_skill_rejects_bad_action(monkeypatch):
+    monkeypatch.setenv("ALLOWED_TOOLS", "assign_skill")
+    monkeypatch.setattr("src.agent.loop._last_message_is_user_origin", lambda m: True)
+    result = await skill_admin_tool.assign_skill(
+        "alpha", agent_id="a", action="toggle", mesh_client=_FakeMesh(), _messages=[{"role": "user"}],
+    )
+    assert "action must be" in result["error"]
+
+
+async def test_list_skill_assignments_requires_operator(monkeypatch):
+    monkeypatch.delenv("ALLOWED_TOOLS", raising=False)
+    result = await skill_admin_tool.list_skill_assignments(mesh_client=_FakeMesh())
+    assert "only available to the operator" in result["error"]
+
+
+async def test_list_skill_assignments_forwards(monkeypatch):
+    monkeypatch.setenv("ALLOWED_TOOLS", "list_skill_assignments")
+    mesh = _FakeMesh({"fleet_skills": ["common"], "per_agent": {"alice": ["alpha"]}})
+    result = await skill_admin_tool.list_skill_assignments(mesh_client=mesh)
+    assert result["fleet_skills"] == ["common"]
+    assert result["per_agent"] == {"alice": ["alpha"]}
 
 
 # ── mesh endpoint smoke (wiring + success through the route) ─────────────────

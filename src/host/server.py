@@ -3853,6 +3853,24 @@ def create_mesh_app(
         permissions.reload()
         return {"fleet_skills": skills}
 
+    @app.get("/mesh/skills/assignments")
+    async def skill_assignments(request: Request) -> dict:
+        """Current fleet + per-agent skill assignment (operator/can_manage_fleet).
+
+        Lets the operator inspect who has what before changing it. ``per_agent``
+        only lists agents that have an explicit allowlist set.
+        """
+        _require_skill_admin(request, {}, "skills.read:can_manage_fleet")
+        per_agent = {
+            aid: list(perms.allowed_skills)
+            for aid, perms in permissions.permissions.items()
+            if perms.allowed_skills
+        }
+        return {
+            "fleet_skills": list(getattr(permissions, "fleet_skills", []) or []),
+            "per_agent": per_agent,
+        }
+
     # === Create Custom Agent ===
 
     @app.post("/mesh/agents/create")

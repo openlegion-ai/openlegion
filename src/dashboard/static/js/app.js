@@ -10844,6 +10844,8 @@ function dashboard() {
         skill_view: 'reading a skill',
         install_skill: 'installing a skill',
         remove_skill: 'removing a skill',
+        list_skill_assignments: 'reviewing skill assignments',
+        assign_skill: 'assigning a skill',
       };
       if (map[toolName]) return map[toolName];
       // Fallback: humanise the snake_case tool name.
