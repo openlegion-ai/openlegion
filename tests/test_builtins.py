@@ -2349,6 +2349,62 @@ class TestStandaloneBlackboardGuards:
         )
 
     @pytest.mark.asyncio
+    async def test_operator_can_read_any_key_globally(self):
+        """The operator is fleet-global and trusted (host authorizes it for
+        every blackboard op). Its read tool must NOT block on a non-global
+        key — it reads ANY key in global scope so it can monitor team data
+        — otherwise it hits a misleading "not assigned to a project" error
+        and can loop."""
+        from src.agent.builtins.mesh_tool import read_blackboard
+        mc = self._standalone_client()
+        mc.agent_id = "operator"
+        mc.read_blackboard = AsyncMock(return_value={
+            "key": "projects/social-media/status/social-publisher",
+            "value": {"state": "working"},
+        })
+
+        result = await read_blackboard(
+            key="projects/social-media/status/social-publisher",
+            mesh_client=mc,
+        )
+
+        assert result["exists"] is True
+        assert result["value"] == {"state": "working"}
+        mc.read_blackboard.assert_awaited_once_with(
+            "projects/social-media/status/social-publisher", global_scope=True,
+        )
+
+    @pytest.mark.asyncio
+    async def test_operator_can_list_any_prefix_globally(self):
+        """The operator lists across every team (global scope), not just
+        its own (non-existent) project scope."""
+        from src.agent.builtins.mesh_tool import list_blackboard
+        mc = self._standalone_client()
+        mc.agent_id = "operator"
+        mc.list_blackboard = AsyncMock(return_value=[])
+
+        result = await list_blackboard(prefix="status/", mesh_client=mc)
+
+        assert "error" not in result
+        mc.list_blackboard.assert_awaited_once_with("status/", global_scope=True)
+
+    @pytest.mark.asyncio
+    async def test_operator_write_not_blocked(self):
+        """The operator is not treated as a standalone-blocked worker on
+        writes either (it is host-authorized for the full blackboard)."""
+        from src.agent.builtins.mesh_tool import write_blackboard
+        mc = self._standalone_client()
+        mc.agent_id = "operator"
+        mc.write_blackboard = AsyncMock(return_value={"version": 1})
+
+        result = await write_blackboard(
+            key="status/operator", value='{"state": "monitoring"}', mesh_client=mc,
+        )
+
+        assert result.get("written") is True
+        assert "error" not in result
+
+    @pytest.mark.asyncio
     async def test_write_blackboard_blocked_for_standalone(self):
         from src.agent.builtins.mesh_tool import write_blackboard
         result = await write_blackboard(

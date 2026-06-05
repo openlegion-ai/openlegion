@@ -166,6 +166,61 @@ class TestHandOff:
         )
 
     @pytest.mark.asyncio
+    async def test_hand_off_to_operator_writes_output_to_global_namespace(self):
+        """Operator-bound handoff OUTPUT lands at ``global/output/{sender}/``
+        with ``global_scope=True`` — the namespace the operator's read
+        carve-out AND the permission model both target (readable by only
+        the operator + the author) — not the sender's team scope, which the
+        team-less operator cannot read. The recorded artifact_ref is the
+        SAME key, so the operator's check_inbox → read_blackboard resolves."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="social-publisher")
+        mc.team_name = "social-media"
+        mc.list_agents.return_value = {"operator": {"project": "ops"}}
+
+        result = await hand_off(
+            to="operator",
+            summary="FB audit complete",
+            data='{"fields_updated": 3}',
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        args, kwargs = mc.write_blackboard.call_args
+        written_key = args[0]
+        assert written_key.startswith("global/output/social-publisher/"), (
+            f"operator handoff output must land in the global namespace, "
+            f"got {written_key!r}"
+        )
+        assert kwargs.get("global_scope") is True
+        # The task points at exactly the key we wrote.
+        assert mc.create_task.call_args.kwargs["artifact_refs"] == [written_key]
+
+    @pytest.mark.asyncio
+    async def test_hand_off_to_teammate_keeps_output_team_scoped(self):
+        """Non-operator handoff output is unchanged: a bare
+        ``output/{sender}/`` key written WITHOUT global_scope (the mesh
+        client transparently prefixes it to the team namespace)."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.team_name = "research-team"
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+
+        result = await hand_off(
+            to="analyst",
+            summary="findings",
+            data='{"x": 1}',
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        args, kwargs = mc.write_blackboard.call_args
+        assert args[0].startswith("output/scout/")
+        assert not kwargs.get("global_scope", False)
+
+    @pytest.mark.asyncio
     async def test_hand_off_cross_project_routes_to_target_project(self):
         """Worker → worker in a different project: task lands in the
         TARGET's project namespace, not the caller's. Without this the
