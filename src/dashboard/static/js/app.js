@@ -1948,9 +1948,11 @@ function dashboard() {
     },
 
     trackEmptyStateCta(sectionId) {
-      // Wired from any empty-state CTA button in the template. Caller
-      // passes a stable ``section_id`` so we can compare CTA traction
-      // across the surfaces Phase 1+ may rework.
+      // Phase-0 baseline telemetry hook. Currently unwired — the operator
+      // empty-state intent chips that called it were removed when
+      // onboarding collapsed into the single setup modal — but retained
+      // (like trackSubtabUsage) so a future empty-state CTA can re-wire it
+      // without re-introducing the helper. See TestPhase0FrontendWiring.
       this.track('empty_state_cta_click', { section_id: sectionId || 'unknown' });
       this._trackFirstAction('empty_state_cta_click');
     },
@@ -9204,6 +9206,14 @@ function dashboard() {
           const err = await opResp.json().catch(() => ({}));
           this.showToast(`Error setting operator model: ${err.detail || opResp.status}`);
           return;
+        }
+        // The model normally hot-reloads live, but if the container
+        // couldn't be reached the server asks for a restart — honour it
+        // so the operator isn't left on its boot default. Mirrors
+        // saveOperatorModel().
+        const opData = await opResp.json().catch(() => ({}));
+        if (opData.restart_required) {
+          await fetch(`${window.__config.apiBase}/agents/operator/restart`, { method: 'POST' }).catch(() => {});
         }
 
         try { localStorage.setItem('ol_setup_done', '1'); } catch (_) { /* ignore */ }

@@ -2471,141 +2471,6 @@
             <svg class="size-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
           </button>
         </div>
-        <!-- Onboarding banner (first-run) -->
-        <!-- Initial setup — a single, non-skippable modal that every new
-             user completes before reaching the workspace. Covers (1) LLM
-             credentials (skippable when OpenLegion credits are present)
-             and (2) choosing the Operator model + Default agent model.
-             Visibility is driven by ``showSetup`` (see app.js). There is
-             intentionally no close button / backdrop-dismiss. -->
-        <div x-show="showSetup && !loading" x-cloak
-             x-init="$watch('showSetup', v => { if (v) { onboardDefaultModel = onboardDefaultModel || (systemSettings && systemSettings.default_model) || ''; onboardOperatorModel = onboardOperatorModel || (opAgent && opAgent.model) || ''; } })"
-             class="fixed inset-0 z-[160] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
-          <div class="w-full max-w-lg bg-gray-900 border border-indigo-800/40 rounded-xl p-6 shadow-2xl max-h-[90vh] overflow-y-auto" data-testid="setup-modal">
-          <h3 class="text-lg font-semibold text-white mb-1">Welcome to OpenLegion</h3>
-          <p class="text-xs text-gray-400 mb-5">A couple of quick steps to get your workspace ready.</p>
-          <div class="space-y-5">
-            <!-- Step 1: API key -->
-            <div class="flex items-start gap-3">
-              <div class="shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold"
-                :class="settingsData?.has_llm_credentials ? 'bg-emerald-600 text-white' : 'bg-gray-700 text-gray-400'">
-                <span x-show="settingsData?.has_llm_credentials">&#10003;</span>
-                <span x-show="!settingsData?.has_llm_credentials">1</span>
-              </div>
-              <div class="flex-1">
-                <div class="text-sm font-medium text-gray-200 mb-2" x-text="settingsData?.credit_proxy_configured && !settingsData?.has_byok_keys ? 'Configure LLM access' : 'Add an API key'"></div>
-                <div x-show="!settingsData?.has_llm_credentials" class="space-y-2">
-                  <div class="flex flex-wrap gap-2">
-                    <select x-model="onboardProvider" :disabled="onboardSaving" class="dash-select text-xs w-40" @change="onboardAuthType = 'api_key'; if ($event.target.value !== '__custom__') { onboardCustomService = ''; onboardIsLlmProvider = false; onboardCustomModels = ''; onboardCustomLabel = ''; }">
-                      <option value="">Provider...</option>
-                      {% for p in providers %}
-                      <option value="{{ p.name }}">{{ p.label }}</option>
-                      {% endfor %}
-                      <option value="__custom__">Custom...</option>
-                    </select>
-                    <template x-if="onboardProvider === '__custom__'">
-                      <input type="text" x-model="onboardCustomService" :disabled="onboardSaving" class="dash-input text-xs w-40" placeholder="Provider name">
-                    </template>
-                    <template x-if="onboardProvider === 'anthropic' || onboardProvider === 'openai'">
-                      <select x-model="onboardAuthType" :disabled="onboardSaving" class="dash-select text-xs w-48">
-                        <option value="api_key">API Key (recommended)</option>
-                        <option value="oauth" x-text="onboardProvider === 'openai' ? 'ChatGPT OAuth (JSON)' : 'Subscription Token'"></option>
-                      </select>
-                    </template>
-                    <input type="password" x-model="onboardKey" :disabled="onboardSaving" class="dash-input flex-1 min-w-0 sm:min-w-[200px]"
-                      :placeholder="onboardAuthType === 'oauth' ? (onboardProvider === 'openai' ? '{&quot;access_token&quot;:...,&quot;refresh_token&quot;:...}' : 'sk-ant-oat01-...') : 'API key'">
-                  </div>
-                  <template x-if="onboardAuthType === 'oauth' && onboardProvider === 'anthropic'">
-                    <div class="text-[11px] text-amber-400/80 leading-snug">
-                      Experimental — uses unofficial OAuth that may break without notice. Generate with: <code class="font-mono bg-gray-800 px-1 rounded">claude setup-token</code>
-                    </div>
-                  </template>
-                  <template x-if="onboardAuthType === 'oauth' && onboardProvider === 'openai'">
-                    <div class="text-[11px] text-amber-400/80 leading-snug">
-                      Paste the JSON blob from <code class="font-mono bg-gray-800 px-1 rounded">~/.codex/auth.json</code> containing <code class="font-mono bg-gray-800 px-1 rounded">access_token</code> and <code class="font-mono bg-gray-800 px-1 rounded">refresh_token</code>.
-                    </div>
-                  </template>
-                  <div x-show="onboardAuthType !== 'oauth'" class="flex flex-wrap gap-2 items-center">
-                    <input type="text" x-model="onboardBaseUrl" :disabled="onboardSaving" class="dash-input flex-1 min-w-0 sm:min-w-[200px]" placeholder="Custom API base URL (optional)">
-                  </div>
-                  <template x-if="onboardProvider === '__custom__'">
-                    <div class="space-y-1.5">
-                      <label class="inline-flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none">
-                        <input type="checkbox" x-model="onboardIsLlmProvider" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30">
-                        This is an LLM provider
-                      </label>
-                      <template x-if="onboardIsLlmProvider">
-                        <div class="space-y-1.5">
-                          <input type="text" x-model="onboardCustomLabel" :disabled="onboardSaving" class="dash-input w-full text-xs" placeholder="Display name (e.g. My Provider)">
-                          <textarea x-model="onboardCustomModels" :disabled="onboardSaving" class="dash-input w-full text-xs" rows="2" placeholder="Model names, comma-separated (e.g. model-7b, model-70b)"></textarea>
-                          <div class="text-[11px] text-gray-400">Models will be available as <code class="bg-gray-800 px-0.5 rounded" x-text="(onboardCustomService || 'provider') + '/model-name'"></code>. Must be OpenAI-compatible.</div>
-                        </div>
-                      </template>
-                    </div>
-                  </template>
-                  <div class="flex flex-wrap gap-2 items-center">
-                    <button @click="submitOnboardCredential()" :disabled="onboardSaving || !onboardProvider || !onboardKey || (onboardProvider === '__custom__' && !onboardCustomService.trim())"
-                      class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors inline-flex items-center gap-1.5">
-                      <svg x-show="onboardSaving" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                      <span x-text="onboardSaving ? 'Saving...' : 'Save'"></span>
-                    </button>
-                  </div>
-                </div>
-                <div x-show="settingsData?.has_llm_credentials" class="space-y-1">
-                  <div x-show="settingsData?.has_byok_keys" class="text-xs text-emerald-400">API key configured</div>
-                  <div x-show="settingsData?.credit_proxy_configured && !settingsData?.has_byok_keys" class="text-xs text-emerald-400">Credits configured</div>
-                  <div x-show="settingsData?.credit_proxy_configured && !settingsData?.has_byok_keys" class="text-[11px] text-gray-400">
-                    Add your own API key above for zero-markup access<template x-if="settingsData?.app_url"><span>, or <a :href="settingsData.app_url + '/credits'" target="_blank" rel="noopener noreferrer" class="text-indigo-400 hover:text-indigo-300">manage credits</a></span></template>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <!-- Step 2: Choose models. Required for everyone — we no
-                 longer auto-assign a default. Disabled until LLM access
-                 (a key OR OpenLegion credits) is configured above. -->
-            <div class="flex items-start gap-3" :class="!settingsData?.has_llm_credentials ? 'opacity-50 pointer-events-none' : ''">
-              <div class="shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold"
-                :class="(onboardOperatorModel && onboardDefaultModel) ? 'bg-emerald-600 text-white' : 'bg-gray-700 text-gray-400'">
-                <span x-show="onboardOperatorModel && onboardDefaultModel">&#10003;</span>
-                <span x-show="!(onboardOperatorModel && onboardDefaultModel)">2</span>
-              </div>
-              <div class="flex-1 space-y-3">
-                <div class="text-sm font-medium text-gray-200">Choose your models</div>
-                <div>
-                  <label class="text-xs text-gray-400 mb-1 block">Operator model
-                    <span class="text-gray-500">— powers the assistant you chat with</span></label>
-                  <select x-model="onboardOperatorModel" class="dash-select text-xs w-full" data-testid="setup-operator-model">
-                    <option value="">Select model…</option>
-                    <template x-for="m in availableModels" :key="m">
-                      <option :value="m" x-text="m"></option>
-                    </template>
-                  </select>
-                </div>
-                <div>
-                  <label class="text-xs text-gray-400 mb-1 block">Default agent model
-                    <span class="text-gray-500">— used by new teammates unless overridden</span></label>
-                  <select x-model="onboardDefaultModel" class="dash-select text-xs w-full" data-testid="setup-default-model">
-                    <option value="">Select model…</option>
-                    <template x-for="m in availableModels" :key="m">
-                      <option :value="m" x-text="m"></option>
-                    </template>
-                  </select>
-                </div>
-              </div>
-            </div>
-          </div>
-          <div class="mt-6 flex items-center justify-end gap-3">
-            <span x-show="!settingsData?.has_llm_credentials" class="text-[11px] text-gray-500">Add LLM access to continue</span>
-            <button @click="finishSetup()"
-              :disabled="!setupCanFinish || onboardFinishing"
-              class="text-xs px-4 py-2 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors inline-flex items-center gap-1.5"
-              data-testid="setup-finish">
-              <svg x-show="onboardFinishing" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-              <span x-text="onboardFinishing ? 'Finishing…' : 'Finish setup'"></span>
-            </button>
-          </div>
-          </div>
-        </div>
       </div>
 
 
@@ -8904,6 +8769,141 @@
         </div>
       </div>
     </div>
+
+        <!-- Initial setup — a single, non-skippable modal that every new
+             user completes before reaching the workspace. Covers (1) LLM
+             credentials (skippable when OpenLegion credits are present)
+             and (2) choosing the Operator model + Default agent model.
+             Visibility is driven by ``showSetup`` (see app.js). There is
+             intentionally no close button / backdrop-dismiss. -->
+        <div x-show="showSetup && !loading" x-cloak
+             x-init="$watch('showSetup', v => { if (v) { onboardDefaultModel = onboardDefaultModel || (systemSettings && systemSettings.default_model) || ''; onboardOperatorModel = onboardOperatorModel || ((agents.find(a => a.id === 'operator') || {}).model) || ''; } })"
+             class="fixed inset-0 z-[160] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
+          <div class="w-full max-w-lg bg-gray-900 border border-indigo-800/40 rounded-xl p-6 shadow-2xl max-h-[90vh] overflow-y-auto" data-testid="setup-modal">
+          <h3 class="text-lg font-semibold text-white mb-1">Welcome to OpenLegion</h3>
+          <p class="text-xs text-gray-400 mb-5">A couple of quick steps to get your workspace ready.</p>
+          <div class="space-y-5">
+            <!-- Step 1: API key -->
+            <div class="flex items-start gap-3">
+              <div class="shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold"
+                :class="settingsData?.has_llm_credentials ? 'bg-emerald-600 text-white' : 'bg-gray-700 text-gray-400'">
+                <span x-show="settingsData?.has_llm_credentials">&#10003;</span>
+                <span x-show="!settingsData?.has_llm_credentials">1</span>
+              </div>
+              <div class="flex-1">
+                <div class="text-sm font-medium text-gray-200 mb-2" x-text="settingsData?.credit_proxy_configured && !settingsData?.has_byok_keys ? 'Configure LLM access' : 'Add an API key'"></div>
+                <div x-show="!settingsData?.has_llm_credentials" class="space-y-2">
+                  <div class="flex flex-wrap gap-2">
+                    <select x-model="onboardProvider" :disabled="onboardSaving" class="dash-select text-xs w-40" @change="onboardAuthType = 'api_key'; if ($event.target.value !== '__custom__') { onboardCustomService = ''; onboardIsLlmProvider = false; onboardCustomModels = ''; onboardCustomLabel = ''; }">
+                      <option value="">Provider...</option>
+                      {% for p in providers %}
+                      <option value="{{ p.name }}">{{ p.label }}</option>
+                      {% endfor %}
+                      <option value="__custom__">Custom...</option>
+                    </select>
+                    <template x-if="onboardProvider === '__custom__'">
+                      <input type="text" x-model="onboardCustomService" :disabled="onboardSaving" class="dash-input text-xs w-40" placeholder="Provider name">
+                    </template>
+                    <template x-if="onboardProvider === 'anthropic' || onboardProvider === 'openai'">
+                      <select x-model="onboardAuthType" :disabled="onboardSaving" class="dash-select text-xs w-48">
+                        <option value="api_key">API Key (recommended)</option>
+                        <option value="oauth" x-text="onboardProvider === 'openai' ? 'ChatGPT OAuth (JSON)' : 'Subscription Token'"></option>
+                      </select>
+                    </template>
+                    <input type="password" x-model="onboardKey" :disabled="onboardSaving" class="dash-input flex-1 min-w-0 sm:min-w-[200px]"
+                      :placeholder="onboardAuthType === 'oauth' ? (onboardProvider === 'openai' ? '{&quot;access_token&quot;:...,&quot;refresh_token&quot;:...}' : 'sk-ant-oat01-...') : 'API key'">
+                  </div>
+                  <template x-if="onboardAuthType === 'oauth' && onboardProvider === 'anthropic'">
+                    <div class="text-[11px] text-amber-400/80 leading-snug">
+                      Experimental — uses unofficial OAuth that may break without notice. Generate with: <code class="font-mono bg-gray-800 px-1 rounded">claude setup-token</code>
+                    </div>
+                  </template>
+                  <template x-if="onboardAuthType === 'oauth' && onboardProvider === 'openai'">
+                    <div class="text-[11px] text-amber-400/80 leading-snug">
+                      Paste the JSON blob from <code class="font-mono bg-gray-800 px-1 rounded">~/.codex/auth.json</code> containing <code class="font-mono bg-gray-800 px-1 rounded">access_token</code> and <code class="font-mono bg-gray-800 px-1 rounded">refresh_token</code>.
+                    </div>
+                  </template>
+                  <div x-show="onboardAuthType !== 'oauth'" class="flex flex-wrap gap-2 items-center">
+                    <input type="text" x-model="onboardBaseUrl" :disabled="onboardSaving" class="dash-input flex-1 min-w-0 sm:min-w-[200px]" placeholder="Custom API base URL (optional)">
+                  </div>
+                  <template x-if="onboardProvider === '__custom__'">
+                    <div class="space-y-1.5">
+                      <label class="inline-flex items-center gap-1.5 text-xs text-gray-400 cursor-pointer select-none">
+                        <input type="checkbox" x-model="onboardIsLlmProvider" class="rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30">
+                        This is an LLM provider
+                      </label>
+                      <template x-if="onboardIsLlmProvider">
+                        <div class="space-y-1.5">
+                          <input type="text" x-model="onboardCustomLabel" :disabled="onboardSaving" class="dash-input w-full text-xs" placeholder="Display name (e.g. My Provider)">
+                          <textarea x-model="onboardCustomModels" :disabled="onboardSaving" class="dash-input w-full text-xs" rows="2" placeholder="Model names, comma-separated (e.g. model-7b, model-70b)"></textarea>
+                          <div class="text-[11px] text-gray-400">Models will be available as <code class="bg-gray-800 px-0.5 rounded" x-text="(onboardCustomService || 'provider') + '/model-name'"></code>. Must be OpenAI-compatible.</div>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+                  <div class="flex flex-wrap gap-2 items-center">
+                    <button @click="submitOnboardCredential()" :disabled="onboardSaving || !onboardProvider || !onboardKey || (onboardProvider === '__custom__' && !onboardCustomService.trim())"
+                      class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors inline-flex items-center gap-1.5">
+                      <svg x-show="onboardSaving" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                      <span x-text="onboardSaving ? 'Saving...' : 'Save'"></span>
+                    </button>
+                  </div>
+                </div>
+                <div x-show="settingsData?.has_llm_credentials" class="space-y-1">
+                  <div x-show="settingsData?.has_byok_keys" class="text-xs text-emerald-400">API key configured</div>
+                  <div x-show="settingsData?.credit_proxy_configured && !settingsData?.has_byok_keys" class="text-xs text-emerald-400">Credits configured</div>
+                  <div x-show="settingsData?.credit_proxy_configured && !settingsData?.has_byok_keys" class="text-[11px] text-gray-400">
+                    Add your own API key above for zero-markup access<template x-if="settingsData?.app_url"><span>, or <a :href="settingsData.app_url + '/credits'" target="_blank" rel="noopener noreferrer" class="text-indigo-400 hover:text-indigo-300">manage credits</a></span></template>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <!-- Step 2: Choose models. Required for everyone — we no
+                 longer auto-assign a default. Disabled until LLM access
+                 (a key OR OpenLegion credits) is configured above. -->
+            <div class="flex items-start gap-3" :class="!settingsData?.has_llm_credentials ? 'opacity-50 pointer-events-none' : ''">
+              <div class="shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold"
+                :class="(onboardOperatorModel && onboardDefaultModel) ? 'bg-emerald-600 text-white' : 'bg-gray-700 text-gray-400'">
+                <span x-show="onboardOperatorModel && onboardDefaultModel">&#10003;</span>
+                <span x-show="!(onboardOperatorModel && onboardDefaultModel)">2</span>
+              </div>
+              <div class="flex-1 space-y-3">
+                <div class="text-sm font-medium text-gray-200">Choose your models</div>
+                <div>
+                  <label class="text-xs text-gray-400 mb-1 block">Operator model
+                    <span class="text-gray-500">— powers the assistant you chat with</span></label>
+                  <select x-model="onboardOperatorModel" class="dash-select text-xs w-full" data-testid="setup-operator-model">
+                    <option value="">Select model…</option>
+                    <template x-for="m in availableModels" :key="m">
+                      <option :value="m" x-text="m"></option>
+                    </template>
+                  </select>
+                </div>
+                <div>
+                  <label class="text-xs text-gray-400 mb-1 block">Default agent model
+                    <span class="text-gray-500">— used by new teammates unless overridden</span></label>
+                  <select x-model="onboardDefaultModel" class="dash-select text-xs w-full" data-testid="setup-default-model">
+                    <option value="">Select model…</option>
+                    <template x-for="m in availableModels" :key="m">
+                      <option :value="m" x-text="m"></option>
+                    </template>
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="mt-6 flex items-center justify-end gap-3">
+            <span x-show="!settingsData?.has_llm_credentials" class="text-[11px] text-gray-500">Add LLM access to continue</span>
+            <button @click="finishSetup()"
+              :disabled="!setupCanFinish || onboardFinishing"
+              class="text-xs px-4 py-2 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors inline-flex items-center gap-1.5"
+              data-testid="setup-finish">
+              <svg x-show="onboardFinishing" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+              <span x-text="onboardFinishing ? 'Finishing…' : 'Finish setup'"></span>
+            </button>
+          </div>
+          </div>
+        </div>
 
     <!-- Minimized chat pill -->
     <div x-show="activeTab !== 'chat' && openChats.length > 0 && chatPanelMinimized" x-cloak

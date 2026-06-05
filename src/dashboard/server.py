@@ -6042,7 +6042,11 @@ def create_dashboard_router(
 
         # Restart all agents in parallel
         _network_cfg = cfg.get("network", {})
-        from src.cli.config import _OPERATOR_AGENT_ID, _OPERATOR_ALLOWED_TOOLS
+        from src.cli.config import (
+            _OPERATOR_AGENT_ID,
+            _OPERATOR_ALLOWED_TOOLS,
+            _load_permissions,
+        )
 
         async def _restart_one(agent_id: str) -> tuple[str, str]:
             agent_cfg = agents_cfg.get(agent_id, {})
@@ -6057,6 +6061,25 @@ def create_dashboard_router(
                 _restart_env: dict[str, str] = {}
                 if agent_id == _OPERATOR_AGENT_ID:
                     _restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
+                    # Re-seed internet/browser access flags so a fleet
+                    # restart (incl. the dashboard's auto-restart on
+                    # restart-gated setting changes) doesn't silently
+                    # re-enable a capability the operator toggled OFF.
+                    # Mirrors the single-agent restart path; default True
+                    # matches the operator-by-default UX.
+                    try:
+                        _op_perms = _load_permissions().get(
+                            "permissions", {},
+                        ).get(_OPERATOR_AGENT_ID, {})
+                        _restart_env["OL_INTERNET_ACCESS_ENABLED"] = (
+                            "true" if _op_perms.get("can_use_internet", True) else "false"
+                        )
+                        _restart_env["OL_BROWSER_ACCESS_ENABLED"] = (
+                            "true" if _op_perms.get("can_use_browser", True) else "false"
+                        )
+                    except Exception:
+                        _restart_env["OL_INTERNET_ACCESS_ENABLED"] = "true"
+                        _restart_env["OL_BROWSER_ACCESS_ENABLED"] = "true"
                 _proxy_url = resolve_agent_proxy(agent_id, agents_cfg, _network_cfg)
                 _proxy_env = build_proxy_env_vars(
                     _proxy_url, _network_cfg.get("no_proxy", ""),

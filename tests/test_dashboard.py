@@ -3032,16 +3032,6 @@ class TestBoardLoadingAndErrorStates:
         # so the user can recover with one click without reloading.
         assert "retryWorkplaceSection('summaries')" in body
 
-    def test_index_html_chip_prefix_does_not_overwrite(self):
-        resp = self.client.get("/dashboard/")
-        body = resp.text
-        # The four onboarding chips now prepend their suggestion to
-        # whatever the user has already typed (chip + ' ' + opMsg)
-        # rather than clobbering it. Caret moves to the end via
-        # setSelectionRange so typing continues naturally.
-        assert "s.opMsg = chip + (s.opMsg ? ' ' + s.opMsg : '')" in body
-        assert "el.setSelectionRange(el.value.length, el.value.length)" in body
-
 
 class TestBoardTemplateDescriptions:
     """PR-M — fleet-template descriptions rewritten as user outcomes.
