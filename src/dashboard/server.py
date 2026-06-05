@@ -2206,11 +2206,6 @@ def create_dashboard_router(
             result.append(entry)
         return {"skills": result}
 
-    @api_router.get("/api/fleet/skills")
-    async def api_fleet_skills(request: Request) -> dict:
-        """Current fleet-wide skill assignment (applies to every agent)."""
-        return {"fleet_skills": list(getattr(permissions, "fleet_skills", []) or [])}
-
     @api_router.post("/api/fleet/skills")
     async def api_set_fleet_skills(request: Request) -> dict:
         """Set the fleet-wide skill allowlist. Body: {skills: [...]}."""
@@ -3346,20 +3341,8 @@ def create_dashboard_router(
             agent_perms["allowed_apis"] = val
             updated.append("allowed_apis")
         if "allowed_skills" in body:
-            # Per-agent skill-pack allowlist. Validate path-safe names so a
-            # value can't smuggle anything into the catalog lookup.
-            val = body["allowed_skills"]
-            if not isinstance(val, list) or not all(isinstance(v, str) for v in val):
-                raise HTTPException(status_code=400, detail="allowed_skills must be a list of strings")
-            cleaned: set[str] = set()
-            for s in val:
-                s = s.strip()
-                if not s:
-                    continue
-                if not all((c.isascii() and c.isalnum()) or c in "_-" for c in s):
-                    raise HTTPException(status_code=400, detail=f"Invalid skill name: {s!r}")
-                cleaned.add(s)
-            agent_perms["allowed_skills"] = sorted(cleaned)
+            # Per-agent skill-pack allowlist (path-safe-validated, sorted/deduped).
+            agent_perms["allowed_skills"] = _clean_skill_names(body["allowed_skills"])
             updated.append("allowed_skills")
         for flag in ("can_use_browser", "can_use_internet", "can_spawn", "can_manage_cron", "can_use_wallet"):
             if flag in body:

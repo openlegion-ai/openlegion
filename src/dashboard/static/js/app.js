@@ -502,14 +502,13 @@ function dashboard() {
     // Skills — per-agent assignment tab + fleet catalog (System → Skills).
     // agentSkills: rows for the selected agent (carry agent_assigned +
     // fleet_assigned); fleetSkillsCatalog: the admin/catalog view (no
-    // agent_id); fleetSkills: names assigned fleet-wide. null = not yet
-    // loaded (spinner), [] = loaded-but-empty (empty state).
+    // agent_id) whose rows carry fleet_assigned. null = not yet loaded
+    // (spinner), [] = loaded-but-empty (empty state).
     agentSkills: null,
     agentSkillsLoading: false,
     agentSkillsSaving: false,
     fleetSkillsCatalog: null,
     fleetSkillsCatalogLoading: false,
-    fleetSkills: [],
     fleetSkillsSaving: false,
     skillInstallRepo: '',
     skillInstallRef: '',
@@ -906,7 +905,7 @@ function dashboard() {
                 this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails();
               }
               if (route.systemTab === 'skills') {
-                this.loadSkillsCatalog(); this.loadFleetSkills();
+                this.loadSkillsCatalog();
               }
               if (route.systemTab === 'operator') {
                 this.fetchAuditLog();
@@ -2438,7 +2437,6 @@ function dashboard() {
         }
         if (this.systemTab === 'skills') {
           this.loadSkillsCatalog();
-          this.loadFleetSkills();
         }
         if (this.systemTab === 'settings') {
           this.fetchBrowserSettings();
@@ -2469,7 +2467,7 @@ function dashboard() {
       if (tabId === 'integrations') { this.fetchChannels(); this.fetchWebhooks(); this.fetchApiKeys(); this.loadIntegrations(); }
       if (tabId === 'apikeys') { this.fetchSettings(); }
       if (tabId === 'storage') { this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails(); }
-      if (tabId === 'skills') { this.loadSkillsCatalog(); this.loadFleetSkills(); }
+      if (tabId === 'skills') { this.loadSkillsCatalog(); }
       if (tabId === 'network') { this.loadNetworkProxy(); }
       if (tabId === 'settings') { this.fetchBrowserSettings(); this.fetchSystemSettings(); }
       if (tabId === 'browser') { this.fetchBrowserSettings(); this.fetchSystemSettings(); this.fetchCaptchaSolver(); this.startPlatformSuccessRefresh(); }
@@ -5393,16 +5391,6 @@ function dashboard() {
       }
     },
 
-    async loadFleetSkills() {
-      try {
-        const resp = await fetch(`${window.__config.apiBase}/fleet/skills`);
-        if (resp.ok) {
-          const data = await resp.json();
-          this.fleetSkills = Array.isArray(data.fleet_skills) ? data.fleet_skills : [];
-        }
-      } catch (e) { console.warn('loadFleetSkills failed:', e); }
-    },
-
     async toggleFleetSkill(skill) {
       if (this.fleetSkillsSaving) return;
       const current = (this.fleetSkillsCatalog || [])
@@ -5427,7 +5415,6 @@ function dashboard() {
       } finally {
         this.fleetSkillsSaving = false;
         await this.loadSkillsCatalog();
-        await this.loadFleetSkills();
       }
     },
 
@@ -5450,7 +5437,6 @@ function dashboard() {
           this.skillInstallRepo = '';
           this.skillInstallRef = '';
           await this.loadSkillsCatalog();
-          await this.loadFleetSkills();
         } else {
           this.showToast(`Install failed: ${data.error || data.detail || resp.status}`);
         }
@@ -5474,7 +5460,6 @@ function dashboard() {
           if (resp.ok) {
             this.showToast(`Removed skill: ${name}`);
             await this.loadSkillsCatalog();
-            await this.loadFleetSkills();
           } else {
             const data = await resp.json().catch(() => ({}));
             this.showToast(`Remove failed: ${data.error || data.detail || resp.status}`);
