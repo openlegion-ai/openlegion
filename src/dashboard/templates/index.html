@@ -4941,46 +4941,117 @@
         </div>
         </div><!-- /automation sub-tab -->
 
-        <!-- Integrations sub-tab (Channels + Webhooks) -->
+        <!-- Integrations sub-tab (Connected services + Channels + Developer/API) -->
         <div x-show="systemTab === 'integrations'">
 
-        <!-- API Reference -->
-        <details class="mb-6 bg-gray-900/50 border border-gray-800 rounded-lg group">
-          <summary class="px-4 py-3 cursor-pointer text-xs text-gray-400 uppercase tracking-wider flex items-center gap-1.5 select-none">
-            <svg class="w-3 h-3 transition-transform group-open:rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
-            API Reference
-          </summary>
-          <div class="px-4 pb-4 space-y-3">
-            <div class="text-[11px] text-gray-400 mb-2">All endpoints below require an <code class="bg-gray-800 px-1 rounded">X-API-Key</code> header. Webhook triggers use <code class="bg-gray-800 px-1 rounded">X-Webhook-Signature</code> instead (HMAC-SHA256 of the raw body).</div>
-            <div class="space-y-2">
-              <div class="text-[11px] text-gray-500 uppercase tracking-wider font-medium">Credential Vault</div>
-              <div class="grid grid-cols-1 sm:grid-cols-[auto_1fr_2fr] gap-x-3 gap-y-1 text-[11px]">
-                <code class="text-green-400/70 font-mono">POST</code><code class="text-gray-400 font-mono">/mesh/credentials</code><span class="text-gray-400">Store a secret. Body: <code class="bg-gray-800 px-0.5 rounded">{"name":"...","value":"..."}</code> &rarr; returns <code class="bg-gray-800 px-0.5 rounded">$CRED{name}</code> handle</span>
-                <code class="text-red-400/70 font-mono">DELETE</code><code class="text-gray-400 font-mono">/mesh/credentials/{name}</code><span class="text-gray-400">Remove a secret by name</span>
-                <code class="text-blue-400/70 font-mono">GET</code><code class="text-gray-400 font-mono">/mesh/credentials</code><span class="text-gray-400">List credential names (never values)</span>
-                <code class="text-blue-400/70 font-mono">GET</code><code class="text-gray-400 font-mono">/mesh/credentials/{name}/exists</code><span class="text-gray-400">Check if a credential exists</span>
+        <!-- Connected services (OAuth) — let agents act on your accounts -->
+        <div class="text-xs text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">Connected services<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Let your agents act on your accounts. Connect Google (Drive, Gmail, Calendar) with one-click OAuth — register your own Google Cloud OAuth client once, then connect accounts. Agents resolve the connection by name with transparent token refresh; they never see the tokens.</span></span></div>
+        <div class="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-6 chat-grid">
+          <template x-for="prov in integrations" :key="prov.key">
+            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+              <div class="flex items-center justify-between mb-3">
+                <div class="flex items-center gap-2">
+                  <div class="w-2 h-2 rounded-full" :class="prov.configured ? 'bg-emerald-400' : 'bg-gray-600'"></div>
+                  <span class="text-sm font-medium text-white" x-text="prov.label"></span>
+                </div>
+                <span class="text-[11px] px-1.5 py-0.5 rounded-full" :class="prov.configured ? 'bg-emerald-900/40 text-emerald-400' : 'bg-gray-800 text-gray-400'" x-text="prov.configured ? 'App configured' : 'Not set up'"></span>
               </div>
+
+              <!-- Setup form: register the operator's OAuth client -->
+              <template x-if="!prov.configured">
+                <div class="space-y-2">
+                  <div class="text-xs text-gray-400 mb-1">Set up your Google app</div>
+                  <div class="rounded-md border border-gray-800 bg-gray-950 px-3 py-2 mb-1">
+                    <div class="text-[11px] text-gray-400 mb-1">Add this as an Authorized redirect URI in your Google Cloud OAuth client.</div>
+                    <div class="flex items-center gap-2">
+                      <code class="text-[11px] text-indigo-300/90 bg-gray-800 px-2 py-1 rounded font-mono flex-1 break-all select-all" x-text="prov.redirect_uri"></code>
+                      <button @click="copyToClipboard(prov.redirect_uri)" class="text-[11px] px-2 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 shrink-0" title="Copy redirect URI">Copy</button>
+                    </div>
+                  </div>
+                  <div>
+                    <label class="block text-xs text-gray-400 mb-1">Client ID</label>
+                    <input type="text" :disabled="integrationSetupSaving === prov.key" x-model="integrationSetup[prov.key].client_id"
+                      placeholder="xxxx.apps.googleusercontent.com"
+                      class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-white focus:border-indigo-500 focus:outline-none">
+                  </div>
+                  <div>
+                    <label class="block text-xs text-gray-400 mb-1">Client Secret</label>
+                    <input type="password" :disabled="integrationSetupSaving === prov.key" x-model="integrationSetup[prov.key].client_secret"
+                      placeholder="GOCSPX-..."
+                      class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-white focus:border-indigo-500 focus:outline-none">
+                  </div>
+                  <div class="flex pt-1">
+                    <button @click="setupIntegration(prov.key)" :disabled="integrationSetupSaving === prov.key"
+                      class="text-xs px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
+                      <svg x-show="integrationSetupSaving === prov.key" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                      <span x-text="integrationSetupSaving === prov.key ? 'Saving...' : 'Save'"></span>
+                    </button>
+                  </div>
+                </div>
+              </template>
+
+              <!-- Connect control + existing connections -->
+              <template x-if="prov.configured">
+                <div class="space-y-3">
+                  <!-- Existing connections -->
+                  <template x-if="(prov.connections || []).length">
+                    <div class="space-y-1">
+                      <template x-for="conn in prov.connections" :key="conn.name">
+                        <div class="flex items-center gap-2 text-xs group bg-gray-950/60 border border-gray-800 rounded-md px-2 py-1.5">
+                          <span class="w-2 h-2 rounded-full bg-emerald-400/70 shrink-0"></span>
+                          <div class="flex-1 min-w-0">
+                            <div class="text-gray-200 font-mono truncate" x-text="conn.account || conn.name"></div>
+                            <div class="text-[11px] text-gray-400 truncate">
+                              <span x-text="conn.name"></span> &middot; <span x-text="(conn.scopes || []).length"></span> scope(s)
+                            </div>
+                          </div>
+                          <button @click="disconnectIntegration(conn.name)" :disabled="integrationDisconnecting === conn.name"
+                            class="text-[11px] px-2 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-colors shrink-0 disabled:opacity-50"
+                            x-text="integrationDisconnecting === conn.name ? '...' : 'Disconnect'"></button>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+
+                  <!-- New connection -->
+                  <div class="border-t border-gray-800 pt-3 space-y-2">
+                    <div class="text-xs text-gray-400">Connect an account</div>
+                    <div>
+                      <label class="block text-[11px] text-gray-400 mb-1">Connection name</label>
+                      <input type="text" x-model="integrationConnectName[prov.key]" :placeholder="prov.key"
+                        class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-white focus:border-indigo-500 focus:outline-none">
+                    </div>
+                    <div class="space-y-1">
+                      <template x-for="bundle in prov.scope_bundles" :key="bundle.key">
+                        <label class="flex items-start gap-2 text-xs text-gray-300 cursor-pointer select-none">
+                          <input type="checkbox" x-model="integrationSelectedScopes[prov.key][bundle.key]"
+                            class="mt-0.5 rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30">
+                          <span>
+                            <span class="text-gray-200" x-text="bundle.label"></span>
+                            <span class="block text-[11px] text-gray-400 leading-snug" x-text="bundle.description"></span>
+                          </span>
+                        </label>
+                      </template>
+                    </div>
+                    <div class="flex pt-1">
+                      <button @click="connectIntegration(prov.key)"
+                        class="text-xs px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-colors">
+                        Connect
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </template>
             </div>
-            <div class="space-y-2">
-              <div class="text-[11px] text-gray-500 uppercase tracking-wider font-medium">Agent Status</div>
-              <div class="grid grid-cols-1 sm:grid-cols-[auto_1fr_2fr] gap-x-3 gap-y-1 text-[11px]">
-                <code class="text-blue-400/70 font-mono">GET</code><code class="text-gray-400 font-mono">/mesh/agents/{id}/ext-status</code><span class="text-gray-400">Health, queue depth, and budget for an agent</span>
-              </div>
-            </div>
-            <div class="space-y-2">
-              <div class="text-[11px] text-gray-500 uppercase tracking-wider font-medium">Webhooks</div>
-              <div class="grid grid-cols-1 sm:grid-cols-[auto_1fr_2fr] gap-x-3 gap-y-1 text-[11px]">
-                <code class="text-green-400/70 font-mono">POST</code><code class="text-gray-400 font-mono">/webhook/hook/{hook_id}</code><span class="text-gray-400">Trigger an agent workflow. Requires <code class="bg-gray-800 px-0.5 rounded">X-Webhook-Signature</code> header (no API key needed)</span>
-              </div>
-            </div>
-          </div>
-        </details>
+          </template>
+        </div>
+        <div x-show="integrations.length === 0" class="text-sm text-gray-400 py-4 mb-6">No connectable services available</div>
 
         <!-- Channels -->
         <div class="text-xs text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">Channels<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Messaging platform integrations. Connect Telegram, Discord, Slack, or WhatsApp so users can chat with agents from those platforms.</span></span></div>
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6 chat-grid">
+        <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-3 mb-6 chat-grid">
           <template x-for="ch in channels" :key="ch.type">
-            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 self-start transition-all" :class="channelConnectType === ch.type ? 'sm:col-span-2 xl:col-span-3' : ''">
               <div class="flex items-center justify-between mb-3">
                 <div class="flex items-center gap-2">
                   <div class="w-2 h-2 rounded-full" :class="ch.connected ? 'bg-emerald-400' : 'bg-gray-600'"></div>
@@ -5093,6 +5164,13 @@
         </div>
         <div x-show="channels.length === 0" class="text-sm text-gray-400 py-4 mb-6">No channel data available</div>
 
+        <!-- Developer & API -->
+        <div class="flex items-center gap-3 mt-2 mb-5">
+          <div class="h-px flex-1 bg-gray-800"></div>
+          <span class="text-[11px] uppercase tracking-wider text-gray-500">Developer &amp; API</span>
+          <div class="h-px flex-1 bg-gray-800"></div>
+        </div>
+
         <!-- Webhooks -->
         <div class="text-xs text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">Webhooks<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Named HTTP endpoints that accept POST requests and route them to agents. Enable "Require HMAC signature" to secure the webhook — your app signs the raw request body with HMAC-SHA256(body, secret) and sends it as the X-Webhook-Signature header. The secret is shown once at creation time; use Regenerate Secret if you missed it.</span></span></div>
         <div class="mb-6">
@@ -5195,6 +5273,38 @@
           </div>
         </div>
 
+        <!-- API Reference -->
+        <details class="mb-6 bg-gray-900/50 border border-gray-800 rounded-lg group">
+          <summary class="px-4 py-3 cursor-pointer text-xs text-gray-400 uppercase tracking-wider flex items-center gap-1.5 select-none">
+            <svg class="w-3 h-3 transition-transform group-open:rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+            API Reference
+          </summary>
+          <div class="px-4 pb-4 space-y-3">
+            <div class="text-[11px] text-gray-400 mb-2">All endpoints below require an <code class="bg-gray-800 px-1 rounded">X-API-Key</code> header. Webhook triggers use <code class="bg-gray-800 px-1 rounded">X-Webhook-Signature</code> instead (HMAC-SHA256 of the raw body).</div>
+            <div class="space-y-2">
+              <div class="text-[11px] text-gray-500 uppercase tracking-wider font-medium">Credential Vault</div>
+              <div class="grid grid-cols-1 sm:grid-cols-[auto_1fr_2fr] gap-x-3 gap-y-1 text-[11px]">
+                <code class="text-green-400/70 font-mono">POST</code><code class="text-gray-400 font-mono">/mesh/credentials</code><span class="text-gray-400">Store a secret. Body: <code class="bg-gray-800 px-0.5 rounded">{"name":"...","value":"..."}</code> &rarr; returns <code class="bg-gray-800 px-0.5 rounded">$CRED{name}</code> handle</span>
+                <code class="text-red-400/70 font-mono">DELETE</code><code class="text-gray-400 font-mono">/mesh/credentials/{name}</code><span class="text-gray-400">Remove a secret by name</span>
+                <code class="text-blue-400/70 font-mono">GET</code><code class="text-gray-400 font-mono">/mesh/credentials</code><span class="text-gray-400">List credential names (never values)</span>
+                <code class="text-blue-400/70 font-mono">GET</code><code class="text-gray-400 font-mono">/mesh/credentials/{name}/exists</code><span class="text-gray-400">Check if a credential exists</span>
+              </div>
+            </div>
+            <div class="space-y-2">
+              <div class="text-[11px] text-gray-500 uppercase tracking-wider font-medium">Agent Status</div>
+              <div class="grid grid-cols-1 sm:grid-cols-[auto_1fr_2fr] gap-x-3 gap-y-1 text-[11px]">
+                <code class="text-blue-400/70 font-mono">GET</code><code class="text-gray-400 font-mono">/mesh/agents/{id}/ext-status</code><span class="text-gray-400">Health, queue depth, and budget for an agent</span>
+              </div>
+            </div>
+            <div class="space-y-2">
+              <div class="text-[11px] text-gray-500 uppercase tracking-wider font-medium">Webhooks</div>
+              <div class="grid grid-cols-1 sm:grid-cols-[auto_1fr_2fr] gap-x-3 gap-y-1 text-[11px]">
+                <code class="text-green-400/70 font-mono">POST</code><code class="text-gray-400 font-mono">/webhook/hook/{hook_id}</code><span class="text-gray-400">Trigger an agent workflow. Requires <code class="bg-gray-800 px-0.5 rounded">X-Webhook-Signature</code> header (no API key needed)</span>
+              </div>
+            </div>
+          </div>
+        </details>
+
         <!-- API Keys -->
         <div class="text-xs text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-1.5 mt-6">API Keys</div>
         <div class="mb-6">
@@ -5203,17 +5313,6 @@
               Authenticate your backend for server-to-server API calls. Send as <code class="bg-gray-800 px-1 rounded text-gray-400">X-API-Key</code> header.
               Create separate keys per environment or integration — each key is hashed and the raw value is shown only once at creation.
             </div>
-            <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-[11px] mb-4 chat-grid">
-              <div class="text-gray-400"><code class="text-gray-400 font-mono">POST</code> <code class="text-gray-400 font-mono">/mesh/credentials</code></div>
-              <div class="text-gray-500">Store a secret &rarr; returns <code class="bg-gray-800/60 px-0.5 rounded">$CRED{name}</code> handle</div>
-              <div class="text-gray-400"><code class="text-gray-400 font-mono">DELETE</code> <code class="text-gray-400 font-mono">/mesh/credentials/{name}</code></div>
-              <div class="text-gray-500">Remove a secret</div>
-              <div class="text-gray-400"><code class="text-gray-400 font-mono">GET</code> <code class="text-gray-400 font-mono">/mesh/credentials</code></div>
-              <div class="text-gray-500">List credential names (never values)</div>
-              <div class="text-gray-400"><code class="text-gray-400 font-mono">GET</code> <code class="text-gray-400 font-mono">/mesh/agents/{id}/ext-status</code></div>
-              <div class="text-gray-500">Agent health, queue depth, budget</div>
-            </div>
-            <div class="border-t border-gray-800 pt-3 mb-3"></div>
             <!-- One-time new key display -->
             <div x-show="apiKeyNewValue" x-transition class="mb-3 p-3 bg-emerald-950/40 border border-emerald-700/40 rounded-lg">
               <div class="text-[11px] text-emerald-400 font-medium mb-2">New API Key — copy this now, it won't be shown again</div>
@@ -5273,108 +5372,6 @@
           </template>
         </div>
 
-        <!-- Connect a service (Google Drive / Gmail / Calendar via OAuth) -->
-        <div class="text-xs text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">Connect a service<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Connect Google (Drive, Gmail, Calendar) with a one-click OAuth flow. Register your own Google Cloud OAuth client once, then connect accounts. Agents resolve the connection by name with transparent token refresh — they never see the tokens.</span></span></div>
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6 chat-grid">
-          <template x-for="prov in integrations" :key="prov.key">
-            <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
-              <div class="flex items-center justify-between mb-3">
-                <div class="flex items-center gap-2">
-                  <div class="w-2 h-2 rounded-full" :class="prov.configured ? 'bg-emerald-400' : 'bg-gray-600'"></div>
-                  <span class="text-sm font-medium text-white" x-text="prov.label"></span>
-                </div>
-                <span class="text-[11px] px-1.5 py-0.5 rounded-full" :class="prov.configured ? 'bg-emerald-900/40 text-emerald-400' : 'bg-gray-800 text-gray-400'" x-text="prov.configured ? 'App configured' : 'Not set up'"></span>
-              </div>
-
-              <!-- Setup form: register the operator's OAuth client -->
-              <template x-if="!prov.configured">
-                <div class="space-y-2">
-                  <div class="text-xs text-gray-400 mb-1">Set up your Google app</div>
-                  <div class="rounded-md border border-gray-800 bg-gray-950 px-3 py-2 mb-1">
-                    <div class="text-[11px] text-gray-400 mb-1">Add this as an Authorized redirect URI in your Google Cloud OAuth client.</div>
-                    <div class="flex items-center gap-2">
-                      <code class="text-[11px] text-indigo-300/90 bg-gray-800 px-2 py-1 rounded font-mono flex-1 break-all select-all" x-text="prov.redirect_uri"></code>
-                      <button @click="copyToClipboard(prov.redirect_uri)" class="text-[11px] px-2 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 shrink-0" title="Copy redirect URI">Copy</button>
-                    </div>
-                  </div>
-                  <div>
-                    <label class="block text-xs text-gray-400 mb-1">Client ID</label>
-                    <input type="text" :disabled="integrationSetupSaving === prov.key" x-model="integrationSetup[prov.key].client_id"
-                      placeholder="xxxx.apps.googleusercontent.com"
-                      class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-white focus:border-indigo-500 focus:outline-none">
-                  </div>
-                  <div>
-                    <label class="block text-xs text-gray-400 mb-1">Client Secret</label>
-                    <input type="password" :disabled="integrationSetupSaving === prov.key" x-model="integrationSetup[prov.key].client_secret"
-                      placeholder="GOCSPX-..."
-                      class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-white focus:border-indigo-500 focus:outline-none">
-                  </div>
-                  <div class="flex pt-1">
-                    <button @click="setupIntegration(prov.key)" :disabled="integrationSetupSaving === prov.key"
-                      class="text-xs px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-colors inline-flex items-center gap-1.5 disabled:opacity-50">
-                      <svg x-show="integrationSetupSaving === prov.key" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                      <span x-text="integrationSetupSaving === prov.key ? 'Saving...' : 'Save'"></span>
-                    </button>
-                  </div>
-                </div>
-              </template>
-
-              <!-- Connect control + existing connections -->
-              <template x-if="prov.configured">
-                <div class="space-y-3">
-                  <!-- Existing connections -->
-                  <template x-if="(prov.connections || []).length">
-                    <div class="space-y-1">
-                      <template x-for="conn in prov.connections" :key="conn.name">
-                        <div class="flex items-center gap-2 text-xs group bg-gray-950/60 border border-gray-800 rounded-md px-2 py-1.5">
-                          <span class="w-2 h-2 rounded-full bg-emerald-400/70 shrink-0"></span>
-                          <div class="flex-1 min-w-0">
-                            <div class="text-gray-200 font-mono truncate" x-text="conn.account || conn.name"></div>
-                            <div class="text-[11px] text-gray-400 truncate">
-                              <span x-text="conn.name"></span> &middot; <span x-text="(conn.scopes || []).length"></span> scope(s)
-                            </div>
-                          </div>
-                          <button @click="disconnectIntegration(conn.name)" :disabled="integrationDisconnecting === conn.name"
-                            class="text-[11px] px-2 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-colors shrink-0 disabled:opacity-50"
-                            x-text="integrationDisconnecting === conn.name ? '...' : 'Disconnect'"></button>
-                        </div>
-                      </template>
-                    </div>
-                  </template>
-
-                  <!-- New connection -->
-                  <div class="border-t border-gray-800 pt-3 space-y-2">
-                    <div class="text-xs text-gray-400">Connect an account</div>
-                    <div>
-                      <label class="block text-[11px] text-gray-400 mb-1">Connection name</label>
-                      <input type="text" x-model="integrationConnectName[prov.key]" :placeholder="prov.key"
-                        class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-white focus:border-indigo-500 focus:outline-none">
-                    </div>
-                    <div class="space-y-1">
-                      <template x-for="bundle in prov.scope_bundles" :key="bundle.key">
-                        <label class="flex items-start gap-2 text-xs text-gray-300 cursor-pointer select-none">
-                          <input type="checkbox" x-model="integrationSelectedScopes[prov.key][bundle.key]"
-                            class="mt-0.5 rounded border-gray-700 bg-gray-800 text-indigo-500 focus:ring-indigo-500/30">
-                          <span>
-                            <span class="text-gray-200" x-text="bundle.label"></span>
-                            <span class="block text-[11px] text-gray-400 leading-snug" x-text="bundle.description"></span>
-                          </span>
-                        </label>
-                      </template>
-                    </div>
-                    <div class="flex pt-1">
-                      <button @click="connectIntegration(prov.key)"
-                        class="text-xs px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-colors">
-                        Connect
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </template>
-            </div>
-          </template>
-        </div>
-        <div x-show="integrations.length === 0" class="text-sm text-gray-400 py-4 mb-6">No connectable services available</div>
 
         <div class="mb-6" x-show="settingsData">
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
