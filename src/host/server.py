@@ -5756,13 +5756,14 @@ def create_mesh_app(
         # with no ``blocker_note`` but carries an ``error`` string (the
         # canonical shape ``mesh_client.set_task_status`` sends for
         # auto-close paths), promote ``error`` to ``blocker_note`` so the
-        # store persists the reason. Truncate to 500 chars to match the
-        # column's expected size and avoid runaway bloat from huge LLM
-        # tracebacks. Existing explicit ``blocker_note`` callers win.
+        # store persists the reason. Existing explicit ``blocker_note``
+        # callers win. Redaction + length-bounding is owned centrally by
+        # ``normalize_blocker_note`` inside ``store.update_status`` (it
+        # redacts BEFORE truncating, so a secret can't be cut mid-token).
         if status == "failed" and not blocker_note:
             _err = body.get("error")
             if isinstance(_err, str) and _err.strip():
-                blocker_note = _err.strip()[:500]
+                blocker_note = _err.strip()
         if status not in VALID_STATUSES:
             raise HTTPException(
                 400,

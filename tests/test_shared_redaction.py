@@ -497,3 +497,65 @@ class TestRedactTextWithUrls:
         # ``filter`` is not in SENSITIVE_QUERY_PARAMS — value survives.
         assert "filter=red" in out
         assert "failed" in out
+
+
+class TestNormalizeBlockerNote:
+    """``normalize_blocker_note`` — the single failure-reason choke point.
+
+    Three jobs: collapse noisy raw payloads to stable codes, redact secrets,
+    bound length. Returns None for contentless input.
+    """
+
+    def test_none_and_empty_return_none(self):
+        from src.shared.redaction import normalize_blocker_note
+        assert normalize_blocker_note(None) is None
+        assert normalize_blocker_note("") is None
+        assert normalize_blocker_note("   ") is None
+
+    def test_contentless_exception_collapses_to_internal_error(self):
+        from src.shared.redaction import normalize_blocker_note
+        # The exact useless notes seen in production.
+        assert normalize_blocker_note("exception: Error:") == "internal_error"
+        assert normalize_blocker_note("exception:") == "internal_error"
+        assert normalize_blocker_note("Error:") == "internal_error"
+
+    def test_truncated_tool_args_collapses_and_drops_payload(self):
+        from src.shared.redaction import normalize_blocker_note
+        raw = (
+            "exception: Error: Truncated tool-call arguments for 'write_file': "
+            '{"path": "x.md", "content": "---\\ntitle: huge blob ...'
+        )
+        out = normalize_blocker_note(raw)
+        assert out == "output_too_large: write_file"
+        # The multi-KB payload must NOT survive.
+        assert "content" not in out and "{" not in out
+
+    def test_clean_codes_pass_through(self):
+        from src.shared.redaction import normalize_blocker_note
+        for code in (
+            "lane_timeout: task exceeded 900s wall-clock cap",
+            "convergence_cap: task hit its per-task round budget",
+            "no_outbound_effects: the recipient completed the turn",
+        ):
+            assert normalize_blocker_note(code) == code
+
+    def test_redacts_secrets_in_free_form_note(self):
+        from src.shared.redaction import normalize_blocker_note
+        raw = "wake_failed: GET https://api.example.com/x?api_key=SUPERSECRETVALUE failed"
+        out = normalize_blocker_note(raw)
+        assert "SUPERSECRETVALUE" not in out
+        assert "[REDACTED]" in out
+
+    def test_bounds_length(self):
+        from src.shared.redaction import (
+            normalize_blocker_note, BLOCKER_NOTE_MAX_CHARS,
+        )
+        out = normalize_blocker_note("blocked: " + ("x" * 2000))
+        assert len(out) <= BLOCKER_NOTE_MAX_CHARS
+
+    def test_idempotent(self):
+        from src.shared.redaction import normalize_blocker_note
+        once = normalize_blocker_note(
+            "exception: Error: Truncated tool-call arguments for 'save_artifact': {...}"
+        )
+        assert normalize_blocker_note(once) == once

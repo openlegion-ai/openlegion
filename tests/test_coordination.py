@@ -137,6 +137,54 @@ class TestHandOff:
         )
 
     @pytest.mark.asyncio
+    async def test_hand_off_to_operator_wake_403_is_queued_success(self):
+        """A worker→operator wake is denied 403 BY DESIGN (the operator
+        polls on heartbeat). The task row is persisted, so a queued operator
+        handoff is the intended SUCCESS — it must not be classified as
+        ``wake_failed`` (which marked the originating task ``failed`` and
+        surfaced a scary "403 Forbidden … host.docker.internal" note).
+        """
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="dev-publisher")
+        mc.list_agents.return_value = {"operator": {"project": "ops"}}
+        mc.wake_agent.side_effect = Exception(
+            "Client error '403 Forbidden' for url "
+            "'http://host.docker.internal:8420/mesh/wake?target=operator'"
+        )
+
+        result = await hand_off(
+            to="operator", summary="pipeline stalled", mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        assert result.get("queued_for_heartbeat") is True
+        # The expected denial must NOT leak as a failure envelope.
+        assert "wake_failed" not in result
+        assert "error" not in result
+
+    @pytest.mark.asyncio
+    async def test_hand_off_to_worker_wake_failure_still_fails(self):
+        """A wake failure to a NON-operator peer is a genuine problem and
+        must keep the existing ``wake_failed`` envelope — the operator carve
+        out must not swallow real handoff failures between workers.
+        """
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.list_agents.return_value = {"writer": {"project": "scout"}}
+        mc.wake_agent.side_effect = Exception("connection refused")
+
+        result = await hand_off(
+            to="writer", summary="here you go", mesh_client=mc,
+        )
+
+        assert result["handed_off"] is False
+        assert result.get("wake_failed") is True
+        assert result.get("task_queued") is True
+        assert "error" in result
+
+    @pytest.mark.asyncio
     async def test_hand_off_to_global_scope_agent_writes_with_global_scope(self):
         """Forward-compat: any agent with ``scope: "global"`` on the
         registry (not just the literal name "operator") routes with

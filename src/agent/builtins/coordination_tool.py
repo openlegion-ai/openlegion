@@ -381,7 +381,20 @@ async def hand_off(
     }
     if artifact_ref:
         result["output_key"] = artifact_ref
-    if wake_error is not None:
+    if wake_error is not None and to == "operator":
+        # By design, worker agents CANNOT synchronously wake the operator —
+        # the mesh /mesh/wake endpoint returns 403 for worker→operator and
+        # the operator discovers queued work on its heartbeat poll. The
+        # durable task row was persisted above, so a queued handoff to the
+        # operator IS the intended successful outcome. Classifying the
+        # expected 403 as ``wake_failed`` (the branch below) marked the
+        # ORIGINATING task ``failed`` and surfaced a scary, technical
+        # "403 Forbidden … host.docker.internal" note to the user. The mesh
+        # permission boundary is untouched; we only stop mislabelling the
+        # expected denial as a failure.
+        result["handed_off"] = True
+        result["queued_for_heartbeat"] = True
+    elif wake_error is not None:
         # Bug G: the durable task row sits in SQLite at status='pending'
         # for the next-heartbeat discovery path — we don't transition it
         # to failed because a transient wake error (network blip, agent
@@ -459,17 +472,20 @@ async def check_inbox(*, mesh_client=None) -> dict:
         entries = await mesh_client.list_blackboard(prefix, global_scope=True)
         for entry in entries:
             value = entry.get("value") or {}
+            # Free-text fields here re-enter THIS agent's LLM context, so
+            # sanitize them at the input boundary (a failed peer's note can
+            # echo arbitrary/injected content). Enum/id fields are safe.
             events.append({
                 "key": entry.get("key", ""),
                 "kind": value.get("kind", ""),
                 "task_id": value.get("task_id", ""),
                 "recipient": value.get("recipient", ""),
-                "title": value.get("title", ""),
+                "title": sanitize_for_prompt(value.get("title", "")),
                 "status": value.get("status", ""),
                 "ts": value.get("ts"),
-                "summary": value.get("summary", ""),
-                "error": value.get("error", ""),
-                "blocker_note": value.get("blocker_note", ""),
+                "summary": sanitize_for_prompt(value.get("summary", "")),
+                "error": sanitize_for_prompt(value.get("error", "")),
+                "blocker_note": sanitize_for_prompt(value.get("blocker_note", "")),
             })
     except Exception as e:
         logger.warning(

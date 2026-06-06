@@ -3863,7 +3863,10 @@ class AgentLoop:
         except Exception as e:
             self.state = "idle"
             logger.error(f"Chat failed: {e}", exc_info=True)
-            msg = f"Error: {e}"
+            # Some exceptions stringify to empty, which produced the useless
+            # "exception: Error:" blocker notes seen in production. Fall back
+            # to the exception class name so the reason is always meaningful.
+            msg = f"Error: {e}" if str(e).strip() else f"Error: {type(e).__name__}"
             self._finalize_chat_turn(
                 turn_id=turn_id,
                 accumulated_content="\n".join(turn_content_parts),

@@ -395,6 +395,63 @@ def redact_text_with_urls(text: str) -> str:
     return redact_string(text)
 
 
+# ── Blocker-note normalization (the failure-reason column) ──────────────────
+
+# Max length of the persisted ``tasks.blocker_note``. Matches the legacy
+# truncation the mesh status endpoint applied ad-hoc; centralized here so
+# every write path is bounded identically.
+BLOCKER_NOTE_MAX_CHARS = 500
+
+# A truncated tool-call argument dump is multi-KB of broken JSON (the model
+# blew past its output-token cap mid tool-call). Capture the tool name so we
+# can collapse the whole payload to a short, stable reason code.
+_TRUNCATED_ARGS_RE = re.compile(
+    r"Truncated tool-call arguments for ['\"]?(?P<tool>[\w.\-]+)",
+    re.IGNORECASE,
+)
+# A contentless exception note — ``exception:``, ``exception: Error:``,
+# ``Error:`` — carries no signal. Collapse to a stable code so the UI never
+# shows a blank "failed" reason.
+_EMPTY_EXCEPTION_RE = re.compile(
+    r"^(exception:)?\s*(error:?)?\s*$", re.IGNORECASE,
+)
+
+
+def normalize_blocker_note(note: str | None) -> str | None:
+    """Sanitize a task ``blocker_note`` before it is persisted or surfaced.
+
+    The single choke point for the failure-reason column. Three jobs:
+
+    1. **Collapse noisy raw payloads to stable codes.** A truncated tool-call
+       dump becomes ``output_too_large: <tool>`` (the multi-KB broken-JSON
+       payload is dropped); a contentless ``exception:`` note becomes
+       ``internal_error``. Callers that already pass clean prefixed codes
+       (``lane_timeout:``, ``convergence_cap:``, ``no_outbound_effects:`` …)
+       fall through untouched.
+    2. **Redact secrets.** The text is UNTRUSTED — exception / HTTP error
+       strings can quote credential-bearing URLs or token-shaped values, so
+       it runs through :func:`redact_text_with_urls`.
+    3. **Bound length** to :data:`BLOCKER_NOTE_MAX_CHARS`.
+
+    Returns ``None`` for empty / whitespace-only input so the column stores
+    NULL rather than a meaningless blank. Pure and idempotent.
+    """
+    if note is None:
+        return None
+    text = str(note).strip()
+    if not text:
+        return None
+    # 1a. Truncated tool-call dump → clean code (the payload is discarded).
+    m = _TRUNCATED_ARGS_RE.search(text)
+    if m:
+        return f"output_too_large: {m.group('tool')}"
+    # 1b. Contentless exception note → stable internal_error code.
+    if _EMPTY_EXCEPTION_RE.match(text):
+        return "internal_error"
+    # 2 + 3. Redact secrets, then bound length.
+    return redact_text_with_urls(text)[:BLOCKER_NOTE_MAX_CHARS]
+
+
 # ── Deep recursion over JSON-shaped structures ──────────────────────────────
 
 
