@@ -340,6 +340,14 @@ class AgentPermissions(BaseModel):
     blackboard_write: list[str] = []
     allowed_apis: list[str] = []
     allowed_credentials: list[str] = []
+    # Per-agent SKILL.md pack allowlist (names). A skill is *data*, not a
+    # capability — this only controls which packs the agent can DISCOVER via
+    # skills_list / skill_view, to keep context lean and relevant. The agent's
+    # effective set is the union of this list and the fleet-wide ``fleet_skills``
+    # (a top-level key in permissions.json), resolved by
+    # ``PermissionMatrix.get_effective_skills``. Empty = no skills until
+    # assigned (the operator + standalone agents see the full catalog).
+    allowed_skills: list[str] = []
     can_use_browser: bool = False
     browser_actions: list[str] | None = None  # None = all known actions
                                                # (default-allow UX).

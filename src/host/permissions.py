@@ -87,6 +87,11 @@ class PermissionMatrix:
 
     def __init__(self, config_path: str = "config/permissions.json"):
         self.permissions: dict[str, AgentPermissions] = {}
+        # Fleet-wide skill-pack assignment (names) — applies to EVERY agent,
+        # unioned with each agent's per-agent ``allowed_skills``. Stored as a
+        # top-level ``fleet_skills`` key in permissions.json. Empty by default
+        # (no skill is fleet-wide until explicitly assigned).
+        self.fleet_skills: list[str] = []
         self._config_path = config_path
         # L10: names of credentials that loaded under the SYSTEM_* tier.
         # Injected post-construction by the runtime via
@@ -113,6 +118,9 @@ class PermissionMatrix:
 
     def _load(self, config_path: str) -> None:
         path = Path(config_path)
+        # Reset fleet-wide skills; the success path repopulates it. Both failure
+        # branches (missing / corrupt) thus fail closed to no fleet skills.
+        self.fleet_skills = []
         if not path.exists():
             logger.warning(f"Permissions file not found: {config_path}, using deny-all defaults")
             # Clear so stale permissions don't persist (fail closed)
@@ -136,6 +144,7 @@ class PermissionMatrix:
         self.permissions.clear()
         for agent_id, perms in data.get("permissions", {}).items():
             self.permissions[agent_id] = AgentPermissions(agent_id=agent_id, **perms)
+        self.fleet_skills = list(data.get("fleet_skills", []) or [])
 
     def get_permissions(self, agent_id: str) -> AgentPermissions:
         """Get permissions for an agent. Falls back to 'default' template, then deny-all."""
@@ -152,6 +161,7 @@ class PermissionMatrix:
                 blackboard_write=default.blackboard_write,
                 allowed_apis=default.allowed_apis,
                 allowed_credentials=default.allowed_credentials,
+                allowed_skills=default.allowed_skills,
                 can_use_browser=default.can_use_browser,
                 browser_actions=default.browser_actions,
                 can_use_internet=default.can_use_internet,
@@ -172,6 +182,18 @@ class PermissionMatrix:
                 wallet_allowed_contracts=default.wallet_allowed_contracts,
             )
         return AgentPermissions(agent_id=agent_id)
+
+    def get_effective_skills(self, agent_id: str) -> list[str]:
+        """Skill-pack names this agent may discover: fleet-wide ∪ per-agent.
+
+        Not a security gate — skills are data, not a capability. This only
+        scopes what ``skills_list`` / ``skill_view`` surface to the agent, so
+        each agent's context stays relevant. Names are returned sorted and
+        de-duplicated; intersection with the actually-installed catalog happens
+        at view time (an assigned-but-uninstalled name simply yields nothing).
+        """
+        per_agent = self.get_permissions(agent_id).allowed_skills
+        return sorted(set(self.fleet_skills) | set(per_agent))
 
     @staticmethod
     def _is_trusted(agent_id: str) -> bool:

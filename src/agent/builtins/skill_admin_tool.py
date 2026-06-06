@@ -80,3 +80,116 @@ async def remove_skill(name: str, *, mesh_client=None, _messages=None, **_kw) ->
             "detail": "User confirmation required to remove a skill.",
         }
     return await mesh_client.remove_skill(name)
+
+
+@tool(
+    name="list_skill_assignments",
+    description=(
+        "Show which skill packs are assigned where: the fleet-wide list (every "
+        "agent sees these) and each agent's per-agent list. Operator-only. Read "
+        "this before assigning so you edit the right list."
+    ),
+    parameters={},
+)
+async def list_skill_assignments(*, mesh_client=None, **_kw) -> dict:
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    return await mesh_client.get_skill_assignments()
+
+
+@tool(
+    name="assign_skill",
+    description=(
+        "Give or take away a skill pack for an agent (or the whole fleet). "
+        "Skills are scoped per agent so each agent only sees the procedures it "
+        "needs — assigning one makes it visible to that agent's skills_list. "
+        "Set fleet=true to assign to EVERY agent; otherwise pass agent_id for a "
+        "single agent. action='add' grants, action='remove' revokes. "
+        "Operator-only; requires the user to have asked for it."
+    ),
+    parameters={
+        "skill": {"type": "string", "description": "Skill pack name (see skills_list / list_skill_assignments)."},
+        "agent_id": {
+            "type": "string",
+            "description": "Agent to assign to. Ignored when fleet=true.",
+            "default": "",
+        },
+        "fleet": {
+            "type": "boolean",
+            "description": "Assign fleet-wide (every agent) instead of to one agent.",
+            "default": False,
+        },
+        "action": {
+            "type": "string",
+            "description": "'add' to grant, 'remove' to revoke.",
+            "default": "add",
+        },
+    },
+    # Read-modify-write against the full-list assign endpoints — must not run
+    # concurrently with another assign_skill or a parallel pair would compute
+    # from the same baseline and the later write would drop the earlier change.
+    parallel_safe=False,
+)
+async def assign_skill(
+    skill: str,
+    agent_id: str = "",
+    fleet: bool = False,
+    action: str = "add",
+    *,
+    mesh_client=None,
+    _messages=None,
+    **_kw,
+) -> dict:
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    from src.agent.loop import _last_message_is_user_origin
+    if _messages is None or not _last_message_is_user_origin(_messages):
+        return {
+            "error": "provenance_check_failed",
+            "detail": "User confirmation required to change skill assignments.",
+        }
+    skill = (skill or "").strip()
+    if not skill:
+        return {"error": "skill is required"}
+    if action not in ("add", "remove"):
+        return {"error": "action must be 'add' or 'remove'"}
+    agent_id = (agent_id or "").strip()
+    if not fleet and not agent_id:
+        return {"error": "Pass agent_id, or set fleet=true to assign to every agent."}
+
+    # Read current assignment, mutate the relevant list, write it back. The
+    # mesh endpoints set the full list, so we compute the new full list here.
+    assignments = await mesh_client.get_skill_assignments()
+    if fleet:
+        current = list(assignments.get("fleet_skills", []))
+    else:
+        current = list(assignments.get("per_agent", {}).get(agent_id, []))
+
+    names = set(current)
+    if action == "add":
+        names.add(skill)
+    else:
+        names.discard(skill)
+    new_list = sorted(names)
+
+    if fleet:
+        result = await mesh_client.set_fleet_skills(new_list)
+    else:
+        result = await mesh_client.assign_skills(agent_id, new_list)
+
+    # Surface the no-op-removal case: removing a skill from one agent has no
+    # effect while it's still assigned fleet-wide.
+    if (
+        action == "remove"
+        and not fleet
+        and skill in set(assignments.get("fleet_skills", []))
+    ):
+        result["note"] = (
+            f"'{skill}' is still assigned fleet-wide, so {agent_id} continues to "
+            "see it. Remove it from the fleet (fleet=true) to fully revoke."
+        )
+    return result

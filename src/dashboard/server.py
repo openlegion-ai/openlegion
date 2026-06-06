@@ -2152,9 +2152,35 @@ def create_dashboard_router(
             })
         return {"templates": result}
 
+    def _clean_skill_names(value) -> list[str]:
+        """Validate + normalise a skill-name list (sorted, deduped, path-safe)."""
+        if not isinstance(value, list):
+            raise HTTPException(400, "skills must be a list of names")
+        cleaned: set[str] = set()
+        for s in value:
+            if not isinstance(s, str):
+                raise HTTPException(400, "skill names must be strings")
+            s = s.strip()
+            if not s:
+                continue
+            if not all((c.isascii() and c.isalnum()) or c in "_-" for c in s):
+                raise HTTPException(400, f"Invalid skill name: {s!r}")
+            cleaned.add(s)
+        return sorted(cleaned)
+
+    def _skills_installed_dir():
+        root = getattr(runtime, "project_root", None) if runtime else None
+        return (root / "skills_installed") if root else None
+
     @api_router.get("/api/skills")
-    async def api_skills(request: Request) -> dict:
-        """List available SKILL.md packs (bundled + installed) with provenance."""
+    async def api_skills(request: Request, agent_id: str = "") -> dict:
+        """List SKILL.md packs (bundled + installed) with provenance + assignment.
+
+        ``fleet_assigned`` — assigned fleet-wide (every agent sees it). When
+        ``agent_id`` is given, ``agent_assigned`` reports the skill's presence on
+        that agent's per-agent allowlist. The Skills tab renders fleet-assigned
+        packs as inherited (on for all agents, not per-agent toggleable).
+        """
         from src.agent.skills import SkillStore
         root = getattr(runtime, "project_root", None) if runtime else None
         store = (
@@ -2162,16 +2188,77 @@ def create_dashboard_router(
             if root
             else SkillStore()
         )
-        result = [
-            {
+        fleet = set(getattr(permissions, "fleet_skills", []) or []) if permissions else set()
+        per_agent: set[str] = set()
+        if agent_id and permissions is not None:
+            per_agent = set(permissions.get_permissions(agent_id).allowed_skills)
+        result = []
+        for s in store.list():
+            entry = {
                 "name": s.name,
                 "description": s.description,
                 "version": s.version,
                 "provenance": s.source or "bundled",
+                "fleet_assigned": s.name in fleet,
             }
-            for s in store.list()
-        ]
+            if agent_id:
+                entry["agent_assigned"] = s.name in per_agent
+            result.append(entry)
         return {"skills": result}
+
+    @api_router.post("/api/fleet/skills")
+    async def api_set_fleet_skills(request: Request) -> dict:
+        """Set the fleet-wide skill allowlist. Body: {skills: [...]}."""
+        if permissions is None:
+            raise HTTPException(503, "Permissions not available")
+        body = await request.json()
+        skills = _clean_skill_names(body.get("skills", []))
+        from src.cli.config import _load_permissions, _save_permissions
+        perms = _load_permissions()
+        perms["fleet_skills"] = skills
+        _save_permissions(perms)
+        permissions.reload()
+        return {"fleet_skills": skills}
+
+    @api_router.post("/api/skills/install")
+    async def api_install_skill(request: Request) -> dict:
+        """Install a SKILL.md pack from a git repo. Body: {repo_url, ref?}."""
+        import asyncio as _asyncio
+
+        from src import marketplace
+        body = await request.json()
+        repo_url = str(body.get("repo_url", "")).strip()
+        if not repo_url:
+            raise HTTPException(400, "repo_url is required")
+        skills_installed = _skills_installed_dir()
+        if skills_installed is None:
+            raise HTTPException(503, "Skills directory not available")
+        result = await _asyncio.to_thread(
+            marketplace.install_skill, repo_url, skills_installed,
+            str(body.get("ref", "")).strip(),
+        )
+        if "error" in result:
+            raise HTTPException(400, result["error"])
+        return result
+
+    @api_router.post("/api/skills/remove")
+    async def api_remove_skill(request: Request) -> dict:
+        """Remove an installed skill pack. Body: {name}."""
+        import asyncio as _asyncio
+
+        from src import marketplace
+        body = await request.json()
+        name = str(body.get("name", "")).strip()
+        if not name:
+            raise HTTPException(400, "name is required")
+        skills_installed = _skills_installed_dir()
+        if skills_installed is None:
+            raise HTTPException(503, "Skills directory not available")
+        result = await _asyncio.to_thread(marketplace.remove_skill, name, skills_installed)
+        if "error" in result:
+            status = 404 if "not found" in result["error"].lower() else 400
+            raise HTTPException(status, result["error"])
+        return result
 
     @api_router.post("/api/agents")
     async def api_add_agent(request: Request) -> dict:
@@ -3220,6 +3307,7 @@ def create_dashboard_router(
             "agent_id": agent_id,
             "allowed_credentials": perms.allowed_credentials,
             "allowed_apis": perms.allowed_apis,
+            "allowed_skills": perms.allowed_skills,
             "available_credentials": available_creds,
             "can_use_browser": perms.can_use_browser,
             "can_use_internet": perms.can_use_internet,
@@ -3237,7 +3325,14 @@ def create_dashboard_router(
         body = await request.json()
         from src.cli.config import _load_permissions, _save_permissions
         perms_data = _load_permissions()
-        agent_perms = perms_data.get("permissions", {}).get(agent_id, {})
+        agents = perms_data.setdefault("permissions", {})
+        # Materialize full effective permissions before a partial write, so an
+        # agent that had no explicit entry (was using the "default" template)
+        # doesn't get dropped to a sparse record that strips its other grants
+        # (Codex review). No-op for agents that already have an entry.
+        if agent_id not in agents:
+            agents[agent_id] = permissions.get_permissions(agent_id).model_dump(exclude={"agent_id"})
+        agent_perms = agents[agent_id]
 
         updated = []
         if "allowed_credentials" in body:
@@ -3252,6 +3347,10 @@ def create_dashboard_router(
                 raise HTTPException(status_code=400, detail="allowed_apis must be a list of strings")
             agent_perms["allowed_apis"] = val
             updated.append("allowed_apis")
+        if "allowed_skills" in body:
+            # Per-agent skill-pack allowlist (path-safe-validated, sorted/deduped).
+            agent_perms["allowed_skills"] = _clean_skill_names(body["allowed_skills"])
+            updated.append("allowed_skills")
         for flag in ("can_use_browser", "can_use_internet", "can_spawn", "can_manage_cron", "can_use_wallet"):
             if flag in body:
                 agent_perms[flag] = bool(body[flag])

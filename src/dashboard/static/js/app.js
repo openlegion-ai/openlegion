@@ -26,6 +26,7 @@ const _IDENTITY_TABS = [
   { id: 'activity', label: 'Activity', file: null, access: 'auto' },
   { id: 'logs', label: 'Logs', file: null, access: 'auto' },
   { id: 'capabilities', label: 'Tools', file: null, access: 'auto' },
+  { id: 'skills', label: 'Skills', file: null, access: 'auto' },
   { id: 'files', label: 'Files', file: null, access: 'auto' },
 ];
 
@@ -489,6 +490,7 @@ function dashboard() {
       { id: 'costs', label: 'Costs' },
       { id: 'activity', label: 'Activity' },
       { id: 'integrations', label: 'Integrations' },
+      { id: 'skills', label: 'Skills' },
       { id: 'apikeys', label: 'API Keys' },
       { id: 'automation', label: 'Automation' },
       { id: 'browser', label: 'Browser' },
@@ -496,6 +498,22 @@ function dashboard() {
       { id: 'network', label: 'Network' },
       { id: 'storage', label: 'Storage' },
     ],
+
+    // Skills — per-agent assignment tab + fleet catalog (System → Skills).
+    // agentSkills: rows for the selected agent (carry agent_assigned +
+    // fleet_assigned); fleetSkillsCatalog: the admin/catalog view (no
+    // agent_id) whose rows carry fleet_assigned. null = not yet loaded
+    // (spinner), [] = loaded-but-empty (empty state).
+    agentSkills: null,
+    agentSkillsLoading: false,
+    agentSkillsSaving: false,
+    fleetSkillsCatalog: null,
+    fleetSkillsCatalogLoading: false,
+    fleetSkillsSaving: false,
+    skillInstallRepo: '',
+    skillInstallRef: '',
+    skillInstalling: false,
+    skillRemoving: '',
 
     // Audit sub-tab
     auditLog: [],
@@ -822,7 +840,7 @@ function dashboard() {
         // Backward compat for old URLs
         const _tabAliases = { schedules: 'automation', connections: 'integrations', uploads: 'storage' };
         const resolved = _tabAliases[sub] || sub;
-        if (resolved && ['activity', 'costs', 'automation', 'integrations', 'apikeys', 'wallet', 'network', 'storage', 'operator', 'browser', 'settings'].includes(resolved)) {
+        if (resolved && ['activity', 'costs', 'automation', 'skills', 'integrations', 'apikeys', 'wallet', 'network', 'storage', 'operator', 'browser', 'settings'].includes(resolved)) {
           route.systemTab = resolved;
           if (resolved === 'activity') {
             const view = clean.split('/')[2];
@@ -889,6 +907,9 @@ function dashboard() {
               }
               if (route.systemTab === 'storage') {
                 this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails();
+              }
+              if (route.systemTab === 'skills') {
+                this.loadSkillsCatalog();
               }
               if (route.systemTab === 'operator') {
                 this.fetchAuditLog();
@@ -2422,6 +2443,9 @@ function dashboard() {
         if (this.systemTab === 'network') {
           this.loadNetworkProxy();
         }
+        if (this.systemTab === 'skills') {
+          this.loadSkillsCatalog();
+        }
         if (this.systemTab === 'settings') {
           this.fetchBrowserSettings();
           this.fetchSystemSettings();
@@ -2451,6 +2475,7 @@ function dashboard() {
       if (tabId === 'integrations') { this.fetchChannels(); this.fetchWebhooks(); this.fetchApiKeys(); this.loadIntegrations(); }
       if (tabId === 'apikeys') { this.fetchSettings(); }
       if (tabId === 'storage') { this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails(); }
+      if (tabId === 'skills') { this.loadSkillsCatalog(); }
       if (tabId === 'network') { this.loadNetworkProxy(); }
       if (tabId === 'settings') { this.fetchBrowserSettings(); this.fetchSystemSettings(); }
       if (tabId === 'browser') { this.fetchBrowserSettings(); this.fetchSystemSettings(); this.fetchCaptchaSolver(); this.startPlatformSuccessRefresh(); }
@@ -5268,6 +5293,9 @@ function dashboard() {
       if (tab.id === 'capabilities') {
         await this.fetchAgentCapabilities(agentId);
       }
+      if (tab.id === 'skills') {
+        await this.loadAgentSkills(agentId);
+      }
       if (tab.id === 'files') {
         await this.fetchAgentFiles(agentId, '.');
       }
@@ -5305,6 +5333,159 @@ function dashboard() {
             ? data.mcp_tool_to_server : {};
         }
       } catch (e) { console.warn('fetchAgentCapabilities failed:', e); }
+    },
+
+    // ── Skills: per-agent assignment (identity Skills tab) ──────────────
+    async loadAgentSkills(agentId) {
+      this.agentSkills = null;
+      this.agentSkillsLoading = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/skills?agent_id=${encodeURIComponent(agentId)}`);
+        if (resp.ok) {
+          const data = await resp.json();
+          // Guard against a stale fetch landing after the user switched
+          // agents (mirrors fetchAgentCapabilities).
+          if (this.selectedAgent !== agentId) return;
+          this.agentSkills = Array.isArray(data.skills) ? data.skills : [];
+        } else {
+          this.agentSkills = [];
+        }
+      } catch (e) {
+        console.warn('loadAgentSkills failed:', e);
+        this.agentSkills = [];
+      } finally {
+        this.agentSkillsLoading = false;
+      }
+    },
+
+    async toggleAgentSkill(agentId, skill) {
+      // Fleet-assigned skills are always-on; the toggle is locked.
+      if (skill.fleet_assigned || this.agentSkillsSaving) return;
+      const current = (this.agentSkills || [])
+        .filter(s => s.agent_assigned)
+        .map(s => s.name);
+      const set = new Set(current);
+      if (skill.agent_assigned) set.delete(skill.name);
+      else set.add(skill.name);
+      this.agentSkillsSaving = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/${encodeURIComponent(agentId)}/permissions`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ allowed_skills: Array.from(set) }),
+        });
+        if (!resp.ok) {
+          const data = await resp.json().catch(() => ({}));
+          this.showToast(`Skill update failed: ${data.detail || data.error || resp.status}`);
+        }
+      } catch (e) {
+        this.showToast(`Skill update failed: ${e.message || e}`);
+      } finally {
+        this.agentSkillsSaving = false;
+        // Re-fetch to reflect server truth (fleet ∪ per-agent).
+        await this.loadAgentSkills(agentId);
+      }
+    },
+
+    // ── Skills: fleet catalog (System → Skills) ─────────────────────────
+    async loadSkillsCatalog() {
+      this.fleetSkillsCatalog = null;
+      this.fleetSkillsCatalogLoading = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/skills`);
+        if (resp.ok) {
+          const data = await resp.json();
+          this.fleetSkillsCatalog = Array.isArray(data.skills) ? data.skills : [];
+        } else {
+          this.fleetSkillsCatalog = [];
+        }
+      } catch (e) {
+        console.warn('loadSkillsCatalog failed:', e);
+        this.fleetSkillsCatalog = [];
+      } finally {
+        this.fleetSkillsCatalogLoading = false;
+      }
+    },
+
+    async toggleFleetSkill(skill) {
+      if (this.fleetSkillsSaving) return;
+      const current = (this.fleetSkillsCatalog || [])
+        .filter(s => s.fleet_assigned)
+        .map(s => s.name);
+      const set = new Set(current);
+      if (skill.fleet_assigned) set.delete(skill.name);
+      else set.add(skill.name);
+      this.fleetSkillsSaving = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/fleet/skills`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ skills: Array.from(set) }),
+        });
+        if (!resp.ok) {
+          const data = await resp.json().catch(() => ({}));
+          this.showToast(`Fleet skill update failed: ${data.detail || data.error || resp.status}`);
+        }
+      } catch (e) {
+        this.showToast(`Fleet skill update failed: ${e.message || e}`);
+      } finally {
+        this.fleetSkillsSaving = false;
+        await this.loadSkillsCatalog();
+      }
+    },
+
+    async installSkill() {
+      const repo = (this.skillInstallRepo || '').trim();
+      if (!repo || this.skillInstalling) return;
+      const ref = (this.skillInstallRef || '').trim();
+      this.skillInstalling = true;
+      try {
+        const body = { repo_url: repo };
+        if (ref) body.ref = ref;
+        const resp = await fetch(`${window.__config.apiBase}/skills/install`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (resp.ok && !data.error) {
+          this.showToast(`Installed skill: ${data.name || repo}`);
+          this.skillInstallRepo = '';
+          this.skillInstallRef = '';
+          await this.loadSkillsCatalog();
+        } else {
+          this.showToast(`Install failed: ${data.error || data.detail || resp.status}`);
+        }
+      } catch (e) {
+        this.showToast(`Install failed: ${e.message || e}`);
+      } finally {
+        this.skillInstalling = false;
+      }
+    },
+
+    async removeSkill(name) {
+      if (!name || this.skillRemoving) return;
+      this.showConfirm('Remove skill?', `This removes the installed pack "${name}" from the fleet catalog.`, async () => {
+        this.skillRemoving = name;
+        try {
+          const resp = await fetch(`${window.__config.apiBase}/skills/remove`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name }),
+          });
+          if (resp.ok) {
+            this.showToast(`Removed skill: ${name}`);
+            await this.loadSkillsCatalog();
+          } else {
+            const data = await resp.json().catch(() => ({}));
+            this.showToast(`Remove failed: ${data.error || data.detail || resp.status}`);
+          }
+        } catch (e) {
+          this.showToast(`Remove failed: ${e.message || e}`);
+        } finally {
+          this.skillRemoving = '';
+        }
+      }, true);
     },
 
     async fetchAgentFiles(agentId, path) {
@@ -10708,6 +10889,8 @@ function dashboard() {
         skill_view: 'reading a skill',
         install_skill: 'installing a skill',
         remove_skill: 'removing a skill',
+        list_skill_assignments: 'reviewing skill assignments',
+        assign_skill: 'assigning a skill',
       };
       if (map[toolName]) return map[toolName];
       // Fallback: humanise the snake_case tool name.
