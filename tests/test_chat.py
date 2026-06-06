@@ -463,16 +463,20 @@ class TestToolLimitReached:
     async def test_tool_limit_sets_flag_in_response(self):
         """When CHAT_MAX_TOOL_ROUNDS is exhausted, response has tool_limit_reached=True."""
         # Each call uses a unique arg so the loop detector doesn't fire first.
+        # Pin the per-turn cap low so it trips within the supplied mock list
+        # (the default is now high — sourced from the central limits table).
+        _rounds = 5
         responses = [
             LLMResponse(
                 content="",
                 tool_calls=[ToolCallInfo(name="exec", arguments={"command": f"step_{i}"})],
                 tokens_used=10,
             )
-            for i in range(AgentLoop.CHAT_MAX_TOOL_ROUNDS)
+            for i in range(_rounds)
         ] + [LLMResponse(content="I've done what I can.", tokens_used=10)]
 
         loop = _make_loop(responses)
+        loop.CHAT_MAX_TOOL_ROUNDS = _rounds
         loop.tools.execute = AsyncMock(return_value={"result": "ok"})
         loop.tools.get_tool_definitions = MagicMock(
             return_value=[{"type": "function", "function": {"name": "exec"}}]
@@ -492,16 +496,18 @@ class TestToolLimitReached:
     @pytest.mark.asyncio
     async def test_tool_limit_streaming_sets_flag(self):
         """Streaming path also emits tool_limit_reached=True on the done event."""
+        _rounds = 5
         responses = [
             LLMResponse(
                 content="",
                 tool_calls=[ToolCallInfo(name="exec", arguments={"command": f"step_{i}"})],
                 tokens_used=10,
             )
-            for i in range(AgentLoop.CHAT_MAX_TOOL_ROUNDS)
+            for i in range(_rounds)
         ] + [LLMResponse(content="Done.", tokens_used=10)]
 
         loop = _make_loop(responses)
+        loop.CHAT_MAX_TOOL_ROUNDS = _rounds
 
         async def _no_stream(**kwargs):
             raise RuntimeError("no streaming")
