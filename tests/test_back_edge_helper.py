@@ -278,3 +278,76 @@ class TestBackEdgeHelperEligibility:
             r.value.get("task_id") == "task_human_1" for r in rows
         )
         assert lane.calls == []
+
+
+class TestBackEdgeTTLSplit:
+    """Actionable events keep the 7-day TTL; informational events get a
+    much shorter 24h TTL so they don't pile up for a week and flood the
+    operator's check_inbox / LLM context on every heartbeat."""
+
+    def test_completed_event_gets_informational_ttl(
+        self, mesh_app_with_back_edge,
+    ):
+        app, blackboard, _lane, _loop = mesh_app_with_back_edge
+        rec = _record("task_ttl_done", status="done")
+
+        app._write_task_event_back_edge(
+            rec, event_kind="task_completed",
+            payload_extras={"summary": "ok"},
+        )
+        _settle()
+
+        entry = next(
+            r for r in blackboard.list_by_prefix("inbox/scout/task_event/")
+            if r.value.get("task_id") == "task_ttl_done"
+        )
+        assert entry.ttl == 86400  # 24 hours
+
+    def test_cancelled_event_gets_informational_ttl(
+        self, mesh_app_with_back_edge,
+    ):
+        app, blackboard, _lane, _loop = mesh_app_with_back_edge
+        rec = _record("task_ttl_cancel", status="cancelled")
+
+        app._write_task_event_back_edge(
+            rec, event_kind="task_cancelled",
+        )
+        _settle()
+
+        entry = next(
+            r for r in blackboard.list_by_prefix("inbox/scout/task_event/")
+            if r.value.get("task_id") == "task_ttl_cancel"
+        )
+        assert entry.ttl == 86400  # 24 hours
+
+    def test_failed_event_keeps_actionable_ttl(self, mesh_app_with_back_edge):
+        app, blackboard, _lane, _loop = mesh_app_with_back_edge
+        rec = _record("task_ttl_fail", status="failed")
+
+        app._write_task_event_back_edge(
+            rec, event_kind="task_failed",
+            payload_extras={"error": "boom"},
+        )
+        _settle()
+
+        entry = next(
+            r for r in blackboard.list_by_prefix("inbox/scout/task_event/")
+            if r.value.get("task_id") == "task_ttl_fail"
+        )
+        assert entry.ttl == 604800  # 7 days
+
+    def test_blocked_event_keeps_actionable_ttl(self, mesh_app_with_back_edge):
+        app, blackboard, _lane, _loop = mesh_app_with_back_edge
+        rec = _record("task_ttl_block", status="blocked")
+
+        app._write_task_event_back_edge(
+            rec, event_kind="task_blocked",
+            payload_extras={"blocker_note": "need creds"},
+        )
+        _settle()
+
+        entry = next(
+            r for r in blackboard.list_by_prefix("inbox/scout/task_event/")
+            if r.value.get("task_id") == "task_ttl_block"
+        )
+        assert entry.ttl == 604800  # 7 days

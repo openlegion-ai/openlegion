@@ -37,6 +37,18 @@ _HANDOFF_TTL = 86_400  # 24 hours — safety net for unprocessed handoffs
 # coordination tool stays decoupled from host internals.
 _TERMINAL_STATES: frozenset[str] = frozenset({"done", "failed", "cancelled"})
 
+# Cap on back-edge events returned by ``check_inbox``. The operator is the
+# originator of nearly every workflow, so on a busy fleet the back-edge
+# event list (7-day TTL, never pruned by the call) can grow to hundreds of
+# entries and flood the LLM context (~80k-170k tokens) on every heartbeat.
+# Actionable kinds (task_failed / task_blocked) are NEVER dropped; the cap
+# only evicts the newest-surviving informational events.
+_MAX_INBOX_EVENTS = 25
+
+# Back-edge kinds the originator must act on. Mirrors the host-side
+# ``_BACK_EDGE_WAKE_KINDS`` — these survive capping in ``check_inbox``.
+_ACTIONABLE_EVENT_KINDS: frozenset[str] = frozenset({"task_failed", "task_blocked"})
+
 
 def _failed_transition_envelope(
     *, kind: str, detail: str, exc: Exception, extras: dict | None = None,
@@ -504,11 +516,39 @@ async def check_inbox(*, mesh_client=None) -> dict:
             mesh_client.agent_id, e,
         )
 
+    # Bound the event list before returning. The operator originates almost
+    # every workflow, so without a cap this list grows to hundreds of entries
+    # (7-day TTL) and re-floods the LLM context on every heartbeat. Actionable
+    # events (task_failed / task_blocked) must NEVER be dropped; informational
+    # events (task_completed / task_cancelled) are evicted oldest-first to make
+    # room. Within the returned list, actionable events come first (newest
+    # actionable first) so the LLM sees what it must act on at the top.
+    events_total = len(events)
+
+    def _event_ts(ev: dict) -> float:
+        ts = ev.get("ts")
+        try:
+            return float(ts) if ts is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    actionable = [e for e in events if e.get("kind") in _ACTIONABLE_EVENT_KINDS]
+    informational = [e for e in events if e.get("kind") not in _ACTIONABLE_EVENT_KINDS]
+    actionable.sort(key=_event_ts, reverse=True)
+    informational.sort(key=_event_ts, reverse=True)
+
+    # Actionable events are always retained (never dropped). Informational
+    # events fill whatever slots remain under the cap, newest first.
+    remaining = max(_MAX_INBOX_EVENTS - len(actionable), 0)
+    capped_events = actionable + informational[:remaining]
+
     return {
         "tasks": tasks,
         "count": len(tasks),
-        "events": events,
-        "event_count": len(events),
+        "events": capped_events,
+        "event_count": len(capped_events),
+        "events_total": events_total,
+        "events_truncated": events_total > len(capped_events),
     }
 
 

@@ -267,10 +267,19 @@ class Blackboard:
         """List all entries matching a key prefix."""
         # Escape LIKE wildcards so literal '%' and '_' in keys match exactly
         escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        # Filter out TTL-expired rows inline. The TTL GC is throttled to once
+        # per 60s and only fires on writes, so without this filter a reader can
+        # see entries that should already be gone (e.g. back-edge task events
+        # past their TTL re-flooding check_inbox). Mirrors the expiry condition
+        # in _gc_expired_unlocked; history/ entries carry no TTL so they are
+        # unaffected (the deletion-side history exclusion isn't needed here).
         rows = self.db.execute(
             "SELECT key, value, written_by, workflow_id, "
             "created_at, updated_at, ttl, version FROM entries "
-            "WHERE key LIKE ? ESCAPE '\\' ORDER BY key",
+            "WHERE key LIKE ? ESCAPE '\\' "
+            "AND NOT (ttl IS NOT NULL AND "
+            "datetime(updated_at, '+' || ttl || ' seconds') < datetime('now')) "
+            "ORDER BY key",
             (escaped + "%",),
         ).fetchall()
         return [
