@@ -507,9 +507,13 @@ function dashboard() {
     auditArchiveDays: 30,
     auditArchiving: false,
 
-    // Unified Team Hub (replaces separate TEAM.md + Comms + Broadcast panels)
-    teamHubExpanded: false,
-    teamHubTab: 'docs',  // 'docs' | 'activity' | 'state' | 'artifacts' | 'broadcast' | 'members'
+    // Unified Team Hub (replaces separate TEAM.md + Comms + Broadcast panels).
+    // Leads with the live Work view; raw State + Activity are demoted under
+    // the Advanced sub-tab (teamHubAdvTab).
+    teamHubExpanded: true,
+    teamHubTab: 'work',  // 'work' | 'artifacts' | 'docs' | 'members' | 'broadcast' | 'advanced'
+    teamHubAdvTab: 'state',  // within Advanced: 'state' | 'activity'
+    _teamWorkLoaded: false,  // load the workplace ledger once, then WS keeps it live
 
     // TEAM.md banner on Agents tab (kept for backward compat, not used by template)
     teamBannerExpanded: false,
@@ -5618,8 +5622,8 @@ function dashboard() {
       this.teamEditing = false;
       this.teamEditBuffer = '';
       this.teamBannerExpanded = false;
-      this.teamHubExpanded = false;
-      this.teamHubTab = 'docs';
+      this.teamHubExpanded = true;
+      this.teamHubTab = 'work';
       this.showTeamForm = false;
       this.commsView = 'activity';
       this.commsExpanded = false;
@@ -5633,10 +5637,49 @@ function dashboard() {
       this.artifactsList = [];
       this.fetchTeamContent();
       if (name) {
-        this.fetchCommsActivity();
-        this.fetchBlackboard();
-        this.fetchArtifacts();
+        // Work leads — ensure the task ledger is loaded (WS keeps it live).
+        // State/Activity (Advanced) and Files lazy-load on their own tabs, so
+        // switching teams no longer eagerly fans out blackboard + artifact reads.
+        this._ensureWorkplaceTasks();
       }
+    },
+
+    // Load the workplace task ledger once per session; the WS reducer
+    // (handleWorkplaceEvent) + the debounced reload keep it current after that,
+    // so the team-hub Work view derives from already-live shared state rather
+    // than its own fetch loop.
+    _ensureWorkplaceTasks() {
+      if (this.workplaceEnabled === false || this._teamWorkLoaded) return;
+      if (typeof this.loadWorkplaceTasks !== 'function') return;
+      this._teamWorkLoaded = true;
+      this.loadWorkplaceTasks();
+    },
+
+    // Buckets the live ledger for the active team into the hub Work view.
+    // Derives from workplaceTasks (shared with the Work tab) — no extra fetch.
+    get teamWork() {
+      const team = this.activeTeam;
+      const active = { pending: 1, accepted: 1, working: 1 };
+      const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
+      const todayMs = midnight.getTime();
+      const blocked = [], inflight = [], doneToday = [];
+      for (const t of (this.workplaceTasks || [])) {
+        if (t.project_id !== team) continue;
+        if (t.status === 'blocked') blocked.push(t);
+        else if (active[t.status]) inflight.push(t);
+        else if (t.status === 'done' && ((t.completed_at || 0) * 1000) >= todayMs) doneToday.push(t);
+      }
+      return { blocked, inflight, doneToday, total: blocked.length + inflight.length + doneToday.length };
+    },
+
+    // One-hop handoff label for a task row: "creator → assignee" (or just the
+    // assignee when it wasn't handed off). Plain text — bind with x-text.
+    teamHandoffLabel(t) {
+      const who = this.agentDisplayName(t.assignee);
+      if (t && t.creator && t.creator !== t.assignee) {
+        return `${this.agentDisplayName(t.creator)} → ${who}`;
+      }
+      return who;
     },
 
     openTeamModal() {
