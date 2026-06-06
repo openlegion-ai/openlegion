@@ -5010,7 +5010,6 @@ def create_dashboard_router(
                 # Team goal (set via the operator's set_team_goal tool). Surfaced
                 # so the team hub can show it; null until set.
                 "north_star": pdata.get("north_star"),
-                "success_criteria": pdata.get("success_criteria"),
             })
         return {"teams": result}
 

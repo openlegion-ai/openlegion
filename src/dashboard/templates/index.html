@@ -1688,7 +1688,7 @@
                 :title="activeTeamData?.description" x-text="activeTeamData?.description"></span>
               <!-- Team goal (north_star) — display-only; set via the operator's set_team_goal -->
               <span x-show="activeTeamData?.north_star" class="text-[11px] text-indigo-300/80 truncate hidden md:block max-w-[14rem] flex-shrink"
-                :title="'Goal: ' + (activeTeamData?.north_star || '') + (activeTeamData?.success_criteria ? ' — Success: ' + activeTeamData.success_criteria : '')"
+                :title="'Goal: ' + (activeTeamData?.north_star || '')"
                 x-text="'🎯 ' + (activeTeamData?.north_star || '')"></span>
               <!-- Tab pills — desktop only, click stops propagation to header toggle -->
               <div class="project-hub-desktop-tabs seg-group hidden md:flex ml-auto flex-shrink-0" @click.stop role="tablist" aria-label="Team sections">
