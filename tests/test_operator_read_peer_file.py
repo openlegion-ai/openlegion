@@ -206,3 +206,158 @@ async def test_read_peer_file_requires_path():
     result = await read_peer_file("alpha", "", mesh_client=mc)
     assert "error" in result
     mc.read_peer_file.assert_not_awaited()
+
+
+# ── host mesh endpoint (real auth + permission machinery) ───────────
+#
+# Mirrors the test_mesh_endpoint_* coverage for peer artifacts: spin up
+# create_mesh_app over ASGITransport so the operator gate, the path-
+# traversal validator, and the transport forwarding are all exercised
+# without Docker.
+
+
+def _mesh_app(tmp_path, monkeypatch, *, transport=None, agents=("operator", "alpha"),
+              tokens=None):
+    import importlib
+
+    from src.host.costs import CostTracker
+    from src.host.mesh import Blackboard, MessageRouter, PubSub
+    from src.host.permissions import PermissionMatrix
+    from src.host.traces import TraceStore
+
+    monkeypatch.setenv("OPENLEGION_PROJECT_SCOPE_MODE", "warn")
+    import src.host.server as server_module
+    importlib.reload(server_module)
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    router = MessageRouter(perms, {})
+    costs = CostTracker(str(tmp_path / "costs.db"))
+    traces = TraceStore(str(tmp_path / "traces.db"))
+    for a in agents:
+        router.register_agent(a, f"http://{a}:8400", [])
+    auth_tokens = tokens or {a: f"{a}-secret" for a in agents}
+    app = server_module.create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
+        cost_tracker=costs, trace_store=traces, transport=transport,
+        auth_tokens=auth_tokens,
+    )
+    return app, (bb, costs, traces, server_module, monkeypatch)
+
+
+def _close(state):
+    import importlib
+    bb, costs, traces, server_module, monkeypatch = state
+    bb.close()
+    costs.close()
+    traces.close()
+    monkeypatch.delenv("OPENLEGION_PROJECT_SCOPE_MODE", raising=False)
+    importlib.reload(server_module)
+
+
+@pytest.mark.asyncio
+async def test_files_mesh_endpoint_rejects_non_operator(tmp_path, monkeypatch):
+    """An authenticated non-operator agent gets HTTP 403 on both endpoints."""
+    from httpx import ASGITransport, AsyncClient
+
+    app, state = _mesh_app(
+        tmp_path, monkeypatch, agents=("operator", "alpha", "scout"),
+    )
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            hdrs = {"authorization": "Bearer scout-secret"}
+            r1 = await client.get("/mesh/agents/alpha/files", headers=hdrs)
+            assert r1.status_code == 403, r1.text
+            r2 = await client.get(
+                "/mesh/agents/alpha/files/workspace/data.md", headers=hdrs,
+            )
+            assert r2.status_code == 403, r2.text
+    finally:
+        _close(state)
+
+
+@pytest.mark.asyncio
+async def test_files_mesh_endpoint_rejects_path_traversal(tmp_path, monkeypatch):
+    """A traversal path is rejected with 400 before reaching the transport."""
+    from httpx import ASGITransport, AsyncClient
+
+    app, state = _mesh_app(tmp_path, monkeypatch)
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.get(
+                "/mesh/agents/alpha/files/..%2Fetc%2Fpasswd",
+                headers={"authorization": "Bearer operator-secret"},
+            )
+            assert resp.status_code == 400, resp.text
+            assert (
+                "traversal" in resp.text.lower()
+                or "invalid" in resp.text.lower()
+            )
+    finally:
+        _close(state)
+
+
+@pytest.mark.asyncio
+async def test_files_mesh_endpoint_forwards_to_transport(tmp_path, monkeypatch):
+    """Happy path: mesh forwards to the agent's /files endpoints and shapes
+    the response with agent_id + paging metadata."""
+    from httpx import ASGITransport, AsyncClient
+
+    from src.host.transport import Transport
+
+    class StubTransport(Transport):
+        def __init__(self):
+            self.calls = []
+
+        async def request(self, agent_id, method, path, json=None, timeout=120, headers=None):
+            self.calls.append((agent_id, method, path))
+            if path.startswith("/files?"):
+                return {"entries": [{"name": "data.md", "size": 16}], "count": 1}
+            if path.startswith("/files/workspace/data.md"):
+                return {
+                    "path": "workspace/data.md", "content": "col_a,col_b\n1,2\n",
+                    "size": 16, "mime_type": "text/markdown", "encoding": "utf-8",
+                    "offset": 0, "next_offset": 16, "truncated": False,
+                }
+            return {"error": "unexpected", "status_code": 502}
+
+        async def is_reachable(self, agent_id, timeout=5):  # pragma: no cover
+            return True
+
+        def request_sync(self, agent_id, method, path, json=None, timeout=120, headers=None):  # pragma: no cover
+            return {}
+
+    transport = StubTransport()
+    app, state = _mesh_app(tmp_path, monkeypatch, transport=transport)
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            hdrs = {"authorization": "Bearer operator-secret"}
+            r1 = await client.get("/mesh/agents/alpha/files", headers=hdrs)
+            assert r1.status_code == 200, r1.text
+            d1 = r1.json()
+            assert d1["agent_id"] == "alpha"
+            assert d1["entries"] == [{"name": "data.md", "size": 16}]
+
+            r2 = await client.get(
+                "/mesh/agents/alpha/files/workspace/data.md", headers=hdrs,
+            )
+            assert r2.status_code == 200, r2.text
+            d2 = r2.json()
+            assert d2["agent_id"] == "alpha"
+            assert d2["path"] == "workspace/data.md"
+            assert d2["content"] == "col_a,col_b\n1,2\n"
+            assert d2["truncated"] is False
+        # Forwarded to the worker's /files endpoints (not /artifacts).
+        assert any(c[2].startswith("/files?") for c in transport.calls)
+        assert any(
+            c[2].startswith("/files/workspace/data.md") for c in transport.calls
+        )
+    finally:
+        _close(state)

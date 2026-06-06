@@ -5324,23 +5324,17 @@ function dashboard() {
     },
 
     downloadAgentFile(agentId, path) {
-      const url = `${window.__config.apiBase}/agents/${agentId}/files/${this._encodeFilePath(path)}`;
-      fetch(url).then(r => r.json()).then(data => {
-        let blob;
-        if (data.encoding === 'base64') {
-          const bin = atob(data.content);
-          const arr = new Uint8Array(bin.length);
-          for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-          blob = new Blob([arr], { type: data.mime_type || 'application/octet-stream' });
-        } else {
-          blob = new Blob([data.content], { type: data.mime_type || 'text/plain' });
-        }
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = path.split('/').pop();
-        a.click();
-        URL.revokeObjectURL(a.href);
-      }).catch(e => this.showToast(`Download failed: ${e.message}`));
+      // Navigate to the streaming attachment endpoint so the browser saves the
+      // FULL file to disk (the JSON /files route is capped at 500 KB and would
+      // silently truncate). Same-origin navigation carries the session cookie;
+      // Content-Disposition makes it a download, not a page load.
+      const url = `${window.__config.apiBase}/agents/${agentId}/file-download/${this._encodeFilePath(path)}`;
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = path.split('/').pop();
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
     },
 
     agentFilesParentPath(path) {
@@ -10631,6 +10625,8 @@ function dashboard() {
         read_user_notifications: 'reviewing recent notifications',
         read_peer_artifact: 'reading a teammate\'s file',
         list_peer_artifacts: 'browsing a teammate\'s files',
+        read_peer_file: 'reading a teammate\'s file',
+        list_peer_files: 'browsing a teammate\'s files',
         create_agent: 'adding a teammate',
         apply_template: 'building a team from a template',
         inspect_agents: 'reviewing the team',
