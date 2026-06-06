@@ -3815,6 +3815,14 @@ function dashboard() {
           t.status = data.new_status;
           if (data.assignee) t.assignee = data.assignee;
           if (data.blocker_note !== undefined) t.blocker_note = data.blocker_note;
+          // The status-change payload omits completed_at, but the team-hub
+          // Work view buckets "Delivered today" by it — without this a task
+          // that completes while the hub is open drops out of every bucket
+          // until a full reload. Prefer a server value if one is ever added;
+          // otherwise approximate with the client clock (corrected on reload).
+          if (data.new_status === 'done' && !t.completed_at) {
+            t.completed_at = (data.completed_at != null) ? data.completed_at : (Date.now() / 1000);
+          }
         }
         // Pinned blockers list lives on a separate endpoint; refresh it
         // whenever a task transitions in to or out of ``blocked``.
@@ -5653,7 +5661,12 @@ function dashboard() {
     // so the team-hub Work view derives from already-live shared state rather
     // than its own fetch loop.
     _ensureWorkplaceTasks() {
-      if (this.workplaceEnabled === false || this._teamWorkLoaded) return;
+      if (this.workplaceEnabled === false) return;
+      if (this.workplaceSectionLoading && this.workplaceSectionLoading.tasks) return;  // already in flight
+      // Skip only if we loaded successfully once. If the last load errored,
+      // workplaceErrors.tasks is set — retry on the next entry rather than
+      // wedging the Work view empty with no recovery path.
+      if (this._teamWorkLoaded && !(this.workplaceErrors && this.workplaceErrors.tasks)) return;
       if (typeof this.loadWorkplaceTasks !== 'function') return;
       this._teamWorkLoaded = true;
       this.loadWorkplaceTasks();
