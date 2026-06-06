@@ -137,7 +137,7 @@ class TestHealthRestartMissingConfig:
             "agents": {
                 "content-creator": {
                     "role": "writer",
-                    "skills_dir": "skills/content",
+                    "tools_dir": "tools/content",
                     "model": "anthropic/claude-3-5-sonnet",
                 },
             },

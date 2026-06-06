@@ -476,7 +476,7 @@ class HealthMonitor:
         )
         return {
             "role": agent_cfg.get("role", ""),
-            "skills_dir": os.path.abspath(agent_cfg.get("skills_dir", "")),
+            "tools_dir": os.path.abspath(agent_cfg.get("tools_dir", "")),
             "model": agent_cfg.get("model", default_model),
             "mcp_servers": agent_cfg.get("mcp_servers") or None,
             "thinking": agent_cfg.get("thinking", ""),

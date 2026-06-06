@@ -4235,10 +4235,10 @@ def _always_tool_calling_loop(*, task_max=4, tool_name="web_search"):
             tokens_used=10,
         )
     loop.llm.chat = AsyncMock(side_effect=_llm_side_effect)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": tool_name}}]
     )
-    loop.skills.execute = AsyncMock(return_value={"results": ["r"]})
+    loop.tools.execute = AsyncMock(return_value={"results": ["r"]})
     loop._auto_close_task = AsyncMock(return_value=None)
     return loop
 
@@ -4373,7 +4373,7 @@ async def test_terminal_handoff_on_last_budgeted_round_closes_done_not_blocked()
         _resp("Handed off to bob; done."),
     ]
     loop.llm.chat = AsyncMock(side_effect=responses)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "web_search"}}]
     )
 
@@ -4381,7 +4381,7 @@ async def test_terminal_handoff_on_last_budgeted_round_closes_done_not_blocked()
         if name == "hand_off":
             return {"handed_off": True, "to": "bob"}
         return {"results": ["r"]}
-    loop.skills.execute = AsyncMock(side_effect=_exec)
+    loop.tools.execute = AsyncMock(side_effect=_exec)
 
     result = await loop.chat("delegate", task_id="t-converge")
 
@@ -4414,7 +4414,7 @@ async def test_terminal_complete_task_on_last_budgeted_round_closes_done():
         _resp("All done."),
     ]
     loop.llm.chat = AsyncMock(side_effect=responses)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "complete_task"}}]
     )
 
@@ -4422,7 +4422,7 @@ async def test_terminal_complete_task_on_last_budgeted_round_closes_done():
         if name == "complete_task":
             return {"completed": True}
         return {"ok": True}
-    loop.skills.execute = AsyncMock(side_effect=_exec)
+    loop.tools.execute = AsyncMock(side_effect=_exec)
 
     result = await loop.chat("finish it", task_id="t-complete")
 
@@ -4458,7 +4458,7 @@ async def test_complete_task_on_exact_cap_round_closes_done_not_blocked():
         _resp("", tool_calls=[ToolCallInfo(name="web_search", arguments={"q": "y"})]),
     ]
     loop.llm.chat = AsyncMock(side_effect=responses)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "complete_task"}}]
     )
 
@@ -4466,7 +4466,7 @@ async def test_complete_task_on_exact_cap_round_closes_done_not_blocked():
         if name == "complete_task":
             return {"completed": True}
         return {"results": ["r"]}
-    loop.skills.execute = AsyncMock(side_effect=_exec)
+    loop.tools.execute = AsyncMock(side_effect=_exec)
 
     result = await loop.chat("finish it", task_id="t-exact")
 
@@ -4499,7 +4499,7 @@ async def test_handoff_on_exact_cap_round_closes_done_not_blocked():
         _resp("", tool_calls=[ToolCallInfo(name="web_search", arguments={"q": "x"})]),
     ]
     loop.llm.chat = AsyncMock(side_effect=responses)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "hand_off"}}]
     )
 
@@ -4507,7 +4507,7 @@ async def test_handoff_on_exact_cap_round_closes_done_not_blocked():
         if name == "hand_off":
             return {"handed_off": True, "to": "bob"}
         return {"results": ["r"]}
-    loop.skills.execute = AsyncMock(side_effect=_exec)
+    loop.tools.execute = AsyncMock(side_effect=_exec)
 
     result = await loop.chat("delegate", task_id="t-exact-ho")
 
@@ -4539,7 +4539,7 @@ async def test_notify_user_on_cap_round_still_blocks_not_completion():
         _resp("", tool_calls=[ToolCallInfo(name="web_search", arguments={"q": "x"})]),
     ]
     loop.llm.chat = AsyncMock(side_effect=responses)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "notify_user"}}]
     )
 
@@ -4547,7 +4547,7 @@ async def test_notify_user_on_cap_round_still_blocks_not_completion():
         if name == "notify_user":
             return {"notified": True}
         return {"results": ["r"]}
-    loop.skills.execute = AsyncMock(side_effect=_exec)
+    loop.tools.execute = AsyncMock(side_effect=_exec)
 
     result = await loop.chat("work", task_id="t-notify")
 
@@ -4616,8 +4616,8 @@ async def test_round_counts_bound_never_resets_live_task_budget():
 
     async def _exec(name, *a, **k):
         return {"results": ["r"]}
-    loop.skills.execute = AsyncMock(side_effect=_exec)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.execute = AsyncMock(side_effect=_exec)
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "web_search"}}]
     )
     # New task does one tool round then converges with final text.
@@ -4654,10 +4654,10 @@ async def test_exhausted_rewake_blocks_immediately_no_extra_tool_round():
     loop.llm.chat = AsyncMock(
         side_effect=AssertionError("LLM must NOT be called on an exhausted re-wake")
     )
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "web_search"}}]
     )
-    loop.skills.execute = AsyncMock(
+    loop.tools.execute = AsyncMock(
         side_effect=AssertionError("no tool round may run on an exhausted re-wake")
     )
 
@@ -4669,7 +4669,7 @@ async def test_exhausted_rewake_blocks_immediately_no_extra_tool_round():
         "an exhausted re-wake must break at the first round top BEFORE the LLM "
         f"call; llm calls={loop.llm.chat.await_count}"
     )
-    assert loop.skills.execute.await_count == 0
+    assert loop.tools.execute.await_count == 0
     # Terminal blocked close with the static convergence note.
     statuses = [
         (c.args[1] if len(c.args) >= 2 else c.kwargs.get("status"))
@@ -4692,10 +4692,10 @@ async def test_task_round_counts_size_bounded_under_many_tasks():
     # Stub the terminal close to a no-op so entries are NEVER popped — this is
     # the degenerate sustained-write-failure regime the bound guards.
     loop._auto_close_task = AsyncMock(return_value=None)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "web_search"}}]
     )
-    loop.skills.execute = AsyncMock(return_value={"results": ["r"]})
+    loop.tools.execute = AsyncMock(return_value={"results": ["r"]})
 
     # Each task: one tool round then a final text (converges) — one increment
     # per distinct task_id. The final close is a no-op stub, so nothing pops.
@@ -4729,10 +4729,10 @@ async def test_task_converges_via_final_text_on_last_round_closes_done():
         _resp('{"result": {"answer": "42"}}'),
     ]
     loop.llm.chat = AsyncMock(side_effect=responses)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "web_search"}}]
     )
-    loop.skills.execute = AsyncMock(return_value={"results": ["r"]})
+    loop.tools.execute = AsyncMock(return_value={"results": ["r"]})
 
     result = await loop.chat("answer it", task_id="t-final")
 
@@ -4754,10 +4754,10 @@ async def test_task_round_count_persists_across_wakes_tighten_only():
     loop = _make_loop()
     loop.TASK_MAX_TOOL_ROUNDS = 6
     loop._auto_close_task = AsyncMock(return_value=None)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "web_search"}}]
     )
-    loop.skills.execute = AsyncMock(return_value={"results": ["r"]})
+    loop.tools.execute = AsyncMock(return_value={"results": ["r"]})
 
     # Simulate 4 of 6 rounds already spent on a prior wake that kept the task
     # 'working' across the wake boundary (a lane followup).
@@ -4850,10 +4850,10 @@ async def test_interactive_chat_no_task_id_completely_unaffected():
     loop.TASK_MAX_TOOL_ROUNDS = 2          # tiny — would cap a task hard
     loop.CHAT_MAX_TOOL_ROUNDS = 5          # bound the interactive loop
     loop._auto_close_task = AsyncMock(return_value=None)
-    loop.skills.get_tool_definitions = MagicMock(
+    loop.tools.get_tool_definitions = MagicMock(
         return_value=[{"type": "function", "function": {"name": "web_search"}}]
     )
-    loop.skills.execute = AsyncMock(return_value={"results": ["r"]})
+    loop.tools.execute = AsyncMock(return_value={"results": ["r"]})
 
     def _always(*a, **k):
         if k.get("tools") is None:

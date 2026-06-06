@@ -140,7 +140,7 @@ _BLACKBOARD_TOOLS = frozenset({
 # internet and browser toggles coexist without one clobbering the other.
 _RUNTIME_GATE_TOOLS: dict[str, frozenset[str]] = {
     "internet": frozenset({"http_request", "web_search"}),
-    # Mirrors the @skill names in ``builtins/browser_tool.py``.
+    # Mirrors the @tool names in ``builtins/browser_tool.py``.
     "browser": frozenset({
         "browser_navigate", "browser_warmup", "browser_get_elements",
         "browser_wait_for", "browser_screenshot", "browser_click",
