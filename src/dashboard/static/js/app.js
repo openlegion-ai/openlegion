@@ -3179,29 +3179,23 @@ function dashboard() {
       }
 
       for (const b of (this.workplaceBlockers || [])) {
-        // Decode machine-style blocker codes into plain English so
-        // Sarah doesn't have to guess what ``no_credentials`` means.
-        // ``classification.kind`` drives the primary CTA: a credential
-        // blocker gets a "Fix" button that jumps to the credential
-        // card in operator chat (the existing flow already renders a
-        // request_credential entry there); a browser-login blocker
-        // does the same for the browser-login flow; everything else
-        // falls back to the legacy "Drill in" task drawer.
+        // Surface ONLY blockers with a real, working resolution for the user:
+        // credential + browser-login approvals, whose "Fix" jumps to the
+        // operator chat card that already renders the request. Every other
+        // blocked/failed task is operator-handled (and narrated in the team's
+        // Work summary) — the old "Drill in" fallback dead-ended on the
+        // summaries-only Work page and could never resolve the item, so it's
+        // gone. ``_humanizeBlocker`` decodes the machine code to plain English.
         const classification = this._humanizeBlocker(b.blocker_note || '');
-        // Show only blockers the user can act on. Engine-internal / transient
-        // ones are noise here — they live in the team's Technical activity
-        // group, not the "Needs you" panel.
-        if (classification.audience !== 'user') continue;
-        const primary = (classification.kind === 'credential' || classification.kind === 'browser_login')
-          ? {
-              label: 'Fix',
-              style: 'indigo',
-              handler: () => {
-                this.activeTab = 'chat';
-                if (this.openChat) this.openChat('operator');
-              },
-            }
-          : { label: 'Drill in', style: 'amber', handler: () => this.openTaskDrillIn(b.id) };
+        if (classification.kind !== 'credential' && classification.kind !== 'browser_login') continue;
+        const primary = {
+          label: 'Fix',
+          style: 'indigo',
+          handler: () => {
+            this.activeTab = 'chat';
+            if (this.openChat) this.openChat('operator');
+          },
+        };
         items.push({
           id: 'blocker-' + b.id,
           kind: 'blocker',
@@ -3257,34 +3251,26 @@ function dashboard() {
     },
 
     // Plain-English mapping for blocker_note codes. Returns
-    // ``{ kind, label, service, audience }`` so callers can render the
-    // sentence, pick a CTA (credential vs. browser-login vs. drill-in),
-    // and route by ``audience`` ('user' shows in the primary view;
-    // 'internal' is hidden into the Technical activity group). ``service``
-    // is best-effort — extracted from a ``cred:<name>`` shorthand or the
-    // trailing word of a sentence; callers should treat empty as "unknown".
+    // ``{ kind, label, service }``: ``label`` is the human sentence (rendered
+    // in the drill-in banner and the "Needs you" subtitle); ``kind`` drives the
+    // CTA (credential / browser-login get a "Fix" → operator chat; the rest are
+    // operator-handled and not surfaced as user actions). ``service`` is
+    // best-effort — from a ``cred:<name>`` shorthand or a ``:`` hint.
     _humanizeBlocker(rawNote) {
-      // Decode a machine blocker_note into plain English + an AUDIENCE.
-      //   audience 'user'     → the person can act on it; shown in the
-      //                          primary Work view with a clear next step.
-      //   audience 'internal' → engine plumbing the user can't act on
-      //                          (transient / automatic); hidden into the
-      //                          collapsible "Technical activity" group.
-      // Returns { kind, label, service, audience }.
       const note = String(rawNote || '').trim();
-      if (!note) return { kind: 'unknown', label: '', service: '', audience: 'internal' };
+      if (!note) return { kind: 'unknown', label: '', service: '' };
       const lower = note.toLowerCase();
 
-      // ── User-actionable ──────────────────────────────────────────
+      // ── User-actionable (credential / browser-login get a working Fix) ──
       if (lower === 'no_credentials' || lower === 'missing_credentials') {
-        return { kind: 'credential', label: 'Needs a credential', service: '', audience: 'user' };
+        return { kind: 'credential', label: 'Needs a credential', service: '' };
       }
       if (lower.startsWith('cred:')) {
         const service = note.slice(5).trim();
         return {
           kind: 'credential',
           label: service ? `Needs a credential: ${service}` : 'Needs a credential',
-          service, audience: 'user',
+          service,
         };
       }
       // Browser-login codes. URL/service hint may follow with a colon
@@ -3296,54 +3282,46 @@ function dashboard() {
         return {
           kind: 'browser_login',
           label: hint ? `Needs a browser login: ${hint}` : 'Needs a browser login',
-          service: hint, audience: 'user',
+          service: hint,
         };
       }
       if (lower === 'awaiting_feedback' || lower === 'awaiting_user') {
-        return { kind: 'feedback', label: 'Waiting for your feedback', service: '', audience: 'user' };
+        return { kind: 'feedback', label: 'Waiting for your feedback', service: '' };
       }
       if (lower === 'quota_exceeded' || lower === 'budget_exceeded') {
-        return { kind: 'budget', label: 'Hit cost limit', service: '', audience: 'user' };
+        return { kind: 'budget', label: 'Hit cost limit', service: '' };
       }
-      // Task too large to finish in one run — the user can split / retry it.
       if (lower.startsWith('lane_timeout')) {
-        return {
-          kind: 'too_big',
-          label: 'This task was too large to finish in one run — try breaking it into smaller pieces.',
-          service: '', audience: 'user',
-        };
+        return { kind: 'too_big', label: 'This task was too large to finish in one run — try breaking it into smaller pieces.', service: '' };
       }
 
-      // ── Engine-internal / transient (hidden from the primary view) ──
+      // ── Engine-internal / transient (operator-handled; friendly label only
+      //    surfaces if such a note reaches the drill-in banner) ──
       if (lower.startsWith('output_too_large')) {
-        return { kind: 'internal', label: 'The agent tried to save more than fits in one step.', service: '', audience: 'internal' };
+        return { kind: 'internal', label: 'The agent tried to save more than fits in one step.', service: '' };
       }
       if (lower.startsWith('convergence_cap') || lower.startsWith('max_iterations')) {
-        return { kind: 'internal', label: 'The task ran out of steps before finishing.', service: '', audience: 'internal' };
+        return { kind: 'internal', label: 'The task ran out of steps before finishing.', service: '' };
       }
       if (lower.startsWith('no_outbound_effects')) {
-        return { kind: 'internal', label: 'The agent finished without producing any output.', service: '', audience: 'internal' };
+        return { kind: 'internal', label: 'The agent finished without producing any output.', service: '' };
       }
       if (lower.startsWith('agent_quarantined')) {
-        return { kind: 'internal', label: 'The agent was paused after repeated errors.', service: '', audience: 'internal' };
+        return { kind: 'internal', label: 'The agent was paused after repeated errors.', service: '' };
       }
-      // Transient AI-provider hiccups. Match only unambiguous error phrases —
-      // bare tokens like "oauth"/"rate limit" could appear in a real user note
-      // ("please complete OAuth login") and must not be hidden. Anything that
-      // slips past here still lands in the generic 'exception' branch below.
+      // Transient AI-provider hiccups. Match only unambiguous error phrases.
       if (lower.includes('llm call failed') || lower.includes('returned empty response')
           || lower.includes('connection to the ai provider')) {
-        return { kind: 'provider', label: 'The AI provider was briefly unavailable.', service: '', audience: 'internal' };
+        return { kind: 'provider', label: 'The AI provider was briefly unavailable.', service: '' };
       }
       if (lower === 'internal_error' || lower.startsWith('exception')
           || lower.startsWith('dispatch_error') || lower.startsWith('auth_failure')
           || lower.startsWith('config_error')) {
-        return { kind: 'internal', label: 'Something went wrong inside the system.', service: '', audience: 'internal' };
+        return { kind: 'internal', label: 'Something went wrong inside the system.', service: '' };
       }
 
-      // A free-form note an agent wrote deliberately — a real, user-directed
-      // message. Render verbatim and treat as user-actionable.
-      return { kind: 'other', label: note, service: '', audience: 'user' };
+      // A free-form note an agent wrote deliberately — render verbatim.
+      return { kind: 'other', label: note, service: '' };
     },
 
     // Per-card preview disclosure state for the Needs-you panel.
@@ -5909,30 +5887,25 @@ function dashboard() {
       this.loadWorkplaceTasks();
     },
 
-    // Buckets the live ledger for the active team into the hub Work view.
-    // Derives from workplaceTasks (shared with the Work tab) — no extra fetch.
+    // Read-only PROGRESS for the active team's hub Work view: in-flight +
+    // delivered-today only. Derives from workplaceTasks (shared with the Work
+    // tab) — no extra fetch. Blocked / failed individual tasks are deliberately
+    // NOT surfaced here: the user's unit is the team, not the task. The operator
+    // handles blockers/failures and narrates them in the team's Work summary;
+    // the only user-actionable items (credential / browser-login approvals)
+    // surface in the Work tab's "Needs you" panel.
     get teamWork() {
       const team = this.activeTeam;
       const active = { pending: 1, accepted: 1, working: 1 };
       const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
       const todayMs = midnight.getTime();
-      const blocked = [], inflight = [], doneToday = [], technical = [];
+      const inflight = [], doneToday = [];
       for (const t of (this.workplaceTasks || [])) {
         if (t.project_id !== team) continue;
-        // Blocked AND failed both carry a blocker_note. Surface the ones the
-        // user can act on (e.g. a too-large task they can split) in the
-        // primary view; route engine-internal / transient ones (the bulk of
-        // failures) to the collapsed Technical activity group.
-        if (t.status === 'blocked' || t.status === 'failed') {
-          if (this._humanizeBlocker(t.blocker_note || '').audience === 'user') blocked.push(t);
-          else technical.push(t);
-        }
-        else if (active[t.status]) inflight.push(t);
+        if (active[t.status]) inflight.push(t);
         else if (t.status === 'done' && ((t.completed_at || 0) * 1000) >= todayMs) doneToday.push(t);
       }
-      // ``total`` counts only the user-facing buckets so the badge reflects
-      // work that's relevant to the person, not internal noise.
-      return { blocked, inflight, doneToday, technical, total: blocked.length + inflight.length + doneToday.length };
+      return { inflight, doneToday, total: inflight.length + doneToday.length };
     },
 
     // One-hop handoff label for a task row: "creator → assignee" (or just the
