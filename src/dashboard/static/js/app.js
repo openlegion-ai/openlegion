@@ -473,18 +473,21 @@ function dashboard() {
     drillInError: '',
 
     // System tab — sub-navigation
-    systemTab: 'activity',
-    // Order: General first (its id is 'settings', relabelled "General" via
-    // systemTabLabelFor), then by how often each is used — config/monitoring
-    // up front, infrastructure plumbing last.
+    systemTab: 'settings',
+    // Order (and default landing): General first (its id is 'settings',
+    // relabelled "General" via systemTabLabelFor), Operator second — these two
+    // are the operator's home + primary control surface. The rest descend by
+    // steady-state likelihood of use: money + observability (Costs, Activity),
+    // then connectivity (Integrations, API Keys), then scheduling (Automation),
+    // then niche/infrastructure plumbing (Browser, Wallet, Network, Storage).
     systemTabs: [
       { id: 'settings', label: 'Settings' },
-      { id: 'activity', label: 'Activity' },
-      { id: 'costs', label: 'Costs' },
-      { id: 'integrations', label: 'Integrations' },
-      { id: 'automation', label: 'Automation' },
-      { id: 'apikeys', label: 'API Keys & Connections' },
       { id: 'operator', label: 'Operator' },
+      { id: 'costs', label: 'Costs' },
+      { id: 'activity', label: 'Activity' },
+      { id: 'integrations', label: 'Integrations' },
+      { id: 'apikeys', label: 'API Keys' },
+      { id: 'automation', label: 'Automation' },
       { id: 'browser', label: 'Browser' },
       { id: 'wallet', label: 'Wallet' },
       { id: 'network', label: 'Network' },
@@ -742,7 +745,7 @@ function dashboard() {
           if (this.activityView === 'logs') return '/system/activity/logs';
           return '/system/activity';
         }
-        return '/system/' + (this.systemTab || 'activity');
+        return '/system/' + (this.systemTab || 'settings');
       }
       if (this.activeTab === 'fleet') return '/teams';
       // Single Work-tab URL — ``/home``. Legacy ``/home/kanban``,
@@ -778,7 +781,7 @@ function dashboard() {
 
     _parsePath(path) {
       const clean = path.replace(/^\/+/, '').replace(/\/+$/, '');
-      const route = { tab: 'chat', activityView: 'traces', systemTab: 'activity', agentId: null, identityTab: 'config' };
+      const route = { tab: 'chat', activityView: 'traces', systemTab: 'settings', agentId: null, identityTab: 'config' };
       if (!clean) return route;
 
       if (clean === 'chat') { route.tab = 'chat'; return route; }
@@ -865,10 +868,10 @@ function dashboard() {
               if (this.systemTab === 'activity') this._stopActivityRefresh();
               this.systemTab = route.systemTab;
               if (route.systemTab === 'integrations') {
-                this.fetchChannels(); this.fetchWebhooks(); this.fetchApiKeys();
+                this.fetchChannels(); this.fetchWebhooks(); this.fetchApiKeys(); this.loadIntegrations();
               }
               if (route.systemTab === 'apikeys') {
-                this.fetchSettings(); this.loadIntegrations();
+                this.fetchSettings();
               }
               if (route.systemTab === 'settings') {
                 this.fetchBrowserSettings();
@@ -1423,7 +1426,7 @@ function dashboard() {
 
       // Deep link restoration: parse initial URL and apply route
       const initRoute = this._parsePath(window.location.pathname);
-      const isDeepLink = initRoute.agentId || initRoute.tab !== 'chat' || initRoute.activityView !== 'traces' || initRoute.systemTab !== 'costs';
+      const isDeepLink = initRoute.agentId || initRoute.tab !== 'chat' || initRoute.activityView !== 'traces' || initRoute.systemTab !== 'settings';
       if (isDeepLink) {
         this.$nextTick(() => {
           this._applyRoute(initRoute);
@@ -2402,11 +2405,9 @@ function dashboard() {
           this.fetchWebhooks();
           this.fetchChannels();
           this.fetchApiKeys();
-        }
-        if (this.systemTab === 'apikeys') {
-          this.fetchSettings();
           this.loadIntegrations();
         }
+        // apikeys needs only fetchSettings(), already called unconditionally above.
         if (this.systemTab === 'network') {
           this.loadNetworkProxy();
         }
@@ -2436,8 +2437,8 @@ function dashboard() {
       if (this.systemTab === 'activity' && tabId !== 'activity') this._stopActivityRefresh();
       this.systemTab = tabId;
       this._pushUrl(false);
-      if (tabId === 'integrations') { this.fetchChannels(); this.fetchWebhooks(); this.fetchApiKeys(); }
-      if (tabId === 'apikeys') { this.fetchSettings(); this.loadIntegrations(); }
+      if (tabId === 'integrations') { this.fetchChannels(); this.fetchWebhooks(); this.fetchApiKeys(); this.loadIntegrations(); }
+      if (tabId === 'apikeys') { this.fetchSettings(); }
       if (tabId === 'storage') { this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails(); }
       if (tabId === 'network') { this.loadNetworkProxy(); }
       if (tabId === 'settings') { this.fetchBrowserSettings(); this.fetchSystemSettings(); }
