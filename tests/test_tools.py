@@ -64,6 +64,42 @@ async def test_unknown_tool_raises():
         await registry.execute("nonexistent", {})
 
 
+def _write_tool_file(path: Path, tool_name: str) -> None:
+    """Write a minimal @tool module that registers ``tool_name`` on import."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "from src.agent.tools import tool\n"
+        f"@tool(name='{tool_name}', description='d', parameters={{}})\n"
+        f"def {tool_name}():\n"
+        "    return 1\n"
+    )
+
+
+def test_loader_prunes_dependency_and_vcs_trees(tmp_path):
+    """The loader must recurse normal subdirs but never descend into a
+    .venv / site-packages / __pycache__ / .git tree — otherwise a stray
+    virtualenv (or tools_dir resolving to a repo root) makes it try to
+    import thousands of library .py files as tools."""
+    # Legit tools: one top-level, one in an ordinary nested package.
+    _write_tool_file(tmp_path / "good_tool.py", "good_one")
+    _write_tool_file(tmp_path / "pkg" / "nested_tool.py", "nested_one")
+    # Poison trees the loader must skip entirely.
+    _write_tool_file(
+        tmp_path / ".venv" / "lib" / "site-packages" / "venv_tool.py", "venv_one"
+    )
+    _write_tool_file(tmp_path / "__pycache__" / "cache_tool.py", "cache_one")
+    _write_tool_file(tmp_path / ".git" / "hooks" / "git_tool.py", "git_one")
+
+    registry = ToolRegistry.__new__(ToolRegistry)
+    registry._load_modules_from(tmp_path, label="tool")
+
+    assert "good_one" in _tool_staging
+    assert "nested_one" in _tool_staging  # ordinary recursion still works
+    assert "venv_one" not in _tool_staging
+    assert "cache_one" not in _tool_staging
+    assert "git_one" not in _tool_staging
+
+
 def test_get_tool_definitions():
     @tool(
         name="tool_test",

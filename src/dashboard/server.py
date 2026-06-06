@@ -2359,7 +2359,8 @@ def create_dashboard_router(
             acfg = cfg.get("agents", {}).get(name, {})
             if template:
                 role = acfg.get("role", role)
-            tools_dir = os.path.abspath(acfg.get("tools_dir", ""))
+            _td = acfg.get("tools_dir", "")
+            tools_dir = os.path.abspath(_td) if _td else ""
             # Build per-agent env overrides (no shared extra_env mutation)
             agent_env: dict[str, str] = {}
             for env_key, cfg_key in (
