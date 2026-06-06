@@ -36,6 +36,11 @@ def _is_operator() -> bool:
             "default": "",
         },
     },
+    # Mutates the shared on-disk skills store (clone → rmtree → os.replace).
+    # Must not run concurrently with another install/remove or the gather-batched
+    # loop could interleave two filesystem mutations on the same store. Mirrors
+    # assign_skill's opt-out.
+    parallel_safe=False,
 )
 async def install_skill(repo_url: str, ref: str = "", *, mesh_client=None, _messages=None, **_kw) -> dict:
     if not _is_operator():
@@ -60,6 +65,8 @@ async def install_skill(repo_url: str, ref: str = "", *, mesh_client=None, _mess
     parameters={
         "name": {"type": "string", "description": "Installed skill name to remove."},
     },
+    # Mutates the shared on-disk skills store — serialize like install_skill.
+    parallel_safe=False,
 )
 async def remove_skill(name: str, *, mesh_client=None, _messages=None, **_kw) -> dict:
     if not _is_operator():
