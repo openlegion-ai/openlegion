@@ -12,7 +12,7 @@ Agents interact with their environment through **tools** -- Python functions reg
 
 ### File Operations
 
-All file operations are scoped to `/data` inside the container. Path traversal is blocked (two-stage: reject `..` then resolve symlinks via `lstat()`). `_MAX_READ=500_000`, `_MAX_LIST_ENTRIES=500`. Direct writes to `SOUL.md` / `AGENTS.md` / `INSTRUCTIONS.md` / `HEARTBEAT.md` / `USER.md` / `MEMORY.md` / `INTERFACE.md` are blocked — use `update_workspace`.
+All file operations are scoped to `/data` inside the container. Path traversal is blocked (two-stage: reject `..` then resolve symlinks via `lstat()`). `_MAX_READ=500_000`, `_MAX_LIST_ENTRIES=500`. Direct writes to `SOUL.md` / `AGENTS.md` / `INSTRUCTIONS.md` / `HEARTBEAT.md` / `USER.md` / `MEMORY.md` are blocked — use `update_workspace`.
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
@@ -102,7 +102,7 @@ An OS-level device profile is selected by `BROWSER_DEVICE_PROFILE` (`desktop-win
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `update_workspace` | `filename`, `content` | Update a writable workspace file (`SOUL.md`, `INSTRUCTIONS.md`, `USER.md`, `HEARTBEAT.md`, `INTERFACE.md`, `GOALS.md`, or `GOALS.json`) to persist learnings across sessions |
+| `update_workspace` | `filename`, `content` | Update a writable workspace file (`SOUL.md`, `INSTRUCTIONS.md`, `USER.md`, `HEARTBEAT.md`, or `INTERFACE.md`) to persist learnings across sessions |
 
 ### Scheduling & Automation
 
@@ -169,7 +169,7 @@ Agents can interact with EVM and Solana blockchains through the wallet signing s
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
-| `get_system_status` | `section` (default "all"; values: `permissions` / `budget` / `fleet` / `cron` / `health` / `all`) | Query live runtime state |
+| `get_system_status` | `section` (default "all"; values: `permissions` / `budget` / `fleet` / `cron` / `health` / `llm` / `all`) | Query live runtime state |
 
 Agents receive system awareness through three layers:
 
@@ -177,7 +177,7 @@ Agents receive system awareness through three layers:
 2. **Runtime Context** — A compact block injected into the system prompt on each turn (5-minute cache). Shows live budget numbers, permission patterns, fleet roster, and cron schedule.
 3. **`get_system_status` tool** — On-demand access to fresh data when agents need exact numbers mid-conversation.
 
-The `section` parameter accepts: `permissions`, `budget`, `fleet`, `cron`, `health`, or `all` (default). Fleet data is filtered by `can_message` permissions — agents only see teammates they can interact with.
+The `section` parameter accepts: `permissions`, `budget`, `fleet`, `cron`, `health`, `llm` (LLM provider availability), or `all` (default). Fleet data is filtered by `can_message` permissions — agents only see teammates they can interact with.
 
 ### Multi-Agent Coordination
 
@@ -220,22 +220,31 @@ stale LLM prompt fails fast and retries on the canonical name.
 | Tool | Parameters | Description |
 |------|-----------|-------------|
 | `inspect_agents` | `agent_id` (default ""), `depth` (default `"summary"`; values: `summary` / `profile` / `history`), `stale_threshold_hours` (default 0, range 1–168; 0/None = skip) | Look up agents. Empty `agent_id` lists the fleet at `summary` depth; passing an `agent_id` with `profile` returns the collaboration interface, or with `history` returns recent conversation history. Pass `stale_threshold_hours=N` to annotate each roster entry with `stale_task_count` + up to 5 oldest stale task IDs. Replaces `list_agents` / `get_agent_profile` / `read_agent_history` for the operator. |
+| `read_agent_config` | `agent_id`, `fields` (optional list) | Read an agent's current config — symmetric inverse of `edit_agent`. Returns the same fields `edit_agent` can change so you can review current values before/after a tweak. |
+| `read_user_notifications` | `hours` (default 24), `limit` (default 50) | Read recent notifications agents pushed to the human user's chat via `notify_user`. Observational/diagnostic only. |
+| `list_peer_artifacts` | `agent_id` | List a teammate's artifact files (those written via `save_artifact`). Operator-only read path. |
+| `read_peer_artifact` | `agent_id`, `name` | Read a single artifact file written by a teammate. Use after `list_peer_artifacts`. |
+| `list_available_models` | `provider` (optional) | List models currently usable given the active credential setup. Call before `edit_agent` / `create_agent` to avoid OAuth-allowlist rejections. |
+| `workflow_snapshot` | `root_task_id` | Read a workflow chain snapshot for a multi-stage handoff. Pass the kickoff task_id; returns every descendant stage with status (and `blocker_note`). |
+| `await_task_event` | `task_id`, `timeout_s`, `poll_interval_s` (default 3) | Block until a task reaches a terminal status (`done` / `failed` / `blocked` / `cancelled`) or the timeout elapses. Polls the operator's back-edge inbox. |
 | `inspect_teams` | `detail` (default `"names"`; values: `names` / `status` / `full`), `team_name` (default "") | Look up teams. With no `team_name`, `names` returns name+description, `status` returns task-count rollups. Passing a `team_name` returns the full record. |
 | `manage_team` | `action` (enum: `archive` / `unarchive` / `propose_delete`), `team_name` | Lifecycle for a team. `propose_delete` requires the team to already be archived (returns a confirmation nonce). |
 | `manage_agent` | `agent_id`, `action` (enum: `archive` / `delete`) | Lifecycle for an agent. Same archive-then-delete contract as `manage_team`. Replaces `archive_agent` / `delete_agent`. |
 | `manage_task` | `task_id`, `action` (enum: `cancel` / `reroute` / `retry`), `new_assignee` (default "", required for `reroute`, optional override for `retry`), `reason` (default ""), `with_changes` (default {}, `retry` only — optional override for assignee/title/description) | Single entry point for task ops. Reroute and retry refuse if the target agent is over budget. `reason` is recorded on the audit trail. Replaces `cancel_task` / `reroute_task` / `retry_failed_task`. |
 | `edit_agent` | `agent_id`, `field` (enum: `instructions` / `soul` / `role` / `heartbeat` / `heartbeat_schedule` / `interface` / `model` / `thinking` / `budget` / `permissions`), `value`, `reason` (default `"user_asked"`; values: `user_asked` / `operator_proactive`) | Single entry point for agent config changes. ALL fields apply immediately and emit an undo receipt — soft fields (`instructions`, `soul`, `role`, `heartbeat`, `heartbeat_schedule`, `interface`) carry a 5-minute Undo window; hard fields (`model`, `thinking`, `budget`, `permissions`) carry a 30-minute Undo window. No pre-execution confirm step. `heartbeat_schedule` also retargets the live cron job in lockstep with the YAML write. |
 | `undo_change` | `undo_token` | Reverse an edit applied via `edit_agent`. Token is returned with the edit and remains valid for 5 minutes (soft fields) or 30 minutes (hard fields); 404 if expired or already undone. |
-| `confirm_edit` | `change_id` | Deprecated no-op stub. The `/edit-soft` immediate-apply refactor retired the propose-then-confirm flow; `confirm_edit` returns a friendly hint and is retained only so in-flight LLM conversations that still emit it don't error. New conversations should call `edit_agent` directly. |
 | `create_agent` | `name` (lowercase, alphanumeric + hyphens, 1–32 chars), `role`, `model` (default ""), `instructions`, `soul` (default "") | Create a new custom agent. Requires user confirmation. |
 | `create_team` | `name`, `description`, `agent_ids` (default []) | Create a new team and optionally assign agents. Requires user confirmation. |
 | `add_agents_to_team` | `team_name`, `agent_ids` | Add one or more agents to a team. Requires user confirmation. |
 | `remove_agents_from_team` | `team_name`, `agent_ids` | Remove one or more agents from a team. Requires user confirmation. |
 | `update_team_context` | `team_name`, `context` | Update the shared `TEAM.md` context for a team. |
 | `set_team_goal` | `team_name`, `north_star`, `success_criteria` (default []) | Save the team's vision (≤2000 chars) and up to 10 success criteria (each ≤200 chars). Rendered prominently on every team card in the Board tab. Pass empty values to clear. No confirmation required — call proactively whenever the user describes a team goal. |
-| `list_agent_queue` | `agent_id`, `limit` (default 10, max 100) | Read an agent's task queue: current and recent tasks grouped by status (`active` / `blocked` / `done` / `failed` / `cancelled`), up to `limit` rows per bucket. Requires `OPENLEGION_ORCHESTRATION_TASKS_V2=1`. |
+| `list_agent_queue` | `agent_id`, `limit` (default 10, max 100) | Read an agent's task queue: current and recent tasks grouped by status (`active` / `blocked` / `done` / `failed` / `cancelled`), up to `limit` rows per bucket. |
 | `get_team_outputs` | `team_id` (alias `project_id` accepted), `since` (default ""; ISO timestamp or duration like `"24h"`/`"7d"`) | Completed task artifacts for a team in a time window. Default window is the last 7 days. |
-| `summarize_team_progress` (alias `summarize_project_progress`) | `team_id` (alias `project_id` accepted) | Synthesized status summary for a team: structured counts + narrative `status_text` + top blockers + recent completions + `ask_for_user` list. |
+| `summarize_team_progress` | `team_id` (alias `project_id` accepted) | Synthesized status summary for a team: structured counts + narrative `status_text` + top blockers + recent completions + `ask_for_user` list. |
+| `compose_work_summary` | `scope_kind` (default `"team"`; `team` / `solo`), `scope_id` (default ""), `period_hours` (default 24) | Compose and persist a work summary (the Work tab's default landing surface) from recent task activity: narrative + metrics + highlights. |
+| `manage_goals` | `action` (e.g. `set` / `add` / `update` / `remove`), `goals`, `goal`, `name`, `team_names` | Manage tracked business goals shown on the user's Work tab. Source of truth is `GOALS.json` (rendered to `GOALS.md` for humans). |
+| `rate_delivery` | `task_id`, `outcome`, `feedback` (default "") | Record an outcome rating on a completed task. Operator's per-task judgment — drives the agent-feedback loop (memory writes + auto-rework spawn). |
 | `list_pending` | -- | List every non-expired pending action awaiting user confirmation. Returns nonce, action_kind, target_kind, target_id, expires_at, actor and summary per row. Use to find the nonce for `cancel_pending_action` or to surface waiting items to the user. |
 | `cancel_pending_action` | `nonce` | Cancel a pending action by nonce so it can no longer be confirmed. Use to clean up stale or incorrect proposals. Pair with `list_pending` to find the nonce. |
 | `archive_audit_before` | `before_date` (ISO 8601 date or timestamp) | Archive operator audit entries older than the given date. Rows are removed from the active audit-log view but preserved in the archived store (recoverable via `include_archived=true`). Returns the count of rows archived. |

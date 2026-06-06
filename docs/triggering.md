@@ -205,7 +205,7 @@ Heartbeats skip the LLM dispatch entirely (zero cost) when all four conditions a
 3. **No recent activity** — daily logs are empty
 4. **No probes triggered** — disk usage normal, no pending signals or tasks
 
-This makes always-on heartbeats economically viable even at high frequencies. See `src/host/cron.py:394`.
+This makes always-on heartbeats economically viable even at high frequencies. See `src/host/cron.py:543`.
 
 #### Forcing the LLM to run every tick
 
@@ -259,7 +259,7 @@ The webhook payload is included in the message dispatched to the configured agen
 
 ### Creating Webhooks
 
-Webhook creation is a **dashboard-only** flow. The endpoint is `POST /api/webhooks` on the dashboard router (`src/dashboard/server.py:5706`); it uses dashboard SSO cookie auth (`ol_session`), not `MESH_AUTH_TOKEN`. There is no `/mesh/webhooks` endpoint.
+Webhook creation is a **dashboard-only** flow. The endpoint is `POST /api/webhooks` on the dashboard router (`src/dashboard/server.py:6659`); it uses dashboard SSO cookie auth (`ol_session`), not `MESH_AUTH_TOKEN`. There is no `/mesh/webhooks` endpoint.
 
 In practice you create webhooks from the dashboard System → Integrations tab. The request body is `{"name": "<label>", "agent": "<agent_id>", "instructions"?: "<extra>", "secret"?: "<existing-secret>"}`; the server stores `require_signature = bool(body.get("secret"))` and assigns a random 32-byte hex secret (`secrets.token_hex(32)`) if none was supplied. The created hook's secret is returned **once** in the response — store it immediately.
 
@@ -319,11 +319,11 @@ Pub/sub is a fan-out signal — for **direct** agent-to-agent work handoffs use 
 | `update_status(state, task_id?)` | Report progress on an active task. With 2+ active tasks and no `task_id`, returns an `ambiguous_task` payload so the LLM can pick a `task_id` without a follow-up `check_inbox` call. |
 | `complete_task(task_key)` | Mark a task complete; releases the auto-notify back to the originator. |
 
-Unprocessed handoffs expire after `_HANDOFF_TTL = 86_400` seconds (24h) as a safety net (`coordination_tool.py:36`).
+Unprocessed handoffs expire after `_HANDOFF_TTL = 86_400` seconds (24h) as a safety net (`coordination_tool.py:33`).
 
 ### MessageRouter
 
-Cross-agent calls go through `MessageRouter` (`src/host/mesh.py:738`), which resolves the target string to a container URL:
+Cross-agent calls go through `MessageRouter` (`src/host/mesh.py:737`), which resolves the target string to a container URL:
 
 - **Agent ID** — exact match against the agent registry
 - **`capability:<name>`** — first agent whose declared capabilities include `<name>`
@@ -332,13 +332,12 @@ Permissions are enforced on every routed call; unknown targets return `{"error":
 
 ### Lanes
 
-Each agent has a FIFO task lane (`src/host/lanes.py`) with three dispatch modes:
+Each agent has a FIFO task lane (`src/host/lanes.py`) with two dispatch modes:
 
 | Mode | Behavior |
 |------|----------|
 | `followup` (default) | Queue the message; process after the current task finishes. |
 | `steer` | Inject the message into the agent's active conversation between tool rounds. Rate-limited to `_STEER_WAKEUP_MAX = 10` injections per `_STEER_WAKEUP_WINDOW = 3600` seconds (per-agent). |
-| `collect` | Batch queued messages while the agent is busy, then dispatch them as a single combined message once the agent becomes free. |
 
 When a lane completes a task that originated from a channel handoff (`auto_notify=True`), the result is forwarded back to the originating channel/user with a `[agent_name]` prefix. The send is capped at `_NOTIFY_FORWARD_TIMEOUT = 30` seconds (`lanes.py:30`).
 

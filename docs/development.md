@@ -91,7 +91,7 @@ Playwright is intentionally **not** in the `[dev]` extra (browser binaries ballo
 
 ### CI Matrix
 
-`.github/workflows/test.yml` runs three jobs on every PR + push:
+`.github/workflows/test.yml` runs on push to `main` and pull requests targeting `main`. `lint` and `test` run on both triggers; `coverage` is push-only:
 
 | Job | Trigger | Setup | Command |
 |-----|---------|-------|---------|
@@ -441,7 +441,7 @@ openlegion/
 │   ├── mesh.yaml
 │   ├── permissions.json
 │   └── cron.json
-├── tests/                       # Test suite (~155 test files)
+├── tests/                       # Test suite (~193 test files)
 │   └── fixtures/                # Test fixtures (echo MCP server, etc.)
 ├── tools/                       # Standalone dev tools
 │   ├── behavior_analyze.py      # Browser/captcha behavior analysis
@@ -472,6 +472,7 @@ openlegion/
 | `pypdf` | PDF text extraction for attachments |
 | `anthropic` | Anthropic SDK (used by litellm) |
 | `python-multipart` | Multipart form data parsing |
+| `Pillow` | Image processing for browser screenshots |
 
 ### Agent-Side (installed in container via Dockerfile)
 
@@ -482,6 +483,7 @@ openlegion/
 | `pydantic` | Type validation |
 | `sqlite-vec` | Vector search for memory |
 | `mcp` | Model Context Protocol client |
+| `pypdf` | PDF text extraction for attachments |
 | `camoufox` | Stealth browser automation (in browser service container) |
 
 ### Optional

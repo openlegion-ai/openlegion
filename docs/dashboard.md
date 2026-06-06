@@ -430,7 +430,7 @@ The dashboard connects to the mesh via WebSocket at `/ws/events`. Events are str
 
 ### Event Types
 
-`DashboardEvent.type` is a `Literal[…]` of **53 values** (`src/shared/types.py:729-838`). They group into nine families:
+`DashboardEvent.type` is a `Literal[…]` of **53 values** (`src/shared/types.py:741-850`). They group into nine families:
 
 | Family | Events |
 |--------|--------|
@@ -548,7 +548,7 @@ curl -X GET "http://localhost:8420/dashboard/api/billing/captcha-rollup?tenant=a
 
 ## API Endpoints
 
-All dashboard API endpoints are prefixed with `/dashboard/api/`. The SPA root is served at `GET /dashboard/` (HTML, not an API endpoint). The dashboard router exposes **143 endpoints** registered via `@api_router.*` in `src/dashboard/server.py`. State-changing endpoints (POST/PUT/DELETE/PATCH) require the `X-Requested-With` header; see [Authentication](#authentication).
+All dashboard API endpoints are prefixed with `/dashboard/api/`. The SPA root is served at `GET /dashboard/` (HTML, not an API endpoint). The dashboard router exposes **160 endpoints** registered via `@api_router.*` in `src/dashboard/server.py`. State-changing endpoints (POST/PUT/DELETE/PATCH) require the `X-Requested-With` header; see [Authentication](#authentication).
 
 A handful of endpoints have **no UI surface** and are reachable by curl only. They are flagged inline as `(operator-curl only — no UI)`.
 
@@ -585,7 +585,7 @@ The tables below are not exhaustive — they cover the user-facing surface area 
 | `GET` | `/dashboard/api/conversations` | List active conversations (open chat panels) |
 | `POST` | `/dashboard/api/conversations/{agent_id}/open` | Mark a conversation open |
 | `POST` | `/dashboard/api/conversations/{agent_id}/close` | Mark a conversation closed |
-| `POST` | `/dashboard/api/broadcast` | Send message to all agents (request body filters by `project` name — alias `team` accepted — or `standalone: true`; operator excluded) |
+| `POST` | `/dashboard/api/broadcast` | Send message to all agents (request body filters by `project` name or `standalone: true`; operator excluded) |
 | `POST` | `/dashboard/api/broadcast/stream` | SSE streaming broadcast (same filters as above) |
 
 **Workspace**
@@ -849,7 +849,7 @@ The dashboard includes several accessibility features:
 
 | File | Role |
 |------|------|
-| `src/dashboard/server.py` | FastAPI router with all 143 API endpoints, CSP + CSRF wiring, VNC URL injection |
+| `src/dashboard/server.py` | FastAPI router with all 160 API endpoints, CSP + CSRF wiring, VNC URL injection |
 | `src/dashboard/templates/index.html` | Dashboard HTML (Alpine.js SPA template + Tailwind via CDN). Renders with `autoescape=True` |
 | `src/dashboard/static/js/app.js` | Dashboard application logic — top-nav tabs, Work surface, wizard / tutorial state, identity tabs |
 | `src/dashboard/static/js/websocket.js` | WebSocket client with exponential-backoff reconnect (`reconnectIn` countdown) |

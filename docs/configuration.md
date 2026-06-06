@@ -251,16 +251,21 @@ OPENLEGION_CRED_SLACK_BOT_TOKEN=xoxb-...
 OPENLEGION_CRED_SLACK_APP_TOKEN=xapp-...
 OPENLEGION_CRED_WHATSAPP_ACCESS_TOKEN=EAAx...
 OPENLEGION_CRED_WHATSAPP_PHONE_NUMBER_ID=1234...
-# Required for WhatsApp inbound webhook signature verification (X-Hub-Signature-256).
-# Without it, signature verification is skipped with a WARNING.
+# WhatsApp webhook-subscription handshake token (hub.verify_token). Echoed back
+# during the GET webhook verification handshake; NOT used for message signing.
 OPENLEGION_CRED_WHATSAPP_VERIFY_TOKEN=...
+# Meta app secret — env-only (read directly from the process environment, no
+# SYSTEM/CRED tiering). Gates inbound webhook X-Hub-Signature-256 verification.
+# Production-required: when MESH_AUTH_TOKEN is set but this is unset the WhatsApp
+# channel logs a hard production warning.
+WHATSAPP_APP_SECRET=...
 ```
 
 All credentials in the `OPENLEGION_SYSTEM_*` and `OPENLEGION_CRED_*` tiers are loaded by the credential vault (`src/host/credentials.py`). Agents never see values directly -- they make API calls through the mesh proxy, which injects credentials server-side.
 
 **CAPTCHA solver credentials bypass the vault.** The four secrets used by the browser CAPTCHA pipeline — `CAPTCHA_SOLVER_KEY`, `CAPTCHA_SOLVER_KEY_SECONDARY`, `CAPTCHA_SOLVER_PROXY_LOGIN`, `CAPTCHA_SOLVER_PROXY_PASSWORD` — are listed in `flags._ENV_ONLY_FLAGS` and read directly from the process environment by the browser service. They are NOT routed through the agent-tier `OPENLEGION_CRED_*` vault, do NOT appear in the credentials UI, and are explicitly stripped from `config/settings.json:browser_flags` at load with a one-time warning (settings.json is plaintext on disk). The dashboard's `POST /api/captcha-solver` endpoint writes them via `os.environ[…]` directly. Provide them as plain environment variables (e.g. via `.env`).
 
-**Channel credential fallback:** Channel bot tokens (Telegram, Discord, Slack, WhatsApp) are resolved with a four-tier fallback chain: `mesh.yaml` channel config field (e.g. `channels.telegram.bot_token`) → `OPENLEGION_SYSTEM_<NAME>` → `OPENLEGION_CRED_<NAME>` → legacy unprefixed `<NAME>` (e.g., `TELEGRAM_BOT_TOKEN`). The `OPENLEGION_CRED_` prefix is recommended for channel tokens.
+**Channel credential fallback:** Channel bot tokens (Telegram, Discord, Slack, WhatsApp) are resolved with a four-tier fallback chain: `mesh.yaml` channel config field (Telegram and Discord use `token`, Slack uses `bot_token`/`app_token`, WhatsApp uses `access_token` — e.g. `channels.telegram.token`) → `OPENLEGION_SYSTEM_<NAME>` → `OPENLEGION_CRED_<NAME>` → legacy unprefixed `<NAME>` (e.g., `TELEGRAM_BOT_TOKEN`). The `OPENLEGION_CRED_` prefix is recommended for channel tokens.
 
 **Important:** LLM provider keys **must** use the `OPENLEGION_SYSTEM_` prefix. The mesh proxy only looks for provider keys in the system tier. A provider key stored with `OPENLEGION_CRED_` will be treated as an agent-tier credential and will not be used for LLM calls.
 
@@ -301,17 +306,16 @@ Beyond credentials, these environment variables affect runtime behavior:
 | `OPENLEGION_LOG_FORMAT` | `json` | Log output format: `json` (structured) or `text` (human-readable) |
 | `MCP_SERVERS` | -- | JSON string of MCP server configs (set automatically in containers) |
 | `MESH_AUTH_TOKEN` | -- | Agent auth token (set automatically in containers) |
-| `MESH_HOST` | -- | Mesh host URL (set automatically in containers) |
+| `MESH_URL` | -- | Mesh host URL the agent container calls back to (set automatically in containers; the agent exits if it is missing) |
 | `AGENT_ID` | -- | Agent identifier (set automatically in containers) |
 | `THINKING` | `off` | Extended thinking/reasoning mode (set automatically from `thinking` in agents.yaml) |
 | `PROJECT_NAME` | -- | Team this agent belongs to (set automatically for team members). Env-var name is retained through PR 2 of the project→team rename. |
-| `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model for memory vector search (set automatically from `llm.embedding_model` in mesh.yaml). Set to `"none"` to disable vector search |
+| `EMBEDDING_MODEL` | *provider-conditional* | Embedding model for memory vector search (set automatically from `llm.embedding_model` in mesh.yaml). The default is derived from the default LLM provider (`src/cli/runtime.py`): openai-family models (`openai/`, `gpt-`, `o1`, `o3`, `o4`) resolve to `text-embedding-3-small`; all other providers resolve to `none`. The raw agent-container default is empty, where `""` / `"none"` disables embeddings. Set to `"none"` to disable vector search |
 | `OPENLEGION_MAX_AGENTS` | `0` | Plan limit: maximum agents to start. `0` means unlimited. If set to N > 0, only the first N agents are started. **Also drives plan-aware browser-service sizing** (`src/host/runtime.py:506-526`) — the browser container's memory, SHM, CPU quota, and `max_browsers` cap are selected across four `max_agents` tiers (see **Browser-Service Sizing Tiers** below). Note: `OPENLEGION_MAX_AGENTS=0` (the default, meaning "unlimited agents") falls into the `≤1` branch and selects the **Basic** browser-service tier — counterintuitive but intentional for self-host installs that haven't declared a plan. |
 | `OPENLEGION_MAX_TEAMS` | -- | Plan limit. Three-state semantics: **unset** (env var absent) → teams are unlimited; **set to `0`** → teams are disabled entirely, `POST /mesh/teams` returns HTTP 403; **set to N > 0** → only N teams are allowed. The pre-rename `OPENLEGION_MAX_PROJECTS` name is no longer read — use `OPENLEGION_MAX_TEAMS`. |
 | `OPENLEGION_TEAM_SCOPE_MODE` | `enforce` | Team-scope rollout kill switch. Accepts `"warn"` or `"enforce"` (case-insensitive via `.lower()`). Invalid values default to `"enforce"` with a WARNING. **Read once at module import — restart the mesh to change.** The pre-rename `OPENLEGION_PROJECT_SCOPE_MODE` name is no longer read. |
 | `OPENLEGION_SKIP_TRUST_TIER_BOOT_GATE` | -- | Bypass the fail-closed startup gate that refuses to boot when `OPENLEGION_TEAM_SCOPE_MODE=enforce` and `auth_tokens` is empty (an unverifiable `X-Agent-ID` header would otherwise make the operator trust tier forgeable). Set to `"1"` to skip the gate. Used by `tests/conftest.py` for in-process test sessions; not for production deploys (`src/host/server.py`). |
 | `OPENLEGION_TEAM_MIGRATION_RENAME_DB` | `1` | DB column rename `tasks.project_id` → `tasks.team_id` on startup. Default-on as of PR 3 of the project→team rename; set to `0` to opt out for emergency rollback. The orchestration layer introspects the live column at init via PRAGMA so either schema shape works without source changes. |
-| `OPENLEGION_ORCHESTRATION_TASKS_V2` | `1` | Toggle the durable orchestration v2 tasks store. `"1"` enables; `"0"` falls back to the legacy blackboard task path. **Read once at module import — restart the mesh to flip.** |
 | `OPENLEGION_ORCHESTRATION_TASKS_DB` | `data/tasks.db` | Override the SQLite path for the orchestration v2 tasks store. |
 | `OPENLEGION_API_KEY` | -- | Legacy single API key for back-compat with the named-key system (`config/api_keys.json`). Compared with `hmac.compare_digest`. Prefer creating named keys via `POST /api/api-keys`. |
 | `OPENLEGION_APP_URL` | -- | App URL used by the dashboard's external SSO link (read by `src/dashboard/server.py`). |

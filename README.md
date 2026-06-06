@@ -150,7 +150,7 @@ OpenLegion was designed from day one assuming agents will be compromised.
 | **Cost controls** | None | Per-agent daily + monthly budget caps |
 | **Multi-agent routing** | LLM CEO agent | Fleet model — blackboard + pub/sub coordination |
 | **LLM providers** | Broad | 100+ via LiteLLM with health-tracked failover |
-| **Test coverage** | Minimal | 5800+ tests across 155 test files including full Docker E2E |
+| **Test coverage** | Minimal | 5800+ tests across 193 test files including full Docker E2E |
 | **Codebase size** | 430,000+ lines | ~77,000 lines in `src/` — still auditable in a day |
 
 ---
@@ -165,7 +165,7 @@ Chat with your agent fleet via **Telegram**, **Discord**, **Slack**, **WhatsApp*
 via cron schedules, webhooks, and heartbeat monitoring — without being
 prompted.
 
-**5800+ tests passing** across 155 test files.
+**5800+ tests passing** across 193 test files.
 **Fully auditable in a day.**
 No LangChain. No Redis. No Kubernetes. No CEO agent. Source-available (PolyForm Perimeter).
 
@@ -710,14 +710,14 @@ openlegion [--verbose/-v] [--quiet/-q] [--json]
 ├── status [--port PORT] [--wide/-w] [--watch N] [--json]  # Show agent status
 ├── teams [--port PORT] [--json]                           # List active teams (alias: ``projects``)
 ├── team <team_id> [--port PORT] [--json]                  # Show one team (members, blockers, task counts) (alias: ``project``)
-├── tasks [--agent X] [--team Y | --project Y] [--status S] [--port PORT] [--json]   # List durable task records
+├── tasks [--agent X] [--team Y] [--status S] [--port PORT] [--json]   # List durable task records
 ├── pending [--port PORT] [--json]                         # List pending actions awaiting confirmation
 ├── confirm <nonce> [--port PORT]                          # Confirm a pending action
 ├── cancel <nonce> [--port PORT]                           # Cancel a pending action
 ├── reset [-y]                                             # DESTRUCTIVE: stop everything and wipe config/, data/, agent_tools/* (keeps .env)
 ├── version [--verbose/-v]                                 # Show version and environment info
 └── wallet                                                 # Manage agent wallets (derives EVM + Solana from one master seed)
-    ├── init                                               # Generate the master wallet seed (shown once; HTTP 410 thereafter)
+    ├── init                                               # Generate the master wallet seed (shown once; refuses to regenerate while ``OPENLEGION_SYSTEM_WALLET_MASTER_SEED`` is set)
     └── show [agent_id]                                    # Show wallet addresses
 ```
 
@@ -988,7 +988,7 @@ pytest tests/
 
 ### Test Coverage
 
-Roughly **5800+ test cases across 155 test files** (`find tests -name '*.py' | xargs grep -c '^def test_'`). Coverage includes every module under `src/` — `tests/test_FOO.py` maps to `src/.../FOO.py` (see CLAUDE.md for the full mapping). The four `tests/test_e2e*.py` files require Docker and a real LLM key; everything else runs in CI in under a few minutes per shard.
+Roughly **5800+ test cases across 193 test files** (`find tests -name '*.py' | xargs grep -c '^def test_'`). Coverage includes every module under `src/` — `tests/test_FOO.py` maps to `src/.../FOO.py` (see CLAUDE.md for the full mapping). The four `tests/test_e2e*.py` files require Docker and a real LLM key; everything else runs in CI in under a few minutes per shard.
 
 ---
 

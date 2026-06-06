@@ -13,7 +13,7 @@ Layer 4: Context Manager          <- Manages the LLM's context window
   |
 Layer 3: Workspace Files          <- Durable, human-readable storage
   |  INSTRUCTIONS.md, SOUL.md, USER.md  (loaded into system prompt)
-  |  SYSTEM.md                    (auto-generated architecture guide + runtime snapshot)
+  |  SYSTEM.md                    (auto-generated architecture guide, static preamble)
   |  MEMORY.md                    (curated long-term facts)
   |  HEARTBEAT.md                 (autonomous monitoring rules)
   |  memory/YYYY-MM-DD.md         (daily session logs)
@@ -40,7 +40,7 @@ Manages the LLM's context window to prevent overflow while preserving important 
 ### Token Tracking
 
 - **Model-aware token estimation**: tiktoken for OpenAI models (accurate), 3.5 chars/token for Anthropic, 4 chars/token fallback for unknown providers
-- **Model-aware context windows**: auto-detects max context from model name (12 models supported), with explicit `max_tokens` override
+- **Model-aware context windows**: uses litellm's `max_input_tokens` with a hardcoded fallback table (16 entries), with explicit `max_tokens` override
 - Four compaction thresholds:
   - **60%** -- proactive flush (extract facts to MEMORY.md)
   - **70%** -- auto-compact (summarize + trim, preserving tool-call group boundaries). If the LLM is unavailable or summarization returns an empty summary (`context.py:452-453`), this path falls back to hard prune.
@@ -80,7 +80,7 @@ Persistent markdown files stored on the agent's `/data/workspace` volume.
 | `USER.md` | User preferences and working style | 4K chars | System prompt |
 | `MEMORY.md` | Curated long-term facts | 16K chars | System prompt |
 | `TEAM.md` | Team-wide context (optional, per-team, mounted from host, **read-only** when present). Pre-rename `PROJECT.md` files are migrated to `TEAM.md` once at startup; the bootstrap loader reads only `TEAM.md`/`team.md`. | -- | When present in the team config |
-| `SYSTEM.md` | System architecture guide + runtime snapshot (auto-generated, read-only) | capped at 6K chars | System prompt |
+| `SYSTEM.md` | System architecture guide (auto-generated, static preamble, read-only) | capped at 6K chars | System prompt |
 | `HEARTBEAT.md` | Autonomous monitoring rules | -- | Heartbeat dispatch (auto-loaded) |
 | `INTERFACE.md` | Public collaboration contract (inputs, outputs, subscriptions) | 4K chars | Not auto-loaded into system prompt — read by other agents via `get_agent_profile` |
 
@@ -88,10 +88,9 @@ Total bootstrap injection into the system prompt is capped at 48K characters acr
 
 ### System File (`SYSTEM.md`)
 
-Auto-generated at startup and refreshed every 5 minutes. Contains two parts:
+Generated once at agent startup. Contains a static preamble only:
 
-1. **Static preamble** — Explains how the mesh, credential vault, blackboard, pub/sub, context window, and tool costs work. Includes a "common errors and what they mean" section (403, 429, budget exceeded, tool loop detected). This teaches agents *how the system works* so they can self-diagnose issues.
-2. **Runtime snapshot** — Compact permissions and fleet roster from the `/mesh/introspect` endpoint. Gives agents initial awareness of their capabilities before the live Runtime Context block kicks in.
+- **Static preamble** — Explains how the mesh, credential vault, blackboard, pub/sub, context window, and tool costs work. Includes a "common errors and what they mean" section (403, 429, budget exceeded, tool loop detected). This teaches agents *how the system works* so they can self-diagnose issues. Permissions and fleet roster are **not** in SYSTEM.md — they come live via the **Runtime Context** block injected on each turn.
 
 SYSTEM.md is capped at 6,000 characters to limit system prompt bloat. It is read-only — agents cannot modify it via `update_workspace`. The authoritative live data comes from the **Runtime Context** block injected into the system prompt on each turn (see [Agent Tools — System Introspection](agent-tools.md#system-introspection)).
 

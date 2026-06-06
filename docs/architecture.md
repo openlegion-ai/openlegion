@@ -46,11 +46,11 @@ OpenLegion uses a **fleet model, not hierarchy**. There is no CEO agent that rou
 
 - **Blackboard** — shared SQLite-backed key-value state (WAL, CAS via `write_if_version`, audit-log with undo/archive). Lives in `src/host/mesh.py`.
 - **PubSub** — event-driven notifications between agents (`src/host/mesh.py:PubSub`).
-- **Coordination protocol** — `hand_off`, `check_inbox`, `update_status`, `complete_task` in `src/agent/builtins/coordination_tool.py`. Behind the `OPENLEGION_ORCHESTRATION_TASKS_V2` flag, hand-offs become durable task records routed via `LaneManager`; the legacy v1 path uses blackboard `tasks/{agent}/{handoff_id}` keys.
+- **Coordination protocol** — `hand_off`, `check_inbox`, `update_status`, `complete_task` in `src/agent/builtins/coordination_tool.py`. Hand-offs are always durable SQLite task records routed via `LaneManager`; the legacy blackboard `tasks/{agent}/{handoff_id}` path was removed in PR #835.
 
 ### Operator agent
 
-A reserved agent named `operator` is auto-created at startup (`_ensure_operator_agent` in `src/cli/runtime.py`). It runs at lower resource caps (128MB RAM, 0.05 CPU) and carries fleet-management tools (`fleet_tool.py`, `operator_tools.py`). The operator is the only agent that can apply fleet templates, archive teams, or confirm hard config edits.
+A reserved agent named `operator` is auto-created at startup (`_ensure_operator_agent` is defined in `src/cli/config.py` and called from `src/cli/runtime.py`). It runs at lower resource caps (128MB RAM, 0.05 CPU) and carries fleet-management tools (`fleet_tool.py`, `operator_tools.py`). The operator is the only agent that can apply fleet templates, archive teams, or confirm hard config edits.
 
 ### Reserved agent IDs
 
@@ -69,7 +69,7 @@ The mesh host runs on the user's machine as a single FastAPI process. It is the 
 | Module | Responsibility |
 |--------|---------------|
 | `mesh.py` | Blackboard (SQLite WAL, atomic CAS, audit log with undo/archive), PubSub, MessageRouter (with cross-team block + capability-based addressing) |
-| `server.py` | FastAPI app factory — 109 `@app.*` endpoints, all permission-checked. Three auth tiers (any-auth / operator-or-internal / loopback). |
+| `server.py` | FastAPI app factory — 117 `@app.*` endpoints, all permission-checked. Three auth tiers (any-auth / operator-or-internal / loopback). |
 | `runtime.py` | `RuntimeBackend` ABC → `DockerBackend` / `SandboxBackend`; the browser-service container lives here too. SandboxBackend falls back to DockerBackend on init failure. |
 | `transport.py` | `Transport` ABC → `HttpTransport` / `SandboxTransport` |
 | `credentials.py` | Two-tier credential vault (`OPENLEGION_SYSTEM_*` / `OPENLEGION_CRED_*`) + LLM API proxy. OpenAI / Anthropic OAuth support. |
@@ -89,7 +89,7 @@ The mesh host runs on the user's machine as a single FastAPI process. It is the 
 
 ### Agent (`src/agent/`)
 
-Each agent runs in an isolated Docker container with its own FastAPI server (28 endpoints).
+Each agent runs in an isolated Docker container with its own FastAPI server (29 endpoints).
 
 | Module | Responsibility |
 |--------|---------------|
@@ -98,7 +98,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server (28 
 | `tools.py` | Tool discovery and registry; `@tool` decorator system. |
 | `mcp_client.py` | MCP server lifecycle management and tool routing. |
 | `memory.py` | SQLite + sqlite-vec + FTS5 hierarchical memory (`EMBEDDING_DIM=1536`, weighted 0.7 vector / 0.3 keyword with salience decay). |
-| `workspace.py` | Persistent markdown workspace. Scaffold files (`_SCAFFOLD_FILES`): `INSTRUCTIONS.md`, `SOUL.md`, `USER.md`, `MEMORY.md`, `HEARTBEAT.md`, `INTERFACE.md`. `TEAM.md` / `SYSTEM.md` are read-only bootstrap inclusions, not writable scaffolds. (Pre-rename `PROJECT.md` files are migrated to `TEAM.md` once at startup by `team_migration.py`; the bootstrap loader itself reads only `TEAM.md`/`team.md`.) |
+| `workspace.py` | Persistent markdown workspace. Scaffold files (`_SCAFFOLD_FILES`): `INSTRUCTIONS.md`, `SOUL.md`, `USER.md`, `MEMORY.md`, `INTERFACE.md`. `HEARTBEAT.md` is intentionally NOT bootstrapped — it is created lazily on first write. `TEAM.md` / `SYSTEM.md` are read-only bootstrap inclusions, not writable scaffolds. (Pre-rename `PROJECT.md` files are migrated to `TEAM.md` once at startup by `team_migration.py`; the bootstrap loader itself reads only `TEAM.md`/`team.md`.) |
 | `context.py` | Context window management. Flush facts at 60%, summarize-and-replace at 70%, warn at 80%. Empty summary falls back to hard prune. Write-then-compact flushes facts to `MEMORY.md` before discarding context. |
 | `llm.py` | LLM client (`chat_stream()` and `chat()`) — routes through mesh proxy, never holds keys. |
 | `mesh_client.py` | HTTP client for agent-to-mesh communication; merges `origin_header()` into `wake_agent` / `create_task`. |
@@ -113,10 +113,10 @@ Each agent runs in an isolated Docker container with its own FastAPI server (28 
 | `exec_tool.py` | Shell execution scoped to `/data` (`_MAX_TIMEOUT=300`). |
 | `file_tool.py` | File I/O with two-stage path traversal protection (`..` rejected lexically, then walked with `is_symlink` checks). |
 | `http_tool.py` | HTTP requests with `$CRED{}` handle substitution and SSRF protection (DNS pinning, IP blocking incl. CGNAT/6to4/Teredo). |
-| `browser_tool.py` | Browser automation via per-agent Camoufox (24 `@tool` tools — navigation, interaction, inspection, file transfer, CAPTCHA + handoff). |
+| `browser_tool.py` | Browser automation via per-agent Camoufox (25 `@tool` tools — navigation, interaction, inspection, file transfer, CAPTCHA + handoff). |
 | `mesh_tool.py` | Blackboard (with `sanitize_for_prompt()`), PubSub, `notify_user`, `list_agents`, artifacts, cron, spawn. |
 | `memory_tool.py` | Memory search with hierarchical fallback, memory save. |
-| `coordination_tool.py` | `hand_off`, `check_inbox`, `update_status`, `complete_task`. Origin-propagating; legacy v1 path uses blackboard, V2 path uses durable task records. |
+| `coordination_tool.py` | `hand_off`, `check_inbox`, `update_status`, `complete_task`. Origin-propagating; always writes durable SQLite task records (the legacy blackboard path was removed in PR #835). |
 | `vault_tool.py` | Credential generation without returning actual values. |
 | `web_search_tool.py` | DuckDuckGo search (no API key needed). |
 | `image_gen_tool.py` | Image generation via Gemini or OpenAI DALL-E 3 (routed through the mesh proxy with fixed-price cost tracking). |
@@ -124,7 +124,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server (28 
 | `introspect_tool.py` | Runtime state query — permissions, budget, fleet, cron, health. |
 | `tool_authoring.py` | Self-authoring with AST validation. Forbidden imports/calls/attrs prevent `eval`, `exec`, `open`, `__subclasses__`, etc. |
 | `fleet_tool.py` | Operator-only fleet management — `list_templates`, `apply_template` (per-slot creation, not atomic across slots). |
-| `operator_tools.py` | Operator-only orchestration — `edit_agent` (single tool; all fields apply immediately and emit an undo receipt: 5-min for soft fields, 30-min for hard fields), `undo_change`, deprecated `confirm_edit` no-op stub (kept for in-flight LLM conversations), `inspect_agents`, `inspect_teams` (alias `inspect_projects`), team/agent CRUD via `create_team` / `add_agents_to_team` / … (legacy `*_project` names still callable). |
+| `operator_tools.py` | Operator-only orchestration — `edit_agent` (single tool; all fields apply immediately and emit an undo receipt: 5-min for soft fields, 30-min for hard fields), `undo_change`, `inspect_agents`, `inspect_teams`, team/agent CRUD via `create_team` / `add_agents_to_team` / … (legacy `*_project` names still callable). |
 | `wallet_tool.py` | Wallet operations — get address, get balance, read contract, transfer, execute (Ethereum + Solana). |
 
 ### Browser Service (`src/browser/`)
@@ -151,7 +151,7 @@ The browser service runs in a separate container with `cap_drop=ALL` plus `cap_a
 
 ### Browser Container Resources
 
-Resources scale with the `OPENLEGION_MAX_AGENTS` environment variable (`src/host/runtime.py:386-392`). **The number of concurrent browser sessions is gated separately by `OPENLEGION_BROWSER_MAX_CONCURRENT` (legacy alias `MAX_BROWSERS`) resolved in `src/browser/__main__.py` — default 5, clamped to `[1, 64]`, startup-only.**
+Resources scale with the `OPENLEGION_MAX_AGENTS` environment variable (`src/host/runtime.py:578-599`). **The number of concurrent browser sessions is gated separately by `OPENLEGION_BROWSER_MAX_CONCURRENT` (legacy alias `MAX_BROWSERS`) resolved in `src/browser/__main__.py` — default = memory-derived autodetect (`_autodetect_default_max_browsers` / `_max_from_memory`), clamped to `[1, 64]`, startup-only.**
 
 | Tier | `OPENLEGION_MAX_AGENTS` | RAM | SHM | CPU | Max Browsers |
 |------|------------------------|-----|-----|-----|-------------|
@@ -178,7 +178,7 @@ Alpine.js SPA + Tailwind via CDN (no build step) with Jinja `autoescape=True` an
 
 | Module | Purpose |
 |--------|---------|
-| `server.py` | Dashboard FastAPI router with 143 API endpoints + VNC URL injection. Top-nav tabs: Chat / Team / Board / Settings (internal IDs `chat` / `fleet` / `workplace` / `system` — frozen for URL stability). |
+| `server.py` | Dashboard FastAPI router with 160 API endpoints + VNC URL injection. Top-nav tabs: Chat / Teams / Work / Settings (internal IDs `chat` / `fleet` / `workplace` / `system` — frozen for URL stability). |
 | `events.py` | `EventBus` for real-time WebSocket streaming on `/ws/events` (mounted on the mesh app, not the dashboard router). |
 | `auth.py` | Session cookie verification — HMAC-SHA256 over `{expiry}.{signature}`, 24h max lifetime, 5-min skew tolerance. |
 | `notifications.py` | Persistent notifications store (SQLite WAL) — backs the top-nav bell. |
@@ -206,7 +206,7 @@ The SSO callback (`/__auth/callback`) is **not implemented in this repo** — it
 
 | Module | Purpose |
 |--------|---------|
-| `types.py` | **THE contract** — all Pydantic models shared between host and agents (369 lines, 24 models). Holds `RESERVED_AGENT_IDS`, `HARD_EDIT_FIELDS` / `SOFT_EDIT_FIELDS`, and the `DashboardEvent.type` Literal enumerating 50 WebSocket event names. |
+| `types.py` | **THE contract** — all Pydantic models shared between host and agents (853 lines, 27 models). Holds `RESERVED_AGENT_IDS`, `HARD_EDIT_FIELDS` / `SOFT_EDIT_FIELDS`, and the `DashboardEvent.type` Literal enumerating 53 WebSocket event names. |
 | `utils.py` | ID generation, structured logging, prompt injection sanitization (`sanitize_for_prompt()`). |
 | `trace.py` | Distributed trace context propagation, `origin_header()` helper. |
 | `models.py` | Model cost and context window registry (backed by LiteLLM). |
@@ -247,7 +247,7 @@ through PR 2 of the project→team rename.)
 - **Blackboard scoping**: The `MeshClient` auto-prefixes all blackboard keys with `projects/{name}/`. An agent writing to `tasks/research_01` on the "sales" team actually writes to `projects/sales/tasks/research_01`. Agents see natural keys — the prefix is stripped on read. This is enforced at both the client (auto-namespacing) and server (permission matrix) layers.
 - **Agent visibility**: `list_agents` returns only team peers for team agents, or only the agent itself for solo agents.
 - **TEAM.md**: Only team members receive a `TEAM.md` mounted read-only into their container at `/app/TEAM.md`. Solo agents get none. (Pre-rename `PROJECT.md` files are migrated to `TEAM.md` once at startup by `team_migration.py`; the bootstrap loader reads only `TEAM.md`/`team.md`.)
-- **Permission management on agent create**: `POST /mesh/agents/create` writes defaults of `blackboard_read=["*"]`, `blackboard_write=["tasks/*","context/*","status/*","output/*","artifacts/*"]`, `can_publish=["*"]`, `can_subscribe=["*"]` (`src/host/server.py:2958-2965`). The effective per-team scope comes from the MeshClient's auto-prefix at runtime, not from the on-disk permission file.
+- **Permission management on agent create**: `POST /mesh/agents/create` writes defaults of `blackboard_read=["*"]`, `blackboard_write=["tasks/*","context/*","status/*","output/*","artifacts/*"]`, `can_publish=["*"]`, `can_subscribe=["*"]` (`src/host/server.py:4020-4021`). The effective per-team scope comes from the MeshClient's auto-prefix at runtime, not from the on-disk permission file.
 - **Remove from team**: When an agent is removed from a team, `blackboard_read` and `blackboard_write` are cleared to `[]`.
 - **Solo agents**: Agents not assigned to any team have no scoped blackboard prefix, see only themselves in `list_agents`, and receive no `TEAM.md`.
 - **Cross-team blackboard counter**: `_blackboard_xproject_count` is a process-lifetime observability counter (no enforcement) surfaced on `/mesh/system/metrics` as `blackboard_cross_project_total`.
@@ -284,7 +284,7 @@ The CLI REPL and dashboard chat both call agent endpoints directly. The mesh rou
 
 ### WebSocket events
 
-The dashboard receives real-time state via `/ws/events` (mounted on the mesh app at `src/host/server.py:6996`). `DashboardEvent.type` is a `Literal` of 50 event names in `src/shared/types.py` — the regex-sweep guard `test_every_emit_string_in_src_matches_a_dashboard_event_literal` prevents silent drops.
+The dashboard receives real-time state via `/ws/events` (mounted on the mesh app at `src/host/server.py:9571`). `DashboardEvent.type` is a `Literal` of 53 event names in `src/shared/types.py` — the regex-sweep guard `test_every_emit_string_in_src_matches_a_dashboard_event_literal` prevents silent drops.
 
 ## Runtime Backends
 
@@ -293,7 +293,7 @@ The dashboard receives real-time state via `/ws/events` (mounted on the mesh app
 | `DockerBackend` | Container (shared kernel) | Any Docker install |
 | `SandboxBackend` | MicroVM (own kernel) | Docker Desktop 4.58+ |
 
-Both implement `RuntimeBackend` ABC so the rest of the system is isolation-agnostic. The backend is selected at startup via `--sandbox`; if `SandboxBackend` init raises `subprocess.TimeoutExpired` or `RuntimeError`, `RuntimeContext.start()` falls back to `DockerBackend` (`src/cli/runtime.py:433-461`).
+Both implement `RuntimeBackend` ABC so the rest of the system is isolation-agnostic. The backend is selected at startup via `--sandbox`; if `SandboxBackend` init raises `subprocess.TimeoutExpired` or `RuntimeError`, `RuntimeContext.start()` falls back to `DockerBackend` (`src/cli/runtime.py:544-560`).
 
 Dockerfiles live at the repo root: `Dockerfile.agent` (python:3.12-slim, non-root UID 1000, `ENTRYPOINT ["tini","--"]`) and `Dockerfile.browser` (Firefox + Camoufox + Xvnc + Openbox + unclutter stack; root entrypoint that installs iptables then drops to UID 1000 via gosu).
 
