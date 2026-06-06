@@ -1884,7 +1884,15 @@ function dashboard() {
     checkOperatorReady() {
       const op = this.agents.find(a => a.id === 'operator');
       const wasReady = this.operatorReady;
-      this.operatorReady = op && op.health_status === 'healthy';
+      // The operator is a fleet-global agent that the health monitor does NOT
+      // track (it's excluded from the fleet status), so /api/agents reports its
+      // health_status as the default 'unknown' — it never becomes 'healthy'.
+      // Requiring === 'healthy' left the main chat stuck on "starting up..."
+      // forever even though the operator was up and serving (the side panel,
+      // which doesn't gate, worked). Ready = present and not genuinely down;
+      // only the real not-ready states keep the "starting up" message.
+      this.operatorReady = !!op
+        && !['stopped', 'failed', 'restarting'].includes(op.health_status);
       // Fix #4 — when operator transitions unhealthy → healthy and the
       // user is still in a first-visit state, retry starting the
       // wizard. Without this, an operator that boots slowly (e.g.
