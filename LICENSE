@@ -1,64 +1,110 @@
-# Business Source License 1.1
+# License
 
-Licensor: Yu-wen Jeffrey Tseng  
-Licensed Work: OpenLegion.ai (including this repository and all source code herein)  
-Change Date: January 1, 2030  
-Change License: Apache License 2.0  
+OpenLegion is source-available software, free to self-host, licensed by
+OpenLegion LLC under the **PolyForm Perimeter License 1.0.1**.
 
----
+Copyright © 2026 OpenLegion LLC. All rights reserved.
 
-## 1. Grant of Rights
+Required Notice: Copyright © 2026 OpenLegion LLC (https://openlegion.ai)
 
-Subject to the terms below, Licensor grants you a non-exclusive, worldwide, royalty-free license to:
+--------------------------------------------------------------------------------
+PLAIN-LANGUAGE SUMMARY — NON-BINDING
 
-- Use the Licensed Work
-- Copy the Licensed Work
-- Modify the Licensed Work
-- Create derivative works
-- Self-host and run the Licensed Work for internal, personal, or non-commercial purposes
+This summary is provided for convenience only. It is **not** part of the
+license and has **no legal effect**. If anything here conflicts with the
+license text below, the license text controls.
 
----
+  • You MAY: use, copy, modify, and self-host OpenLegion for any purpose —
+    including running it within your own organization for commercial,
+    internal operations — and distribute your modified versions, so long as
+    you keep the notices below.
 
-## 2. Commercial Restrictions
+  • You MAY NOT: provide OpenLegion to others as a product or service that
+    competes with OpenLegion — that is, anything that serves as a substitute
+    for the functionality or value of the software. This includes offering it
+    — modified or not — as a hosted, managed, or Software-as-a-Service (SaaS)
+    product, through any interface (service, library, or plug-in), on any
+    platform, in any programming language, and even free of charge.
 
-You may NOT, without explicit written permission from the Licensor:
+Need to offer OpenLegion as a hosted/managed service, or otherwise need
+rights beyond this license? A commercial license is available — contact
+admin@openlegion.ai.
 
-- Offer the Licensed Work as a hosted, managed, or Software-as-a-Service (SaaS) offering to third parties.
-- Provide a commercial product or service that competes with the Licensor’s commercial offerings using the Licensed Work.
-- Commercially sublicense, sell, rent, lease, or redistribute the Licensed Work.
-- Use the Licensed Work to provide paid AI infrastructure or platform services to third parties.
+"OpenLegion" and the OpenLegion logo are trademarks of OpenLegion LLC. This
+license grants no trademark rights. See TRADEMARK.md.
+--------------------------------------------------------------------------------
 
-Any use in violation of the above requires a separate commercial agreement with the Licensor.
+The full, controlling license text follows.
 
----
 
-## 3. Commercial Licensing
+# PolyForm Perimeter License 1.0.1
 
-To obtain a commercial license, contact:
+<https://polyformproject.org/licenses/perimeter/1.0.1>
 
-Yu-wen Jeffrey Tseng  
-admin@openlegion.ai
+## Acceptance
 
----
+In order to get any license under these terms, you must agree to them as both strict obligations and conditions to all your licenses.
 
-## 4. Change Date
+## Copyright License
 
-On the Change Date specified above, this Licensed Work will automatically convert to the Change License (Apache License 2.0).
+The licensor grants you a copyright license for the software to do everything you might do with the software that would otherwise infringe the licensor's copyright in it for any permitted purpose.  However, you may only distribute the software according to [Distribution License](#distribution-license) and make changes or new works based on the software according to [Changes and New Works License](#changes-and-new-works-license).
 
----
+## Distribution License
 
-## 5. Trademarks
+The licensor grants you an additional copyright license to distribute copies of the software.  Your license to distribute covers distributing the software with changes and new works permitted by [Changes and New Works License](#changes-and-new-works-license).
 
-This License does not grant any rights to use the name “OpenLegion.ai”, associated logos, branding, or trademarks. All such rights are reserved by the Licensor.
+## Notices
 
----
+You must ensure that anyone who gets a copy of any part of the software from you also gets a copy of these terms or the URL for them above, as well as copies of any plain-text lines beginning with `Required Notice:` that the licensor provided with the software.  For example:
 
-## 6. Disclaimer of Warranty
+> Required Notice: Copyright Yoyodyne, Inc. (http://example.com)
 
-THE LICENSED WORK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+## Changes and New Works License
 
----
+The licensor grants you an additional copyright license to make changes and new works based on the software for any permitted purpose.
 
-## 7. Limitation of Liability
+## Patent License
 
-IN NO EVENT SHALL THE LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM USE OF THE LICENSED WORK.
+The licensor grants you a patent license for the software that covers patent claims the licensor can license, or becomes able to license, that you would infringe by using the software.
+
+## Noncompete
+
+Any purpose is a permitted purpose, except for providing to others any product that competes with the software.
+
+## Competition
+
+If you use this software to market a product as a substitute for the functionality or value of the software, it competes with the software. A product may compete regardless how it is designed or deployed. For example, a product may compete even if it provides its functionality via any kind of interface (including services, libraries or plug-ins), even if it is ported to a different platform or programming language, and even if it is provided free of charge.
+
+## Fair Use
+
+You may have "fair use" rights for the software under the law. These terms do not limit them.
+
+## No Other Rights
+
+These terms do not allow you to sublicense or transfer any of your licenses to anyone else, or prevent the licensor from granting licenses to anyone else.  These terms do not imply any other licenses.
+
+## Patent Defense
+
+If you make any written claim that the software infringes or contributes to infringement of any patent, your patent license for the software granted under these terms ends immediately. If your company makes such a claim, your patent license ends immediately for work on behalf of your company.
+
+## Violations
+
+The first time you are notified in writing that you have violated any of these terms, or done anything with the software not covered by your licenses, your licenses can nonetheless continue if you come into full compliance with these terms, and take practical steps to correct past violations, within 32 days of receiving notice.  Otherwise, all your licenses end immediately.
+
+## No Liability
+
+***As far as the law allows, the software comes as is, without any warranty or condition, and the licensor will not be liable to you for any damages arising out of these terms or the use or nature of the software, under any kind of legal claim.***
+
+## Definitions
+
+The **licensor** is the individual or entity offering these terms, and the **software** is the software the licensor makes available under these terms.
+
+A **product** can be a good or service, or a combination of them.
+
+**You** refers to the individual or entity agreeing to these terms.
+
+**Your company** is any legal entity, sole proprietorship, or other kind of organization that you work for, plus all organizations that have control over, are under the control of, or are under common control with that organization.  **Control** means ownership of substantially all the assets of an entity, or the power to direct its management and policies by vote, contract, or otherwise.  Control can be direct or indirect.
+
+**Your licenses** are all the licenses granted to you for the software under these terms.
+
+**Use** means anything you do with the software requiring one of your licenses.

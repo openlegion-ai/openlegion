@@ -7,6 +7,8 @@ name = "openlegion"
 version = "0.1.0"
 description = "A lean, container-isolated, memory-aware multi-agent runtime"
 requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "OpenLegion LLC", email = "admin@openlegion.ai" }]
 
 dependencies = [
     "fastapi>=0.115.0",
