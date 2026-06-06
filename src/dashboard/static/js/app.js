@@ -10646,6 +10646,8 @@ function dashboard() {
         await_task_event: 'waiting on a task',
         skills_list: 'browsing its skills',
         skill_view: 'reading a skill',
+        install_skill: 'installing a skill',
+        remove_skill: 'removing a skill',
       };
       if (map[toolName]) return map[toolName];
       // Fallback: humanise the snake_case tool name.

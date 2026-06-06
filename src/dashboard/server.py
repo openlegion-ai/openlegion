@@ -2152,6 +2152,27 @@ def create_dashboard_router(
             })
         return {"templates": result}
 
+    @api_router.get("/api/skills")
+    async def api_skills(request: Request) -> dict:
+        """List available SKILL.md packs (bundled + installed) with provenance."""
+        from src.agent.skills import SkillStore
+        root = getattr(runtime, "project_root", None) if runtime else None
+        store = (
+            SkillStore(bundled_dir=root / "skills", installed_dir=root / "skills_installed")
+            if root
+            else SkillStore()
+        )
+        result = [
+            {
+                "name": s.name,
+                "description": s.description,
+                "version": s.version,
+                "provenance": s.source or "bundled",
+            }
+            for s in store.list()
+        ]
+        return {"skills": result}
+
     @api_router.post("/api/agents")
     async def api_add_agent(request: Request) -> dict:
         """Add a new agent: create config, start container, register."""

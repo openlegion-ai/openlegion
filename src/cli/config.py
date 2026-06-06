@@ -1710,8 +1710,9 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     # Coordination + chat
     "list_templates", "apply_template", "hand_off", "check_inbox",
     # Skill-pack discovery (SKILL.md procedures) — read-only, so the
-    # operator can see which skills its workers can draw on.
-    "skills_list", "skill_view",
+    # operator can see which skills its workers can draw on. install_skill /
+    # remove_skill are operator-gated + user-origin-gated mutations.
+    "skills_list", "skill_view", "install_skill", "remove_skill",
     # Workflow awareness — operator-only chain inspection + single-task
     # blocking primitive (see _HEARTBEAT_TOOLS in src/agent/loop.py for
     # the heartbeat surface; both tools self-reject for non-operators).
