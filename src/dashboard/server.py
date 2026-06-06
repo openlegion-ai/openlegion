@@ -3685,28 +3685,35 @@ def create_dashboard_router(
         Pages the agent's ``/files`` endpoint in 5 MB chunks and concatenates
         the raw bytes, so the user can save a worker's deliverable (CSV,
         data.md, a binary export) straight to disk — bypassing the JSON read
-        cap and never routing the bytes through any LLM context. Rejected
-        upfront if the file exceeds the 64 MB cap (the agent reports the full
-        size in the first page), so host memory stays bounded.
+        cap and never routing the bytes through any LLM context. Memory stays
+        bounded two ways: a fast reject on the agent-reported size, AND a
+        running byte counter that does NOT trust that size (the agent is an
+        untrusted component — a lying ``size`` must not OOM the host).
         """
         import base64 as _b64
-        from urllib.parse import urlencode
+        from urllib.parse import quote, urlencode
 
         from fastapi.responses import Response
         if agent_id not in agent_registry:
             raise HTTPException(status_code=404, detail="Agent not found")
         if transport is None:
             raise HTTPException(status_code=503, detail="Transport not available")
+        # Quote the filename portion so spaces / '?' / '#' / '%' in a real
+        # filename survive interpolation into the agent URL (httpx splits on a
+        # raw '?'; the sandbox-backend curl rejects a raw space). The query
+        # string is appended AFTER, so only the path segment is quoted.
+        safe_path = quote(path, safe="/")
         _CHUNK = 5 * 1024 * 1024
         _MAX_TOTAL = 64 * 1024 * 1024
         parts: list[bytes] = []
+        total = 0
         offset = 0
         mime = "application/octet-stream"
         while True:
             qs = urlencode({"offset": offset, "max_bytes": _CHUNK})
             try:
                 result = await transport.request(
-                    agent_id, "GET", f"/files/{path}?{qs}", timeout=60,
+                    agent_id, "GET", f"/files/{safe_path}?{qs}", timeout=60,
                 )
             except Exception as e:
                 raise HTTPException(status_code=502, detail=str(e))
@@ -3714,8 +3721,7 @@ def create_dashboard_router(
                 status = result.get("status_code", 404) if isinstance(result, dict) else 502
                 detail = result.get("error", "download failed") if isinstance(result, dict) else "download failed"
                 raise HTTPException(status_code=status, detail=detail)
-            # Reject oversize before buffering anything: the first page carries
-            # the full file size.
+            # Fast reject on the agent-reported size (first page carries it).
             if int(result.get("size", 0)) > _MAX_TOTAL:
                 raise HTTPException(
                     status_code=413,
@@ -3726,6 +3732,15 @@ def create_dashboard_router(
                 blob = _b64.b64decode(result.get("content", ""))
             else:
                 blob = (result.get("content") or "").encode("utf-8")
+            # Truth, not trust: enforce the cap on actual bytes received so a
+            # malformed/lying agent (size=0, truncated=true, advancing offset)
+            # can't loop the host into unbounded memory growth.
+            total += len(blob)
+            if total > _MAX_TOTAL:
+                raise HTTPException(
+                    status_code=413,
+                    detail="File exceeds the 64 MB download cap",
+                )
             parts.append(blob)
             next_offset = result.get("next_offset", offset + len(blob))
             if not result.get("truncated") or next_offset <= offset:

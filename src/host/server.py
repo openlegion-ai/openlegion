@@ -7091,10 +7091,13 @@ def create_mesh_app(
             raise HTTPException(404, f"Agent '{agent_id}' not found")
         if transport is None:
             raise HTTPException(503, "Transport not available")
-        from urllib.parse import urlencode
+        from urllib.parse import quote, urlencode
         qs = urlencode({"offset": max(0, offset), "max_bytes": max(0, max_bytes)})
+        # Quote the path segment — the validated name may contain spaces, which
+        # break a raw interpolation into the agent URL (curl on the sandbox
+        # backend). The query string is appended after the quoted path.
         result = await transport.request(
-            agent_id, "GET", f"/files/{path}?{qs}", timeout=30,
+            agent_id, "GET", f"/files/{quote(path, safe='/')}?{qs}", timeout=30,
         )
         if isinstance(result, dict) and "error" in result and "content" not in result:
             status = result.get("status_code", 502)

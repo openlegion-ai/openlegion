@@ -6219,3 +6219,45 @@ class TestDashboardFileDownload:
         assert resp.status_code == 200
         # JSON read route, not the attachment endpoint.
         assert resp.json()["content"] == "i am a file named download"
+
+    def test_download_quotes_spaces_in_filename(self):
+        """A filename with a space is percent-quoted before being forwarded to
+        the agent — a raw space breaks the agent URL (curl on the sandbox
+        backend; httpx). The browser sends it pre-encoded; we re-quote after
+        FastAPI decodes the dashboard route."""
+        seen = {}
+
+        async def _fake(agent_id, method, path, **kw):
+            seen["path"] = path
+            return {
+                "content": "x,y\n1,2\n", "size": 8, "encoding": "utf-8",
+                "mime_type": "text/csv", "offset": 0, "next_offset": 8,
+                "truncated": False,
+            }
+
+        self.components["transport"].request = AsyncMock(side_effect=_fake)
+        # FastAPI decodes the dashboard {path:path}, so the endpoint sees the
+        # raw space and must re-quote it for the agent hop.
+        resp = self.client.get(
+            "/dashboard/api/agents/alpha/file-download/Q3%20Report.csv",
+        )
+        assert resp.status_code == 200
+        assert resp.content == b"x,y\n1,2\n"
+        # The forwarded agent path is quoted, query appended after.
+        assert seen["path"].startswith("/files/Q3%20Report.csv?")
+
+    def test_download_lying_agent_does_not_loop(self):
+        """A misbehaving agent that returns truncated=True forever without
+        advancing next_offset must not loop the host — the next_offset<=offset
+        guard breaks it. (The byte cap is the other backstop against a lying
+        size.)"""
+        self.components["transport"].request = AsyncMock(return_value={
+            "content": "stuck", "size": 0, "encoding": "utf-8",
+            "mime_type": "text/plain", "offset": 0, "next_offset": 0,
+            "truncated": True,
+        })
+        resp = self.client.get(
+            "/dashboard/api/agents/alpha/file-download/loop.txt",
+        )
+        assert resp.status_code == 200
+        assert resp.content == b"stuck"  # exactly one page, loop terminated
