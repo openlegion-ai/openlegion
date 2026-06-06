@@ -81,6 +81,32 @@ def _maybe_add_header(filename: str, content: str) -> str:
         return content
     return f"## {filename} — {desc}\n\n{content}"
 
+
+def _truncate_keep_tail(content: str, cap: int) -> str:
+    """Keep the LAST ``cap`` characters of ``content``, trimmed to a clean start.
+
+    Used for append-only files (MEMORY.md) where the newest, most relevant
+    facts live at the tail. After slicing the last ``cap`` chars we trim
+    *forward* to the next clean block boundary so the prompt never starts
+    mid-line: prefer the first ``"\n## "`` (markdown block header) inside the
+    kept slice, else the first ``"\n"``. A notice is prepended so the agent
+    knows older history exists and can recover it via ``memory_search``.
+    """
+    if len(content) <= cap:
+        return content
+    tail = content[-cap:]
+    marker = tail.find("\n## ")
+    if marker != -1:
+        tail = tail[marker + 1:]  # drop the leading newline, keep "## ..."
+    else:
+        nl = tail.find("\n")
+        if nl != -1:
+            tail = tail[nl + 1:]
+    return (
+        "... (older memory truncated — use memory_search for full history)\n\n"
+        + tail
+    )
+
 # Permission keys surfaced to agents in SYSTEM.md and Runtime Context.
 # Keep in sync with the introspect endpoint in src/host/server.py.
 INTROSPECT_PERM_KEYS = (
@@ -92,6 +118,10 @@ _MAX_INSTRUCTIONS = 12_000
 _MAX_SOUL = 4_000
 _MAX_USER = 4_000
 _MAX_MEMORY = 16_000
+# On-disk cap for MEMORY.md. Appends accumulate at the tail; once the file
+# exceeds this we rewrite it keeping the newest content (trimmed forward to a
+# block boundary) so it can never creep toward the 200KB read ceiling.
+_MEMORY_FILE_MAX = 32_000  # == 2 × _MAX_MEMORY
 
 # Public mapping for external consumers (tool response, dashboard).
 # Files not listed have no per-file bootstrap cap.
@@ -494,9 +524,17 @@ class WorkspaceManager:
                 continue
             content = content.strip()
             if len(content) > cap:
-                content = content[:cap] + (
-                    "\n\n... (truncated, use memory_search for full content)"
-                )
+                if filename == "MEMORY.md":
+                    # MEMORY.md grows by APPEND at the tail, so a head-slice
+                    # (content[:cap]) would freeze the oldest facts into the
+                    # prompt forever. Keep the TAIL (newest facts) instead.
+                    content = _truncate_keep_tail(content, cap)
+                else:
+                    # INSTRUCTIONS/SOUL/USER are authored top-down — the head
+                    # is the most important part, so head-slice is correct.
+                    content = content[:cap] + (
+                        "\n\n... (truncated, use memory_search for full content)"
+                    )
             parts.append(_maybe_add_header(filename, content))
 
         combined = "\n\n---\n\n".join(parts)
@@ -535,10 +573,28 @@ class WorkspaceManager:
             f.write(line)
 
     def append_memory(self, content: str) -> None:
-        """Append to MEMORY.md (used by context manager before compacting)."""
+        """Append to MEMORY.md (used by context manager before compacting).
+
+        Enforces an on-disk cap (``_MEMORY_FILE_MAX``): once the file grows
+        past the cap we rewrite it keeping the TAIL (newest entries), trimmed
+        forward to the next ``"\n## "`` block boundary so we never persist a
+        half block. Without this the append-only file creeps toward the 200KB
+        read ceiling unbounded.
+        """
         path = self.root / self.MEMORY_FILE
         with path.open("a") as f:
             f.write(f"\n{content}\n")
+
+        try:
+            current = path.read_text(errors="replace")
+            if len(current) > _MEMORY_FILE_MAX:
+                tail = current[-_MEMORY_FILE_MAX:]
+                marker = tail.find("\n## ")
+                tail = tail[marker + 1:] if marker != -1 else tail
+                path.write_text("<!-- older memory trimmed -->\n" + tail)
+        except Exception as e:
+            logger.warning(f"Failed to enforce MEMORY.md on-disk cap: {e}")
+
         self._bootstrap_cache = None  # MEMORY.md is part of bootstrap
 
     # Files agents are allowed to update themselves

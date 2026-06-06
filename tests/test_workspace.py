@@ -9,11 +9,14 @@ from pathlib import Path
 import pytest
 
 from src.agent.workspace import (
+    _MAX_MEMORY,
     _MAX_SYSTEM,
+    _MEMORY_FILE_MAX,
     WorkspaceManager,
     _bm25_score,
     _maybe_add_header,
     _tokenize,
+    _truncate_keep_tail,
     generate_system_md,
 )
 
@@ -293,6 +296,44 @@ class TestBootstrapContent:
         assert "truncated" in content
         assert "memory_search" in content
 
+    def test_bootstrap_keeps_tail_of_oversized_memory(self):
+        # MEMORY.md is append-only: bootstrap must keep the NEWEST (tail)
+        # blocks, not freeze the oldest head-slice into the prompt forever.
+        root = Path(self._tmpdir)
+        # Oldest block first, newest last; pad each to push over _MAX_MEMORY.
+        oldest = "## Oldest Block\n\n" + ("o" * 12_000)
+        newest = "## Newest Block\n\n" + ("n" * 12_000)
+        (root / "MEMORY.md").write_text(oldest + "\n" + newest + "\n")
+        ws = WorkspaceManager(workspace_dir=self._tmpdir)
+        content = ws.get_bootstrap_content()
+        assert "Newest Block" in content          # tail kept
+        assert "Oldest Block" not in content      # head dropped
+        assert "older memory truncated" in content
+
+    def test_bootstrap_still_head_keeps_instructions(self):
+        # INSTRUCTIONS.md is authored top-down — head-keep is still correct.
+        root = Path(self._tmpdir)
+        head = "## Top Procedures\n\n" + ("h" * 13_000)
+        tail = "## Bottom Notes\n\n" + ("t" * 5_000)
+        (root / "INSTRUCTIONS.md").write_text(head + "\n" + tail + "\n")
+        ws = WorkspaceManager(workspace_dir=self._tmpdir)
+        content = ws.get_bootstrap_content()
+        assert "Top Procedures" in content        # head kept
+        assert "Bottom Notes" not in content       # tail dropped
+
+    def test_truncate_keep_tail_prefers_block_boundary(self):
+        content = (
+            "## First\n\n" + ("a" * 100)
+            + "\n## Second\n\n" + ("b" * 100)
+            + "\n## Third\n\n" + ("c" * 100)
+        )
+        cap = 250  # forces dropping at least the first block
+        out = _truncate_keep_tail(content, cap)
+        assert out.startswith("... (older memory truncated")
+        # Starts at a clean block header, not mid-line.
+        body = out.split("\n\n", 1)[1]
+        assert body.startswith("## ")
+
     def test_bootstrap_enforces_total_cap(self):
         root = Path(self._tmpdir)
         # Fill every file close to its per-file cap to exceed total
@@ -443,6 +484,35 @@ class TestMemoryFile:
         content = ws.load_memory()
         assert "Existing fact" in content
         assert "New fact" in content
+
+    def test_append_memory_enforces_ondisk_cap(self):
+        path = Path(self._tmpdir) / "MEMORY.md"
+        # Pre-fill past the on-disk cap with old blocks.
+        old = "".join(
+            f"## Old Block {i}\n\n" + ("x" * 2_000) + "\n"
+            for i in range(30)
+        )
+        path.write_text(old)
+        ws = WorkspaceManager(workspace_dir=self._tmpdir)
+        ws.append_memory("## Newest Block\n\nfresh fact")
+
+        on_disk = path.read_text()
+        # Trimmed to within the cap (+ small margin for the marker line).
+        assert len(on_disk) <= _MEMORY_FILE_MAX + 100
+        # Newest content survives; the very oldest blocks are gone.
+        assert "fresh fact" in on_disk
+        assert "Old Block 0" not in on_disk
+        assert on_disk.startswith("<!-- older memory trimmed -->")
+        # Starts at a clean block boundary (no half block after the marker).
+        body = on_disk.split("\n", 1)[1]
+        assert body.lstrip().startswith("## ")
+
+    def test_append_memory_no_trim_under_cap(self):
+        ws = WorkspaceManager(workspace_dir=self._tmpdir)
+        ws.append_memory("small fact")
+        on_disk = (Path(self._tmpdir) / "MEMORY.md").read_text()
+        assert "older memory trimmed" not in on_disk
+        assert _MEMORY_FILE_MAX == 2 * _MAX_MEMORY
 
 
 class TestBM25Search:

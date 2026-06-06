@@ -28,6 +28,7 @@ logger = setup_logging("agent.context")
 _FLUSH_THRESHOLD = 0.60  # proactive fact extraction before compaction
 _COMPACT_THRESHOLD = 0.70  # summarize-and-replace conversation history
 _WARNING_THRESHOLD = 0.80  # warn agent to wrap up or save facts
+_EMERGENCY_THRESHOLD = 0.90  # hard-prune fallback when summarization can't recover
 
 _encoding_cache: dict[str, object | None] = {}
 
@@ -156,6 +157,14 @@ class ContextManager:
 
     Modes:
       safeguard (default) — auto-compact at 70%, emergency prune at 90%
+
+    Compaction decisions in :meth:`maybe_compact` are made against
+    *effective* usage — the conversation messages PLUS the system prompt's
+    token cost — because the system prompt (large and churning for the
+    operator agent) genuinely consumes the window. At >= 90% effective usage
+    the emergency path summarises and, if still over the compact threshold,
+    additionally hard-prunes. ``usage`` / ``should_compact`` remain
+    messages-only for backward compatibility with other callers.
     """
 
     def __init__(
@@ -205,6 +214,24 @@ class ContextManager:
     def should_compact(self, messages: list[dict]) -> bool:
         return self.usage(messages) >= _COMPACT_THRESHOLD
 
+    def _effective_usage(self, system_prompt: str, messages: list[dict]) -> float:
+        """Usage fraction including the system prompt's token cost.
+
+        The system prompt is not part of ``messages`` but is sent on every
+        request and consumes the context window — for the operator agent it
+        is the largest, most-churning block. Counting only ``messages`` (as
+        ``usage`` does) makes compaction underfire for exactly that agent, so
+        :meth:`maybe_compact` decides against this fraction instead.
+        """
+        system_tokens = (
+            estimate_tokens(
+                [{"role": "system", "content": system_prompt}], model=self.model
+            )
+            if system_prompt
+            else 0
+        )
+        return (self.token_count(messages) + system_tokens) / self.max_tokens
+
     async def maybe_compact(
         self, system_prompt: str, messages: list[dict],
     ) -> tuple[list[dict], bool]:
@@ -213,11 +240,16 @@ class ContextManager:
         Returns ``(messages, did_compact)`` where ``did_compact`` is True only
         when the conversation was actually summarised and replaced.
 
+        Decisions are made against *effective* usage = messages tokens +
+        system-prompt tokens / ``max_tokens`` (see :meth:`_effective_usage`),
+        so a large system prompt (operator agent) is correctly accounted for.
+
         1. If between 60-70%, proactively flush structured facts (once).
         2. If above 70%, flush to MEMORY.md, then summarize.
-        3. If above 90%, hard-prune oldest messages as emergency fallback.
+        3. If above 90% AND summarization can't pull effective usage back below
+           70%, additionally hard-prune the result as an emergency fallback.
         """
-        usage = self.usage(messages)
+        usage = self._effective_usage(system_prompt, messages)
 
         # Proactive flush at 60% — save facts before compaction discards them
         if (
@@ -234,10 +266,27 @@ class ContextManager:
             await self._proactive_flush(system_prompt, messages)
             return messages, False  # don't compact yet
 
-        if not self.should_compact(messages):
+        if usage < _COMPACT_THRESHOLD:
             return messages, False
 
         result = await self._do_compact(system_prompt, messages, label="Compaction")
+
+        # Emergency prune at 90%: if even after summarization the effective
+        # usage is still over the compact threshold, hard-prune the result so
+        # the next request doesn't blow the window. Without this the "90%
+        # emergency prune" the docstrings advertise never actually fired.
+        if (
+            usage >= _EMERGENCY_THRESHOLD
+            and self._effective_usage(system_prompt, result) >= _COMPACT_THRESHOLD
+        ):
+            logger.warning(
+                "Emergency prune: effective usage still %d%% after "
+                "summarization (>=%d%%); hard-pruning",
+                int(self._effective_usage(system_prompt, result) * 100),
+                int(_COMPACT_THRESHOLD * 100),
+            )
+            result = self._hard_prune(result)
+
         return result, True
 
     async def force_compact(

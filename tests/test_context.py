@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.agent.context import (
+    _COMPACT_THRESHOLD,
+    _EMERGENCY_THRESHOLD,
     ContextManager,
     estimate_tokens,
     group_messages_by_tool_call,
@@ -227,6 +229,109 @@ class TestCompaction:
             # With such a short conversation, _flush_to_memory should skip
             # (< 100 chars of conversation text), so only summarize is called
             assert llm.chat.call_count <= 2
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class TestSystemPromptAwareCompaction:
+    @pytest.mark.asyncio
+    async def test_large_system_prompt_triggers_compaction(self):
+        """Messages alone are under the compact threshold, but a large system
+        prompt pushes EFFECTIVE usage over it — compaction must fire."""
+        cm = ContextManager(max_tokens=1000, llm=None, workspace=None)
+        msgs = _make_messages(10, chars_each=50)  # well under threshold alone
+
+        # Sanity: messages-only usage is below the compact threshold.
+        assert cm.usage(msgs) < _COMPACT_THRESHOLD
+        # No-op compaction (no system prompt) confirms baseline.
+        result_no_sys, did_no_sys = await cm.maybe_compact("", msgs)
+        assert did_no_sys is False
+        assert result_no_sys == msgs
+
+        # A big system prompt (~3000 tokens at 4 chars/token) pushes effective
+        # usage over 70%.
+        big_system = "S" * 12_000
+        assert cm._effective_usage(big_system, msgs) >= _COMPACT_THRESHOLD
+        result, did_compact = await cm.maybe_compact(big_system, msgs)
+        assert did_compact is True
+        assert len(result) < len(msgs)
+
+    def test_effective_usage_counts_system_prompt(self):
+        cm = ContextManager(max_tokens=10_000)
+        msgs = _make_messages(2, chars_each=100)
+        bare = cm.usage(msgs)
+        with_sys = cm._effective_usage("X" * 8_000, msgs)
+        assert with_sys > bare
+
+    def test_effective_usage_empty_system_prompt_matches_usage(self):
+        cm = ContextManager(max_tokens=10_000)
+        msgs = _make_messages(3, chars_each=100)
+        assert cm._effective_usage("", msgs) == pytest.approx(cm.usage(msgs))
+
+
+class TestEmergencyPrune:
+    @pytest.mark.asyncio
+    async def test_emergency_prune_when_summary_does_not_recover(self):
+        """At >= 90% effective usage, if summarization leaves the result still
+        over the compact threshold, the result is additionally hard-pruned."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            workspace = WorkspaceManager(workspace_dir=tmpdir)
+            llm = MagicMock()
+            # Summary is HUGE so summarization alone can't pull usage down.
+            llm.chat = AsyncMock(
+                side_effect=[
+                    LLMResponse(content="[]", tokens_used=10),  # flush: no facts
+                    LLMResponse(content="S" * 8_000, tokens_used=2000),  # fat summary
+                ]
+            )
+            # max_tokens tuned so 14 messages of 200 chars sit >= 90%.
+            cm = ContextManager(max_tokens=850, llm=llm, workspace=workspace)
+            msgs = _make_messages(14, chars_each=200)
+            assert cm._effective_usage("system", msgs) >= _EMERGENCY_THRESHOLD
+
+            result, did_compact = await cm.maybe_compact("system", msgs)
+            assert did_compact is True
+            # Hard prune ran on top of summarize: result is short (first +
+            # last-4 groups) rather than the summary + recent tail.
+            assert len(result) <= 6
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_emergency_prune_via_no_llm_hard_prune(self):
+        """No-LLM path: _do_compact hard-prunes; when usage is >= 90% and the
+        prune still leaves it over the compact threshold, a second hard-prune
+        fires. Deterministic exercise of the emergency branch."""
+        cm = ContextManager(max_tokens=80, llm=None, workspace=None)
+        msgs = _make_messages(40, chars_each=200)
+        assert cm._effective_usage("system", msgs) >= _EMERGENCY_THRESHOLD
+        result, did_compact = await cm.maybe_compact("system", msgs)
+        assert did_compact is True
+        assert len(result) < len(msgs)
+
+    @pytest.mark.asyncio
+    async def test_no_emergency_prune_below_90(self):
+        """Between 70-90% the normal compact path runs without the emergency
+        hard-prune kicking in on top."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            workspace = WorkspaceManager(workspace_dir=tmpdir)
+            llm = MagicMock()
+            llm.chat = AsyncMock(
+                side_effect=[
+                    LLMResponse(content="[]", tokens_used=10),
+                    LLMResponse(content="Short summary.", tokens_used=10),
+                ]
+            )
+            cm = ContextManager(max_tokens=750, llm=llm, workspace=workspace)
+            msgs = _make_messages(10, chars_each=200)
+            eff = cm._effective_usage("system", msgs)
+            assert _COMPACT_THRESHOLD <= eff < _EMERGENCY_THRESHOLD
+            result, did_compact = await cm.maybe_compact("system", msgs)
+            assert did_compact is True
+            # Summary present (not an emergency hard-prune, which would drop it).
+            assert any("Summary" in m.get("content", "") for m in result)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
