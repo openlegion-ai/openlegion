@@ -279,6 +279,34 @@ def test_enrich_bare_path_no_preposition(tmp_path: Path, monkeypatch: pytest.Mon
     assert any(b["type"] == "image_url" for b in result)
 
 
+def test_enrich_filename_with_parens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Filenames that contain ")" — e.g. the common browser-download
+    "report(1).png" — must be captured whole, not truncated at the first ")"."""
+    img_path = tmp_path / "report(1).png"
+    img_path.write_bytes(_make_tiny_png())
+
+    monkeypatch.setattr(
+        "src.agent.attachments.Path",
+        lambda p: tmp_path / Path(p).name if "/data/uploads/" in p else Path(p),
+    )
+
+    msg = "📎 report(1).png (at /data/uploads/report(1).png)"
+    result = enrich_message_with_attachments(msg)
+    assert isinstance(result, list)
+    assert any(b["type"] == "image_url" for b in result)
+
+
+def test_enrich_rejects_path_traversal() -> None:
+    """A crafted "/data/uploads/../../x.png" breadcrumb must NOT be read — the
+    traversal guard keeps the plain-text reference instead of escaping the
+    read-only uploads mount. Uses the real Path (no monkeypatch) so the ".."
+    segments survive to reach the guard."""
+    msg = "📎 (at /data/uploads/../../secret.png)"
+    result = enrich_message_with_attachments(msg)
+    # Guard fires → no enrichment → returned unchanged as a plain string.
+    assert result == msg
+
+
 # ---------------------------------------------------------------------------
 # convert_openai_image_blocks
 # ---------------------------------------------------------------------------
