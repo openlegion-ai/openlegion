@@ -1,17 +1,17 @@
-# Skills
+# Tools
 
-Skills are Python functions that give agents custom capabilities beyond the
+Tools are Python functions that give agents custom capabilities beyond the
 built-in tools (shell, file I/O, HTTP, browser, memory, mesh communication).
 
-## How Skills Work
+## How Tools Work
 
-Each agent has a `skills_dir` in its config. At startup, the agent auto-discovers
-all `.py` files in that directory and registers any functions decorated with `@skill`.
+Each agent has a `tools_dir` in its config. At startup, the agent auto-discovers
+all `.py` files in that directory and registers any functions decorated with `@tool`.
 
 ```python
-from src.agent.skills import skill
+from src.agent.tools import tool
 
-@skill(
+@tool(
     name="my_tool",
     description="What this tool does (shown to the LLM)",
     parameters={
@@ -32,7 +32,7 @@ async def my_tool(query: str, limit: int = 5, *, mesh_client=None):
 
 ## Key Points
 
-- Skills can be **sync or async**. Sync functions run in a thread executor.
+- Tools can be **sync or async**. Sync functions run in a thread executor.
 - Declare `mesh_client` or `workspace_manager` as keyword-only parameters
   to have them injected at call time.
 - **Never call external APIs directly.** Use `mesh_client.api_call()` which
@@ -43,7 +43,7 @@ async def my_tool(query: str, limit: int = 5, *, mesh_client=None):
 ## Built-in Tools
 
 Every agent automatically has access to built-in tools defined in
-`src/agent/builtins/`. You don't need to add these to your skills directory:
+`src/agent/builtins/`. You don't need to add these to your tools directory:
 
 - `run_command` — Shell command execution
 - `read_file`, `write_file`, `list_files` — File I/O
@@ -59,4 +59,4 @@ Every agent automatically has access to built-in tools defined in
 - `vault_generate_secret`, `vault_list` — Credential vault
 - `get_system_status` — Runtime state queries (permissions, budget, fleet, cron, health)
 - `read_agent_history` — Read another agent's conversation logs
-- `create_skill`, `reload_skills` — Self-extension
+- `create_tool`, `reload_tools` — Self-extension

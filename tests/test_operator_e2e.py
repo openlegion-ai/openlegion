@@ -1,7 +1,7 @@
 """End-to-end integration tests for the Operator Agent feature.
 
 Verifies critical paths across multiple components:
-- allowed_tools filtering (SkillRegistry + AgentLoop integration)
+- allowed_tools filtering (ToolRegistry + AgentLoop integration)
 - Message provenance gating
 - Heartbeat tool restriction (operator-specific)
 - Config auto-creation patterns
@@ -22,22 +22,22 @@ import pytest
 import yaml
 
 from src.agent.loop import AgentLoop, _last_message_is_user_origin
-from src.agent.skills import SkillRegistry
+from src.agent.tools import ToolRegistry
 from src.shared.types import LLMResponse
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_mock_skills():
-    """Create a MagicMock SkillRegistry with standard test stubs."""
-    skills = MagicMock()
-    skills.get_tool_definitions = MagicMock(return_value=[])
-    skills.get_descriptions = MagicMock(return_value="- no tools")
-    skills.list_skills = MagicMock(return_value=[])
-    skills.is_parallel_safe = MagicMock(return_value=True)
-    skills.get_loop_exempt_tools = MagicMock(return_value=frozenset())
-    return skills
+def _make_mock_tools():
+    """Create a MagicMock ToolRegistry with standard test stubs."""
+    tools = MagicMock()
+    tools.get_tool_definitions = MagicMock(return_value=[])
+    tools.get_descriptions = MagicMock(return_value="- no tools")
+    tools.list_tools = MagicMock(return_value=[])
+    tools.is_parallel_safe = MagicMock(return_value=True)
+    tools.get_loop_exempt_tools = MagicMock(return_value=frozenset())
+    return tools
 
 
 def _make_mock_llm(responses=None):
@@ -88,41 +88,41 @@ def _make_loop(
         agent_id="test_agent",
         role="research",
         memory=_make_mock_memory(),
-        skills=_make_mock_skills(),
+        tools=_make_mock_tools(),
         llm=_make_mock_llm(llm_responses),
         mesh_client=_make_mock_mesh(),
         allowed_tools=allowed_tools,
     )
 
 
-def _make_registry_with_skills(*tool_names: str) -> tuple[SkillRegistry, str]:
-    """Create a real SkillRegistry with named test skills in a temp dir.
+def _make_registry_with_tools(*tool_names: str) -> tuple[ToolRegistry, str]:
+    """Create a real ToolRegistry with named test tools in a temp dir.
 
     Returns (registry, temp_dir_path).
     """
     td = tempfile.mkdtemp()
-    lines = ["from src.agent.skills import skill\n"]
+    lines = ["from src.agent.tools import tool\n"]
     for name in tool_names:
         lines.append(
-            f"@skill(name={name!r}, description={name!r}, parameters={{}})\n"
+            f"@tool(name={name!r}, description={name!r}, parameters={{}})\n"
             f"async def {name}(**kw): return {{}}\n"
         )
     with open(os.path.join(td, "tools.py"), "w") as f:
         f.write("\n".join(lines))
-    return SkillRegistry(skills_dir=td), td
+    return ToolRegistry(tools_dir=td), td
 
 
 # ===========================================================================
-# 1. Allowed tools filtering (integration: SkillRegistry + AgentLoop)
+# 1. Allowed tools filtering (integration: ToolRegistry + AgentLoop)
 # ===========================================================================
 
 
 class TestAllowedToolsIntegration:
-    """Verify allowed_tools flows correctly from AgentLoop through SkillRegistry."""
+    """Verify allowed_tools flows correctly from AgentLoop through ToolRegistry."""
 
     def test_allowed_tools_filters_correctly(self):
-        """Real SkillRegistry should respect allowed parameter."""
-        reg, _ = _make_registry_with_skills("tool_a", "tool_b")
+        """Real ToolRegistry should respect allowed parameter."""
+        reg, _ = _make_registry_with_tools("tool_a", "tool_b")
 
         # With allowed, only those tools visible
         defs = reg.get_tool_definitions(allowed=frozenset({"tool_a"}))
@@ -150,30 +150,30 @@ class TestAllowedToolsIntegration:
         # Non-standalone agents have no excluded tools
         assert loop._excluded_tools is None
 
-    def test_skill_filter_kw_includes_allowed(self):
-        """_skill_filter_kw should include allowed when set."""
+    def test_tool_filter_kw_includes_allowed(self):
+        """_tool_filter_kw should include allowed when set."""
         tools = frozenset({"list_agents", "notify_user"})
         loop = _make_loop(allowed_tools=tools)
 
-        kw = loop._skill_filter_kw
+        kw = loop._tool_filter_kw
         assert kw.get("allowed") == tools
         assert "exclude" not in kw
 
-    def test_skill_filter_kw_omits_allowed_when_none(self):
-        """_skill_filter_kw should not include allowed when None."""
+    def test_tool_filter_kw_omits_allowed_when_none(self):
+        """_tool_filter_kw should not include allowed when None."""
         loop = _make_loop(allowed_tools=None)
-        kw = loop._skill_filter_kw
+        kw = loop._tool_filter_kw
         assert "allowed" not in kw
 
     def test_empty_allowed_returns_nothing(self):
         """An empty frozenset means no tools are visible."""
-        reg, _ = _make_registry_with_skills("tool_a", "tool_b")
+        reg, _ = _make_registry_with_tools("tool_a", "tool_b")
         defs = reg.get_tool_definitions(allowed=frozenset())
         assert defs == []
 
     def test_allowed_overrides_exclude(self):
         """When both allowed and exclude are passed, allowed takes precedence."""
-        reg, _ = _make_registry_with_skills("tool_a", "tool_b", "tool_c")
+        reg, _ = _make_registry_with_tools("tool_a", "tool_b", "tool_c")
         defs = reg.get_tool_definitions(
             exclude=frozenset({"tool_b"}),
             allowed=frozenset({"tool_a", "tool_b"}),
@@ -183,7 +183,7 @@ class TestAllowedToolsIntegration:
 
     def test_caching_differentiates_allowed_values(self):
         """Cache should be keyed on allowed value, not shared across calls."""
-        reg, _ = _make_registry_with_skills("tool_a", "tool_b")
+        reg, _ = _make_registry_with_tools("tool_a", "tool_b")
         result1 = reg.get_tool_definitions(allowed=frozenset({"tool_a"}))
         result2 = reg.get_tool_definitions(allowed=frozenset({"tool_b"}))
         names1 = {d["function"]["name"] for d in result1}
@@ -272,9 +272,9 @@ class TestHeartbeatToolRestriction:
     """Verify that heartbeat mode passes tool filter kwargs through."""
 
     @pytest.mark.asyncio
-    async def test_heartbeat_uses_skill_filter_kw(self):
+    async def test_heartbeat_uses_tool_filter_kw(self):
         """When operator has allowed_tools, heartbeat should pass them to
-        get_tool_definitions via _skill_filter_kw."""
+        get_tool_definitions via _tool_filter_kw."""
         tools = frozenset({"list_agents", "get_agent_profile", "notify_user"})
         loop = _make_loop(
             allowed_tools=tools,
@@ -297,10 +297,10 @@ class TestHeartbeatToolRestriction:
 
         await loop.execute_heartbeat("Run heartbeat check")
 
-        # The skills.get_tool_definitions should have been called with
+        # The tools.get_tool_definitions should have been called with
         # allowed=_HEARTBEAT_TOOLS (hardcoded 5-tool set, not the operator's original set)
         from src.agent.loop import _HEARTBEAT_TOOLS
-        for call in loop.skills.get_tool_definitions.call_args_list:
+        for call in loop.tools.get_tool_definitions.call_args_list:
             if call.kwargs.get("allowed"):
                 assert call.kwargs["allowed"] == _HEARTBEAT_TOOLS
 
@@ -618,26 +618,26 @@ class TestHeartbeatSkipLogic:
 
 
 # ===========================================================================
-# 11. Integration: SkillRegistry list_skills + get_descriptions
+# 11. Integration: ToolRegistry list_tools + get_descriptions
 # ===========================================================================
 
 
-class TestSkillRegistryAllowedIntegration:
-    """Test that list_skills and get_descriptions also respect allowed."""
+class TestToolRegistryAllowedIntegration:
+    """Test that list_tools and get_descriptions also respect allowed."""
 
-    def test_list_skills_with_allowed(self):
-        reg, _ = _make_registry_with_skills("alpha", "beta", "gamma")
-        result = reg.list_skills(allowed=frozenset({"alpha", "gamma"}))
+    def test_list_tools_with_allowed(self):
+        reg, _ = _make_registry_with_tools("alpha", "beta", "gamma")
+        result = reg.list_tools(allowed=frozenset({"alpha", "gamma"}))
         assert sorted(result) == ["alpha", "gamma"]
 
     def test_get_descriptions_with_allowed(self):
-        reg, _ = _make_registry_with_skills("alpha", "beta")
+        reg, _ = _make_registry_with_tools("alpha", "beta")
         desc = reg.get_descriptions(allowed=frozenset({"alpha"}))
         assert "alpha" in desc
         assert "beta" not in desc
 
     def test_get_tool_sources_with_allowed(self):
-        reg, _ = _make_registry_with_skills("alpha", "beta")
+        reg, _ = _make_registry_with_tools("alpha", "beta")
         sources = reg.get_tool_sources(allowed=frozenset({"alpha"}))
         assert "alpha" in sources
         assert "beta" not in sources
@@ -649,20 +649,20 @@ class TestSkillRegistryAllowedIntegration:
 
 
 class TestMessagesInjection:
-    """Verify _messages can be injected into skill execution."""
+    """Verify _messages can be injected into tool execution."""
 
     @pytest.mark.asyncio
     async def test_messages_parameter_accepted_by_execute(self):
-        """SkillRegistry.execute should pass _messages to skills that declare it."""
-        reg, td = _make_registry_with_skills()
+        """ToolRegistry.execute should pass _messages to tools that declare it."""
+        reg, td = _make_registry_with_tools()
 
-        # Register a skill that accepts _messages
-        skill_file = os.path.join(td, "provenance_tool.py")
-        with open(skill_file, "w") as f:
+        # Register a tool that accepts _messages
+        tool_file = os.path.join(td, "provenance_tool.py")
+        with open(tool_file, "w") as f:
             f.write('''
-from src.agent.skills import skill
+from src.agent.tools import tool
 
-@skill(name="gated_tool", description="Needs provenance", parameters={})
+@tool(name="gated_tool", description="Needs provenance", parameters={})
 async def gated_tool(*, _messages=None, **kw):
     """A tool that checks message provenance."""
     if _messages is None:
@@ -682,15 +682,15 @@ async def gated_tool(*, _messages=None, **kw):
 
     @pytest.mark.asyncio
     async def test_messages_not_injected_when_not_declared(self):
-        """Skills without _messages in signature should not receive it."""
-        reg, td = _make_registry_with_skills()
+        """Tools without _messages in signature should not receive it."""
+        reg, td = _make_registry_with_tools()
 
-        skill_file = os.path.join(td, "simple_tool.py")
-        with open(skill_file, "w") as f:
+        tool_file = os.path.join(td, "simple_tool.py")
+        with open(tool_file, "w") as f:
             f.write('''
-from src.agent.skills import skill
+from src.agent.tools import tool
 
-@skill(name="simple_tool", description="No provenance", parameters={})
+@tool(name="simple_tool", description="No provenance", parameters={})
 async def simple_tool(**kw):
     return {"ok": True, "got_messages": "_messages" in kw}
 ''')

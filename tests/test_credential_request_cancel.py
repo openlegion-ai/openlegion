@@ -212,7 +212,7 @@ async def test_cancel_blocked_for_non_operator(tmp_path):
 
 @pytest.mark.asyncio
 async def test_agent_side_request_credential_surfaces_request_id():
-    """The ``request_credential`` skill must surface the server-generated
+    """The ``request_credential`` tool must surface the server-generated
     request_id back into the tool result so downstream cancel paths can
     address it (and so the agent itself can correlate steers).
     """

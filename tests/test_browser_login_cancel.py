@@ -292,7 +292,7 @@ async def test_captcha_help_cancel_emits_and_steers(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_request_browser_login_skill_surfaces_request_id():
+async def test_request_browser_login_tool_surfaces_request_id():
     from src.agent.builtins.browser_tool import request_browser_login
 
     mc = AsyncMock()
@@ -308,7 +308,7 @@ async def test_request_browser_login_skill_surfaces_request_id():
 
 
 @pytest.mark.asyncio
-async def test_request_browser_login_skill_omits_request_id_when_missing():
+async def test_request_browser_login_tool_omits_request_id_when_missing():
     from src.agent.builtins.browser_tool import request_browser_login
 
     mc = AsyncMock()
@@ -324,7 +324,7 @@ async def test_request_browser_login_skill_omits_request_id_when_missing():
 
 
 @pytest.mark.asyncio
-async def test_request_captcha_help_skill_surfaces_request_id():
+async def test_request_captcha_help_tool_surfaces_request_id():
     from src.agent.builtins.browser_tool import request_captcha_help
 
     mc = AsyncMock()

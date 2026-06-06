@@ -5216,7 +5216,7 @@ class TestAllowedBrowserActions:
     Any browser action added to browser_tool.py must also be in
     KNOWN_BROWSER_ACTIONS in src/host/permissions.py (single source of truth;
     host/server.py imports as _ALLOWED_BROWSER_ACTIONS for input validation)
-    — otherwise the skill silently fails with a 400 "unknown action" from
+    — otherwise the tool silently fails with a 400 "unknown action" from
     the proxy.
     """
 
@@ -5226,19 +5226,19 @@ class TestAllowedBrowserActions:
         return KNOWN_BROWSER_ACTIONS
 
     def test_wait_for_in_allowed_actions(self):
-        """wait_for must be allowed — browser_wait_for skill depends on it."""
+        """wait_for must be allowed — browser_wait_for tool depends on it."""
         actions = self._get_allowed_actions()
         assert "wait_for" in actions, (
             "wait_for missing from _ALLOWED_BROWSER_ACTIONS in host/server.py — "
-            "browser_wait_for skill will silently fail"
+            "browser_wait_for tool will silently fail"
         )
 
     def test_hover_in_allowed_actions(self):
-        """hover must be allowed — browser_hover skill depends on it."""
+        """hover must be allowed — browser_hover tool depends on it."""
         actions = self._get_allowed_actions()
         assert "hover" in actions, (
             "hover missing from _ALLOWED_BROWSER_ACTIONS in host/server.py — "
-            "browser_hover skill will silently fail"
+            "browser_hover tool will silently fail"
         )
 
     def test_core_actions_present(self):
@@ -5249,16 +5249,16 @@ class TestAllowedBrowserActions:
         missing = required - actions
         assert not missing, f"Missing browser actions: {missing}"
 
-    def test_phase_8_captcha_skill_actions_present(self):
-        """Phase 8 §11.14 explicit-trigger captcha skills depend on these."""
+    def test_phase_8_captcha_tool_actions_present(self):
+        """Phase 8 §11.14 explicit-trigger captcha tools depend on these."""
         actions = self._get_allowed_actions()
         assert "solve_captcha" in actions, (
             "solve_captcha missing from KNOWN_BROWSER_ACTIONS — "
-            "browser_solve_captcha skill will silently fail with 400."
+            "browser_solve_captcha tool will silently fail with 400."
         )
         assert "request_captcha_help" in actions, (
             "request_captcha_help missing from KNOWN_BROWSER_ACTIONS — "
-            "request_captcha_help skill will silently fail with 400."
+            "request_captcha_help tool will silently fail with 400."
         )
 
 

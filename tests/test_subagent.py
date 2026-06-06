@@ -10,7 +10,7 @@ from src.agent.builtins.subagent_tool import (
     MAX_DEPTH,
     _active_subagents,
     _cleanup_depth,
-    _clone_skill_registry,
+    _clone_tool_registry,
     _depth_map,
     _get_depth,
     _parent_llm_refs,
@@ -213,35 +213,35 @@ class TestSpawnSubagentTTLTimeout:
         _cleanup()
 
 
-class TestCloneSkillRegistry:
+class TestCloneToolRegistry:
     def setup_method(self):
-        """Ensure skill staging is populated with builtins before each test."""
-        from src.agent.skills import SkillRegistry
-        # Creating a registry re-discovers builtins and populates _skill_staging
-        SkillRegistry(skills_dir="/nonexistent")
+        """Ensure tool staging is populated with builtins before each test."""
+        from src.agent.tools import ToolRegistry
+        # Creating a registry re-discovers builtins and populates _tool_staging
+        ToolRegistry(tools_dir="/nonexistent")
 
-    def test_clone_has_skills_minus_unsafe(self):
-        """Clone has same skills but without unsafe skills."""
+    def test_clone_has_tools_minus_unsafe(self):
+        """Clone has same tools but without unsafe tools."""
         _cleanup()
 
-        clone = _clone_skill_registry()
+        clone = _clone_tool_registry()
 
-        # Should have regular skills (builtins were discovered in setup)
-        assert len(clone.skills) > 0
-        assert "run_command" in clone.skills
+        # Should have regular tools (builtins were discovered in setup)
+        assert len(clone.tools) > 0
+        assert "run_command" in clone.tools
 
-        # Should NOT have unsafe skills
-        assert "create_skill" not in clone.skills
-        assert "reload_skills" not in clone.skills
-        assert "spawn_subagent" not in clone.skills
-        assert "wait_for_subagent" not in clone.skills
+        # Should NOT have unsafe tools
+        assert "create_tool" not in clone.tools
+        assert "reload_tools" not in clone.tools
+        assert "spawn_subagent" not in clone.tools
+        assert "wait_for_subagent" not in clone.tools
 
     def test_clone_reload_is_noop(self):
-        """reload() on clone returns skill count without re-discovering."""
-        clone = _clone_skill_registry()
+        """reload() on clone returns tool count without re-discovering."""
+        clone = _clone_tool_registry()
         count = clone.reload()
         assert isinstance(count, int)
-        assert count == len(clone.skills)
+        assert count == len(clone.tools)
 
 
 class TestListSubagents:

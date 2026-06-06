@@ -118,7 +118,7 @@ class RuntimeContext:
     def start(self) -> None:
         """Initialize and start all components. Called once."""
         self._start_time = time.time()
-        # Match detached mode behavior so relative paths (pubsub.db, skills/, config/)
+        # Match detached mode behavior so relative paths (pubsub.db, agent_tools/, config/)
         # resolve under the OpenLegion project root even when launched elsewhere.
         os.chdir(PROJECT_ROOT)
         self._validate_prereqs()
@@ -455,7 +455,7 @@ class RuntimeContext:
                     daily_usd=budget.get("daily_usd", 10.0),
                     monthly_usd=budget.get("monthly_usd", 200.0),
                 )
-            skills_dir = os.path.abspath(agent_cfg.get("skills_dir", ""))
+            tools_dir = os.path.abspath(agent_cfg.get("tools_dir", ""))
             agent_model = agent_cfg.get("model", default_model)
             agent_mcp_servers = agent_cfg.get("mcp_servers") or None
             agent_thinking = agent_cfg.get("thinking", "")
@@ -535,7 +535,7 @@ class RuntimeContext:
                 url = self.runtime.start_agent(
                     agent_id=agent_id,
                     role=agent_cfg["role"],
-                    skills_dir=skills_dir,
+                    tools_dir=tools_dir,
                     model=agent_model,
                     mcp_servers=agent_mcp_servers,
                     thinking=agent_thinking,
@@ -567,7 +567,7 @@ class RuntimeContext:
                     url = self.runtime.start_agent(
                         agent_id=agent_id,
                         role=agent_cfg["role"],
-                        skills_dir=skills_dir,
+                        tools_dir=tools_dir,
                         model=agent_model,
                         mcp_servers=agent_mcp_servers,
                         thinking=agent_thinking,

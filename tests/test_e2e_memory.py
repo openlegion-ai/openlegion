@@ -95,7 +95,7 @@ def memory_stack(tmp_path_factory):
     url = cm.start_agent(
         agent_id="membot",
         role="assistant",
-        skills_dir="",
+        tools_dir="",
         system_prompt=(
             "You are a helpful assistant with persistent memory. "
             "When the user tells you a fact, use the memory_save tool to remember it. "
@@ -227,5 +227,5 @@ def test_builtin_memory_tools_available(memory_stack):
     r = httpx.get(f"{url}/capabilities", timeout=5)
     assert r.status_code == 200
     caps = r.json()
-    assert "memory_search" in caps["skills"]
-    assert "memory_save" in caps["skills"]
+    assert "memory_search" in caps["tools"]
+    assert "memory_save" in caps["tools"]

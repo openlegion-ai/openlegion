@@ -137,7 +137,7 @@ class TestHealthRestartMissingConfig:
             "agents": {
                 "content-creator": {
                     "role": "writer",
-                    "skills_dir": "skills/content",
+                    "tools_dir": "tools/content",
                     "model": "anthropic/claude-3-5-sonnet",
                 },
             },
@@ -181,7 +181,7 @@ class TestHealthRestartMissingConfig:
     async def test_restart_succeeds_with_config(self):
         """Restart with valid agent metadata proceeds normally."""
         monitor = _make_monitor({
-            "good-agent": {"role": "coder", "skills_dir": "/skills"},
+            "good-agent": {"role": "coder", "tools_dir": "/tools"},
         })
         monitor.register("good-agent")
         health = monitor.agents["good-agent"]
@@ -202,7 +202,7 @@ class TestHealthRestartMissingConfig:
         output cap into the new container's env (LLM_MAX_TOKENS), or the
         agent silently reverts to the 8192 default on every crash."""
         monitor = _make_monitor({
-            "good-agent": {"role": "coder", "skills_dir": "/skills"},
+            "good-agent": {"role": "coder", "tools_dir": "/tools"},
         })
         monitor.register("good-agent")
         health = monitor.agents["good-agent"]

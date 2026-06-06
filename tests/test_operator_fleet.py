@@ -1,4 +1,4 @@
-"""Tests for fleet template endpoints, fleet_tool skills, and mesh client methods."""
+"""Tests for fleet template endpoints, fleet_tool tools, and mesh client methods."""
 
 from __future__ import annotations
 
@@ -284,8 +284,8 @@ class TestMeshClientFleetMethods:
             assert mock_http.post.call_args.kwargs["json"] == {"template": "starter"}
 
 
-class TestApplyTemplateAgentOverridesSkill:
-    """PR-N: ``apply_template`` skill forwards ``agent_overrides`` and back-compat."""
+class TestApplyTemplateAgentOverridesTool:
+    """PR-N: ``apply_template`` tool forwards ``agent_overrides`` and back-compat."""
 
     @pytest.mark.asyncio
     async def test_overrides_forwarded(self):

@@ -243,10 +243,10 @@ class TestChatLoopBumpsMidIteration:
         )
         final_response = LLMResponse(content="done", tokens_used=20)
         loop = _make_loop([tool_response, final_response])
-        loop.skills.get_tool_definitions = MagicMock(
+        loop.tools.get_tool_definitions = MagicMock(
             return_value=[{"type": "function", "function": {"name": "search"}}]
         )
-        loop.skills.execute = AsyncMock(return_value={"result": "ok"})
+        loop.tools.execute = AsyncMock(return_value={"result": "ok"})
 
         before = loop._iterations_since_boot
         await loop.chat("trigger one tool round")

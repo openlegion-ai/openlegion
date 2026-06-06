@@ -93,7 +93,7 @@ _MAX_SOUL = 4_000
 _MAX_USER = 4_000
 _MAX_MEMORY = 16_000
 
-# Public mapping for external consumers (skill response, dashboard).
+# Public mapping for external consumers (tool response, dashboard).
 # Files not listed have no per-file bootstrap cap.
 BOOTSTRAP_CAPS: dict[str, int] = {
     "INSTRUCTIONS.md": _MAX_INSTRUCTIONS,
@@ -1062,14 +1062,14 @@ You can still use the lower-level tools (read_blackboard, write_blackboard,
 publish_event) for custom data patterns (e.g. research/, drafts/, analysis/),
 but prefer the coordination tools above for inter-agent workflows.
 
-## Custom Skills
+## Custom Tools
 
-You can create reusable tools with `create_skill`. Custom skills are Python
-functions decorated with `@skill` that get framework dependencies injected
+You can create reusable tools with `create_tool`. Custom tools are Python
+functions decorated with `@tool` that get framework dependencies injected
 automatically. Key capability: `mesh_client.browser_command(action, params)`
 lets you build multi-step browser automation workflows — it's the same API
 that browser_navigate, browser_click, and all browser tools use internally.
-Call `reload_skills` after creating a skill to activate it.
+Call `reload_tools` after creating a tool to activate it.
 """
 
 

@@ -8,7 +8,7 @@ whether the browser-automation timing distributions look human.
 What this is
 ------------
 A *purely offline* operator tool. There are no runtime hooks, no agent
-surface (this is not a ``@skill``), and no mesh routes. Operators run
+surface (this is not a ``@tool``), and no mesh routes. Operators run
 this script against ``/data/debug/*.jsonl`` (the recorder's dump
 directory) after a session to inspect timing distributions and compare
 against a baseline corpus.

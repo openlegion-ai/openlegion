@@ -43,7 +43,7 @@ benchmark_report.md
 
 # Local-only demo recorder output (record.js + output snapshots)
 demo/
-skills/_marketplace/
+agent_tools/_marketplace/
 uv.lock
 .claude/
 .openlegion

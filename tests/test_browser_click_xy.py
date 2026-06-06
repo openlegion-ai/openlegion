@@ -536,11 +536,11 @@ class TestClickXyMeshAction:
         assert matrix.can_browser_action("no-browser", "click_xy") is False
 
 
-class TestClickXyAgentSkill:
-    """Agent-side skill registration + invocation."""
+class TestClickXyAgentTool:
+    """Agent-side tool registration + invocation."""
 
     @pytest.mark.asyncio
-    async def test_browser_click_xy_skill_calls_mesh_with_click_xy_action(self):
+    async def test_browser_click_xy_tool_calls_mesh_with_click_xy_action(self):
         from src.agent.builtins import browser_tool
 
         mesh = MagicMock()
@@ -552,25 +552,25 @@ class TestClickXyAgentSkill:
         mesh.browser_command.assert_awaited_once_with(
             "click_xy", {"x": 12, "y": 34},
         )
-        # Skills wrap responses in deep_redact — the success envelope round-trips.
+        # Tools wrap responses in deep_redact — the success envelope round-trips.
         assert result["success"] is True
 
-    def test_browser_click_xy_registered_as_skill(self):
-        """Skill metadata must surface to the staging registry so the LLM
-        sees it. Importing ``browser_tool`` triggers the @skill decorator
-        which populates ``_skill_staging``."""
+    def test_browser_click_xy_registered_as_tool(self):
+        """Tool metadata must surface to the staging registry so the LLM
+        sees it. Importing ``browser_tool`` triggers the @tool decorator
+        which populates ``_tool_staging``."""
         import src.agent.builtins.browser_tool  # noqa: F401
-        from src.agent.skills import _skill_staging
+        from src.agent.tools import _tool_staging
 
-        assert "browser_click_xy" in _skill_staging
-        meta = _skill_staging["browser_click_xy"]
+        assert "browser_click_xy" in _tool_staging
+        meta = _tool_staging["browser_click_xy"]
         # Match plan §9.3 contract — parallel_safe=False because clicks
         # mutate shared browser state.
         assert meta["_parallel_safe"] is False
         assert "x" in meta["parameters"]
         assert "y" in meta["parameters"]
 
-    def test_skill_description_documents_review_caveats(self):
+    def test_tool_description_documents_review_caveats(self):
         """Third-pass review locked these caveats into the description so
         agents are warned about the non-obvious failure modes:
           - CSS pixels (not device pixels — DPR irrelevant)
@@ -579,9 +579,9 @@ class TestClickXyAgentSkill:
           - post-click CAPTCHA detection is best-effort
         """
         import src.agent.builtins.browser_tool  # noqa: F401
-        from src.agent.skills import _skill_staging
+        from src.agent.tools import _tool_staging
 
-        desc = _skill_staging["browser_click_xy"]["description"].lower()
+        desc = _tool_staging["browser_click_xy"]["description"].lower()
         assert "css pixel" in desc, "DPR clarification missing"
         assert "scroll" in desc, "scroll-position warning missing"
         assert "iframe" in desc, "cross-origin iframe limitation missing"

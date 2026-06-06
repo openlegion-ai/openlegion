@@ -87,7 +87,7 @@ async def test_rate_delivery_feedback_must_be_string():
     from src.agent.builtins.operator_tools import rate_delivery
 
     mesh = _make_mesh()
-    # The skill is typed as ``feedback: str`` but the LLM could pass
+    # The tool is typed as ``feedback: str`` but the LLM could pass
     # garbage; we defend at the boundary.
     result = await rate_delivery(
         task_id="task_1",

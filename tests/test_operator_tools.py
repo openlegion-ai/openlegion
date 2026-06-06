@@ -1261,11 +1261,11 @@ async def test_archive_audit_before_surfaces_truncated_flag():
     assert "rerun" in result["message"].lower()
 
 
-# ── workflow_snapshot operator skill ──────────────────────────────
+# ── workflow_snapshot operator tool ──────────────────────────────
 
 
-class TestWorkflowSnapshotSkill:
-    """The operator-only ``workflow_snapshot`` skill is a thin wrapper
+class TestWorkflowSnapshotTool:
+    """The operator-only ``workflow_snapshot`` tool is a thin wrapper
     over ``mesh_client.get_workflow_snapshot``: it 404-maps to
     ``{'error': 'not_found'}`` and proxies the dict otherwise."""
 
@@ -1318,10 +1318,10 @@ class TestWorkflowSnapshotSkill:
         mc.get_workflow_snapshot.assert_not_called()
 
 
-# ── await_task_event operator skill ───────────────────────────────
+# ── await_task_event operator tool ───────────────────────────────
 
 
-class TestAwaitTaskEventSkill:
+class TestAwaitTaskEventTool:
     """``await_task_event`` polls the operator's back-edge inbox for a
     terminal event matching ``task_id`` with exponential backoff."""
 

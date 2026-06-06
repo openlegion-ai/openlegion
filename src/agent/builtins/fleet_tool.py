@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from src.agent.skills import skill
+from src.agent.tools import tool
 
 
 def _is_operator() -> bool:
@@ -12,7 +12,7 @@ def _is_operator() -> bool:
     return os.environ.get("ALLOWED_TOOLS", "") != ""
 
 
-@skill(
+@tool(
     name="list_templates",
     description=(
         "List available fleet templates that can be used to create agent teams. "
@@ -32,7 +32,7 @@ async def list_templates(*, mesh_client=None, **_kw) -> dict:
         return {"error": f"Failed to list templates: {e}"}
 
 
-@skill(
+@tool(
     name="apply_template",
     description=(
         "Create a team of agents from a fleet template. Use list_templates first "

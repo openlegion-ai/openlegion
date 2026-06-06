@@ -18,12 +18,12 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None) -> AgentLoop:
     memory.log_action = AsyncMock()
     memory._run_db = AsyncMock(return_value=None)
 
-    skills = MagicMock()
-    skills.get_tool_definitions = MagicMock(return_value=[])
-    skills.get_descriptions = MagicMock(return_value="- no tools")
-    skills.list_skills = MagicMock(return_value=[])
-    skills.is_parallel_safe = MagicMock(return_value=True)
-    skills.get_loop_exempt_tools = MagicMock(return_value=frozenset())
+    tools = MagicMock()
+    tools.get_tool_definitions = MagicMock(return_value=[])
+    tools.get_descriptions = MagicMock(return_value="- no tools")
+    tools.list_tools = MagicMock(return_value=[])
+    tools.is_parallel_safe = MagicMock(return_value=True)
+    tools.get_loop_exempt_tools = MagicMock(return_value=frozenset())
 
     llm = MagicMock()
     if llm_responses:
@@ -39,7 +39,7 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None) -> AgentLoop:
         agent_id="test_agent",
         role="assistant",
         memory=memory,
-        skills=skills,
+        tools=tools,
         llm=llm,
         mesh_client=mesh_client,
     )
@@ -83,8 +83,8 @@ class TestChatMode:
         final_response = LLMResponse(content="Here are your files", tokens_used=20)
 
         loop = _make_loop([tool_response, final_response])
-        loop.skills.execute = AsyncMock(return_value={"exit_code": 0, "stdout": "file.txt"})
-        loop.skills.get_tool_definitions = MagicMock(
+        loop.tools.execute = AsyncMock(return_value={"exit_code": 0, "stdout": "file.txt"})
+        loop.tools.get_tool_definitions = MagicMock(
             return_value=[{"type": "function", "function": {"name": "exec"}}]
         )
 
@@ -350,8 +350,8 @@ class TestAutoContinueSession:
         final_response = LLMResponse(content="Done", tokens_used=10)
 
         loop = _make_loop([tool_response, final_response])
-        loop.skills.execute = AsyncMock(return_value={"result": "ok"})
-        loop.skills.get_tool_definitions = MagicMock(
+        loop.tools.execute = AsyncMock(return_value={"result": "ok"})
+        loop.tools.get_tool_definitions = MagicMock(
             return_value=[{"type": "function", "function": {"name": "exec"}}]
         )
         # Set rounds to just below the limit so the first tool round triggers it
@@ -473,8 +473,8 @@ class TestToolLimitReached:
         ] + [LLMResponse(content="I've done what I can.", tokens_used=10)]
 
         loop = _make_loop(responses)
-        loop.skills.execute = AsyncMock(return_value={"result": "ok"})
-        loop.skills.get_tool_definitions = MagicMock(
+        loop.tools.execute = AsyncMock(return_value={"result": "ok"})
+        loop.tools.get_tool_definitions = MagicMock(
             return_value=[{"type": "function", "function": {"name": "exec"}}]
         )
 
@@ -508,8 +508,8 @@ class TestToolLimitReached:
             yield  # noqa: F811 — makes it an async generator
 
         loop.llm.chat_stream = _no_stream
-        loop.skills.execute = AsyncMock(return_value={"result": "ok"})
-        loop.skills.get_tool_definitions = MagicMock(
+        loop.tools.execute = AsyncMock(return_value={"result": "ok"})
+        loop.tools.get_tool_definitions = MagicMock(
             return_value=[{"type": "function", "function": {"name": "exec"}}]
         )
 
@@ -588,8 +588,8 @@ class TestCompactionSystemMessage:
 
             loop = _make_loop([tool_response, final_response])
             loop.workspace = workspace
-            loop.skills.execute = AsyncMock(return_value={"result": "ok"})
-            loop.skills.get_tool_definitions = MagicMock(
+            loop.tools.execute = AsyncMock(return_value={"result": "ok"})
+            loop.tools.get_tool_definitions = MagicMock(
                 return_value=[{"type": "function", "function": {"name": "exec"}}]
             )
 

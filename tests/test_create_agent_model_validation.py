@@ -124,8 +124,8 @@ def _mesh_env(tmp_path, monkeypatch):
     """Patch config module paths so agent creation writes to tmp_path."""
     cfg_dir = tmp_path / "config"
     cfg_dir.mkdir()
-    skills_dir = tmp_path / "skills"
-    skills_dir.mkdir()
+    tools_dir = tmp_path / "agent_tools"
+    tools_dir.mkdir()
 
     monkeypatch.setattr("src.cli.config.PROJECT_ROOT", tmp_path)
     monkeypatch.setattr("src.cli.config.AGENTS_FILE", cfg_dir / "agents.yaml")

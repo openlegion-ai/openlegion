@@ -1,7 +1,7 @@
 """Tests for browser login delegation.
 
 Covers:
-- ``request_browser_login`` skill passes ``agent_id`` through as
+- ``request_browser_login`` tool passes ``agent_id`` through as
   ``target_agent_id`` to the mesh client.
 - ``MeshClient.browser_command`` / ``request_browser_login`` include
   ``target_agent_id`` in the request body when set.
@@ -32,10 +32,10 @@ def _prefill_rate_bucket(app, endpoint: str, agent_id: str, count: int) -> None:
     for _ in range(count):
         bucket.append(now)
 
-# ── Skill tests ─────────────────────────────────────────────────────
+# ── Tool tests ─────────────────────────────────────────────────────
 
 
-class TestRequestBrowserLoginSkill:
+class TestRequestBrowserLoginTool:
     """src/agent/builtins/browser_tool.request_browser_login."""
 
     @pytest.mark.asyncio

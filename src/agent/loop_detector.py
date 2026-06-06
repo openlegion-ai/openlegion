@@ -8,7 +8,7 @@ Three escalation levels:
   - block:     >= 4 prior identical calls (about to be 5th)
   - terminate: >= 9 prior calls with same tool+params regardless of result
 
-Tools marked ``loop_exempt`` via the ``@skill`` decorator skip warn/block
+Tools marked ``loop_exempt`` via the ``@tool`` decorator skip warn/block
 but still respect the terminate threshold (hard safety cap).
 """
 
@@ -22,7 +22,7 @@ from src.shared.utils import dumps_safe, setup_logging
 
 logger = setup_logging("agent.loop_detector")
 
-# Hardcoded exempt tools — augmented at runtime by skill-level loop_exempt.
+# Hardcoded exempt tools — augmented at runtime by tool-level loop_exempt.
 _DEFAULT_EXEMPT_TOOLS = frozenset({"memory_search"})
 
 # Escalation thresholds (checked against prior completed calls in window)

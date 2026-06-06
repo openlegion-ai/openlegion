@@ -1,7 +1,7 @@
-"""Self-authoring: agents can create their own skills at runtime.
+"""Self-authoring: agents can create their own tools at runtime.
 
 The agent writes a Python function, which is validated (syntax-checked),
-saved to the skills directory, and hot-reloaded into the registry.
+saved to the tools directory, and hot-reloaded into the registry.
 
 Security framing — the AST validation below is authoring HYGIENE, not a
 sandbox or a security boundary. The ``_FORBIDDEN_IMPORTS`` /
@@ -13,10 +13,10 @@ have ``run_command`` — in-container code execution is part of the design —
 so a determined agent never needs to smuggle anything past this validator.
 The REAL boundary is the Docker container hardening (non-root UID 1000,
 ``cap_drop=ALL``, ``no-new-privileges``, read-only root fs, memory/CPU/PID
-limits). Treat these AST checks as a lint pass that keeps honest skills
+limits). Treat these AST checks as a lint pass that keeps honest tools
 well-formed, never as a confinement mechanism.
 
-Marketplace skills (``SkillRegistry.MARKETPLACE_SKILLS_DIR``) are loaded
+Marketplace tools (``ToolRegistry.MARKETPLACE_TOOLS_DIR``) are loaded
 WITHOUT any load-time AST validation — that path runs arbitrary module
 code at import. They are trusted because the marketplace directory is
 operator-populated and mounted read-only. If a remote or agent-reachable
@@ -32,7 +32,7 @@ import ast
 import re
 from pathlib import Path
 
-from src.agent.skills import skill
+from src.agent.tools import tool
 
 _FORBIDDEN_IMPORTS = frozenset({
     "os", "subprocess", "shutil", "ctypes",
@@ -60,24 +60,24 @@ _FORBIDDEN_ATTRS = frozenset({
     "__dict__",
     "builtins",
 })
-_MAX_SKILL_SIZE = 10_000
+_MAX_TOOL_SIZE = 10_000
 
 
-def _validate_skill_code(code: str) -> str | None:
-    """Validate skill code. Returns error message or None if valid."""
-    if len(code) > _MAX_SKILL_SIZE:
-        return f"Skill code too large ({len(code)} > {_MAX_SKILL_SIZE} chars)"
+def _validate_tool_code(code: str) -> str | None:
+    """Validate tool code. Returns error message or None if valid."""
+    if len(code) > _MAX_TOOL_SIZE:
+        return f"Tool code too large ({len(code)} > {_MAX_TOOL_SIZE} chars)"
     try:
         tree = ast.parse(code)
     except SyntaxError as e:
         return f"Syntax error: {e}"
 
-    has_skill_decorator = False
+    has_tool_decorator = False
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             for dec in node.decorator_list:
-                if isinstance(dec, ast.Call) and isinstance(dec.func, ast.Name) and dec.func.id == "skill":
-                    has_skill_decorator = True
+                if isinstance(dec, ast.Call) and isinstance(dec.func, ast.Name) and dec.func.id == "tool":
+                    has_tool_decorator = True
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             modules: list[str] = []
             if isinstance(node, ast.ImportFrom) and node.module:
@@ -100,8 +100,8 @@ def _validate_skill_code(code: str) -> str | None:
             if func_name in _FORBIDDEN_CALLS:
                 return f"Forbidden call: {func_name}()"
 
-    if not has_skill_decorator:
-        return "Code must contain at least one function with the @skill decorator"
+    if not has_tool_decorator:
+        return "Code must contain at least one function with the @tool decorator"
 
     # Check: sync functions that call mesh_client methods must be async
     # (all mesh_client methods are coroutines — forgetting await silently
@@ -135,13 +135,13 @@ def _validate_skill_code(code: str) -> str | None:
 
 
 def _sanitize_filename(name: str) -> str:
-    """Convert a skill name to a safe Python filename."""
+    """Convert a tool name to a safe Python filename."""
     safe = re.sub(r"[^a-z0-9_]", "_", name.lower())
     return f"custom_{safe}.py"
 
 
-_SKILL_AUTHORING_GUIDE = """\
-# Skill Authoring Guide
+_TOOL_AUTHORING_GUIDE = """\
+# Tool Authoring Guide
 
 ## mesh_client Methods (all async)
 
@@ -156,12 +156,12 @@ _SKILL_AUTHORING_GUIDE = """\
 - `image_generate(prompt, size, provider)` — generate an image
 - `list_agents()` — list fleet agents
 
-## Example: Browser Automation Skill
+## Example: Browser Automation Tool
 
 ```python
-from src.agent.skills import skill
+from src.agent.tools import tool
 
-@skill(
+@tool(
     name="post_tweet",
     description="Post a tweet",
     parameters={"text": {"type": "string", "description": "Tweet text"}},
@@ -182,12 +182,12 @@ async def post_tweet(text: str, *, mesh_client=None) -> dict:
     return {"posted": True}
 ```
 
-## Example: Simple Skill (no dependencies)
+## Example: Simple Tool (no dependencies)
 
 ```python
-from src.agent.skills import skill
+from src.agent.tools import tool
 
-@skill(
+@tool(
     name="my_tool",
     description="Does X",
     parameters={"x": {"type": "string"}},
@@ -203,21 +203,21 @@ def my_tool(x: str) -> dict:
 """
 
 
-def _ensure_skill_guide() -> None:
-    """Lazily write the skill authoring guide to /data/ if missing.
+def _ensure_tool_guide() -> None:
+    """Lazily write the tool authoring guide to /data/ if missing.
 
     Uses atomic write (temp file + rename) to avoid partial-write corruption.
     """
     import os
     import tempfile
 
-    guide_path = Path("/data/SKILL_AUTHORING.md")
+    guide_path = Path("/data/TOOL_AUTHORING.md")
     if not guide_path.exists():
         tmp = None
         try:
             fd, tmp = tempfile.mkstemp(dir="/data", suffix=".md")
             with os.fdopen(fd, "w") as f:
-                f.write(_SKILL_AUTHORING_GUIDE)
+                f.write(_TOOL_AUTHORING_GUIDE)
             os.replace(tmp, str(guide_path))
             tmp = None  # rename succeeded, don't clean up
         except (FileNotFoundError, PermissionError, OSError):
@@ -230,68 +230,68 @@ def _ensure_skill_guide() -> None:
                     pass
 
 
-@skill(
-    name="create_skill",
+@tool(
+    name="create_tool",
     description=(
-        "Create a new tool by writing Python code with the @skill decorator. "
-        "Import 'from src.agent.skills import skill' and decorate your function "
-        "with @skill(name=..., description=..., parameters=...). "
+        "Create a new tool by writing Python code with the @tool decorator. "
+        "Import 'from src.agent.tools import tool' and decorate your function "
+        "with @tool(name=..., description=..., parameters=...). "
         "Declare keyword parameters for injected dependencies: mesh_client "
         "(mesh API — browser_command, notify_user, read/write_blackboard, "
         "vault_resolve, image_generate, list_agents), workspace_manager, "
         "or memory_store. Async functions must use 'async def'. "
-        "Call reload_skills after creation to activate. "
-        "Read /data/SKILL_AUTHORING.md for mesh_client API details and examples."
+        "Call reload_tools after creation to activate. "
+        "Read /data/TOOL_AUTHORING.md for mesh_client API details and examples."
     ),
     parameters={
         "name": {
             "type": "string",
-            "description": "Name for this skill (used as filename)",
+            "description": "Name for this tool (used as filename)",
         },
         "code": {
             "type": "string",
-            "description": "Python source code with @skill decorator",
+            "description": "Python source code with @tool decorator",
         },
     },
 )
-def create_skill(name: str, code: str, *, workspace_manager=None) -> dict:
+def create_tool(name: str, code: str, *, workspace_manager=None) -> dict:
     if workspace_manager is None:
         return {"error": "No workspace_manager available"}
 
-    _ensure_skill_guide()
+    _ensure_tool_guide()
 
-    error = _validate_skill_code(code)
+    error = _validate_tool_code(code)
     if error:
         return {"error": f"Validation failed: {error}"}
 
-    # Write to /data/custom_skills (writable) — /app/skills is read-only
-    skills_dir = Path("/data/custom_skills")
-    skills_dir.mkdir(parents=True, exist_ok=True)
+    # Write to /data/custom_tools (writable) — /app/tools is read-only
+    tools_dir = Path("/data/custom_tools")
+    tools_dir.mkdir(parents=True, exist_ok=True)
 
     filename = _sanitize_filename(name)
-    filepath = skills_dir / filename
+    filepath = tools_dir / filename
     filepath.write_text(code)
 
     return {
         "created": True,
         "name": name,
         "file": str(filepath),
-        "note": "Skill saved. Use reload_skills to activate it.",
+        "note": "Tool saved. Use reload_tools to activate it.",
     }
 
 
-@skill(
-    name="reload_skills",
+@tool(
+    name="reload_tools",
     description=(
-        "Reload all skills, picking up any new ones from create_skill or "
-        "marketplace installs. Your newly created skill is NOT available "
-        "until you call this. Call once after create_skill — you do not need "
+        "Reload all tools, picking up any new ones from create_tool or "
+        "marketplace installs. Your newly created tool is NOT available "
+        "until you call this. Call once after create_tool — you do not need "
         "to call it before every tool use."
     ),
     parameters={},
 )
-def reload_skills() -> dict:
+def reload_tools() -> dict:
     return {
         "reload_requested": True,
-        "note": "Skills will be reloaded. New tools will be available on next turn.",
+        "note": "Tools will be reloaded. New tools will be available on next turn.",
     }

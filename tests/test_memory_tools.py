@@ -1,4 +1,4 @@
-"""Tests for memory_search, memory_save, and memory_recall built-in skills."""
+"""Tests for memory_search, memory_save, and memory_recall built-in tools."""
 
 from __future__ import annotations
 
@@ -68,9 +68,9 @@ class TestMemorySave:
 
 class TestMemoryToolDiscovery:
     def test_memory_tools_auto_discovered(self):
-        from src.agent.skills import SkillRegistry
+        from src.agent.tools import ToolRegistry
 
-        registry = SkillRegistry(skills_dir="/nonexistent/path")
-        assert "memory_search" in registry.skills
-        assert "memory_save" in registry.skills
-        assert "category" in registry.skills["memory_search"]["parameters"]
+        registry = ToolRegistry(tools_dir="/nonexistent/path")
+        assert "memory_search" in registry.tools
+        assert "memory_save" in registry.tools
+        assert "category" in registry.tools["memory_search"]["parameters"]

@@ -343,7 +343,7 @@ class TestDashboardAgentCRUD:
             "agents": {
                 "new_agent": {
                     "role": "tester",
-                    "skills_dir": "", "model": "openai/gpt-4o-mini",
+                    "tools_dir": "", "model": "openai/gpt-4o-mini",
                 },
             },
         }
@@ -371,7 +371,7 @@ class TestDashboardAgentCRUD:
             "agents": {
                 "new_agent": {
                     "role": "tester",
-                    "skills_dir": "", "model": "openai/gpt-4o-mini",
+                    "tools_dir": "", "model": "openai/gpt-4o-mini",
                 },
             },
         }
@@ -396,7 +396,7 @@ class TestDashboardAgentCRUD:
             "agents": {
                 "new_agent": {
                     "role": "tester",
-                    "skills_dir": "", "model": "openai/gpt-4o-mini",
+                    "tools_dir": "", "model": "openai/gpt-4o-mini",
                 },
             },
         }
@@ -463,7 +463,7 @@ class TestDashboardAgentCRUD:
             "agents": {
                 "new_agent": {
                     "role": "tester",
-                    "skills_dir": "", "model": "anthropic/claude-opus-4-6",
+                    "tools_dir": "", "model": "anthropic/claude-opus-4-6",
                 },
             },
         }
@@ -511,7 +511,7 @@ class TestDashboardAgentCRUD:
             "agents": {
                 "my_engineer": {
                     "role": "Software engineer",
-                    "skills_dir": "", "model": "openai/gpt-4o-mini",
+                    "tools_dir": "", "model": "openai/gpt-4o-mini",
                 },
             },
         }
@@ -538,7 +538,7 @@ class TestDashboardAgentCRUD:
             "agents": {
                 "my_pm": {
                     "role": "Product manager",
-                    "skills_dir": "", "model": "openai/gpt-4o-mini",
+                    "tools_dir": "", "model": "openai/gpt-4o-mini",
                     "initial_instructions": "You are a PM.",
                     "initial_soul": "Precise and outcome-focused.",
                     "initial_heartbeat": "Check tasks board.",
@@ -5831,7 +5831,7 @@ class TestDashboardEventBusCoverage:
             "llm": {"default_model": "openai/gpt-4o-mini"},
             "agents": {
                 "alpha": {
-                    "role": "tester", "skills_dir": "",
+                    "role": "tester", "tools_dir": "",
                     "model": "openai/gpt-4o-mini",
                 },
             },
@@ -5871,7 +5871,7 @@ class TestDashboardEventBusCoverage:
             "llm": {"default_model": "openai/gpt-4o-mini"},
             "agents": {
                 "alpha": {
-                    "role": "tester", "skills_dir": "",
+                    "role": "tester", "tools_dir": "",
                     "model": "openai/gpt-4o-mini",
                     "max_output_tokens": 32000,
                 },
@@ -6042,7 +6042,7 @@ class TestCapabilitiesMcpForwarding:
         """The agent's per-server status registry passes through
         unchanged so the dashboard can render status dots."""
         self.transport_mock.request = AsyncMock(return_value={
-            "agent_id": "alpha", "role": "r", "skills": {},
+            "agent_id": "alpha", "role": "r", "tools": {},
             "tool_definitions": [], "tool_sources": {},
             "mcp_servers": [
                 {"name": "linear", "state": "running", "tools_count": 8, "error": None},
@@ -6059,7 +6059,7 @@ class TestCapabilitiesMcpForwarding:
 
     def test_forwards_mcp_tool_to_server_mapping(self):
         self.transport_mock.request = AsyncMock(return_value={
-            "agent_id": "alpha", "role": "r", "skills": {},
+            "agent_id": "alpha", "role": "r", "tools": {},
             "tool_definitions": [], "tool_sources": {},
             "mcp_tool_to_server": {
                 "linear_create_issue": "linear",
@@ -6082,7 +6082,7 @@ class TestCapabilitiesMcpForwarding:
         was always False against the OpenAI tool format.
         """
         self.transport_mock.request = AsyncMock(return_value={
-            "agent_id": "alpha", "role": "r", "skills": {},
+            "agent_id": "alpha", "role": "r", "tools": {},
             "tool_definitions": [
                 {"type": "function", "function": {"name": "linear_create_issue"}},
                 {"type": "function", "function": {"name": "gh_list_repos"}},
@@ -6105,7 +6105,7 @@ class TestCapabilitiesMcpForwarding:
         absent; the new backfill must not crash.
         """
         self.transport_mock.request = AsyncMock(return_value={
-            "agent_id": "alpha", "role": "r", "skills": {},
+            "agent_id": "alpha", "role": "r", "tools": {},
             "tool_definitions": [
                 {"type": "function", "function": {"name": "some_unknown_tool"}},
             ],
@@ -6121,7 +6121,7 @@ class TestCapabilitiesMcpForwarding:
         emit the new fields; the dashboard response simply omits them.
         """
         self.transport_mock.request = AsyncMock(return_value={
-            "agent_id": "alpha", "role": "r", "skills": {},
+            "agent_id": "alpha", "role": "r", "tools": {},
             "tool_definitions": [], "tool_sources": {},
         })
         resp = self.client.get("/dashboard/api/agents/alpha/capabilities")

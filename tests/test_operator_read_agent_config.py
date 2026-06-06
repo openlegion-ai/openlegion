@@ -1,4 +1,4 @@
-"""Tests for the operator read_agent_config skill — symmetric inverse of edit_agent."""
+"""Tests for the operator read_agent_config tool — symmetric inverse of edit_agent."""
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock

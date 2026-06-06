@@ -1,12 +1,12 @@
 """Memory tools: search and append to persistent workspace memory.
 
 The workspace_manager and memory_store are injected at call time via the
-skills system (same pattern as mesh_client injection).
+tools system (same pattern as mesh_client injection).
 """
 
 from __future__ import annotations
 
-from src.agent.skills import skill
+from src.agent.tools import tool
 from src.shared.utils import setup_logging
 
 logger = setup_logging("agent.builtins.memory_tool")
@@ -45,7 +45,7 @@ def _parse_fact(content: str) -> tuple[str, str]:
     return key, content
 
 
-@skill(
+@tool(
     name="memory_search",
     description=(
         "Search your long-term memory. By default searches both workspace files "
@@ -125,7 +125,7 @@ async def memory_search(
     return {"results": results, "count": len(results)}
 
 
-@skill(
+@tool(
     name="memory_save",
     description=(
         "Save a fact or note to your memory database, searchable later via "

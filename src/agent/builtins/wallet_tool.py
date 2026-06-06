@@ -7,7 +7,7 @@ as LLM calls: agent describes what, mesh decides whether and how.
 
 from __future__ import annotations
 
-from src.agent.skills import skill
+from src.agent.tools import tool
 from src.shared.utils import sanitize_for_prompt, setup_logging
 
 logger = setup_logging("agent.wallet")
@@ -19,7 +19,7 @@ _CHAIN_DESC = (
 )
 
 
-@skill(
+@tool(
     name="wallet_get_address",
     description=(
         "Returns your wallet address on a specific chain. "
@@ -45,7 +45,7 @@ async def wallet_get_address(chain: str, *, mesh_client=None) -> dict:
         return {"error": sanitize_for_prompt(f"Failed to get address: {e}")}
 
 
-@skill(
+@tool(
     name="wallet_get_balance",
     description=(
         "Check your wallet balance. Returns the amount in human-readable form. "
@@ -81,7 +81,7 @@ async def wallet_get_balance(
         return {"error": sanitize_for_prompt(f"Failed to get balance: {e}")}
 
 
-@skill(
+@tool(
     name="wallet_read_contract",
     description=(
         "Read onchain data without sending a transaction. "
@@ -137,7 +137,7 @@ async def wallet_read_contract(
         return {"error": sanitize_for_prompt(f"Contract read failed: {e}")}
 
 
-@skill(
+@tool(
     name="wallet_transfer",
     description=(
         "Send tokens to an address. Use this for simple sends — "
@@ -186,7 +186,7 @@ async def wallet_transfer(
         return {"error": sanitize_for_prompt(f"Transfer failed: {e}")}
 
 
-@skill(
+@tool(
     name="wallet_execute",
     description=(
         "Call a smart contract or sign a protocol transaction. "
