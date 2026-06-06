@@ -548,7 +548,8 @@ class TestNormalizeBlockerNote:
 
     def test_bounds_length(self):
         from src.shared.redaction import (
-            normalize_blocker_note, BLOCKER_NOTE_MAX_CHARS,
+            BLOCKER_NOTE_MAX_CHARS,
+            normalize_blocker_note,
         )
         out = normalize_blocker_note("blocked: " + ("x" * 2000))
         assert len(out) <= BLOCKER_NOTE_MAX_CHARS
