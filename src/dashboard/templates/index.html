@@ -5748,7 +5748,7 @@
               <span class="text-[11px] text-amber-500/70 ml-auto">restart required after changes</span>
             </div>
 
-            <!-- Managed proxy, no user override -->
+            <!-- Status badge + context (varies by state; the form below is shared) -->
             <div x-show="networkProxy.system_proxy.managed && !networkProxy.system_proxy.overridden" class="space-y-3">
               <div class="flex items-center gap-2">
                 <span class="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-indigo-900/30 text-indigo-400 border border-indigo-800/50">
@@ -5761,28 +5761,7 @@
                 <div class="text-sm text-gray-300 font-mono" x-text="networkProxy.system_proxy.managed_url || '(hidden)'"></div>
               </div>
               <p class="text-[11px] text-gray-500">This proxy is provisioned by OpenLegion. You can override it with your own below.</p>
-              <div>
-                <label class="text-xs text-gray-400 mb-1 block">Override Proxy URL</label>
-                <input type="text" x-model="networkProxy.form.url" class="dash-input w-full" placeholder="http://proxy.example.com:8080">
-              </div>
-              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 chat-grid">
-                <div>
-                  <label class="text-xs text-gray-400 mb-1 block">Username <span class="text-gray-500">(optional)</span></label>
-                  <input type="text" x-model="networkProxy.form.username" class="dash-input w-full" autocomplete="off">
-                </div>
-                <div>
-                  <label class="text-xs text-gray-400 mb-1 block">Password <span class="text-gray-500">(optional)</span></label>
-                  <input type="password" x-model="networkProxy.form.password" class="dash-input w-full" autocomplete="off">
-                </div>
-              </div>
-              <p class="text-[11px] text-gray-400">Only HTTP and HTTPS proxies are supported.</p>
-              <button @click="saveSystemProxy()" :disabled="networkProxy.saving || !networkProxy.form.url"
-                class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">
-                <span x-text="networkProxy.saving ? 'Saving...' : 'Override Proxy'"></span>
-              </button>
             </div>
-
-            <!-- Managed proxy with user override active -->
             <div x-show="networkProxy.system_proxy.managed && networkProxy.system_proxy.overridden" class="space-y-3">
               <div class="flex items-center gap-2 flex-wrap">
                 <span class="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-amber-900/30 text-amber-400 border border-amber-800/50">
@@ -5797,37 +5776,9 @@
                 <div class="text-xs text-gray-400 mb-1">Current Override</div>
                 <div class="text-sm text-gray-300 font-mono" x-text="networkProxy.system_proxy.url"></div>
               </div>
-              <div>
-                <label class="text-xs text-gray-400 mb-1 block">New Override Proxy URL</label>
-                <input type="text" x-model="networkProxy.form.url" class="dash-input w-full" placeholder="http://proxy.example.com:8080">
-              </div>
-              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 chat-grid">
-                <div>
-                  <label class="text-xs text-gray-400 mb-1 block">Username <span class="text-gray-500">(optional)</span></label>
-                  <input type="text" x-model="networkProxy.form.username" class="dash-input w-full" autocomplete="off">
-                </div>
-                <div>
-                  <label class="text-xs text-gray-400 mb-1 block">Password <span class="text-gray-500">(optional)</span></label>
-                  <input type="password" x-model="networkProxy.form.password" class="dash-input w-full" autocomplete="off">
-                </div>
-              </div>
-              <p class="text-[11px] text-gray-400">Only HTTP and HTTPS proxies are supported.</p>
-              <div class="flex items-center gap-2 pt-1">
-                <button @click="saveSystemProxy()" :disabled="networkProxy.saving || !networkProxy.form.url"
-                  class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">
-                  <span x-text="networkProxy.saving ? 'Saving...' : 'Save'"></span>
-                </button>
-                <button @click="revertSystemProxy()" :disabled="networkProxy.removingSystemProxy"
-                  class="text-xs px-3 py-1.5 rounded bg-amber-900/30 hover:bg-amber-900/50 text-amber-400 border border-amber-800/30 disabled:opacity-50 transition-colors">
-                  <span x-text="networkProxy.removingSystemProxy ? 'Reverting...' : 'Revert to Managed'"></span>
-                </button>
-                <span x-show="networkProxy.saved" x-transition class="text-xs text-emerald-400 ml-2">Saved</span>
-              </div>
             </div>
-
-            <!-- Self-hosted proxy (editable form) -->
             <div x-show="!networkProxy.system_proxy.managed && networkProxy.system_proxy.configured" class="space-y-3">
-              <div class="flex items-center gap-2 mb-2">
+              <div class="flex items-center gap-2">
                 <span class="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-emerald-900/30 text-emerald-400 border border-emerald-800/50">
                   <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
                   Configured
@@ -5837,8 +5788,15 @@
                 <div class="text-xs text-gray-400 mb-1">Current Proxy</div>
                 <div class="text-sm text-gray-300 font-mono" x-text="networkProxy.system_proxy.url"></div>
               </div>
+            </div>
+            <div x-show="!networkProxy.system_proxy.managed && !networkProxy.system_proxy.configured" class="bg-gray-800/30 rounded-lg p-4 border border-dashed border-gray-700 mb-3">
+              <p class="text-xs text-gray-400 leading-relaxed">No proxy configured. Agents use the server's IP address directly. For browser automation against sites with anti-bot protection, add a residential proxy.</p>
+            </div>
+
+            <!-- Shared proxy form (single source of truth for all four states) -->
+            <div class="space-y-3">
               <div>
-                <label class="text-xs text-gray-400 mb-1 block">New Proxy URL</label>
+                <label class="text-xs text-gray-400 mb-1 block" x-text="networkProxy.system_proxy.managed ? 'Override Proxy URL' : 'Proxy URL'"></label>
                 <input type="text" x-model="networkProxy.form.url" class="dash-input w-full" placeholder="http://proxy.example.com:8080">
               </div>
               <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 chat-grid">
@@ -5855,40 +5813,16 @@
               <div class="flex items-center gap-2 pt-1">
                 <button @click="saveSystemProxy()" :disabled="networkProxy.saving || !networkProxy.form.url"
                   class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">
-                  <span x-text="networkProxy.saving ? 'Saving...' : 'Save'"></span>
+                  <span x-text="networkProxy.saving ? 'Saving...' : (networkProxy.system_proxy.managed && !networkProxy.system_proxy.overridden ? 'Override Proxy' : (!networkProxy.system_proxy.managed && !networkProxy.system_proxy.configured ? 'Add Proxy' : 'Save'))"></span>
                 </button>
-                <button @click="revertSystemProxy()" :disabled="networkProxy.removingSystemProxy"
-                  class="text-xs px-3 py-1.5 rounded bg-red-900/30 hover:bg-red-900/50 text-red-400 border border-red-800/30 disabled:opacity-50 transition-colors">
-                  <span x-text="networkProxy.removingSystemProxy ? 'Removing...' : 'Remove Proxy'"></span>
+                <button x-show="(networkProxy.system_proxy.managed && networkProxy.system_proxy.overridden) || (!networkProxy.system_proxy.managed && networkProxy.system_proxy.configured)"
+                  @click="revertSystemProxy()" :disabled="networkProxy.removingSystemProxy"
+                  class="text-xs px-3 py-1.5 rounded border disabled:opacity-50 transition-colors"
+                  :class="networkProxy.system_proxy.managed ? 'bg-amber-900/30 hover:bg-amber-900/50 text-amber-400 border-amber-800/30' : 'bg-red-900/30 hover:bg-red-900/50 text-red-400 border-red-800/30'">
+                  <span x-text="networkProxy.removingSystemProxy ? (networkProxy.system_proxy.managed ? 'Reverting...' : 'Removing...') : (networkProxy.system_proxy.managed ? 'Revert to Managed' : 'Remove Proxy')"></span>
                 </button>
                 <span x-show="networkProxy.saved" x-transition class="text-xs text-emerald-400 ml-2">Saved</span>
               </div>
-            </div>
-
-            <!-- No proxy configured -->
-            <div x-show="!networkProxy.system_proxy.managed && !networkProxy.system_proxy.configured" class="space-y-3">
-              <div class="bg-gray-800/30 rounded-lg p-4 border border-dashed border-gray-700">
-                <p class="text-xs text-gray-400 leading-relaxed">No proxy configured. Agents use the server's IP address directly. For browser automation against sites with anti-bot protection, add a residential proxy.</p>
-              </div>
-              <div>
-                <label class="text-xs text-gray-400 mb-1 block">Proxy URL</label>
-                <input type="text" x-model="networkProxy.form.url" class="dash-input w-full" placeholder="http://proxy.example.com:8080">
-              </div>
-              <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 chat-grid">
-                <div>
-                  <label class="text-xs text-gray-400 mb-1 block">Username <span class="text-gray-500">(optional)</span></label>
-                  <input type="text" x-model="networkProxy.form.username" class="dash-input w-full" autocomplete="off">
-                </div>
-                <div>
-                  <label class="text-xs text-gray-400 mb-1 block">Password <span class="text-gray-500">(optional)</span></label>
-                  <input type="password" x-model="networkProxy.form.password" class="dash-input w-full" autocomplete="off">
-                </div>
-              </div>
-              <p class="text-[11px] text-gray-400">Only HTTP and HTTPS proxies are supported.</p>
-              <button @click="saveSystemProxy()" :disabled="networkProxy.saving || !networkProxy.form.url"
-                class="text-xs px-4 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white disabled:opacity-50 transition-colors">
-                <span x-text="networkProxy.saving ? 'Saving...' : 'Add Proxy'"></span>
-              </button>
             </div>
           </div>
 
@@ -6757,25 +6691,6 @@
               Saved — restart the operator to fully apply
               (the container couldn't be reached for live update).
             </div>
-          </div>
-
-          <!-- Pending actions surface — replaced by the inline
-               ``pending_action_card`` chat message. Kept as a small
-               empty-state pointer so users coming from the previous
-               UX know where to look now. -->
-          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5">
-            <div class="flex items-center gap-2 mb-2">
-              <svg class="w-4 h-4 text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
-              </svg>
-              <h3 class="text-base font-medium text-gray-200">Approvals needed</h3>
-            </div>
-            <p class="text-xs text-gray-400">
-              Approvals now appear inline in the operator chat — look for the
-              <span class="text-indigo-300">Confirm change</span> /
-              <span class="text-rose-300">Confirm destructive action</span>
-              cards there.
-            </p>
           </div>
 
           <!-- Audit log -->
