@@ -6825,7 +6825,7 @@
               <template x-for="entry in auditLog" :key="entry.id">
                 <div x-data="{ expanded: false }" class="rounded-lg border"
                   :class="entry.archived ? 'bg-gray-800/10 border-gray-800/30 opacity-70' : 'bg-gray-800/30 border-gray-800/50'">
-                  <div class="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-gray-800/40 transition-colors" tabindex="0" role="button" @click="expanded = !expanded" @keydown.enter.prevent.self="expanded = !expanded" @keydown.space.prevent.self="expanded = !expanded">
+                  <div class="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-gray-800/40 transition-colors" @click="expanded = !expanded">
                     <div class="text-[11px] text-gray-400 w-14 shrink-0" x-text="entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : ''"></div>
                     <div class="flex-1 min-w-0 flex items-center gap-1.5">
                       <span class="text-[11px] px-1.5 py-0.5 rounded-full bg-indigo-900/30 text-indigo-400 border border-indigo-800/30 font-medium" x-text="entry.action"></span>
@@ -6849,7 +6849,9 @@
                       <span x-show="!auditReverting[entry.id]">Revert</span>
                       <span x-show="auditReverting[entry.id]" x-cloak>...</span>
                     </button>
-                    <svg class="w-3 h-3 text-gray-500 transition-transform shrink-0" :class="expanded && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                    <button type="button" @click.stop="expanded = !expanded" :aria-expanded="expanded" aria-label="Toggle change details" class="shrink-0 text-gray-500 hover:text-gray-300 transition-colors">
+                      <svg class="w-3 h-3 transition-transform" :class="expanded && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+                    </button>
                   </div>
                   <template x-if="expanded">
                     <div class="px-3 pb-2.5 border-t border-gray-800/40 space-y-2 pt-2">
@@ -6918,7 +6920,7 @@
                         browserMetricsStale(m.receivedAt) ? 'opacity-60' : '',
                         m.click_success_rate_100 != null ? 'cursor-pointer' : ''
                       ]"
-                      :tabindex="m.click_success_rate_100 != null ? 0 : -1" :role="m.click_success_rate_100 != null ? 'button' : null"
+                      :tabindex="m.click_success_rate_100 != null ? 0 : -1" :role="m.click_success_rate_100 != null ? 'button' : null" :aria-expanded="m.click_success_rate_100 != null ? expanded : null"
                       @click="if (m.click_success_rate_100 != null) expanded = !expanded"
                       @keydown.enter.prevent.self="if (m.click_success_rate_100 != null) expanded = !expanded"
                       @keydown.space.prevent.self="if (m.click_success_rate_100 != null) expanded = !expanded">
@@ -7311,7 +7313,7 @@
           </div>
 
           <!-- ── 1b. Image Generation ── -->
-          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5" x-show="systemSettings">
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5" x-show="systemSettings || !systemSettingsLoading">
             <div class="flex items-center gap-2 mb-4">
               <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
               <h3 class="text-base font-medium text-gray-200">Image Generation</h3>
@@ -7332,7 +7334,7 @@
           </div>
 
           <!-- ── 2. Budgets ── -->
-          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5" x-show="systemSettings">
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5" x-show="systemSettings || !systemSettingsLoading">
             <div class="flex items-center gap-2 mb-4">
               <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
               <h3 class="text-base font-medium text-gray-200">Budgets</h3>
@@ -7360,7 +7362,7 @@
           </div>
 
           <!-- ── 3. Agents ── -->
-          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5" x-show="systemSettings">
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5" x-show="systemSettings || !systemSettingsLoading">
             <div class="flex items-center gap-2 mb-4">
               <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
               <h3 class="text-base font-medium text-gray-200">Agent Execution</h3>
@@ -7407,7 +7409,7 @@
           </div>
 
           <!-- ── 4. Health & Recovery ── -->
-          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5" x-show="systemSettings">
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5" x-show="systemSettings || !systemSettingsLoading">
             <div class="flex items-center gap-2 mb-4">
               <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z"/></svg>
               <h3 class="text-base font-medium text-gray-200">Health &amp; Recovery</h3>
