@@ -5007,6 +5007,10 @@ def create_dashboard_router(
                 "members": pdata.get("members", []),
                 "created_at": pdata.get("created_at", ""),
                 "over_limit": is_over,
+                # Team goal (set via the operator's set_team_goal tool). Surfaced
+                # so the team hub can show it; null until set.
+                "north_star": pdata.get("north_star"),
+                "success_criteria": pdata.get("success_criteria"),
             })
         return {"teams": result}
 

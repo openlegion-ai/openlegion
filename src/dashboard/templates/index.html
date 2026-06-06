@@ -1686,6 +1686,10 @@
                 x-text="(activeTeamData?.members || []).length + ' member' + ((activeTeamData?.members || []).length !== 1 ? 's' : '')"></span>
               <span x-show="activeTeamData?.description" class="text-[11px] text-gray-500 truncate hidden sm:block"
                 :title="activeTeamData?.description" x-text="activeTeamData?.description"></span>
+              <!-- Team goal (north_star) — display-only; set via the operator's set_team_goal -->
+              <span x-show="activeTeamData?.north_star" class="text-[11px] text-indigo-300/80 truncate hidden md:block max-w-[14rem] flex-shrink"
+                :title="'Goal: ' + (activeTeamData?.north_star || '') + (activeTeamData?.success_criteria ? ' — Success: ' + activeTeamData.success_criteria : '')"
+                x-text="'🎯 ' + (activeTeamData?.north_star || '')"></span>
               <!-- Tab pills — desktop only, click stops propagation to header toggle -->
               <div class="project-hub-desktop-tabs seg-group hidden md:flex ml-auto flex-shrink-0" @click.stop role="tablist" aria-label="Team sections">
                 <button @click="teamHubExpanded = true; teamHubTab = 'work'; _ensureWorkplaceTasks()"
@@ -1704,7 +1708,7 @@
                   class="seg-tab seg-tab-sm"
                   :class="teamHubExpanded && teamHubTab === 'docs' ? 'seg-tab-active' : ''"
                   role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'docs'">
-                  <span>Context</span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">The shared TEAM.md file visible to all agents. Use it for team-wide instructions, goals, and context.</span></span>
+                  <span>Brief</span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">The shared TEAM.md brief visible to all agents. Use it for team-wide instructions, goals, and context.</span></span>
                 </button>
                 <button @click="teamHubExpanded = true; teamHubTab = 'members'"
                   class="seg-tab seg-tab-sm"
@@ -1765,7 +1769,7 @@
                   class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
                   :class="teamHubTab === 'docs' ? 'text-white border-indigo-500' : 'text-gray-400 border-transparent hover:text-gray-300'"
                   role="tab" :aria-selected="teamHubTab === 'docs'">
-                  Context
+                  Brief
                 </button>
                 <button @click="teamHubTab = 'members'"
                   class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
