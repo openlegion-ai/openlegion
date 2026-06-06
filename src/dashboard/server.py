@@ -3674,6 +3674,71 @@ def create_dashboard_router(
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
 
+    # Deliberately NOT under ``/files/`` — that namespace ends in a greedy
+    # ``{path:path}`` read route, and a sibling ``/files/{path}/download`` would
+    # permanently shadow any real file whose path ends in ``/download``. A
+    # separate prefix keeps both routes unambiguous.
+    @api_router.get("/api/agents/{agent_id}/file-download/{path:path}")
+    async def api_download_file(agent_id: str, path: str):
+        """Download an agent's /data file as a Content-Disposition attachment.
+
+        Pages the agent's ``/files`` endpoint in 5 MB chunks and concatenates
+        the raw bytes, so the user can save a worker's deliverable (CSV,
+        data.md, a binary export) straight to disk — bypassing the JSON read
+        cap and never routing the bytes through any LLM context. Rejected
+        upfront if the file exceeds the 64 MB cap (the agent reports the full
+        size in the first page), so host memory stays bounded.
+        """
+        import base64 as _b64
+        from urllib.parse import urlencode
+
+        from fastapi.responses import Response
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if transport is None:
+            raise HTTPException(status_code=503, detail="Transport not available")
+        _CHUNK = 5 * 1024 * 1024
+        _MAX_TOTAL = 64 * 1024 * 1024
+        parts: list[bytes] = []
+        offset = 0
+        mime = "application/octet-stream"
+        while True:
+            qs = urlencode({"offset": offset, "max_bytes": _CHUNK})
+            try:
+                result = await transport.request(
+                    agent_id, "GET", f"/files/{path}?{qs}", timeout=60,
+                )
+            except Exception as e:
+                raise HTTPException(status_code=502, detail=str(e))
+            if not isinstance(result, dict) or "content" not in result:
+                status = result.get("status_code", 404) if isinstance(result, dict) else 502
+                detail = result.get("error", "download failed") if isinstance(result, dict) else "download failed"
+                raise HTTPException(status_code=status, detail=detail)
+            # Reject oversize before buffering anything: the first page carries
+            # the full file size.
+            if int(result.get("size", 0)) > _MAX_TOTAL:
+                raise HTTPException(
+                    status_code=413,
+                    detail="File exceeds the 64 MB download cap",
+                )
+            mime = result.get("mime_type") or mime
+            if result.get("encoding") == "base64":
+                blob = _b64.b64decode(result.get("content", ""))
+            else:
+                blob = (result.get("content") or "").encode("utf-8")
+            parts.append(blob)
+            next_offset = result.get("next_offset", offset + len(blob))
+            if not result.get("truncated") or next_offset <= offset:
+                break
+            offset = next_offset
+        filename = path.rsplit("/", 1)[-1] or "download"
+        safe_name = re.sub(r"[^\w.\- ]", "_", filename) or "download"
+        return Response(
+            content=b"".join(parts),
+            media_type=mime,
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+        )
+
     @api_router.get("/api/agents/{agent_id}/files/{path:path}")
     async def api_read_file(agent_id: str, path: str) -> dict:
         """Read a file from the agent's /data volume."""

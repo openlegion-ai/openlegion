@@ -379,6 +379,10 @@ class TestOperatorConstants:
         assert "read_agent_config" in _OPERATOR_ALLOWED_TOOLS
         assert "list_peer_artifacts" in _OPERATOR_ALLOWED_TOOLS
         assert "read_peer_artifact" in _OPERATOR_ALLOWED_TOOLS
+        # Peer FILE reads — full /data volume, not just artifacts/. Lets the
+        # operator locate + relay a worker's deliverable (CSV, data.md).
+        assert "list_peer_files" in _OPERATOR_ALLOWED_TOOLS
+        assert "read_peer_file" in _OPERATOR_ALLOWED_TOOLS
         # Credential-aware model discovery (new tool added by Fix 2).
         assert "list_available_models" in _OPERATOR_ALLOWED_TOOLS
         # Operator self-notes — was bouncing through hand_off-to-self.

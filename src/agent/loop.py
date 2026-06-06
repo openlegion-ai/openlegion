@@ -219,6 +219,8 @@ _READ_ONLY_TOOLS = frozenset({
     "list_cron", "read_agent_history",
     # Pending-action / artifact reads (writes go through manage_task etc.)
     "list_pending", "list_peer_artifacts", "read_peer_artifact",
+    # Peer file reads (full /data volume, not just artifacts/) — read-only.
+    "list_peer_files", "read_peer_file",
     "get_team_outputs",
     # Memory / file reads (writes go through memory_save / write_file)
     "memory_search", "read_file",

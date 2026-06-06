@@ -6128,3 +6128,94 @@ class TestCapabilitiesMcpForwarding:
         body = resp.json()
         assert "mcp_servers" not in body
         assert "mcp_tool_to_server" not in body
+
+
+class TestDashboardFileDownload:
+    """The /file-download/ endpoint streams a worker's file to the user as an
+    attachment, paging the agent in chunks so large files (a CSV, data.md)
+    aren't capped by the 500 KB JSON read. Deliberately NOT under /files/ so it
+    can't shadow a real file whose path ends in /download.
+    """
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_download_text_single_page_attachment(self):
+        self.components["transport"].request = AsyncMock(return_value={
+            "path": "workspace/data.md", "content": "col_a,col_b\n1,2\n",
+            "size": 16, "mime_type": "text/markdown", "encoding": "utf-8",
+            "offset": 0, "next_offset": 16, "truncated": False,
+        })
+        resp = self.client.get(
+            "/dashboard/api/agents/alpha/file-download/workspace/data.md",
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.content == b"col_a,col_b\n1,2\n"
+        assert "attachment" in resp.headers["content-disposition"]
+        assert "data.md" in resp.headers["content-disposition"]
+
+    def test_download_binary_base64_roundtrip(self):
+        import base64 as _b64
+        raw = bytes(range(256))
+        self.components["transport"].request = AsyncMock(return_value={
+            "path": "blob.bin", "content": _b64.b64encode(raw).decode("ascii"),
+            "size": len(raw), "mime_type": "application/octet-stream",
+            "encoding": "base64", "offset": 0, "next_offset": len(raw),
+            "truncated": False,
+        })
+        resp = self.client.get("/dashboard/api/agents/alpha/file-download/blob.bin")
+        assert resp.status_code == 200
+        assert resp.content == raw  # byte-exact
+
+    def test_download_pages_until_complete(self):
+        pages = {
+            0: {"content": "AAAA", "size": 8, "encoding": "utf-8",
+                "offset": 0, "next_offset": 4, "truncated": True,
+                "mime_type": "text/plain"},
+            4: {"content": "BBBB", "size": 8, "encoding": "utf-8",
+                "offset": 4, "next_offset": 8, "truncated": False,
+                "mime_type": "text/plain"},
+        }
+
+        async def _fake(agent_id, method, path, **kw):
+            off = int(path.split("offset=")[1].split("&")[0])
+            return pages[off]
+
+        self.components["transport"].request = AsyncMock(side_effect=_fake)
+        resp = self.client.get("/dashboard/api/agents/alpha/file-download/big.txt")
+        assert resp.status_code == 200
+        assert resp.content == b"AAAABBBB"  # reassembled across pages
+
+    def test_download_oversize_rejected_upfront(self):
+        self.components["transport"].request = AsyncMock(return_value={
+            "content": "x", "size": 65 * 1024 * 1024, "encoding": "utf-8",
+            "offset": 0, "next_offset": 1, "truncated": True,
+            "mime_type": "text/plain",
+        })
+        resp = self.client.get("/dashboard/api/agents/alpha/file-download/huge.csv")
+        assert resp.status_code == 413
+
+    def test_download_unknown_agent_404(self):
+        resp = self.client.get("/dashboard/api/agents/ghost/file-download/x.md")
+        assert resp.status_code == 404
+
+    def test_files_path_ending_in_download_not_shadowed(self):
+        """A real file at a path ending in '/download' still reads via the JSON
+        route — the download endpoint lives under a different prefix."""
+        self.components["transport"].request = AsyncMock(return_value={
+            "path": "workspace/download", "content": "i am a file named download",
+            "size": 26, "mime_type": "text/plain", "encoding": "utf-8",
+            "offset": 0, "next_offset": 26, "truncated": False,
+        })
+        resp = self.client.get(
+            "/dashboard/api/agents/alpha/files/workspace/download",
+        )
+        assert resp.status_code == 200
+        # JSON read route, not the attachment endpoint.
+        assert resp.json()["content"] == "i am a file named download"
