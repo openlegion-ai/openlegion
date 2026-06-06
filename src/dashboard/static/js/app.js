@@ -2401,6 +2401,10 @@ function dashboard() {
         this.fetchSettings();
         this.fetchTeamContent();
         this.fetchTeams();
+        // Lead-with-Work: ensure the task ledger is loaded when entering the
+        // Teams tab with a team active (init restores activeTeam directly, not
+        // via switchTeam, so the Work view would otherwise render empty).
+        if (this.activeTeam) this._ensureWorkplaceTasks();
       }
       if (tab === 'system') {
         this.fetchSettings();
