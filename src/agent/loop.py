@@ -1600,9 +1600,17 @@ class AgentLoop:
         # same-role messages, which violates the LLM role-alternation invariant.
         if not first_group:
             result = [{"role": "user", "content": summary_text.strip()}]
-        elif first_group[0].get("role") == "user" and isinstance(first_group[0].get("content"), str):
-            first_msg = {**first_group[0], "content": first_group[0]["content"] + summary_text}
-            result = [first_msg] + first_group[1:]
+        elif first_group[0].get("role") == "user":
+            first_msg = first_group[0]
+            content0 = first_msg.get("content")
+            if isinstance(content0, list):
+                # Multimodal first message (e.g. an uploaded image): append the
+                # summary as a trailing text block so the turn stays a single
+                # user message and the LLM role-alternation invariant holds.
+                merged = content0 + [{"type": "text", "text": summary_text}]
+            else:
+                merged = (content0 or "") + summary_text
+            result = [{**first_msg, "content": merged}] + first_group[1:]
         else:
             result = first_group + [{"role": "user", "content": summary_text.strip()}]
         for group in recent_groups:
