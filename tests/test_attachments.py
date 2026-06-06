@@ -242,6 +242,43 @@ def test_enrich_multiple_attachments(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert len(image_blocks) == 2
 
 
+def test_enrich_operator_breadcrumb_format(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Operator composer emits "📎 <name> (at /data/uploads/<name>)" — the shorter
+    form that previously did NOT match the regex, leaving the operator unable to
+    view uploaded images. Regression guard for that mismatch."""
+    img_path = tmp_path / "photo.jpg"
+    img_path.write_bytes(_make_tiny_png())
+
+    monkeypatch.setattr(
+        "src.agent.attachments.Path",
+        lambda p: tmp_path / Path(p).name if "/data/uploads/" in p else Path(p),
+    )
+
+    msg = "What is this? 📎 photo.jpg (at /data/uploads/photo.jpg)"
+    result = enrich_message_with_attachments(msg)
+    assert isinstance(result, list)
+    assert any(b["type"] == "image_url" for b in result)
+    text_blocks = [b for b in result if b["type"] == "text"]
+    assert any("What is this?" in b["text"] for b in text_blocks)
+
+
+def test_enrich_bare_path_no_preposition(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A breadcrumb with no "at"/"available at" prose still enriches — only the
+    /data/uploads/ path is the contract."""
+    img_path = tmp_path / "chart.png"
+    img_path.write_bytes(_make_tiny_png())
+
+    monkeypatch.setattr(
+        "src.agent.attachments.Path",
+        lambda p: tmp_path / Path(p).name if "/data/uploads/" in p else Path(p),
+    )
+
+    msg = "📎 (/data/uploads/chart.png)"
+    result = enrich_message_with_attachments(msg)
+    assert isinstance(result, list)
+    assert any(b["type"] == "image_url" for b in result)
+
+
 # ---------------------------------------------------------------------------
 # convert_openai_image_blocks
 # ---------------------------------------------------------------------------

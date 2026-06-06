@@ -27,9 +27,14 @@ from src.shared.utils import setup_logging
 logger = setup_logging("agent.attachments")
 
 # Annotation pattern emitted by the dashboard when a user attaches a file.
-# Format: "📎 File attached: <name> (available at /data/uploads/<name>)"
+# Two composers emit slightly different prose for the same breadcrumb:
+#   regular agent chat: "📎 File attached: <name> (available at /data/uploads/<name>)"
+#   operator chat:      "📎 <name> (at /data/uploads/<name>)"
+# Match only the stable invariant — the "/data/uploads/<name>" path inside the
+# trailing parentheses — so enrichment is independent of the surrounding wording
+# (and survives any future composer drift). The display name is the path basename.
 _ATTACHMENT_RE = re.compile(
-    r"📎 File attached: (?P<name>[^\n(]+?) \(available at (?P<path>/data/uploads/[^\)]+)\)"
+    r"📎[^\n]*?\((?:\s*(?:available at|at)\s+)?(?P<path>/data/uploads/[^)]+?)\s*\)"
 )
 
 _IMAGE_EXTS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp"})
@@ -129,8 +134,8 @@ def enrich_message_with_attachments(message: str) -> str | list[dict]:
         if text_before:
             blocks.append({"type": "text", "text": text_before})
 
-        name = m.group("name").strip()
-        fpath = Path(m.group("path"))
+        fpath = Path(m.group("path").strip())
+        name = fpath.name
         ext = fpath.suffix.lower()
 
         if ext in _IMAGE_EXTS:

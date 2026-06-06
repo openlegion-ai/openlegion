@@ -1546,7 +1546,11 @@ class AgentLoop:
         if assignment.context:
             parts.append(f"## Shared Context from Other Agents\n{sanitize_for_prompt(format_dict(assignment.context))}")
 
-        return [{"role": "user", "content": "\n\n".join(parts)}]
+        # Enrich any 📎 /data/uploads/ references in the task so a worker handed
+        # an image/PDF can actually see it (mirrors the chat path). Returns a
+        # plain string unchanged when there is nothing to enrich.
+        content = enrich_message_with_attachments("\n\n".join(parts))
+        return [{"role": "user", "content": content}]
 
     def _trim_context(self, messages: list[dict], max_tokens: int = 100_000) -> list[dict]:
         """Trim old tool exchanges to manage context window.
