@@ -939,7 +939,7 @@ class AgentLoop:
 
                 available_tools = self.tools.get_tool_definitions(**self._tool_filter_kw) or None
                 llm_response = await _llm_call_with_retry(
-                    self.llm.chat,
+                    self.llm.chat_collect,
                     system=effective_system,
                     messages=messages,
                     tools=available_tools,
@@ -2125,7 +2125,7 @@ class AgentLoop:
                     )
 
                     llm_response = await _llm_call_with_retry(
-                        self.llm.chat,
+                        self.llm.chat_collect,
                         system=system_prompt,
                         messages=messages,
                         tools=iter_tools,
@@ -3321,7 +3321,7 @@ class AgentLoop:
         """
         try:
             llm_response = await _llm_call_with_retry(
-                self.llm.chat,
+                self.llm.chat_collect,
                 system=system,
                 messages=self._chat_messages,
                 tools=None,
@@ -3456,7 +3456,7 @@ class AgentLoop:
                     self.tools.get_tool_definitions(**self._tool_filter_kw) or None
                 )
                 llm_response = await _llm_call_with_retry(
-                    self.llm.chat,
+                    self.llm.chat_collect,
                     system=_round_system,
                     messages=self._chat_messages,
                     tools=_iter_tools,
@@ -3767,7 +3767,7 @@ class AgentLoop:
             # Max tool rounds exhausted — force final text response.
             # Omit tools so the LLM cannot return more tool calls.
             llm_response = await _llm_call_with_retry(
-                self.llm.chat,
+                self.llm.chat_collect,
                 system=system,
                 messages=self._chat_messages,
                 tools=None,

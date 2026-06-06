@@ -85,6 +85,13 @@ class LLMClient:
                 "output cap.",
                 self.timeout_seconds, self.max_output_tokens, int(_needed),
             )
+        # Stream task/handoff LLM calls (default on). Streaming turns the read
+        # timeout into a per-chunk *idle* bound instead of a total-response
+        # bound, so large generations can't ReadTimeout mid-flight. Set
+        # OPENLEGION_TASK_STREAMING=0 to force the non-streaming path.
+        self.stream_task_exec = os.environ.get(
+            "OPENLEGION_TASK_STREAMING", "1",
+        ).strip().lower() not in ("0", "false", "no", "off")
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
         self._auth_token: str = os.environ.get("MESH_AUTH_TOKEN", "")
@@ -376,6 +383,59 @@ class LLMClient:
                         model=data.get("model", ""),
                     )
                     yield {"type": "done", "response": llm_resp}
+
+    async def chat_collect(
+        self,
+        system: str,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float = 0.7,
+        **kwargs,
+    ) -> LLMResponse:
+        """Run a completion over the streaming endpoint, returning the final
+        assembled ``LLMResponse``.
+
+        Streaming makes the httpx read timeout a per-chunk (idle) bound instead
+        of a total-response bound, so a large generation the agent's
+        ``max_output_tokens`` permits can't ``ReadTimeout`` mid-flight — the
+        failure that broke task execution on the fleet. Contract-identical to
+        ``chat``: the stream's terminal ``done`` frame carries the same
+        fully-parsed ``LLMResponse`` (content, thinking, tool_calls, tokens).
+
+        Falls back to non-streaming ``chat`` when streaming is disabled, the
+        stream ends without a terminal frame, or the transport fails for a
+        non-classified reason (mirrors the documented ``chat_stream`` fallback
+        intent). Classified errors (auth / config / retryable) propagate to
+        ``_llm_call_with_retry`` so its backoff still applies.
+        """
+        _passthru = dict(
+            tools=tools, model=model, max_tokens=max_tokens,
+            temperature=temperature, **kwargs,
+        )
+        if not self.stream_task_exec:
+            return await self.chat(system, messages, **_passthru)
+        from src.shared.errors import LLMAuthError, LLMConfigError
+        final: LLMResponse | None = None
+        try:
+            async for chunk in self.chat_stream(system, messages, **_passthru):
+                if chunk.get("type") == "done":
+                    final = chunk.get("response")
+        except (LLMRetryableError, LLMAuthError, LLMConfigError):
+            raise
+        except Exception as e:
+            logger.warning(
+                "Streaming chat failed (%s); falling back to non-streaming",
+                type(e).__name__,
+            )
+            return await self.chat(system, messages, **_passthru)
+        if final is None:
+            logger.warning(
+                "Stream ended without a final frame; falling back to non-streaming",
+            )
+            return await self.chat(system, messages, **_passthru)
+        return final
 
     async def embed(self, text: str, model: str | None = None) -> list[float]:
         """Generate an embedding vector through the mesh proxy."""
