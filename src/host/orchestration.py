@@ -1291,7 +1291,16 @@ class Tasks:
                     {
                         "from": current,
                         "to": status,
-                        "blocker_note": blocker_note,
+                        # Mirror the column + bus-payload gating: only
+                        # blocked/failed carry a reason. A note on any other
+                        # transition is stale context that must not be echoed
+                        # into the audit event row (exposed via
+                        # /mesh/tasks/{id}/events).
+                        "blocker_note": (
+                            blocker_note
+                            if status in ("blocked", "failed")
+                            else None
+                        ),
                     },
                 )
                 # Chain-break detection — only on the ``done`` transition.
