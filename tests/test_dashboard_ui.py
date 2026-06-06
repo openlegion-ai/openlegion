@@ -334,10 +334,13 @@ class TestTabLabelVocabulary:
 
 class TestVocabularySweepStrings:
     def test_pending_actions_renamed(self):
-        # The Operator sub-tab card was titled "Pending actions"; the
-        # sweep flips it to "Approvals needed".
-        assert "Approvals needed" in _INDEX_HTML
+        # The Operator sub-tab card was titled "Pending actions", then
+        # renamed to "Approvals needed", then removed entirely (PR #1044)
+        # once approvals moved inline into the operator chat. The legacy
+        # wording must stay gone, and the interim pointer card must not
+        # reappear.
         assert ">Pending actions<" not in _INDEX_HTML
+        assert "Approvals needed" not in _INDEX_HTML
 
     def test_audit_log_renamed_to_change_history(self):
         assert "Change history" in _INDEX_HTML
