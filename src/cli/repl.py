@@ -1415,6 +1415,8 @@ class REPLSession:
             restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
         # Per-agent output-token cap → LLM_MAX_TOKENS (survives /restart).
         set_llm_max_tokens_env(restart_env, agent_cfg)
+        from src.shared.limits import set_llm_limits_env
+        set_llm_limits_env(restart_env, agent_cfg)
 
         # Start new container
         url = self.ctx.runtime.start_agent(

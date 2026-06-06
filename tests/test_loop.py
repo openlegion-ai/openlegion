@@ -597,6 +597,9 @@ async def test_max_iterations_reached():
     ]
 
     loop = _make_loop(responses)
+    # Pin the cap below the supplied response count so the loop hits the
+    # iteration ceiling (not the mock running dry). The default is now high.
+    loop.MAX_ITERATIONS = 20
     loop.tools.get_tool_definitions = MagicMock(return_value=[{"type": "function", "function": {"name": "search"}}])
     loop.tools.execute = AsyncMock(return_value={"result": "ok"})
 
@@ -1694,6 +1697,9 @@ class TestTaskCompletionLogging:
             for i in range(25)
         ]
         loop = factory(responses)
+        # Pin the cap below the supplied response count so the loop hits the
+        # iteration ceiling (not the mock running dry). The default is now high.
+        loop.MAX_ITERATIONS = 20
         loop.tools.get_tool_definitions = MagicMock(
             return_value=[{"type": "function", "function": {"name": "search"}}]
         )
@@ -4245,10 +4251,12 @@ def _always_tool_calling_loop(*, task_max=4, tool_name="web_search"):
     return loop
 
 
-def test_task_max_tool_rounds_default_is_20():
-    """(#5) The per-task budget default is 20 (raised from 12)."""
+def test_task_max_tool_rounds_default_matches_limits_table():
+    """The per-task budget default is sourced from the central limits table
+    (raised to a high default; tune via env / per-agent config)."""
+    from src.shared import limits
     loop = _make_loop()
-    assert loop.TASK_MAX_TOOL_ROUNDS == 20
+    assert loop.TASK_MAX_TOOL_ROUNDS == limits.LIMIT_SPECS["task_max_tool_rounds"][0]
 
 
 @pytest.mark.asyncio

@@ -13,13 +13,13 @@ Two queue modes control how incoming messages interact with busy agents:
 from __future__ import annotations
 
 import asyncio
-import os
 import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
 from src.host.orchestration import InvalidStatusTransition
+from src.shared import limits
 from src.shared.types import SILENT_REPLY_TOKEN, MessageOrigin
 from src.shared.utils import generate_id, setup_logging
 
@@ -30,11 +30,11 @@ _STEER_WAKEUP_WINDOW = 3600  # 1 hour window
 _NOTIFY_FORWARD_TIMEOUT = 30  # seconds — cap on auto-notify send
 # Per-task lane watchdog (Bug 4): a hung LLM stream or stuck tool call
 # previously blocked the lane indefinitely — every subsequent task for that
-# agent would queue forever. The default is generous (15 min) because some
-# deep-research workloads legitimately take that long; tune via env var.
-_DEFAULT_LANE_TIMEOUT_SECONDS = int(
-    os.getenv("OPENLEGION_LANE_TIMEOUT_SECONDS", "900"),
-)
+# agent would queue forever. The default is generous because some
+# deep-research / large-document workloads legitimately run long; this is the
+# hung-task backstop, so it must sit ABOVE the per-task tool-round budget ×
+# the LLM call timeout. Resolved + clamped via the central limits table.
+_DEFAULT_LANE_TIMEOUT_SECONDS = limits.resolve("lane_timeout_seconds")
 # H7 — per-agent lane queue depth cap. Bounds the un-drained followup
 # backlog so a flood of wakes/handoffs can't grow a single agent's queue
 # without limit (memory + a guarantee that backpressure surfaces as a
@@ -42,9 +42,7 @@ _DEFAULT_LANE_TIMEOUT_SECONDS = int(
 # drains serially, so a healthy agent rarely carries more than a handful
 # queued, and 100 deep is already a strong signal something is looping.
 # ``<= 0`` disables the bound (unbounded queue, pre-H7 behaviour).
-_DEFAULT_LANE_QUEUE_MAX = int(
-    os.getenv("OPENLEGION_LANE_QUEUE_MAX", "100"),
-)
+_DEFAULT_LANE_QUEUE_MAX = limits.resolve("lane_queue_max")
 
 
 class LaneQueueFull(Exception):
