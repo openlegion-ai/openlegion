@@ -198,6 +198,9 @@ function dashboard() {
     // Traces
     traces: [],
     tracesLoading: false,
+    costsLoading: false,
+    cronLoading: false,
+    storageLoading: false,
 
     // Activity view
     activityView: 'traces',
@@ -5929,6 +5932,7 @@ function dashboard() {
     },
 
     async fetchCosts() {
+      this.costsLoading = true;
       try {
         const resp = await fetch(`${window.__config.apiBase}/costs?period=${this.costPeriod}`);
         if (resp.ok) {
@@ -5936,6 +5940,7 @@ function dashboard() {
           this.$nextTick(() => { this.renderCostChart(); this.renderModelChart(); });
         }
       } catch (e) { console.warn('fetchCosts failed:', e); }
+      this.costsLoading = false;
     },
 
     async fetchTraces() {
@@ -6866,10 +6871,12 @@ function dashboard() {
     // ── Cron fetchers ───────────────────────────────────
 
     async fetchCronJobs() {
+      this.cronLoading = true;
       try {
         const resp = await fetch(`${window.__config.apiBase}/cron`);
         if (resp.ok) this.cronJobs = (await resp.json()).jobs;
       } catch (e) { console.warn('fetchCronJobs failed:', e); }
+      this.cronLoading = false;
     },
 
     async runCronJob(jobId) {
@@ -7688,10 +7695,12 @@ function dashboard() {
     },
 
     async fetchStorage() {
+      this.storageLoading = true;
       try {
         const resp = await fetch(`${window.__config.apiBase}/storage`);
         if (resp.ok) this.storageData = await resp.json();
       } catch (e) { console.warn('fetchStorage failed:', e); }
+      this.storageLoading = false;
     },
 
     formatBytes(bytes) {

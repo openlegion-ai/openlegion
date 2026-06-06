@@ -4602,6 +4602,13 @@
         <!-- Costs sub-tab -->
         <div x-show="systemTab === 'costs'">
 
+        <!-- Initial-load spinner (avoids flashing $0.00 before data arrives) -->
+        <div x-show="costsLoading && costData.agents === undefined" class="text-center py-16 text-gray-500 text-sm">
+          <svg class="animate-spin h-5 w-5 mx-auto mb-2 text-gray-600" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+          Loading costs&hellip;
+        </div>
+        <div x-show="!costsLoading || costData.agents !== undefined">
+
         <!-- Stat Cards -->
         <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-5 chat-grid">
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
@@ -4735,6 +4742,7 @@
             </div>
           </div>
         </details>
+        </div><!-- /costs content -->
         </div><!-- /costs sub-tab -->
 
         <!-- Automation sub-tab -->
@@ -4872,7 +4880,11 @@
                 </tbody>
               </table>
             </div>
-            <div x-show="cronJobs.length === 0" class="text-center py-12">
+            <div x-show="cronLoading && cronJobs.length === 0" class="text-center py-12 text-gray-500 text-sm">
+              <svg class="animate-spin h-5 w-5 mx-auto mb-2 text-gray-600" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+              Loading schedules&hellip;
+            </div>
+            <div x-show="!cronLoading && cronJobs.length === 0" class="text-center py-12">
               <svg class="empty-state-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
               </svg>
@@ -4933,7 +4945,11 @@
                 </div>
               </template>
             </div>
-            <div x-show="workflows.length === 0" class="text-center py-8">
+            <div x-show="workflowsLoading && workflows.length === 0" class="text-center py-8 text-gray-500 text-sm">
+              <svg class="animate-spin h-5 w-5 mx-auto mb-2 text-gray-600" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+              Loading workflows&hellip;
+            </div>
+            <div x-show="!workflowsLoading && workflows.length === 0" class="text-center py-8">
               <div class="text-gray-400 text-sm">No workflows configured</div>
               <div class="text-gray-500 text-xs mt-1">Add workflows in your mesh.yaml config</div>
             </div>
@@ -6141,6 +6157,10 @@
           </div>
         </div>
         <!-- Disk & Engine Data -->
+        <div class="mt-6 text-center py-12 text-gray-500 text-sm" x-show="storageLoading && !storageData">
+          <svg class="animate-spin h-5 w-5 mx-auto mb-2 text-gray-600" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+          Loading disk usage&hellip;
+        </div>
         <div class="mt-6" x-show="storageData">
           <div class="text-xs text-gray-400 uppercase tracking-wider mb-3">Disk Usage<span class="setting-hint setting-hint-sm ml-1" tabindex="0">?<span class="setting-hint-text">Storage utilization across the server. Includes agent workspaces, uploaded files, and engine databases.</span></span></div>
           <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 chat-grid">
