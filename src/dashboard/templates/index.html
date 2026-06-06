@@ -1688,23 +1688,11 @@
                 :title="activeTeamData?.description" x-text="activeTeamData?.description"></span>
               <!-- Tab pills — desktop only, click stops propagation to header toggle -->
               <div class="project-hub-desktop-tabs seg-group hidden md:flex ml-auto flex-shrink-0" @click.stop role="tablist" aria-label="Team sections">
-                <button @click="teamHubExpanded = true; teamHubTab = 'docs'"
+                <button @click="teamHubExpanded = true; teamHubTab = 'work'; _ensureWorkplaceTasks()"
                   class="seg-tab seg-tab-sm"
-                  :class="teamHubExpanded && teamHubTab === 'docs' ? 'seg-tab-active' : ''"
-                  role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'docs'">
-                  <span>Context</span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">The shared TEAM.md file visible to all agents. Use it for team-wide instructions, goals, and context.</span></span>
-                </button>
-                <button @click="teamHubExpanded = true; teamHubTab = 'activity'; if (commsActivity.length === 0 && !commsActivityLoading) fetchCommsActivity()"
-                  class="seg-tab seg-tab-sm"
-                  :class="teamHubExpanded && teamHubTab === 'activity' ? 'seg-tab-active' : ''"
-                  role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'activity'">
-                  <span>Activity</span><span x-show="commsActivity.length > 0" class="ml-1 opacity-50 font-mono text-[11px]" x-text="'(' + commsActivity.length + ')'"></span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">Real-time feed of blackboard writes and pub/sub events between agents. Shows how agents are coordinating.</span></span>
-                </button>
-                <button @click="teamHubExpanded = true; teamHubTab = 'state'; fetchBlackboard(); if (Object.keys(commsSubs).length === 0) fetchCommsActivity()"
-                  class="seg-tab seg-tab-sm"
-                  :class="teamHubExpanded && teamHubTab === 'state' ? 'seg-tab-active' : ''"
-                  role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'state'">
-                  <span>State</span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">The shared blackboard — a key-value store where agents read and write data to coordinate. Browse, edit, or delete entries.</span></span>
+                  :class="teamHubExpanded && teamHubTab === 'work' ? 'seg-tab-active' : ''"
+                  role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'work'">
+                  <span>Work</span><span x-show="teamWork.blocked.length > 0" class="ml-1 w-1.5 h-1.5 rounded-full bg-amber-400 inline-block" :title="teamWork.blocked.length + ' blocked'"></span>
                 </button>
                 <button @click="teamHubExpanded = true; teamHubTab = 'artifacts'; fetchArtifacts()"
                   class="seg-tab seg-tab-sm"
@@ -1712,17 +1700,29 @@
                   role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'artifacts'">
                   Files
                 </button>
-                <button @click="teamHubExpanded = true; teamHubTab = 'broadcast'"
+                <button @click="teamHubExpanded = true; teamHubTab = 'docs'"
                   class="seg-tab seg-tab-sm"
-                  :class="teamHubExpanded && teamHubTab === 'broadcast' ? 'seg-tab-active' : ''"
-                  role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'broadcast'">
-                  <span>Broadcast</span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">Send a message to all agents at once. Useful for fleet-wide instructions or status requests.</span></span>
+                  :class="teamHubExpanded && teamHubTab === 'docs' ? 'seg-tab-active' : ''"
+                  role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'docs'">
+                  <span>Context</span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">The shared TEAM.md file visible to all agents. Use it for team-wide instructions, goals, and context.</span></span>
                 </button>
                 <button @click="teamHubExpanded = true; teamHubTab = 'members'"
                   class="seg-tab seg-tab-sm"
                   :class="teamHubExpanded && teamHubTab === 'members' ? 'seg-tab-active' : ''"
                   role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'members'">
                   Members<span class="ml-1 opacity-50 font-mono text-[11px]" x-text="'(' + (activeTeamData?.members || []).length + ')'"></span>
+                </button>
+                <button @click="teamHubExpanded = true; teamHubTab = 'broadcast'"
+                  class="seg-tab seg-tab-sm"
+                  :class="teamHubExpanded && teamHubTab === 'broadcast' ? 'seg-tab-active' : ''"
+                  role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'broadcast'">
+                  <span>Broadcast</span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">Send a message to all agents at once. Useful for fleet-wide instructions or status requests.</span></span>
+                </button>
+                <button @click="teamHubExpanded = true; teamHubTab = 'advanced'; if (teamHubAdvTab === 'state') { fetchBlackboard(); if (Object.keys(commsSubs).length === 0) fetchCommsActivity(); } else if (commsActivity.length === 0 && !commsActivityLoading) { fetchCommsActivity(); }"
+                  class="seg-tab seg-tab-sm"
+                  :class="teamHubExpanded && teamHubTab === 'advanced' ? 'seg-tab-active' : ''"
+                  role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'advanced'">
+                  <span>Advanced</span><span class="setting-hint setting-hint-sm ml-0.5" tabindex="0">?<span class="setting-hint-text">Power-user: the raw shared blackboard (State) and the agent coordination event log (Activity). For debugging how agents coordinate.</span></span>
                 </button>
               </div>
               <!-- Team options kebab menu -->
@@ -1749,23 +1749,11 @@
             <div x-show="teamHubExpanded" x-transition class="border-t border-gray-800/60">
               <!-- Mobile tab strip (sm:hidden) -->
               <div class="project-hub-tabs project-hub-mobile-tabs md:hidden" role="tablist" aria-label="Team sections">
-                <button @click="teamHubTab = 'docs'"
+                <button @click="teamHubTab = 'work'; _ensureWorkplaceTasks()"
                   class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
-                  :class="teamHubTab === 'docs' ? 'text-white border-indigo-500' : 'text-gray-400 border-transparent hover:text-gray-300'"
-                  role="tab" :aria-selected="teamHubTab === 'docs'">
-                  Context
-                </button>
-                <button @click="teamHubTab = 'activity'; if (commsActivity.length === 0 && !commsActivityLoading) fetchCommsActivity()"
-                  class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
-                  :class="teamHubTab === 'activity' ? 'text-white border-indigo-500' : 'text-gray-400 border-transparent hover:text-gray-300'"
-                  role="tab" :aria-selected="teamHubTab === 'activity'">
-                  Activity
-                </button>
-                <button @click="teamHubTab = 'state'; fetchBlackboard(); if (Object.keys(commsSubs).length === 0) fetchCommsActivity()"
-                  class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
-                  :class="teamHubTab === 'state' ? 'text-white border-indigo-500' : 'text-gray-400 border-transparent hover:text-gray-300'"
-                  role="tab" :aria-selected="teamHubTab === 'state'">
-                  State
+                  :class="teamHubTab === 'work' ? 'text-white border-indigo-500' : 'text-gray-400 border-transparent hover:text-gray-300'"
+                  role="tab" :aria-selected="teamHubTab === 'work'">
+                  Work
                 </button>
                 <button @click="teamHubTab = 'artifacts'; fetchArtifacts()"
                   class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
@@ -1773,11 +1761,11 @@
                   role="tab" :aria-selected="teamHubTab === 'artifacts'">
                   Files
                 </button>
-                <button @click="teamHubTab = 'broadcast'"
+                <button @click="teamHubTab = 'docs'"
                   class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
-                  :class="teamHubTab === 'broadcast' ? 'text-white border-indigo-500' : 'text-gray-400 border-transparent hover:text-gray-300'"
-                  role="tab" :aria-selected="teamHubTab === 'broadcast'">
-                  Broadcast
+                  :class="teamHubTab === 'docs' ? 'text-white border-indigo-500' : 'text-gray-400 border-transparent hover:text-gray-300'"
+                  role="tab" :aria-selected="teamHubTab === 'docs'">
+                  Context
                 </button>
                 <button @click="teamHubTab = 'members'"
                   class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
@@ -1785,6 +1773,86 @@
                   role="tab" :aria-selected="teamHubTab === 'members'">
                   Members
                 </button>
+                <button @click="teamHubTab = 'broadcast'"
+                  class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
+                  :class="teamHubTab === 'broadcast' ? 'text-white border-indigo-500' : 'text-gray-400 border-transparent hover:text-gray-300'"
+                  role="tab" :aria-selected="teamHubTab === 'broadcast'">
+                  Broadcast
+                </button>
+                <button @click="teamHubTab = 'advanced'; if (teamHubAdvTab === 'state') { fetchBlackboard(); if (Object.keys(commsSubs).length === 0) fetchCommsActivity(); } else if (commsActivity.length === 0 && !commsActivityLoading) { fetchCommsActivity(); }"
+                  class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
+                  :class="teamHubTab === 'advanced' ? 'text-white border-indigo-500' : 'text-gray-400 border-transparent hover:text-gray-300'"
+                  role="tab" :aria-selected="teamHubTab === 'advanced'">
+                  Advanced
+                </button>
+              </div>
+
+              <!-- ── WORK (live task flow — derived from the shared workplace ledger) ── -->
+              <div x-show="teamHubTab === 'work'" x-cloak class="px-4 py-3">
+                <div x-show="workplaceEnabled === false" class="text-gray-500 text-sm py-6 text-center">
+                  Task tracking isn't enabled for this instance.
+                </div>
+                <template x-if="workplaceEnabled !== false">
+                  <div>
+                    <!-- first-load spinner -->
+                    <div x-show="workplaceSectionLoading.tasks && teamWork.total === 0" class="flex items-center gap-2 text-gray-500 py-6 justify-center">
+                      <svg class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                      <span class="text-xs">Loading work…</span>
+                    </div>
+                    <!-- empty -->
+                    <div x-show="!workplaceSectionLoading.tasks && teamWork.total === 0" class="text-gray-500 text-sm py-6 text-center">
+                      No active work for <span class="text-gray-400" x-text="activeTeam"></span> yet.<br>
+                      <span class="text-xs text-gray-600">Tasks appear here as agents pick them up and hand off to each other.</span>
+                    </div>
+                    <div x-show="teamWork.total > 0" class="space-y-4">
+                      <!-- Blocked -->
+                      <div x-show="teamWork.blocked.length > 0">
+                        <h4 class="text-[11px] font-semibold uppercase tracking-wide text-amber-400/90 mb-1.5">&#9888; Blocked &middot; <span x-text="teamWork.blocked.length"></span></h4>
+                        <div class="space-y-1">
+                          <template x-for="t in teamWork.blocked" :key="t.id">
+                            <button @click="switchTab('workplace'); openTaskDrillIn(t.id)" class="w-full text-left bg-amber-500/5 hover:bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 transition-colors">
+                              <div class="flex items-center justify-between gap-2">
+                                <span class="text-sm text-gray-200 truncate" x-text="t.title"></span>
+                                <span class="text-[11px] text-gray-500 flex-shrink-0 font-mono" x-text="teamHandoffLabel(t)"></span>
+                              </div>
+                              <div x-show="t.blocker_note" class="text-[11px] text-red-400 mt-0.5 truncate" x-text="'⛔ ' + (t.blocker_note || '')"></div>
+                            </button>
+                          </template>
+                        </div>
+                      </div>
+                      <!-- In flight -->
+                      <div x-show="teamWork.inflight.length > 0">
+                        <h4 class="text-[11px] font-semibold uppercase tracking-wide text-blue-400/90 mb-1.5">&#9679; In flight &middot; <span x-text="teamWork.inflight.length"></span></h4>
+                        <div class="space-y-1">
+                          <template x-for="t in teamWork.inflight" :key="t.id">
+                            <button @click="switchTab('workplace'); openTaskDrillIn(t.id)" class="w-full text-left bg-gray-800/40 hover:bg-gray-800/70 border border-gray-700/50 rounded-lg px-3 py-2 transition-colors">
+                              <div class="flex items-center justify-between gap-2">
+                                <span class="text-sm text-gray-200 truncate" x-text="t.title"></span>
+                                <span class="text-[11px] text-gray-500 flex-shrink-0 font-mono" x-text="teamHandoffLabel(t)"></span>
+                              </div>
+                              <div class="text-[11px] text-gray-600 mt-0.5" x-text="t.status"></div>
+                            </button>
+                          </template>
+                        </div>
+                      </div>
+                      <!-- Delivered today -->
+                      <div x-show="teamWork.doneToday.length > 0">
+                        <h4 class="text-[11px] font-semibold uppercase tracking-wide text-emerald-400/90 mb-1.5">&#10003; Delivered today &middot; <span x-text="teamWork.doneToday.length"></span></h4>
+                        <div class="space-y-1">
+                          <template x-for="t in teamWork.doneToday" :key="t.id">
+                            <button @click="switchTab('workplace'); openTaskDrillIn(t.id)" class="w-full text-left bg-gray-800/30 hover:bg-gray-800/60 border border-gray-800 rounded-lg px-3 py-2 transition-colors">
+                              <div class="flex items-center justify-between gap-2">
+                                <span class="text-sm text-gray-300 truncate" x-text="t.title"></span>
+                                <span class="text-[11px] text-gray-600 flex-shrink-0 font-mono" x-text="teamHandoffLabel(t)"></span>
+                              </div>
+                              <div x-show="t.outcome" class="text-[11px] text-emerald-400/80 mt-0.5" x-text="'✓ ' + (t.outcome || '')"></div>
+                            </button>
+                          </template>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </template>
               </div>
 
               <!-- ── CONTEXT (TEAM.md) ── -->
@@ -1842,8 +1910,21 @@
                 </div>
               </div>
 
-              <!-- ── ACTIVITY ── -->
-              <div x-show="teamHubTab === 'activity'" x-cloak>
+              <!-- ── ADVANCED (power-user: raw State + Activity, demoted from the primary tabs) ── -->
+              <div x-show="teamHubTab === 'advanced'" x-cloak class="px-4 pt-3">
+                <p class="text-[11px] text-gray-500 mb-2">Power-user view — the raw shared blackboard and the agent coordination event log, for debugging how agents coordinate.</p>
+                <div class="seg-group inline-flex" role="tablist" aria-label="Advanced sections">
+                  <button @click="teamHubAdvTab = 'state'; fetchBlackboard(); if (Object.keys(commsSubs).length === 0) fetchCommsActivity()"
+                    class="seg-tab seg-tab-sm" :class="teamHubAdvTab === 'state' ? 'seg-tab-active' : ''"
+                    role="tab" :aria-selected="teamHubAdvTab === 'state'">State</button>
+                  <button @click="teamHubAdvTab = 'activity'; if (commsActivity.length === 0 && !commsActivityLoading) fetchCommsActivity()"
+                    class="seg-tab seg-tab-sm" :class="teamHubAdvTab === 'activity' ? 'seg-tab-active' : ''"
+                    role="tab" :aria-selected="teamHubAdvTab === 'activity'">Activity</button>
+                </div>
+              </div>
+
+              <!-- ── ACTIVITY (under Advanced) ── -->
+              <div x-show="teamHubTab === 'advanced' && teamHubAdvTab === 'activity'" x-cloak>
                 <!-- Activity header row: subs + refresh -->
                 <div class="flex items-center gap-2 px-4 pt-3 pb-2">
                   <div x-show="Object.keys(commsSubs).length > 0" class="flex items-center gap-1.5 flex-wrap flex-1 min-w-0" x-cloak>
@@ -1902,7 +1983,7 @@
               </div>
 
               <!-- ── SHARED STATE (Blackboard) ── -->
-              <div x-show="teamHubTab === 'state'" x-cloak class="p-4">
+              <div x-show="teamHubTab === 'advanced' && teamHubAdvTab === 'state'" x-cloak class="p-4">
                 <div class="mb-3 flex gap-2">
                   <input type="text" x-model="bbPrefix" @keyup.enter="fetchBlackboard()"
                     placeholder="Filter by prefix…"
