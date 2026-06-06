@@ -6825,7 +6825,7 @@
               <template x-for="entry in auditLog" :key="entry.id">
                 <div x-data="{ expanded: false }" class="rounded-lg border"
                   :class="entry.archived ? 'bg-gray-800/10 border-gray-800/30 opacity-70' : 'bg-gray-800/30 border-gray-800/50'">
-                  <div class="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-gray-800/40 transition-colors" tabindex="0" role="button" @click="expanded = !expanded" @keydown.enter.prevent="expanded = !expanded" @keydown.space.prevent="expanded = !expanded">
+                  <div class="flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-gray-800/40 transition-colors" tabindex="0" role="button" @click="expanded = !expanded" @keydown.enter.prevent.self="expanded = !expanded" @keydown.space.prevent.self="expanded = !expanded">
                     <div class="text-[11px] text-gray-400 w-14 shrink-0" x-text="entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : ''"></div>
                     <div class="flex-1 min-w-0 flex items-center gap-1.5">
                       <span class="text-[11px] px-1.5 py-0.5 rounded-full bg-indigo-900/30 text-indigo-400 border border-indigo-800/30 font-medium" x-text="entry.action"></span>
@@ -6920,8 +6920,8 @@
                       ]"
                       :tabindex="m.click_success_rate_100 != null ? 0 : -1" :role="m.click_success_rate_100 != null ? 'button' : null"
                       @click="if (m.click_success_rate_100 != null) expanded = !expanded"
-                      @keydown.enter.prevent="if (m.click_success_rate_100 != null) expanded = !expanded"
-                      @keydown.space.prevent="if (m.click_success_rate_100 != null) expanded = !expanded">
+                      @keydown.enter.prevent.self="if (m.click_success_rate_100 != null) expanded = !expanded"
+                      @keydown.space.prevent.self="if (m.click_success_rate_100 != null) expanded = !expanded">
                       <td class="py-3 pr-3 text-gray-200 font-mono truncate max-w-[14rem]" x-text="m.agent"></td>
                       <td class="py-3 pr-3">
                         <template x-if="m.click_success_rate_100 != null">
