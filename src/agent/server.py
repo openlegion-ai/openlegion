@@ -620,6 +620,8 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         model = body.get("model") if "model" in body else None
         thinking = body.get("thinking") if "thinking" in body else None
         max_tokens = body.get("max_tokens") if "max_tokens" in body else None
+        max_tool_rounds = body.get("max_tool_rounds") if "max_tool_rounds" in body else None
+        llm_timeout = body.get("llm_timeout_seconds") if "llm_timeout_seconds" in body else None
         internet = body.get("internet_access_enabled") if "internet_access_enabled" in body else None
         browser = body.get("browser_access_enabled") if "browser_access_enabled" in body else None
         if "model" in body and (not isinstance(model, str) or not model):
@@ -645,6 +647,23 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             raise HTTPException(
                 400, "browser_access_enabled must be a boolean",
             )
+        # Per-agent operational caps — validated against the central limits
+        # clamp spec (single source of truth). bool rejected (int subclass).
+        from src.shared import limits as _limits
+        for _k, _val in (
+            ("max_tool_rounds", max_tool_rounds),
+            ("llm_timeout_seconds", llm_timeout),
+        ):
+            if _k in body:
+                _d, _lo, _hi = _limits.LIMIT_SPECS[_limits.AGENT_CONFIG_KEYS[_k]]
+                if (
+                    not isinstance(_val, int)
+                    or isinstance(_val, bool)
+                    or not (_lo <= _val <= _hi)
+                ):
+                    raise HTTPException(
+                        400, f"{_k} must be an integer between {_lo} and {_hi}",
+                    )
 
         updated: dict = {}
         if "model" in body:
@@ -656,6 +675,16 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         if "max_tokens" in body:
             loop.llm.max_output_tokens = max_tokens
             updated["max_tokens"] = max_tokens
+        if "max_tool_rounds" in body:
+            # Honour the TASK <= CHAT invariant (mirrors AgentLoop.__init__).
+            loop.TASK_MAX_TOOL_ROUNDS = min(max_tool_rounds, loop.CHAT_MAX_TOOL_ROUNDS)
+            updated["max_tool_rounds"] = loop.TASK_MAX_TOOL_ROUNDS
+        if "llm_timeout_seconds" in body:
+            loop.llm.timeout_seconds = llm_timeout
+            # Reset the pooled httpx client so the new timeout takes effect on
+            # the next call (httpx fixes the timeout at client construction).
+            await loop.llm.close()
+            updated["llm_timeout_seconds"] = llm_timeout
         if "internet_access_enabled" in body:
             # Mesh-side push from the Operator Settings → Internet
             # access toggle. When False, hide http_request + web_search

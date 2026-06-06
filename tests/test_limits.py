@@ -68,3 +68,25 @@ def test_set_llm_limits_env_clamps():
     _default, _lo, hi = limits.LIMIT_SPECS["task_max_tool_rounds"]
     limits.set_llm_limits_env(env, {"max_tool_rounds": hi + 5000})
     assert env["OPENLEGION_TASK_MAX_TOOL_ROUNDS"] == str(hi)
+
+
+# --- edit_agent field support for the per-agent limit knobs (PR B) ---
+
+def test_new_limit_fields_are_editable():
+    from src.shared.types import HARD_EDIT_FIELDS
+    assert "max_tool_rounds" in HARD_EDIT_FIELDS
+    assert "llm_timeout_seconds" in HARD_EDIT_FIELDS
+
+
+def test_validate_edit_accepts_valid_rounds():
+    from src.agent.builtins.operator_tools import _validate_edit
+    assert _validate_edit("a", "max_tool_rounds", 250) is None
+    assert _validate_edit("a", "llm_timeout_seconds", 900) is None
+
+
+def test_validate_edit_rejects_out_of_range_and_bool():
+    from src.agent.builtins.operator_tools import _validate_edit
+    _d, _lo, hi = limits.LIMIT_SPECS["task_max_tool_rounds"]
+    assert _validate_edit("a", "max_tool_rounds", hi + 1) is not None
+    assert _validate_edit("a", "max_tool_rounds", True) is not None
+    assert _validate_edit("a", "llm_timeout_seconds", "nope") is not None

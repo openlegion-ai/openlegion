@@ -7039,6 +7039,7 @@ def create_mesh_app(
             raise HTTPException(404, f"Agent '{agent_id}' not found")
         raw = agents[agent_id]
 
+        from src.shared import limits as _limits_mod
         # Translate yaml internals -> canonical edit_agent field names.
         full: dict = {
             "model": raw.get("model", ""),
@@ -7052,6 +7053,12 @@ def create_mesh_app(
             # Falls back to the LLMClient default (8192) when never set, so the
             # operator sees the effective cap, not a blank.
             "max_output_tokens": raw.get("max_output_tokens", 8192) or 8192,
+            # Per-agent operational caps — fall back to the central limits
+            # default so the operator sees the effective value, not a blank.
+            "max_tool_rounds": raw.get("max_tool_rounds")
+            or _limits_mod.LIMIT_SPECS["task_max_tool_rounds"][0],
+            "llm_timeout_seconds": raw.get("llm_timeout_seconds")
+            or _limits_mod.LIMIT_SPECS["llm_timeout_seconds"][0],
         }
 
         # Permissions live in PERMISSIONS_FILE, not agents.yaml. Load via
@@ -7408,14 +7415,17 @@ def create_mesh_app(
             "model": "model",
             "thinking": "thinking",
             "max_output_tokens": "max_tokens",
+            "max_tool_rounds": "max_tool_rounds",
+            "llm_timeout_seconds": "llm_timeout_seconds",
         }.get(field)
+        _int_push_fields = ("max_output_tokens", "max_tool_rounds", "llm_timeout_seconds")
         if (
             transport
             and agent_id in router.agent_registry
             and _config_push_key is not None
             and (
                 isinstance(new_value, str)
-                or (field == "max_output_tokens" and isinstance(new_value, int))
+                or (field in _int_push_fields and isinstance(new_value, int))
             )
         ):
             try:
@@ -7691,6 +7701,18 @@ def create_mesh_app(
                 raise HTTPException(
                     400, "max_output_tokens must be between 256 and 200000",
                 )
+        elif field in ("max_tool_rounds", "llm_timeout_seconds"):
+            # Per-agent operational caps. Re-enforce server-side; range is the
+            # central limits clamp spec (single source of truth). bool is an
+            # int subclass — reject it so True/False can't slip through as 1/0.
+            from src.shared import limits as _limits
+            if not isinstance(new_value, int) or isinstance(new_value, bool):
+                raise HTTPException(400, f"{field} must be an integer")
+            _d, _lo, _hi = _limits.LIMIT_SPECS[_limits.AGENT_CONFIG_KEYS[field]]
+            if not (_lo <= new_value <= _hi):
+                raise HTTPException(
+                    400, f"{field} must be between {_lo} and {_hi}",
+                )
         elif field == "permissions":
             # Finding H1 (May 2026 remediation): re-enforce the operator
             # permission ceiling server-side. The operator tool's
@@ -7738,7 +7760,18 @@ def create_mesh_app(
             # the hot-reload push forwards to the agent /config (the push
             # guard requires an int) so the live agent actually drops back to
             # 8192 instead of silently keeping the raised cap until restart.
-            _missing_default = 8192 if field == "max_output_tokens" else ""
+            # Default the audit "before" value to the effective limit (not "")
+            # when a field was never set, so Undo writes back a usable int that
+            # the hot-reload push will forward to the live agent.
+            if field == "max_output_tokens":
+                _missing_default: object = 8192
+            elif field in ("max_tool_rounds", "llm_timeout_seconds"):
+                from src.shared import limits as _limits
+                _missing_default = _limits.LIMIT_SPECS[
+                    _limits.AGENT_CONFIG_KEYS[field]
+                ][0]
+            else:
+                _missing_default = ""
             old_value = agents[agent_id].get(yaml_key, _missing_default)
 
         # Apply directly via the same write helper used by the confirm
