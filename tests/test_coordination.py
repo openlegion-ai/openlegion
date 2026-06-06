@@ -164,6 +164,29 @@ class TestHandOff:
         assert "error" not in result
 
     @pytest.mark.asyncio
+    async def test_hand_off_to_operator_non_403_wake_error_still_fails(self):
+        """The operator carve-out is narrowed to the BY-DESIGN 403. A genuine
+        infra failure (500 / network) on an operator wake must NOT be masked
+        as success — it stays visible via the ``wake_failed`` envelope.
+        """
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="dev-publisher")
+        mc.list_agents.return_value = {"operator": {"project": "ops"}}
+        mc.wake_agent.side_effect = Exception(
+            "Server error '500 Internal Server Error' for url "
+            "'http://host.docker.internal:8420/mesh/wake'"
+        )
+
+        result = await hand_off(
+            to="operator", summary="pipeline stalled", mesh_client=mc,
+        )
+
+        assert result["handed_off"] is False
+        assert result.get("wake_failed") is True
+        assert "queued_for_heartbeat" not in result
+
+    @pytest.mark.asyncio
     async def test_hand_off_to_worker_wake_failure_still_fails(self):
         """A wake failure to a NON-operator peer is a genuine problem and
         must keep the existing ``wake_failed`` envelope — the operator carve

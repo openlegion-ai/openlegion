@@ -3249,11 +3249,12 @@ function dashboard() {
     },
 
     // Plain-English mapping for blocker_note codes. Returns
-    // ``{ kind, label, service }`` so callers can both render the
-    // sentence and pick a CTA (credential vs. browser-login vs.
-    // drill-in). ``service`` is best-effort — extracted from a
-    // ``cred:<name>`` shorthand or the trailing word of a sentence;
-    // callers should treat empty as "unknown".
+    // ``{ kind, label, service, audience }`` so callers can render the
+    // sentence, pick a CTA (credential vs. browser-login vs. drill-in),
+    // and route by ``audience`` ('user' shows in the primary view;
+    // 'internal' is hidden into the Technical activity group). ``service``
+    // is best-effort — extracted from a ``cred:<name>`` shorthand or the
+    // trailing word of a sentence; callers should treat empty as "unknown".
     _humanizeBlocker(rawNote) {
       // Decode a machine blocker_note into plain English + an AUDIENCE.
       //   audience 'user'     → the person can act on it; shown in the
@@ -3318,9 +3319,11 @@ function dashboard() {
       if (lower.startsWith('agent_quarantined')) {
         return { kind: 'internal', label: 'The agent was paused after repeated errors.', service: '', audience: 'internal' };
       }
-      // Transient AI-provider hiccups.
+      // Transient AI-provider hiccups. Match only unambiguous error phrases —
+      // bare tokens like "oauth"/"rate limit" could appear in a real user note
+      // ("please complete OAuth login") and must not be hidden. Anything that
+      // slips past here still lands in the generic 'exception' branch below.
       if (lower.includes('llm call failed') || lower.includes('returned empty response')
-          || lower.includes('oauth') || lower.includes('rate limit') || lower.includes(' 429')
           || lower.includes('connection to the ai provider')) {
         return { kind: 'provider', label: 'The AI provider was briefly unavailable.', service: '', audience: 'internal' };
       }
@@ -5908,15 +5911,16 @@ function dashboard() {
       const blocked = [], inflight = [], doneToday = [], technical = [];
       for (const t of (this.workplaceTasks || [])) {
         if (t.project_id !== team) continue;
-        if (t.status === 'blocked') {
-          // Surface only user-actionable blockers in the primary view;
-          // engine-internal ones go to the Technical activity group.
+        // Blocked AND failed both carry a blocker_note. Surface the ones the
+        // user can act on (e.g. a too-large task they can split) in the
+        // primary view; route engine-internal / transient ones (the bulk of
+        // failures) to the collapsed Technical activity group.
+        if (t.status === 'blocked' || t.status === 'failed') {
           if (this._humanizeBlocker(t.blocker_note || '').audience === 'user') blocked.push(t);
           else technical.push(t);
         }
         else if (active[t.status]) inflight.push(t);
         else if (t.status === 'done' && ((t.completed_at || 0) * 1000) >= todayMs) doneToday.push(t);
-        else if (t.status === 'failed') technical.push(t);  // failures are engine-internal by default
       }
       // ``total`` counts only the user-facing buckets so the badge reflects
       // work that's relevant to the person, not internal noise.

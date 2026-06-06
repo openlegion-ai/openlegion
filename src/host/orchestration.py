@@ -1345,6 +1345,13 @@ class Tasks:
                 # the bell for already-rated (e.g. auto-graded) work.
                 "title": task_title,
                 "outcome": task_outcome,
+                # Carry the (already-normalized) failure reason so the SPA can
+                # live-patch it and bucket by audience without a full reload.
+                # Mirror the persistence rule: only blocked/failed keep a note;
+                # other transitions explicitly send null so a stale note clears.
+                "blocker_note": (
+                    blocker_note if new_status in ("blocked", "failed") else None
+                ),
             }
             # Merge caller-supplied context (e.g. cancel ``reason``) so
             # the dashboard activity feed can render rich status_changed

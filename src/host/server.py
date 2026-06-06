@@ -5800,11 +5800,13 @@ def create_mesh_app(
             result_dict = raw_result if isinstance(raw_result, dict) else {}
             payload_extras: dict = {}
             if status == "blocked":
-                payload_extras["blocker_note"] = blocker_note or ""
+                # Use the stored value — update_status ran it through
+                # normalize_blocker_note (redacted + collapsed), so this
+                # back-edge (read by other agents via check_inbox) can't
+                # leak a secret from the raw request body.
+                payload_extras["blocker_note"] = (fresh.get("blocker_note") or "")
             elif status == "failed":
-                payload_extras["error"] = (
-                    body.get("error") or result_dict.get("error", "") or ""
-                )
+                payload_extras["error"] = (fresh.get("blocker_note") or "")
             elif status == "done":
                 payload_extras["summary"] = result_dict.get("summary", "")
             _write_task_event_back_edge(
