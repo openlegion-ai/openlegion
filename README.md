@@ -6,7 +6,7 @@
 </h3>
 <div align="center">
    
-[![License: BSL 1.1](https://img.shields.io/badge/license-BSL%201.1-orange.svg)](LICENSE)
+[![License: PolyForm Perimeter 1.0.1](https://img.shields.io/badge/license-PolyForm%20Perimeter%201.0.1-orange.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://python.org)
 [![Tests: 5800+](https://img.shields.io/badge/tests-5800%2B%20passing-brightgreen)](https://github.com/openlegion-ai/openlegion/actions/workflows/test.yml)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/mXNkjpDvvr)
@@ -61,7 +61,7 @@ https://github.com/user-attachments/assets/8bd3fe95-5734-474d-92f0-40616daf91ad
 
 OpenLegion is a **secure, self-hosted AI agent runtime** for running fleets of autonomous AI agents in production. Each agent runs in its own hardened Docker container (or microVM), with its own memory, tools, schedule, and budget. Agents never hold API keys - every LLM and API call routes through a central credential vault that also enforces per-agent spend limits. A trusted mesh host coordinates the fleet through shared state and pub/sub events, with permission ACLs checked on every cross-agent action.
 
-It is **source-available** under the Business Source License 1.1 (BSL): you can self-host it for free, read the entire ~77,000-line codebase, and audit it in a day. Managed hosting is available for teams that prefer not to run their own infrastructure. OpenLegion is built as a production- and team-focused **OpenClaw alternative** - it keeps the autonomy of single-user assistant frameworks and adds container isolation, credential vaulting, per-agent budgets, and auditable workflows.
+It is **source-available** under the PolyForm Perimeter License 1.0.1: you can self-host it for free — including for your own commercial, internal operations — read the entire ~77,000-line codebase, and audit it in a day. The one thing you can't do is offer it to others as a product or service that competes with OpenLegion (e.g. reselling it as your own hosted/managed service). Managed hosting is available from OpenLegion LLC for teams that prefer not to run their own infrastructure. OpenLegion is built as a production- and team-focused **OpenClaw alternative** - it keeps the autonomy of single-user assistant frameworks and adds container isolation, credential vaulting, per-agent budgets, and auditable workflows.
 
 In one line: **a multi-agent framework where security, isolation, and cost control are part of the architecture, not an afterthought.**
 
@@ -167,7 +167,7 @@ prompted.
 
 **5800+ tests passing** across 155 test files.
 **Fully auditable in a day.**
-No LangChain. No Redis. No Kubernetes. No CEO agent. BSL License.
+No LangChain. No Redis. No Kubernetes. No CEO agent. Source-available (PolyForm Perimeter).
 
 1. **Security by architecture** — every agent runs in an isolated Docker container
    (microVM when available). API keys live in the credential vault — agents call
@@ -1158,10 +1158,10 @@ config/
 OpenLegion is a secure, self-hosted AI agent runtime for running fleets of autonomous AI agents in isolated Docker containers. A central mesh host holds all credentials, enforces per-agent budgets and permission ACLs, and coordinates agents through shared state and pub/sub - so agents stay isolated, auditable, and cost-bounded.
 
 **Is OpenLegion open source?**
-OpenLegion is **source-available**, not open source. It is licensed under the Business Source License 1.1 (BSL): you can view, modify, and self-host the full codebase for free, but you cannot offer it as a competing hosted or SaaS product. The entire ~77,000-line `src/` tree is readable and auditable.
+OpenLegion is **source-available**, not open source. It is licensed by OpenLegion LLC under the PolyForm Perimeter License 1.0.1: you can view, modify, and self-host the full codebase for free — including for commercial, internal use — but you cannot provide it to others as a product or service that competes with OpenLegion (for example, reselling it as a hosted or SaaS product). The entire ~77,000-line `src/` tree is readable and auditable.
 
 **Can I self-host OpenLegion?**
-Yes. Self-hosting is the default and is free under the BSL. You need Python 3.10+, Docker, and at least one LLM provider key. See the [Quick Start](#quick-start) and the [full setup guide](QUICKSTART.md).
+Yes. Self-hosting is the default and is free under the license, including for your own commercial, internal use. You need Python 3.10+, Docker, and at least one LLM provider key. See the [Quick Start](#quick-start) and the [full setup guide](QUICKSTART.md).
 
 **Is OpenLegion a good OpenClaw alternative?**
 For production and team use, yes - it adds container/microVM isolation, a credential vault so agents never hold API keys, per-agent budget caps, and permission ACLs on top of autonomous agents. For a single-user assistant on one machine, OpenClaw or a lighter tool may be simpler. See [OpenLegion vs OpenClaw](#openlegion-vs-openclaw).
@@ -1179,19 +1179,26 @@ Defense-in-depth: per-agent Docker containers (or Docker Sandbox microVMs), a cr
 100+ providers via [LiteLLM](https://litellm.ai) (Anthropic, OpenAI, Gemini, Moonshot, DeepSeek, xAI, Groq, Minimax, Zai, Ollama, and more), with health-tracked failover across providers.
 
 **Does OpenLegion offer managed hosting?**
-Yes. Managed hosting is available for teams that prefer not to run their own infrastructure, while self-hosting stays free under the BSL.
+Yes. Managed hosting is available from OpenLegion LLC for teams that prefer not to run their own infrastructure, while self-hosting stays free under the license.
 
 ---
 
 ## License
 
-OpenLegion.ai is source-available under the Business Source License 1.1 (BSL).
+OpenLegion is source-available software, copyright © 2026 OpenLegion LLC,
+licensed under the **PolyForm Perimeter License 1.0.1**.
 
-You may view, modify, and self-host the software.
+You may view, modify, and self-host the software — including for your own
+commercial, internal use.
 
-You may NOT offer it as a competing hosted or SaaS product.
+You may NOT provide it to others as a product or service that competes with
+OpenLegion (for example, offering it as a hosted, managed, or SaaS product).
 
-See [LICENSE](LICENSE) for details.
+Need a commercial or hosting license? Contact admin@openlegion.ai.
+
+"OpenLegion" and the OpenLegion logo are trademarks of OpenLegion LLC; see
+[TRADEMARK.md](TRADEMARK.md). See [LICENSE](LICENSE) for the full terms and
+[CONTRIBUTING.md](CONTRIBUTING.md) / [CLA.md](CLA.md) to contribute.
 
 ---
 
