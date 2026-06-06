@@ -1194,7 +1194,8 @@ commercial, internal use.
 You may NOT provide it to others as a product or service that competes with
 OpenLegion (for example, offering it as a hosted, managed, or SaaS product).
 
-Need a commercial or hosting license? Contact admin@openlegion.ai.
+Need a commercial or hosting license? See [COMMERCIAL.md](COMMERCIAL.md) or
+contact admin@openlegion.ai.
 
 "OpenLegion" and the OpenLegion logo are trademarks of OpenLegion LLC; see
 [TRADEMARK.md](TRADEMARK.md). See [LICENSE](LICENSE) for the full terms and
