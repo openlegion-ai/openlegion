@@ -148,10 +148,10 @@ def install_tool(
     """
     marketplace_dir.mkdir(parents=True, exist_ok=True)
 
-    # Clone to temp directory first
-    tmp_dir = marketplace_dir / "_tmp_install"
-    if tmp_dir.exists():
-        shutil.rmtree(tmp_dir)
+    # Clone to a unique staging dir (underscore-prefixed so list_tools skips
+    # it) — lets concurrent installs run without clobbering a shared
+    # _tmp_install directory.
+    tmp_dir = Path(tempfile.mkdtemp(prefix="_tmp_install_", dir=marketplace_dir))
 
     clone_err = _clone_repo(repo_url, tmp_dir, ref)
     if clone_err:
@@ -172,11 +172,13 @@ def install_tool(
         shutil.rmtree(tmp_dir, ignore_errors=True)
         return {"error": f"Tool validation failed: {'; '.join(errors)}"}
 
-    # Move to final location
+    # Move to final location. os.replace = atomic rename within marketplace_dir
+    # (tmp_dir is a sibling, same filesystem); unlike shutil.move it never nests
+    # the source inside an existing dir under a concurrent same-name install.
     final_dir = marketplace_dir / tool_name
     if final_dir.exists():
         shutil.rmtree(final_dir)
-    shutil.move(str(tmp_dir), str(final_dir))
+    os.replace(tmp_dir, final_dir)
 
     # Remove .git directory to save space
     git_dir = final_dir / ".git"
@@ -221,7 +223,9 @@ def list_tools(marketplace_dir: Path) -> list[dict]:
 
 def remove_tool(name: str, marketplace_dir: Path) -> dict:
     """Remove an installed marketplace tool."""
-    if ".." in name or "/" in name or "\\" in name:
+    # Strict allowlist — rejects "", ".", "..", and any path separator, so a
+    # name can never resolve to marketplace_dir itself (which rmtree would wipe).
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
         return {"error": "Invalid tool name"}
     tool_dir = marketplace_dir / name
     if not tool_dir.exists():

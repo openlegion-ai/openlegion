@@ -106,6 +106,20 @@ class TestInstallTool:
         assert result["name"] == "test-tool"
         assert (marketplace_dir / "test-tool" / ".installed.json").exists()
 
+    def test_install_tool_leaves_no_staging_dir(self, tmp_path):
+        """Staging is a unique mkdtemp dir (no shared _tmp_install to race) and
+        is gone after a successful install."""
+        marketplace_dir = tmp_path / "marketplace"
+
+        def mock_clone(cmd, **kwargs):
+            _create_valid_tool_dir(Path(cmd[-1]))
+            return type("Result", (), {"returncode": 0, "stderr": ""})()
+
+        with patch("src.marketplace.subprocess.run", side_effect=mock_clone):
+            result = install_tool("https://github.com/user/test-tool.git", marketplace_dir)
+        assert result.get("installed") is True
+        assert list(marketplace_dir.glob("_tmp_install*")) == []
+
     def test_install_tool_validation_failure(self, tmp_path):
         """Tool with eval() is rejected."""
         marketplace_dir = tmp_path / "marketplace"
@@ -234,6 +248,18 @@ class TestRemoveTool:
         result = remove_tool("../../etc/passwd", marketplace_dir)
         assert "error" in result
         assert "invalid" in result["error"].lower()
+
+    def test_remove_tool_rejects_catalog_wipe(self, tmp_path):
+        """'.' / '' must not resolve to marketplace_dir itself and rmtree the
+        whole catalog (the weak ..-only check let '.' through)."""
+        marketplace_dir = tmp_path / "marketplace"
+        _create_valid_tool_dir(marketplace_dir / "keep")
+
+        for bad in (".", "", "   "):
+            result = remove_tool(bad, marketplace_dir)
+            assert "error" in result
+        # Catalog (and the marketplace dir) survived.
+        assert (marketplace_dir / "keep").exists()
 
 
 # ── code validation ───────────────────────────────────────────
