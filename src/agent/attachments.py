@@ -27,9 +27,17 @@ from src.shared.utils import setup_logging
 logger = setup_logging("agent.attachments")
 
 # Annotation pattern emitted by the dashboard when a user attaches a file.
-# Format: "📎 File attached: <name> (available at /data/uploads/<name>)"
+# Two composers emit slightly different prose for the same breadcrumb:
+#   regular agent chat: "📎 File attached: <name> (available at /data/uploads/<name>)"
+#   operator chat:      "📎 <name> (at /data/uploads/<name>)"
+# Match only the stable invariant — the "/data/uploads/<name>" path inside the
+# trailing parentheses — so enrichment is independent of the surrounding wording
+# (and survives any future composer drift). The display name is the path basename.
+# The path runs up to the closing ")" that ends the breadcrumb (followed by
+# whitespace or end-of-string), so filenames that themselves contain ")" — e.g.
+# the common browser-download "report(1).png" — are captured whole.
 _ATTACHMENT_RE = re.compile(
-    r"📎 File attached: (?P<name>[^\n(]+?) \(available at (?P<path>/data/uploads/[^\)]+)\)"
+    r"📎[^\n]*?\((?:\s*(?:available at|at)\s+)?(?P<path>/data/uploads/.+?)\)(?=\s|$)"
 )
 
 _IMAGE_EXTS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".webp"})
@@ -129,11 +137,17 @@ def enrich_message_with_attachments(message: str) -> str | list[dict]:
         if text_before:
             blocks.append({"type": "text", "text": text_before})
 
-        name = m.group("name").strip()
-        fpath = Path(m.group("path"))
+        fpath = Path(m.group("path").strip())
+        name = fpath.name
         ext = fpath.suffix.lower()
 
-        if ext in _IMAGE_EXTS:
+        # Defense-in-depth: the breadcrumb is user-controllable text, so a
+        # crafted "/data/uploads/../../x.png" could otherwise escape the
+        # read-only uploads mount when read below. Any traversal segment →
+        # keep the plain-text reference (the agent may still try file_tool).
+        traversal = ".." in fpath.parts
+
+        if not traversal and ext in _IMAGE_EXTS:
             block = _read_image_block(fpath)
             if block:
                 blocks.append(block)
@@ -142,7 +156,7 @@ def enrich_message_with_attachments(message: str) -> str | list[dict]:
                 # Fall back to plain-text reference
                 blocks.append({"type": "text", "text": m.group(0)})
 
-        elif ext == ".pdf":
+        elif not traversal and ext == ".pdf":
             text = _extract_pdf_text(fpath)
             if text:
                 blocks.append({"type": "text", "text": f"[Contents of {name}]\n\n{text}"})

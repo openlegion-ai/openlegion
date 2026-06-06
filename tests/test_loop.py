@@ -4887,3 +4887,45 @@ async def test_interactive_chat_no_task_id_completely_unaffected():
         c for c in loop._auto_close_task.await_args_list
         if len(c.args) >= 2 and c.args[1] == "blocked"
     ]
+
+
+def test_trim_context_preserves_multimodal_first_message() -> None:
+    """Regression: when the initial user message is multimodal (list content,
+    e.g. an uploaded image enriched by _build_initial_context), trimming must
+    fold the summary into that message as a trailing text block — not append a
+    second consecutive user message, which would violate the LLM
+    role-alternation invariant (Constraint #7)."""
+    loop = _make_loop()
+    img_block = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+    messages: list[dict] = [
+        {"role": "user", "content": [{"type": "text", "text": "Review this"}, img_block]},
+    ]
+    # >3 tool-call groups so trimming engages and the middle groups summarize.
+    for i in range(4):
+        messages.append({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": f"c{i}", "type": "function",
+                "function": {"name": "noop", "arguments": "{}"},
+            }],
+        })
+        messages.append({"role": "tool", "tool_call_id": f"c{i}", "content": f"result {i}"})
+
+    trimmed = loop._trim_context(messages, max_tokens=5)
+
+    # No two consecutive user-role messages anywhere in the result.
+    roles = [m["role"] for m in trimmed]
+    assert not any(
+        roles[i] == "user" and roles[i + 1] == "user" for i in range(len(roles) - 1)
+    ), f"consecutive user messages: {roles}"
+    # First message stays the multimodal user turn with the image intact.
+    assert trimmed[0]["role"] == "user"
+    assert isinstance(trimmed[0]["content"], list)
+    assert img_block in trimmed[0]["content"]
+    # The summary was folded in as a trailing text block.
+    assert any(
+        isinstance(b, dict) and b.get("type") == "text"
+        and "Previous Actions" in b.get("text", "")
+        for b in trimmed[0]["content"]
+    )

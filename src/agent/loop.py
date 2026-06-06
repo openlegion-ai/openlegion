@@ -1563,7 +1563,11 @@ class AgentLoop:
         if assignment.context:
             parts.append(f"## Shared Context from Other Agents\n{sanitize_for_prompt(format_dict(assignment.context))}")
 
-        return [{"role": "user", "content": "\n\n".join(parts)}]
+        # Enrich any 📎 /data/uploads/ references in the task so a worker handed
+        # an image/PDF can actually see it (mirrors the chat path). Returns a
+        # plain string unchanged when there is nothing to enrich.
+        content = enrich_message_with_attachments("\n\n".join(parts))
+        return [{"role": "user", "content": content}]
 
     def _trim_context(self, messages: list[dict], max_tokens: int = 100_000) -> list[dict]:
         """Trim old tool exchanges to manage context window.
@@ -1613,9 +1617,17 @@ class AgentLoop:
         # same-role messages, which violates the LLM role-alternation invariant.
         if not first_group:
             result = [{"role": "user", "content": summary_text.strip()}]
-        elif first_group[0].get("role") == "user" and isinstance(first_group[0].get("content"), str):
-            first_msg = {**first_group[0], "content": first_group[0]["content"] + summary_text}
-            result = [first_msg] + first_group[1:]
+        elif first_group[0].get("role") == "user":
+            first_msg = first_group[0]
+            content0 = first_msg.get("content")
+            if isinstance(content0, list):
+                # Multimodal first message (e.g. an uploaded image): append the
+                # summary as a trailing text block so the turn stays a single
+                # user message and the LLM role-alternation invariant holds.
+                merged = content0 + [{"type": "text", "text": summary_text}]
+            else:
+                merged = (content0 or "") + summary_text
+            result = [{**first_msg, "content": merged}] + first_group[1:]
         else:
             result = first_group + [{"role": "user", "content": summary_text.strip()}]
         for group in recent_groups:
