@@ -36,6 +36,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from src.shared.redaction import normalize_blocker_note
 from src.shared.task_titles import normalize_title_and_description
 from src.shared.utils import dumps_safe, setup_logging
 
@@ -1213,6 +1214,12 @@ class Tasks:
         """
         if status not in VALID_STATUSES:
             raise ValueError(f"unknown status: {status!r}")
+        # Single choke point for the failure-reason column: redact secrets,
+        # collapse noisy raw dumps (truncated tool-call payloads, empty
+        # exceptions) to stable codes, and bound length — BEFORE the value
+        # is persisted at the UPDATE below or echoed into the
+        # ``status_changed`` event payload. Every write path funnels here.
+        blocker_note = normalize_blocker_note(blocker_note)
         now = time.time()
         # Captured outside the txn so the event-emit (which goes through
         # the bus / asyncio loop) doesn't run while we hold BEGIN IMMEDIATE.
@@ -1338,6 +1345,13 @@ class Tasks:
                 # the bell for already-rated (e.g. auto-graded) work.
                 "title": task_title,
                 "outcome": task_outcome,
+                # Carry the (already-normalized) failure reason so the SPA can
+                # live-patch it and bucket by audience without a full reload.
+                # Mirror the persistence rule: only blocked/failed keep a note;
+                # other transitions explicitly send null so a stale note clears.
+                "blocker_note": (
+                    blocker_note if new_status in ("blocked", "failed") else None
+                ),
             }
             # Merge caller-supplied context (e.g. cancel ``reason``) so
             # the dashboard activity feed can render rich status_changed

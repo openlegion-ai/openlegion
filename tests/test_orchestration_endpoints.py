@@ -565,10 +565,13 @@ async def test_failed_status_explicit_blocker_note_wins_over_error(v2_app):
 
 @pytest.mark.asyncio
 async def test_failed_status_error_truncated_to_500_chars(v2_app):
-    """Huge ``error`` strings (e.g. LLM tracebacks) are truncated to 500
-    chars in the promoted ``blocker_note`` to avoid runaway bloat."""
+    """Huge ``error`` strings (e.g. LLM tracebacks) are bounded to 500 chars
+    in the promoted ``blocker_note`` (now via the central
+    ``normalize_blocker_note`` choke point) to avoid runaway bloat."""
     app, _, _ = v2_app
-    huge = "x" * 5000
+    # A long, non-secret-shaped message so the assertion targets the length
+    # bound, not the redactor (which would shrink a token-shaped run).
+    huge = "verbose traceback line. " * 300
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post(
             "/mesh/tasks",
@@ -589,7 +592,8 @@ async def test_failed_status_error_truncated_to_500_chars(v2_app):
         assert r.status_code == 200
         note = r.json()["blocker_note"]
         assert note is not None
-        assert len(note) == 500
+        assert len(note) <= 500
+        assert note.startswith("verbose traceback line.")
 
 
 @pytest.mark.asyncio

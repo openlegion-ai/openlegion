@@ -1803,8 +1803,8 @@
                       <svg class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
                       <span class="text-xs">Loading work…</span>
                     </div>
-                    <!-- empty -->
-                    <div x-show="!workplaceSectionLoading.tasks && teamWork.total === 0" class="text-gray-500 text-sm py-6 text-center">
+                    <!-- empty (only when there's genuinely nothing — internal-only activity still shows the Technical group below) -->
+                    <div x-show="!workplaceSectionLoading.tasks && teamWork.total === 0 && teamWork.technical.length === 0" class="text-gray-500 text-sm py-6 text-center">
                       No active work for <span class="text-gray-400" x-text="activeTeam"></span> yet.<br>
                       <span class="text-xs text-gray-600">Tasks appear here as agents pick them up and hand off to each other.</span>
                     </div>
@@ -1819,7 +1819,7 @@
                                 <span class="text-sm text-gray-200 truncate" x-text="t.title"></span>
                                 <span class="text-[11px] text-gray-500 flex-shrink-0 font-mono" x-text="teamHandoffLabel(t)"></span>
                               </div>
-                              <div x-show="t.blocker_note" class="text-[11px] text-red-400 mt-0.5 truncate" x-text="'⛔ ' + (t.blocker_note || '')"></div>
+                              <div x-show="t.blocker_note" class="text-[11px] text-amber-300/90 mt-0.5 truncate" x-text="_humanizeBlocker(t.blocker_note).label"></div>
                             </button>
                           </template>
                         </div>
@@ -1853,6 +1853,24 @@
                             </button>
                           </template>
                         </div>
+                      </div>
+                    </div>
+                    <!-- Technical activity — engine-internal failures the user can't act on. Collapsed by default; shown even when there's no user-facing work so it's always reachable. -->
+                    <div x-show="teamWork.technical.length > 0" x-data="{ open: false }" :class="teamWork.total > 0 ? 'mt-4' : ''">
+                      <button @click="open = !open" class="w-full flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500 hover:text-gray-400 mb-1.5">
+                        <span x-text="open ? '▾' : '▸'"></span>
+                        <span>Technical activity &middot; <span x-text="teamWork.technical.length"></span></span>
+                      </button>
+                      <div x-show="open" class="space-y-1">
+                        <template x-for="t in teamWork.technical" :key="t.id">
+                          <button @click="switchTab('workplace'); openTaskDrillIn(t.id)" class="w-full text-left bg-gray-800/20 hover:bg-gray-800/50 border border-gray-800 rounded-lg px-3 py-2 transition-colors">
+                            <div class="flex items-center justify-between gap-2">
+                              <span class="text-sm text-gray-400 truncate" x-text="t.title"></span>
+                              <span class="text-[11px] text-gray-600 flex-shrink-0 font-mono" x-text="teamHandoffLabel(t)"></span>
+                            </div>
+                            <div x-show="t.blocker_note" class="text-[11px] text-gray-500 mt-0.5 truncate" x-text="_humanizeBlocker(t.blocker_note).label"></div>
+                          </button>
+                        </template>
                       </div>
                     </div>
                   </div>
@@ -4537,9 +4555,14 @@
                        Colour: amber for blocked, red for failed. -->
                   <template x-if="!drillInLoading && drillInData?.task && drillInData.task.blocker_note && ['blocked','failed'].includes(drillInData.task.status)">
                     <div class="mt-2 text-xs">
-                      <span x-show="drillInData.task.status === 'blocked'" class="text-amber-400 font-medium">Blocked:</span>
-                      <span x-show="drillInData.task.status === 'failed'" class="text-red-400 font-medium">Failed:</span>
-                      <span class="text-gray-200 whitespace-pre-wrap" x-text="drillInData.task.blocker_note"></span>
+                      <span x-show="drillInData.task.status === 'blocked'" class="text-amber-400 font-medium">Needs you:</span>
+                      <span x-show="drillInData.task.status === 'failed'" class="text-red-400 font-medium">Didn't finish:</span>
+                      <span class="text-gray-200 whitespace-pre-wrap" x-text="_humanizeBlocker(drillInData.task.blocker_note).label"></span>
+                      <!-- Raw (already redacted server-side) note for when you want the detail. -->
+                      <details class="mt-1" x-show="_humanizeBlocker(drillInData.task.blocker_note).label !== drillInData.task.blocker_note">
+                        <summary class="text-gray-500 hover:text-gray-400 cursor-pointer select-none">Technical details</summary>
+                        <span class="text-gray-500 whitespace-pre-wrap font-mono break-words" x-text="drillInData.task.blocker_note"></span>
+                      </details>
                     </div>
                   </template>
                 </div>

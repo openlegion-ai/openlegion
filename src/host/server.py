@@ -5756,13 +5756,14 @@ def create_mesh_app(
         # with no ``blocker_note`` but carries an ``error`` string (the
         # canonical shape ``mesh_client.set_task_status`` sends for
         # auto-close paths), promote ``error`` to ``blocker_note`` so the
-        # store persists the reason. Truncate to 500 chars to match the
-        # column's expected size and avoid runaway bloat from huge LLM
-        # tracebacks. Existing explicit ``blocker_note`` callers win.
+        # store persists the reason. Existing explicit ``blocker_note``
+        # callers win. Redaction + length-bounding is owned centrally by
+        # ``normalize_blocker_note`` inside ``store.update_status`` (it
+        # redacts BEFORE truncating, so a secret can't be cut mid-token).
         if status == "failed" and not blocker_note:
             _err = body.get("error")
             if isinstance(_err, str) and _err.strip():
-                blocker_note = _err.strip()[:500]
+                blocker_note = _err.strip()
         if status not in VALID_STATUSES:
             raise HTTPException(
                 400,
@@ -5799,11 +5800,13 @@ def create_mesh_app(
             result_dict = raw_result if isinstance(raw_result, dict) else {}
             payload_extras: dict = {}
             if status == "blocked":
-                payload_extras["blocker_note"] = blocker_note or ""
+                # Use the stored value — update_status ran it through
+                # normalize_blocker_note (redacted + collapsed), so this
+                # back-edge (read by other agents via check_inbox) can't
+                # leak a secret from the raw request body.
+                payload_extras["blocker_note"] = (fresh.get("blocker_note") or "")
             elif status == "failed":
-                payload_extras["error"] = (
-                    body.get("error") or result_dict.get("error", "") or ""
-                )
+                payload_extras["error"] = (fresh.get("blocker_note") or "")
             elif status == "done":
                 payload_extras["summary"] = result_dict.get("summary", "")
             _write_task_event_back_edge(

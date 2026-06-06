@@ -360,6 +360,7 @@ async def hand_off(
     # next cron. Forward task_id so the recipient's lane → /chat → loop
     # chain auto-closes the task on completion (Constraint #16).
     wake_error: str | None = None
+    wake_status: int | None = None
     try:
         await mesh_client.wake_agent(
             to, f"New task from {mesh_client.agent_id}: {summary[:200]}",
@@ -370,6 +371,10 @@ async def hand_off(
         # Redact BEFORE truncation — HTTP-level exceptions can quote
         # the failing URL with an API key in the query string.
         wake_error = redact_text_with_urls(str(e))[:200]
+        # Capture the HTTP status (httpx.HTTPStatusError carries .response)
+        # so we can distinguish the BY-DESIGN worker→operator 403 from a
+        # genuine infra failure (500 / network) below.
+        wake_status = getattr(getattr(e, "response", None), "status_code", None)
         logger.warning("Wake for %s failed (task still queued): %s", to, e)
 
     result = {
@@ -381,7 +386,26 @@ async def hand_off(
     }
     if artifact_ref:
         result["output_key"] = artifact_ref
-    if wake_error is not None:
+    _operator_by_design_403 = (
+        to == "operator"
+        and (wake_status == 403 or "403 forbidden" in (wake_error or "").lower())
+    )
+    if wake_error is not None and _operator_by_design_403:
+        # By design, worker agents CANNOT synchronously wake the operator —
+        # the mesh /mesh/wake endpoint returns 403 for worker→operator and
+        # the operator discovers queued work on its heartbeat poll. The
+        # durable task row was persisted above, so a queued handoff to the
+        # operator IS the intended successful outcome. Classifying the
+        # expected 403 as ``wake_failed`` (the branch below) marked the
+        # ORIGINATING task ``failed`` and surfaced a scary, technical
+        # "403 Forbidden … host.docker.internal" note to the user. The mesh
+        # permission boundary is untouched; we only stop mislabelling the
+        # expected denial as a failure. A NON-403 operator wake error (500,
+        # network) is a genuine infra failure and still flows to the
+        # ``wake_failed`` envelope below so it stays visible.
+        result["handed_off"] = True
+        result["queued_for_heartbeat"] = True
+    elif wake_error is not None:
         # Bug G: the durable task row sits in SQLite at status='pending'
         # for the next-heartbeat discovery path — we don't transition it
         # to failed because a transient wake error (network blip, agent
@@ -459,17 +483,20 @@ async def check_inbox(*, mesh_client=None) -> dict:
         entries = await mesh_client.list_blackboard(prefix, global_scope=True)
         for entry in entries:
             value = entry.get("value") or {}
+            # Free-text fields here re-enter THIS agent's LLM context, so
+            # sanitize them at the input boundary (a failed peer's note can
+            # echo arbitrary/injected content). Enum/id fields are safe.
             events.append({
                 "key": entry.get("key", ""),
                 "kind": value.get("kind", ""),
                 "task_id": value.get("task_id", ""),
                 "recipient": value.get("recipient", ""),
-                "title": value.get("title", ""),
+                "title": sanitize_for_prompt(value.get("title", "")),
                 "status": value.get("status", ""),
                 "ts": value.get("ts"),
-                "summary": value.get("summary", ""),
-                "error": value.get("error", ""),
-                "blocker_note": value.get("blocker_note", ""),
+                "summary": sanitize_for_prompt(value.get("summary", "")),
+                "error": sanitize_for_prompt(value.get("error", "")),
+                "blocker_note": sanitize_for_prompt(value.get("blocker_note", "")),
             })
     except Exception as e:
         logger.warning(
