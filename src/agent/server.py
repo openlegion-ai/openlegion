@@ -799,9 +799,24 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         except ValueError as e:
             raise HTTPException(400, str(e))
 
+    # Hard ceiling on a single /files read so a caller can pull more than the
+    # 500 KB default read cap (e.g. a peer-file download) without ever loading
+    # an unbounded amount into memory. Larger files are paged via ``offset``.
+    _MAX_FILE_READ_BYTES = 5 * 1024 * 1024  # 5 MB
+
     @app.get("/files/{path:path}")
-    async def read_data_file(path: str) -> dict:
-        """Read any file from /data. Text returned as-is; binary base64-encoded."""
+    async def read_data_file(
+        path: str, offset: int = 0, max_bytes: int = 0,
+    ) -> dict:
+        """Read any file from /data. Text returned as-is; binary base64-encoded.
+
+        ``offset`` seeks into the file and ``max_bytes`` caps how much is
+        returned in one call, so a caller can page through a file larger than
+        the default 500 KB read cap. ``max_bytes`` defaults to that legacy cap
+        (back-compat for existing dashboard/agent readers) and is clamped to a
+        5 MB hard ceiling per request. ``next_offset`` is where the next page
+        starts; ``truncated`` is True while more bytes remain.
+        """
         from src.agent.builtins.file_tool import _MAX_READ, _safe_path
         try:
             safe = _safe_path(path)
@@ -813,18 +828,29 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             raise HTTPException(400, f"Not a file: {path}")
         size = safe.stat().st_size
         mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
-        # Read at most _MAX_READ bytes without loading the full file first.
+        offset = max(0, offset)
+        limit = max_bytes if max_bytes > 0 else _MAX_READ
+        limit = min(limit, _MAX_FILE_READ_BYTES)
+        # Seek to offset and read at most ``limit`` bytes — never loads the
+        # whole file into memory.
         with safe.open("rb") as fh:
-            raw = fh.read(_MAX_READ)
+            if offset:
+                fh.seek(offset)
+            raw = fh.read(limit)
+        next_offset = offset + len(raw)
+        truncated = next_offset < size
         try:
             content = raw.decode("utf-8")
-            return {"path": path, "content": content, "size": size,
-                    "mime_type": mime, "encoding": "utf-8",
-                    "truncated": size > _MAX_READ}
+            encoding = "utf-8"
         except UnicodeDecodeError:
-            return {"path": path, "content": base64.b64encode(raw).decode("ascii"),
-                    "size": size, "mime_type": mime, "encoding": "base64",
-                    "truncated": size > _MAX_READ}
+            # A chunk boundary may split a multibyte char; base64 keeps the
+            # page byte-exact so a paged download reassembles losslessly.
+            content = base64.b64encode(raw).decode("ascii")
+            encoding = "base64"
+        return {"path": path, "content": content, "size": size,
+                "mime_type": mime, "encoding": encoding,
+                "offset": offset, "next_offset": next_offset,
+                "truncated": truncated}
 
     @app.post("/artifacts/ingest/{name:path}")
     async def ingest_artifact(name: str, request: Request) -> dict:

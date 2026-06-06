@@ -7032,6 +7032,91 @@ def create_mesh_app(
             "encoding": encoding,
         }
 
+    @app.get("/mesh/agents/{agent_id}/files")
+    async def list_peer_files(
+        agent_id: str, request: Request,
+        path: str = ".", recursive: bool = False, pattern: str = "*",
+    ) -> dict:
+        """List a peer agent's /data files. Operator-or-internal only.
+
+        Extends the peer-read affordance beyond ``artifacts/`` (see
+        ``list_peer_artifacts`` above) to the agent's full /data volume so the
+        operator can locate a worker's deliverable wherever it was written —
+        e.g. a ``data.md`` built in the workspace root, not under
+        ``artifacts/``. Gated to the operator exactly like the artifact reads;
+        workers gain nothing.
+        """
+        _require_any_auth(request)
+        caller = _resolve_agent_id("", request)
+        if not (_caller_is_operator(caller, request) or _is_internal_caller(request)):
+            raise HTTPException(403, "Only the operator can read peer files")
+        if agent_id not in router.agent_registry:
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+        if transport is None:
+            raise HTTPException(503, "Transport not available")
+        from urllib.parse import urlencode
+        qs = urlencode({
+            "path": path, "recursive": str(bool(recursive)).lower(),
+            "pattern": pattern,
+        })
+        result = await transport.request(
+            agent_id, "GET", f"/files?{qs}", timeout=10,
+        )
+        if isinstance(result, dict) and "error" in result and "entries" not in result:
+            status = result.get("status_code", 502)
+            raise HTTPException(status, result["error"])
+        entries = result.get("entries", []) if isinstance(result, dict) else []
+        return {"agent_id": agent_id, "entries": entries,
+                "count": result.get("count", len(entries)) if isinstance(result, dict) else 0}
+
+    @app.get("/mesh/agents/{agent_id}/files/{path:path}")
+    async def read_peer_file(
+        agent_id: str, path: str, request: Request,
+        offset: int = 0, max_bytes: int = 0,
+    ) -> dict:
+        """Read one peer /data file's content. Operator-or-internal only.
+
+        Mirrors ``read_peer_artifact`` but targets the agent's general
+        ``/files`` endpoint, so the operator can pull any file a worker
+        produced — not only those under ``artifacts/``. ``offset``/``max_bytes``
+        page large files. Path is validated against the same traversal-safe
+        allowlist as artifact names. 404/413/400 surface cleanly.
+        """
+        _require_any_auth(request)
+        caller = _resolve_agent_id("", request)
+        if not (_caller_is_operator(caller, request) or _is_internal_caller(request)):
+            raise HTTPException(403, "Only the operator can read peer files")
+        _validate_peer_artifact_name(path)
+        if agent_id not in router.agent_registry:
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+        if transport is None:
+            raise HTTPException(503, "Transport not available")
+        from urllib.parse import urlencode
+        qs = urlencode({"offset": max(0, offset), "max_bytes": max(0, max_bytes)})
+        result = await transport.request(
+            agent_id, "GET", f"/files/{path}?{qs}", timeout=30,
+        )
+        if isinstance(result, dict) and "error" in result and "content" not in result:
+            status = result.get("status_code", 502)
+            if status == 404:
+                raise HTTPException(
+                    404, f"File '{path}' not found on agent '{agent_id}'",
+                )
+            if status == 400:
+                raise HTTPException(400, result["error"])
+            raise HTTPException(status, result["error"])
+        size = int(result.get("size", 0)) if isinstance(result, dict) else 0
+        return {
+            "agent_id": agent_id,
+            "path": path,
+            "content": result.get("content", "") if isinstance(result, dict) else "",
+            "size": size,
+            "encoding": result.get("encoding", "utf-8") if isinstance(result, dict) else "utf-8",
+            "offset": result.get("offset", offset) if isinstance(result, dict) else offset,
+            "next_offset": result.get("next_offset", size) if isinstance(result, dict) else size,
+            "truncated": bool(result.get("truncated")) if isinstance(result, dict) else False,
+        }
+
     async def _apply_pending_change(
         change_id: str, change: dict,
         *, undoable: bool = False, is_undo: bool = False,

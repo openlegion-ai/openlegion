@@ -1698,6 +1698,10 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     # read_peer_artifact for deeper inspection of peer-written files.
     "read_agent_config",
     "list_peer_artifacts", "read_peer_artifact",
+    # Peer FILE reads — full /data volume, not just artifacts/. Lets the
+    # operator locate + relay a worker's deliverable (CSV, data.md) the
+    # user asked for, instead of reporting it unreachable.
+    "list_peer_files", "read_peer_file",
     # Observation log of agent→user notifications — PULL-only, NOT a
     # message channel (agents can't address the operator). Lets the
     # operator answer "what's blocking?" from what workers already told

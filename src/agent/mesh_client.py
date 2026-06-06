@@ -906,6 +906,46 @@ class MeshClient:
         _raise_with_body(response)
         return response.json()
 
+    async def list_peer_files(self, agent_id: str, path: str = ".",
+                              recursive: bool = False) -> dict:
+        """List a peer agent's /data files (operator-only).
+
+        Backs the operator's ``list_peer_files`` tool. Reaches beyond
+        ``artifacts/`` to the worker's full /data volume so the operator can
+        locate a deliverable wherever it was written. Returns
+        ``{agent_id, entries: [...], count}``. 403 if the caller isn't
+        operator; 404 if the agent doesn't exist.
+        """
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/files",
+            params={"requesting_agent": self.agent_id, "path": path,
+                    "recursive": str(bool(recursive)).lower()},
+        )
+        _raise_with_body(response)
+        return response.json()
+
+    async def read_peer_file(self, agent_id: str, path: str,
+                             offset: int = 0, max_bytes: int = 0) -> dict:
+        """Read a peer agent's /data file content (operator-only).
+
+        Backs the operator's ``read_peer_file`` tool. Returns
+        ``{agent_id, path, content, size, encoding, offset, next_offset,
+        truncated}``. Pass the prior ``next_offset`` back as ``offset`` to
+        page a large file. 403 if the caller isn't operator; 404 if the file
+        is missing.
+        """
+        params: dict = {"requesting_agent": self.agent_id}
+        if offset:
+            params["offset"] = offset
+        if max_bytes:
+            params["max_bytes"] = max_bytes
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/files/{path}",
+            params=params,
+        )
+        _raise_with_body(response)
+        return response.json()
+
     async def cancel_pending_action(self, nonce: str) -> dict:
         """Cancel a pending action by nonce (operator self-cleanup).
 

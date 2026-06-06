@@ -463,6 +463,146 @@ async def read_peer_artifact(
 
 
 @skill(
+    name="list_peer_files",
+    description=(
+        "List the files in a teammate's workspace/data volume — "
+        "operator-only. Unlike list_peer_artifacts (which only sees the "
+        "artifacts/ folder), this reaches the worker's FULL workspace, so "
+        "you can find a deliverable a worker built as a plain file "
+        "(e.g. 'workspace/data.md' or a generated CSV) and then pull it "
+        "with read_peer_file to relay it to the user or hand it off. Pass "
+        "path='workspace' with recursive=True to see everything a worker "
+        "produced. THIS is how you get a worker's data out — don't tell "
+        "the user a deliverable is unreachable before checking here."
+    ),
+    parameters={
+        "agent_id": {
+            "type": "string",
+            "description": "The teammate agent id whose files to list.",
+        },
+        "path": {
+            "type": "string",
+            "description": "Directory under /data to list (default '.').",
+            "default": ".",
+        },
+        "recursive": {
+            "type": "boolean",
+            "description": "Recurse into subdirectories.",
+            "default": False,
+        },
+    },
+)
+async def list_peer_files(
+    agent_id: str,
+    path: str = ".",
+    recursive: bool = False,
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """List a teammate's /data files — operator-only.
+
+    Mirrors :func:`list_peer_artifacts` but spans the worker's whole
+    workspace, not just ``artifacts/``. 404 → ``agent_not_found``.
+    """
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if not agent_id or not isinstance(agent_id, str):
+        return {"error": "agent_id is required"}
+
+    try:
+        return await mesh_client.list_peer_files(agent_id, path, recursive)
+    except Exception as e:
+        resp = getattr(e, "response", None)
+        status = getattr(resp, "status_code", None)
+        if status == 404:
+            return {"error": "agent_not_found", "agent_id": agent_id}
+        if status == 400:
+            return {"error": "invalid_path", "agent_id": agent_id, "path": path}
+        if status is not None:
+            body = getattr(resp, "text", "") or ""
+            return {"error": "mesh_error", "status": status, "body": body[:200]}
+        return {"error": f"Failed to list peer files: {str(e)[:200]}"}
+
+
+@skill(
+    name="read_peer_file",
+    description=(
+        "Read the content of any file in a teammate's workspace/data "
+        "volume — operator-only. This is how you retrieve a worker's "
+        "actual deliverable (a CSV, a data.md, a report) so you can paste "
+        "it to the user, hand it off, or post it onward. Use list_peer_files "
+        "first to find the path. Files larger than the per-read cap return "
+        "truncated=True with a next_offset — call again with that offset to "
+        "page through the rest. For files too big to paste, tell the user "
+        "they can download it directly from the agent's file view in the "
+        "dashboard. Binary files come back base64-encoded (encoding='base64')."
+    ),
+    parameters={
+        "agent_id": {
+            "type": "string",
+            "description": "The teammate agent id that owns the file.",
+        },
+        "path": {
+            "type": "string",
+            "description": (
+                "File path under /data (e.g. 'workspace/data.md') as "
+                "returned by list_peer_files. No '..' or absolute paths."
+            ),
+        },
+        "offset": {
+            "type": "integer",
+            "description": (
+                "Byte offset to start from (default 0). Pass the "
+                "next_offset from a prior truncated read to continue."
+            ),
+            "default": 0,
+        },
+    },
+)
+async def read_peer_file(
+    agent_id: str,
+    path: str,
+    offset: int = 0,
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Read a teammate's /data file content — operator-only.
+
+    Mirrors :func:`read_peer_artifact` but targets any file under the
+    worker's /data volume. 404 → ``file_not_found``; 400 → ``invalid_path``.
+    """
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if not agent_id or not isinstance(agent_id, str):
+        return {"error": "agent_id is required"}
+    if not path or not isinstance(path, str):
+        return {"error": "path is required"}
+
+    try:
+        result = await mesh_client.read_peer_file(agent_id, path, offset=offset)
+    except Exception as e:
+        resp = getattr(e, "response", None)
+        status = getattr(resp, "status_code", None)
+        if status == 404:
+            return {"error": "file_not_found", "agent_id": agent_id, "path": path}
+        if status == 400:
+            return {"error": "invalid_path", "agent_id": agent_id, "path": path}
+        if status == 413:
+            return {"error": "oversize", "agent_id": agent_id, "path": path}
+        if status is not None:
+            body = getattr(resp, "text", "") or ""
+            return {"error": "mesh_error", "status": status, "body": body[:200]}
+        return {"error": f"Failed to read peer file: {str(e)[:200]}"}
+    return result
+
+
+@skill(
     name="list_available_models",
     description=(
         "List models currently usable given the active credential setup. "
