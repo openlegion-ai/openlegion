@@ -44,6 +44,12 @@ _INSTALLED_DIR = "/data/skills"
 # a traversal sequence into a name that later code might join onto a path.
 _NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 
+# Frontmatter fences are whole ``---`` lines (optional trailing whitespace; ``\r``
+# tolerated for CRLF checkouts), so a ``---`` substring inside a YAML scalar can't
+# be mistaken for a fence. One pattern serves both the opening-fence guard
+# (``.match`` at pos 0) and the body split.
+_FRONTMATTER_FENCE_RE = re.compile(r"^---[ \t\r]*$", re.MULTILINE)
+
 
 @dataclass(frozen=True)
 class Skill:
@@ -59,11 +65,17 @@ class Skill:
 
 
 def _split_frontmatter(text: str) -> tuple[str, str] | None:
-    """Split a SKILL.md into ``(yaml_frontmatter, body)``; None if absent."""
-    if not text.startswith("---"):
+    """Split a SKILL.md into ``(yaml_frontmatter, body)``; None if absent.
+
+    The ``---`` fences are matched as whole lines only (``^---$``), so a literal
+    ``---`` inside a YAML scalar (e.g. a description containing ``---``) does not
+    truncate the frontmatter. maxsplit=2 consumes just the opening and closing
+    fences; any further ``---`` in the body (a horizontal rule) is left intact.
+    """
+    if not _FRONTMATTER_FENCE_RE.match(text):
         return None
-    # maxsplit=2 → ["", frontmatter, body]; the body keeps any further "---".
-    parts = text.split("---", 2)
+    # ["", frontmatter, body]; the body keeps any further "---".
+    parts = _FRONTMATTER_FENCE_RE.split(text, maxsplit=2)
     if len(parts) < 3:
         return None
     return parts[1], parts[2]

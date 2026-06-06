@@ -100,6 +100,31 @@ def test_parse_body_may_contain_triple_dash(tmp_path):
     assert "horizontal rule" in skill.body
 
 
+def test_parse_triple_dash_inside_frontmatter_scalar(tmp_path):
+    """A literal ``---`` inside a frontmatter value must not truncate parsing —
+    fences are whole ``---`` lines only, so the scalar is preserved and the body
+    stays intact (regression: substring split silently cut the description)."""
+    md = tmp_path / "SKILL.md"
+    md.write_text(
+        "---\nname: demo\ndescription: fast --- reliable research\n---\n# Body\nReal body.\n",
+        encoding="utf-8",
+    )
+    skill = parse_skill_md(md)
+    assert skill is not None
+    assert skill.description == "fast --- reliable research"
+    assert skill.body == "# Body\nReal body."
+
+
+def test_parse_crlf_frontmatter(tmp_path):
+    """CRLF-checked-out packs (Windows/git autocrlf) still parse."""
+    md = tmp_path / "SKILL.md"
+    md.write_bytes(b"---\r\nname: demo\r\ndescription: d\r\n---\r\n# Body\r\n")
+    skill = parse_skill_md(md)
+    assert skill is not None
+    assert skill.name == "demo"
+    assert "Body" in skill.body
+
+
 # ── SkillStore ────────────────────────────────────────────────────────────
 
 def test_store_lists_bundled(tmp_path):
