@@ -134,6 +134,36 @@ class LaneManager:
         # ``create_task(_forward())`` can be garbage-collected mid-flight
         # per the Python docs warning.
         self._forward_tasks: set[asyncio.Task] = set()
+        # Dashboard EventBus, wired post-construction (the bus is created
+        # inside ``create_mesh_app``). When set, lane state transitions emit
+        # ``queue_changed`` so the dashboard refreshes queue badges live
+        # instead of polling. ``None`` (the default) means no-op — the lane
+        # works identically without it.
+        self._event_bus: Any = None
+
+    def set_event_bus(self, bus: Any) -> None:
+        """Wire the dashboard EventBus after construction.
+
+        The bus is created inside ``create_mesh_app`` (after this
+        ``LaneManager`` is built in runtime.py), so it is injected post-hoc,
+        mirroring ``set_tasks_store``. Pass ``None`` to clear.
+        """
+        self._event_bus = bus
+
+    def _emit_queue_changed(self, agent: str) -> None:
+        """Emit a ``queue_changed`` event for ``agent`` (best-effort).
+
+        Called from lane state transitions. Safe from the dispatch-loop
+        thread — ``EventBus.emit`` marshals cross-thread internally. Never
+        raises into the lane: a broken bus must not wedge the worker.
+        """
+        bus = self._event_bus
+        if bus is None:
+            return
+        try:
+            bus.emit("queue_changed", agent=agent, data={"agent": agent})
+        except Exception as exc:  # pragma: no cover - observability only
+            logger.debug("queue_changed emit failed for %s: %s", agent, exc)
 
     def set_tasks_store(self, store: Any) -> None:
         """Wire the durable tasks store after construction.
@@ -290,6 +320,7 @@ class LaneManager:
             )
         self._pending[agent].append(task)
         logger.debug(f"Queued task {task.id} for agent '{agent}' (depth: {self._queues[agent].qsize()})")
+        self._emit_queue_changed(agent)
         return await task.future
 
     async def _handle_steer(self, agent: str, message: str) -> str:
@@ -394,9 +425,11 @@ class LaneManager:
                 except ValueError:
                     pass
                 queue.task_done()
+                self._emit_queue_changed(agent)
                 continue
             async with lock:
                 self._busy[agent] = True
+            self._emit_queue_changed(agent)
             current_trace_id.set(task.trace_id)
             t0 = time.time()
             if task.trace_id and self._trace_store:
@@ -596,6 +629,9 @@ class LaneManager:
                     if task in pending:
                         pending.remove(task)
                 queue.task_done()
+                # Terminal transition (complete / timeout / error) — queue
+                # depth dropped and the agent went idle, so refresh badges.
+                self._emit_queue_changed(agent)
 
     def get_status(self) -> dict[str, dict]:
         """Return queue depth, pending task count, and busy flag per agent."""
@@ -634,6 +670,7 @@ class LaneManager:
         self._busy.pop(agent, None)
         self._state_locks.pop(agent, None)
         self._steer_wakeup_ts.pop(agent, None)
+        self._emit_queue_changed(agent)
 
     async def stop(self) -> None:
         """Cancel all worker tasks and any in-flight auto-notify forwards."""

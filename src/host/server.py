@@ -865,6 +865,11 @@ def create_mesh_app(
     # ``task_*`` events to the dashboard.
     if event_bus is not None:
         tasks_store.set_event_bus(event_bus)
+        # Wire the bus into the lane manager so queue depth/busy transitions
+        # emit ``queue_changed`` — the dashboard refreshes queue badges live
+        # instead of polling ``/api/queues`` every 2s.
+        if lane_manager is not None:
+            lane_manager.set_event_bus(event_bus)
 
     # Durable work-summaries store. One row per (scope, period_start);
     # operator generates via the ``compose_work_summary`` tool or the

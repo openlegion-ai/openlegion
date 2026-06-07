@@ -848,6 +848,18 @@ class DashboardEvent(BaseModel):
         # Blackboard delete — mirror of ``blackboard_write`` for the
         # delete endpoint so the SPA can reflect removals live.
         "blackboard_delete",
+        # Lane queue depth/busy changed — emitted by ``host/lanes.LaneManager``
+        # on enqueue / dequeue / quarantine / terminal completion so the SPA
+        # refreshes queue badges live instead of polling ``/api/queues`` every
+        # 2s. Payload: ``{"agent": <agent_id>}``.
+        "queue_changed",
+        # System-tab config changed — single generic event emitted by the
+        # dashboard settings mutation endpoints. ``data.scope`` discriminates
+        # the panel (e.g. browser_settings / channels / integrations / webhooks
+        # / api_keys / network_proxy / captcha_solver / system_settings /
+        # storage / uploads / skills / wallet) so the SPA re-fetches just that
+        # panel without polling.
+        "config_changed",
     ]
     agent: str = ""
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
