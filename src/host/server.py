@@ -7053,12 +7053,13 @@ def create_mesh_app(
             # Falls back to the LLMClient default (8192) when never set, so the
             # operator sees the effective cap, not a blank.
             "max_output_tokens": raw.get("max_output_tokens", 8192) or 8192,
-            # Per-agent operational caps — fall back to the central limits
-            # default so the operator sees the effective value, not a blank.
+            # Per-agent operational caps — fall back to the EFFECTIVE value
+            # (env/global → default), so the operator sees what the agent
+            # actually runs, not just the static floor.
             "max_tool_rounds": raw.get("max_tool_rounds")
-            or _limits_mod.LIMIT_SPECS["task_max_tool_rounds"][0],
+            or _limits_mod.resolve("task_max_tool_rounds"),
             "llm_timeout_seconds": raw.get("llm_timeout_seconds")
-            or _limits_mod.LIMIT_SPECS["llm_timeout_seconds"][0],
+            or _limits_mod.resolve("llm_timeout_seconds"),
         }
 
         # Permissions live in PERMISSIONS_FILE, not agents.yaml. Load via
@@ -7766,10 +7767,11 @@ def create_mesh_app(
             if field == "max_output_tokens":
                 _missing_default: object = 8192
             elif field in ("max_tool_rounds", "llm_timeout_seconds"):
+                # Resolve the EFFECTIVE value (env/global → built-in default),
+                # not the static default, so Undo restores what the agent was
+                # actually running, not the floor.
                 from src.shared import limits as _limits
-                _missing_default = _limits.LIMIT_SPECS[
-                    _limits.AGENT_CONFIG_KEYS[field]
-                ][0]
+                _missing_default = _limits.resolve(_limits.AGENT_CONFIG_KEYS[field])
             else:
                 _missing_default = ""
             old_value = agents[agent_id].get(yaml_key, _missing_default)
