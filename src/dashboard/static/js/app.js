@@ -10923,6 +10923,7 @@ function dashboard() {
         file_write: 'writing a file',
         file_list: 'listing files',
         memory_search: 'checking memory',
+        memory_think: 'reasoning over memory',
         memory_save: 'saving to memory',
         hand_off: 'handing off to a teammate',
         check_inbox: 'checking the inbox',
