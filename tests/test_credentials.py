@@ -643,6 +643,91 @@ async def test_stream_failover(monkeypatch):
     assert any("done" in e for e in events)
 
 
+async def test_stream_captures_trailing_usage_chunk(monkeypatch):
+    """Streaming anthropic: a trailing usage-only chunk (empty choices) is
+    captured so the ``done`` event's token accounting is non-zero and the
+    request asks for usage via ``stream_options={"include_usage": True}``.
+
+    Regression: native-anthropic streaming returns no ``response.usage``, so
+    prior to capturing the trailing chunk, ``tokens_used`` (and cache
+    metrics) were always blank on the streaming path agents actually use.
+    """
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant")
+    v = CredentialVault()
+
+    captured_kwargs = {}
+
+    async def mock_chunk_generator():
+        # Two content chunks with real choices...
+        for piece in ("hello ", "world"):
+            chunk = MagicMock()
+            chunk.choices = [MagicMock()]
+            chunk.choices[0].delta.content = piece
+            chunk.choices[0].delta.tool_calls = None
+            chunk.choices[0].delta.reasoning_content = None
+            chunk.usage = None
+            yield chunk
+        # ...then a final usage-only chunk with EMPTY choices (litellm emits
+        # this when include_usage is set). The empty-choices guard prevents
+        # an IndexError; our code reads chunk.usage off it.
+        final = MagicMock()
+        final.choices = []
+        usage = MagicMock()
+        usage.total_tokens = 1234
+        usage.prompt_tokens = 1000
+        usage.completion_tokens = 234
+        usage.cache_read_input_tokens = 800
+        usage.cache_creation_input_tokens = 50
+        final.usage = usage
+        yield final
+
+    async def mock_acompletion(model, messages, api_key, stream=False, **kwargs):
+        captured_kwargs.update(kwargs)
+        captured_kwargs["model"] = model
+        return mock_chunk_generator()
+
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={
+                "model": "anthropic/claude-haiku-4-5-20251001",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        events = []
+        async for event in v.stream_llm(req):
+            events.append(event)
+
+    # include_usage requested on the anthropic stream.
+    assert captured_kwargs.get("stream_options") == {"include_usage": True}
+
+    # The done event carries the captured trailing-chunk token accounting.
+    done_payloads = [
+        json.loads(e[len("data: "):]) for e in events
+        if e.startswith("data: ") and '"type": "done"' in e
+    ]
+    assert done_payloads, f"no done event in {events!r}"
+    assert done_payloads[0]["tokens_used"] == 1234
+    # Content from the real-choices chunks survived too.
+    assert done_payloads[0]["content"] == "hello world"
+
+
+def test_stream_options_guard_anthropic_only():
+    """The include_usage guard fires only for ``anthropic/`` models and is a
+    no-op for openai/gemini, matching the in-line guard in ``stream_llm``."""
+    def _apply(model: str) -> dict:
+        llm_kwargs: dict = {"model": model}
+        if isinstance(llm_kwargs.get("model"), str) and llm_kwargs["model"].startswith("anthropic/"):
+            llm_kwargs["stream_options"] = {"include_usage": True}
+        return llm_kwargs
+
+    assert _apply("anthropic/claude-haiku-4-5-20251001").get("stream_options") == {
+        "include_usage": True,
+    }
+    assert "stream_options" not in _apply("openai/gpt-4o-mini")
+    assert "stream_options" not in _apply("gemini/gemini-2.5-flash")
+
+
 # ── Hot-reload credential management ──────────────────────────
 
 

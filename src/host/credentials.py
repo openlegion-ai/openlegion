@@ -3606,6 +3606,12 @@ class CredentialVault:
                 # Guarded on the FINAL (post-rewrite) model: the api_base /
                 # credit-proxy rewrite to ``openai/`` makes this a no-op.
                 _mark_anthropic_cache_breakpoints_openai_fmt(llm_kwargs)
+                # Native-anthropic streaming returns no usage unless we ask
+                # for it; needed for cache-metric verification and accurate
+                # token accounting. Scoped to anthropic to avoid changing
+                # behavior for providers that may not support stream_options.
+                if isinstance(llm_kwargs.get("model"), str) and llm_kwargs["model"].startswith("anthropic/"):
+                    llm_kwargs["stream_options"] = {"include_usage": True}
 
                 async def _open_stream(_kwargs=llm_kwargs, _model=model):
                     try:
@@ -3674,6 +3680,13 @@ class CredentialVault:
                         # path; no-op once the rewrite makes the model
                         # ``openai/`` (api_base / credit-proxy).
                         _mark_anthropic_cache_breakpoints_openai_fmt(llm_kwargs)
+                        # Native-anthropic streaming returns no usage unless we
+                        # ask for it; needed for cache-metric verification and
+                        # accurate token accounting. Scoped to anthropic to
+                        # avoid changing behavior for providers that may not
+                        # support stream_options.
+                        if isinstance(llm_kwargs.get("model"), str) and llm_kwargs["model"].startswith("anthropic/"):
+                            llm_kwargs["stream_options"] = {"include_usage": True}
 
                         async def _open_fb_stream(_kwargs=llm_kwargs, _model=fallback):
                             try:
@@ -3730,6 +3743,10 @@ class CredentialVault:
             # Uses asyncio.wait (not wait_for) to avoid cancelling the
             # pending __anext__ — cancellation would corrupt the iterator.
             _KEEPALIVE_INTERVAL = 15
+            # litellm emits a final usage-only chunk when include_usage is
+            # set (anthropic streaming above); capture it for token/cache
+            # accounting since streaming ``response.usage`` is empty.
+            _stream_usage = None
             chunk_iter = response.__aiter__()
             next_chunk = asyncio.ensure_future(chunk_iter.__anext__())
             try:
@@ -3792,6 +3809,15 @@ class CredentialVault:
                                 if tc.function and tc.function.arguments:
                                     collected_tool_calls[idx]["arguments"] += tc.function.arguments
 
+                    # Final usage-only chunk (empty choices, guarded above)
+                    # carries token + cache counts when include_usage is set.
+                    # Only the trailing usage-only frame (no real choices)
+                    # bears usage; content chunks leave it None.
+                    if not chunk.choices:
+                        _cu = getattr(chunk, "usage", None)
+                        if _cu:
+                            _stream_usage = _cu
+
                     next_chunk = asyncio.ensure_future(chunk_iter.__anext__())
             finally:
                 if not next_chunk.done():
@@ -3803,14 +3829,17 @@ class CredentialVault:
             tokens_used = 0
             prompt_tokens = 0
             completion_tokens = 0
-            if hasattr(response, 'usage') and response.usage:
-                tokens_used = response.usage.total_tokens
-                prompt_tokens = getattr(response.usage, 'prompt_tokens', 0) or 0
-                completion_tokens = getattr(response.usage, 'completion_tokens', 0) or 0
+            # Streaming ``response.usage`` is empty; prefer the trailing
+            # usage-only chunk captured above (anthropic include_usage).
+            _final_usage = getattr(response, "usage", None) or _stream_usage
+            if _final_usage:
+                tokens_used = _final_usage.total_tokens
+                prompt_tokens = getattr(_final_usage, 'prompt_tokens', 0) or 0
+                completion_tokens = getattr(_final_usage, 'completion_tokens', 0) or 0
                 # Prompt-cache verification (litellm normalizes Anthropic cache
                 # fields; names vary by version). Logging only — billing math
                 # is unchanged.
-                _u = response.usage
+                _u = _final_usage
                 _cache_read = (
                     getattr(_u, "cache_read_input_tokens", None)
                     or (getattr(getattr(_u, "prompt_tokens_details", None), "cached_tokens", 0) if _u else 0)
