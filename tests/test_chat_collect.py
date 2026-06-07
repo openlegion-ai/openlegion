@@ -75,19 +75,6 @@ async def test_chat_collect_falls_back_when_no_done_frame():
 
 
 @pytest.mark.asyncio
-async def test_chat_collect_flag_off_uses_non_streaming(monkeypatch):
-    monkeypatch.setenv("OPENLEGION_TASK_STREAMING", "0")
-    c = _client()
-    assert c.stream_task_exec is False
-    direct = LLMResponse(content="d", tokens_used=1)
-    c.chat = AsyncMock(return_value=direct)
-    c.chat_stream = AsyncMock()  # must NOT be used
-    out = await c.chat_collect("sys", [])
-    assert out is direct
-    c.chat_stream.assert_not_called()
-
-
-@pytest.mark.asyncio
 async def test_chat_collect_propagates_classified_errors():
     c = _client()
 

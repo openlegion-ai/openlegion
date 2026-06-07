@@ -85,13 +85,6 @@ class LLMClient:
                 "output cap.",
                 self.timeout_seconds, self.max_output_tokens, int(_needed),
             )
-        # Stream task/handoff LLM calls (default on). Streaming turns the read
-        # timeout into a per-chunk *idle* bound instead of a total-response
-        # bound, so large generations can't ReadTimeout mid-flight. Set
-        # OPENLEGION_TASK_STREAMING=0 to force the non-streaming path.
-        self.stream_task_exec = os.environ.get(
-            "OPENLEGION_TASK_STREAMING", "1",
-        ).strip().lower() not in ("0", "false", "no", "off")
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
         self._auth_token: str = os.environ.get("MESH_AUTH_TOKEN", "")
@@ -404,18 +397,17 @@ class LLMClient:
         ``chat``: the stream's terminal ``done`` frame carries the same
         fully-parsed ``LLMResponse`` (content, thinking, tool_calls, tokens).
 
-        Falls back to non-streaming ``chat`` when streaming is disabled, the
-        stream ends without a terminal frame, or the transport fails for a
-        non-classified reason (mirrors the documented ``chat_stream`` fallback
-        intent). Classified errors (auth / config / retryable) propagate to
+        Falls back to non-streaming ``chat`` only when the stream ends without
+        a terminal frame or the transport fails for a non-classified reason
+        (mirrors the documented ``chat_stream`` fallback intent) — that
+        fallback is resilience, not a toggle. Classified errors (auth / config
+        / retryable) and other RuntimeErrors propagate to
         ``_llm_call_with_retry`` so its backoff still applies.
         """
         _passthru = dict(
             tools=tools, model=model, max_tokens=max_tokens,
             temperature=temperature, **kwargs,
         )
-        if not self.stream_task_exec:
-            return await self.chat(system, messages, **_passthru)
         from src.shared.errors import LLMAuthError, LLMConfigError
         final: LLMResponse | None = None
         try:
