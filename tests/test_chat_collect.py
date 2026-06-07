@@ -2,9 +2,10 @@
 
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 
-from src.agent.llm import LLMClient
+from src.agent.llm import LLMClient, LLMRetryableError
 from src.shared.types import LLMResponse
 
 
@@ -32,7 +33,7 @@ async def test_chat_collect_falls_back_on_stream_transport_error():
     fallback = LLMResponse(content="fb", tokens_used=1)
 
     async def boom(*a, **k):
-        raise RuntimeError("transport down")
+        raise httpx.ConnectError("stream endpoint down")
         yield  # pragma: no cover — makes this an async generator
 
     c.chat_stream = boom
@@ -40,6 +41,23 @@ async def test_chat_collect_falls_back_on_stream_transport_error():
     out = await c.chat_collect("sys", [])
     assert out is fallback
     c.chat.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_chat_collect_propagates_runtime_error_without_second_call():
+    # A non-retryable SSE error frame (or budget) arrives as plain RuntimeError
+    # — it must propagate, NOT trigger a second (billable) non-streaming call.
+    c = _client()
+
+    async def app_error(*a, **k):
+        raise RuntimeError("LLM stream error: invalid request")
+        yield  # pragma: no cover
+
+    c.chat_stream = app_error
+    c.chat = AsyncMock()
+    with pytest.raises(RuntimeError):
+        await c.chat_collect("sys", [])
+    c.chat.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -71,7 +89,6 @@ async def test_chat_collect_flag_off_uses_non_streaming(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_chat_collect_propagates_classified_errors():
-    from src.agent.llm import LLMRetryableError
     c = _client()
 
     async def transient(*a, **k):

@@ -424,9 +424,17 @@ class LLMClient:
                     final = chunk.get("response")
         except (LLMRetryableError, LLMAuthError, LLMConfigError):
             raise
+        except RuntimeError:
+            # Non-retryable application errors surfaced via the SSE error frame
+            # (and budget-exceeded) arrive as plain RuntimeError. They must
+            # propagate — falling back here would swallow a real error AND fire
+            # a second, billable non-streaming generation after the stream may
+            # already have produced/billed tokens. Only genuine transport
+            # failures (httpx etc., below) fall back.
+            raise
         except Exception as e:
             logger.warning(
-                "Streaming chat failed (%s); falling back to non-streaming",
+                "Streaming transport failed (%s); falling back to non-streaming",
                 type(e).__name__,
             )
             return await self.chat(system, messages, **_passthru)
