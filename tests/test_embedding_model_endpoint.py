@@ -96,7 +96,8 @@ class TestEmbeddingModelEndpoint:
 
     # ── POST /api/embedding-model ───────────────────────────────────────
 
-    def test_provider_writes_model_string(self, mesh_yaml):
+    def test_provider_writes_model_string(self, mesh_yaml, monkeypatch):
+        monkeypatch.setenv("OPENLEGION_SYSTEM_VOYAGE_API_KEY", "vk-test")
         resp = self.client.post(
             "/dashboard/api/embedding-model",
             json={"value": "voyage"},
@@ -154,6 +155,18 @@ class TestEmbeddingModelEndpoint:
         )
         assert resp.status_code == 400
 
+    def test_provider_without_key_rejected(self, mesh_yaml, monkeypatch):
+        # A provider with no configured API key is rejected — persisting it
+        # would mint a dead embedding model agents restart into.
+        monkeypatch.delenv("OPENLEGION_SYSTEM_VOYAGE_API_KEY", raising=False)
+        resp = self.client.post(
+            "/dashboard/api/embedding-model",
+            json={"value": "voyage"},
+            headers=_CSRF,
+        )
+        assert resp.status_code == 400
+        assert self._read_embedding(mesh_yaml) == "__ABSENT__"
+
     # ── GET /api/system-settings embedding block ────────────────────────
 
     def test_system_settings_embedding_block_off(self, mesh_yaml, monkeypatch):
@@ -195,6 +208,21 @@ class TestEmbeddingModelEndpoint:
         assert emb["configured_provider"] == "openai"
         assert emb["configured"] == "text-embedding-3-small"
         assert emb["on"] is True
+
+    def test_system_settings_explicit_provider_no_key_is_off(
+        self, mesh_yaml, monkeypatch,
+    ):
+        # Explicit model whose provider key was removed → honest OFF status.
+        for p in ("OPENAI", "VOYAGE", "GEMINI", "COHERE"):
+            monkeypatch.delenv(f"OPENLEGION_SYSTEM_{p}_API_KEY", raising=False)
+        mesh_yaml.write_text(
+            yaml.dump({"llm": {"embedding_model": "voyage/voyage-3.5"}})
+        )
+        resp = self.client.get("/dashboard/api/system-settings")
+        assert resp.status_code == 200, resp.text
+        emb = resp.json()["embedding"]
+        assert emb["configured_provider"] == "voyage"
+        assert emb["on"] is False  # provider has no key → not actually on
 
     def test_system_settings_embedding_custom(self, mesh_yaml, monkeypatch):
         # A model not in the ladder → "custom".

@@ -6140,11 +6140,22 @@ def create_dashboard_router(
                 (p for p, m, _d in _EMBEDDING_PROVIDER_LADDER if m == raw_embed),
                 "custom",
             )
+        # An explicit configured model bypasses the resolver's key check, so
+        # verify the provider actually has a key — otherwise the status would
+        # claim ON after the key was removed. A "custom" model outside the
+        # ladder can't be verified here, so it's trusted.
+        on = str(eff_model).lower() != "none"
+        if (
+            on and raw_embed is not None
+            and configured_provider != "custom"
+            and configured_provider not in keyed
+        ):
+            on = False
         result["embedding"] = {
             "configured": raw_embed,
             "configured_provider": configured_provider,
             "effective_model": eff_model,
-            "on": str(eff_model).lower() != "none",
+            "on": on,
             "available_providers": [
                 p for p, _m, _d in _EMBEDDING_PROVIDER_LADDER if p in keyed
             ],
@@ -6229,7 +6240,10 @@ def create_dashboard_router(
         """
         import yaml
 
-        from src.cli.runtime import _EMBEDDING_PROVIDER_LADDER
+        from src.cli.runtime import (
+            _EMBEDDING_PROVIDER_LADDER,
+            _embedding_providers_with_keys,
+        )
 
         body = await request.json()
         value = str(body.get("value", "")).strip()
@@ -6247,6 +6261,14 @@ def create_dashboard_router(
             )
             if model is None:
                 raise HTTPException(400, f"Unknown embedding provider: {value}")
+            # Reject a provider with no configured key — persisting it would
+            # mint a dead embedding model that agents restart into (the embed
+            # proxy authenticates by key only). Validate at config-write time,
+            # matching the model-allowlist convention used elsewhere.
+            if value not in _embedding_providers_with_keys():
+                raise HTTPException(
+                    400, f"No API key configured for embedding provider: {value}",
+                )
             stored = model
 
         config_path = Path("config/mesh.yaml")
