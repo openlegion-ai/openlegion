@@ -1339,6 +1339,7 @@ class TestAwaitTaskEventTool:
             "title": "stage 1",
             "blocker_note": None,
             "outcome": "accepted",
+            "result_summary": "ok",
             "completed_at": 1000,
             "updated_at": 1000,
         })
@@ -1349,6 +1350,54 @@ class TestAwaitTaskEventTool:
         assert result["event"]["kind"] == "task_completed"
         assert result["event"]["task_id"] == "task_abc"
         assert result["event"]["status"] == "done"
+        assert result["event"]["summary"] == "ok"
+
+    @pytest.mark.asyncio
+    async def test_returns_result_summary(self):
+        """The worker's deliverable (persisted on the task row as
+        ``result_summary``) surfaces in the event envelope's ``summary``
+        field — previously hollow (``""``)."""
+        from src.agent.builtins.operator_tools import await_task_event
+
+        mc = MagicMock()
+        mc.agent_id = "operator"
+        mc.get_task = AsyncMock(return_value={
+            "status": "done",
+            "title": "t",
+            "result_summary": "the deliverable",
+            "completed_at": 1,
+        })
+        result = await await_task_event(
+            "task_abc", timeout_s=60, poll_interval_s=1, mesh_client=mc,
+        )
+        assert result["event"]["summary"] == "the deliverable"
+
+    @pytest.mark.asyncio
+    async def test_result_summary_is_sanitized(self):
+        """The worker's ``result_summary`` is untrusted text and must pass
+        through ``sanitize_for_prompt`` before landing in the event envelope —
+        otherwise injected invisible/line-separator chars reach the LLM."""
+        from src.agent.builtins.operator_tools import await_task_event
+        from src.shared.utils import sanitize_for_prompt
+
+        # U+2028 (LINE SEPARATOR) is rewritten to "\n" by sanitize_for_prompt,
+        # so the sanitized form differs from the raw input.
+        raw = "deliver\u2028able"
+        assert sanitize_for_prompt(raw) != raw
+
+        mc = MagicMock()
+        mc.agent_id = "operator"
+        mc.get_task = AsyncMock(return_value={
+            "status": "done",
+            "title": "t",
+            "result_summary": raw,
+            "completed_at": 1,
+        })
+        result = await await_task_event(
+            "task_abc", timeout_s=60, poll_interval_s=1, mesh_client=mc,
+        )
+        assert result["event"]["summary"] == sanitize_for_prompt(raw)
+        assert result["event"]["summary"] != raw
 
     @pytest.mark.asyncio
     async def test_returns_timed_out_when_non_terminal(self, monkeypatch):

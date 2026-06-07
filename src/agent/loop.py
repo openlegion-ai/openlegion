@@ -2827,6 +2827,18 @@ class AgentLoop:
                                             "{\"status\": \"noop\", \"reason\": "
                                             "\"...\"}})."
                                         ),
+                                        result_payload=(
+                                            # Capture the worker's answer as the
+                                            # deliverable — but NOT a synthetic
+                                            # ``silent_reply`` marker (mirrors the
+                                            # carve-out above), which is an
+                                            # internal empty-turn placeholder, not
+                                            # a real result.
+                                            {"summary": response_text[:500]}
+                                            if response_text.strip()
+                                            and not result.get("silent_reply")
+                                            else None
+                                        ),
                                     )
                             else:
                                 summary = response_text[:500]

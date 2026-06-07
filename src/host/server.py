@@ -5780,6 +5780,17 @@ def create_mesh_app(
             _err = body.get("error")
             if isinstance(_err, str) and _err.strip():
                 blocker_note = _err.strip()
+        # Persist the worker's result summary on the task row so it
+        # surfaces via await_task_event / GET (today it only reaches the
+        # back-edge inbox event, which doesn't fire for human/cron-
+        # originated handoffs). Length-bounded; matches the existing
+        # (unredacted) back-edge summary handling.
+        _raw_result = body.get("result")
+        _result_summary = None
+        if isinstance(_raw_result, dict):
+            _s = _raw_result.get("summary")
+            if isinstance(_s, str) and _s.strip():
+                _result_summary = _s.strip()[:1000]
         if status not in VALID_STATUSES:
             raise HTTPException(
                 400,
@@ -5800,6 +5811,7 @@ def create_mesh_app(
         try:
             updated = store.update_status(
                 task_id, status, actor=caller, blocker_note=blocker_note,
+                result_summary=_result_summary,
             )
         except InvalidStatusTransition as e:
             raise HTTPException(400, str(e))

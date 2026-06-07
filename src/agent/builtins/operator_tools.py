@@ -1232,7 +1232,15 @@ async def await_task_event(
                             "task_id": task_id,
                             "status": status,
                             "title": record.get("title"),
-                            "summary": "",
+                            # ``result_summary`` is raw worker output crossing
+                            # into the operator's LLM context — sanitize at this
+                            # boundary (mirrors check_inbox's handling of
+                            # back-edge summaries). ``title`` is already
+                            # sanitized at hand_off-creation and ``blocker_note``
+                            # is redacted on write, so only this field is raw.
+                            "summary": sanitize_for_prompt(
+                                record.get("result_summary") or ""
+                            ),
                             "error": blocker,
                             "blocker_note": blocker,
                             "outcome": record.get("outcome"),
