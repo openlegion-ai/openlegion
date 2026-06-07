@@ -2841,10 +2841,27 @@ class AgentLoop:
                                         ),
                                     )
                             else:
-                                summary = response_text[:500]
+                                # Non-lazy success. When the worker returned a
+                                # structured ``{"result": {...}}`` final (the
+                                # answer-delivery shape this prompt now steers
+                                # them to), pass the PARSED envelope through —
+                                # exactly as execute_task does — so the
+                                # originator's await/check_inbox surfaces the
+                                # clean ``result.summary`` answer rather than the
+                                # raw JSON wrapper. The mesh reads ``.summary``
+                                # tolerantly (``.get`` → "" when absent, e.g. a
+                                # noop), so no summary is synthesized here.
+                                if self._is_structured_final(response_text):
+                                    result_payload, _ = self._parse_final_output(
+                                        response_text,
+                                    )
+                                else:
+                                    result_payload = {
+                                        "summary": response_text[:500],
+                                    }
                                 await self._auto_close_task(
                                     task_id, "done",
-                                    result_payload={"summary": summary},
+                                    result_payload=result_payload,
                                 )
                     # Bug 3 final net: a chat turn must never surface an
                     # empty reply unless the model deliberately chose
@@ -4186,10 +4203,13 @@ class AgentLoop:
         rules += (
             "- For HANDOFF tasks (dispatched via lane → /chat with an "
             "x-task-id header): either call tools to do the work, OR "
-            "respond with a structured final answer: "
-            "{\"result\": {\"status\": \"noop\"|\"impossible\"|...}}. "
-            "A text-only \"on it\" / \"done\" acknowledgment without "
-            "tool calls auto-closes the task as failed (no_action_taken).\n"
+            "return your result as a structured final answer — including "
+            "when your deliverable is simply an answer or decision: "
+            "{\"result\": {\"status\": \"done\", \"summary\": \"<your "
+            "answer here>\"}} (use status \"noop\"/\"impossible\" when "
+            "there is genuinely nothing to do). A plain-text reply with no "
+            "tool call and no {\"result\": {...}} envelope auto-closes the "
+            "task as failed (no_outbound_effects).\n"
             "- Before answering from memory, run memory_search first.\n"
             "- Use update_workspace to save lasting knowledge and user preferences.\n"
         )
