@@ -68,3 +68,12 @@ def test_set_llm_limits_env_clamps():
     _default, _lo, hi = limits.LIMIT_SPECS["task_max_tool_rounds"]
     limits.set_llm_limits_env(env, {"max_tool_rounds": hi + 5000})
     assert env["OPENLEGION_TASK_MAX_TOOL_ROUNDS"] == str(hi)
+
+
+def test_set_llm_limits_env_no_ops_on_non_dict_config():
+    # A null/malformed agents.yaml entry yields None on the restart path —
+    # must no-op, not raise AttributeError (Codex pre-merge finding).
+    env: dict[str, str] = {}
+    limits.set_llm_limits_env(env, None)
+    limits.set_llm_limits_env(env, "not-a-dict")
+    assert env == {}

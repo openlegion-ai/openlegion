@@ -131,8 +131,12 @@ def set_llm_limits_env(env: dict[str, str], agent_cfg: dict) -> None:
     Mirrors ``set_llm_max_tokens_env``: called by every restart-from-config
     path so an operator's ``edit_agent`` change to ``max_tool_rounds`` /
     ``llm_timeout_seconds`` survives a container restart. No-op for unset /
-    non-int values (the env/settings/default chain then applies).
+    non-int values (the env/settings/default chain then applies), and a no-op
+    for a missing/malformed agent config (a null agents.yaml entry yields
+    ``None``) rather than raising.
     """
+    if not isinstance(agent_cfg, dict):
+        return
     for cfg_key, limit_key in AGENT_CONFIG_KEYS.items():
         v = _coerce_int(agent_cfg.get(cfg_key), limit_key)
         if v is not None:
