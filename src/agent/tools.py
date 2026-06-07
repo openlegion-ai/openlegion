@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import inspect
+import os
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -19,6 +20,18 @@ if TYPE_CHECKING:
     from src.agent.mcp_client import MCPClient
 
 logger = setup_logging("agent.tools")
+
+# Directories that never contain agent tools. The loader walks tools_dir
+# recursively, so without this guard a stray virtualenv, VCS checkout, or
+# vendored dependency tree (e.g. an agent running `pip install` in its tools
+# dir, or tools_dir accidentally resolving to a repo root) would make it try
+# to import thousands of library .py files as tools — flooding logs and
+# stalling startup. Pruning whole subtrees keeps discovery fast and robust.
+_NON_TOOL_DIRS = frozenset({
+    ".git", ".venv", "venv", "env", "__pycache__", "node_modules",
+    "site-packages", ".tox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+    ".idea", ".vscode", "dist", "build", ".egg-info",
+})
 
 # Global registry populated by the @tool decorator.
 # Protected by _tool_staging_lock during reload to prevent
@@ -151,17 +164,31 @@ class ToolRegistry:
         self._load_modules_from(tools_path, label="tool")
 
     def _load_modules_from(self, directory: Path, label: str) -> None:
-        """Load all .py modules from a directory, registering decorated tools."""
-        for py_file in directory.glob("**/*.py"):
-            if py_file.name.startswith("_"):
-                continue
-            try:
-                spec = importlib.util.spec_from_file_location(py_file.stem, str(py_file))
-                if spec and spec.loader:
-                    module = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(module)
-            except Exception as e:
-                logger.warning(f"Failed to load {label} {py_file}: {e}")
+        """Load all .py modules from a directory, registering decorated tools.
+
+        Recurses into subdirectories but prunes dependency/VCS/cache trees
+        (see ``_NON_TOOL_DIRS``) and any hidden dir so a stray ``.venv`` or
+        vendored package tree can never be mistaken for a pile of tools.
+        """
+        for root, dirs, files in os.walk(directory):
+            # Prune in place so os.walk never descends into these subtrees.
+            dirs[:] = [
+                d for d in dirs
+                if d not in _NON_TOOL_DIRS and not d.startswith(".")
+            ]
+            for fname in files:
+                if not fname.endswith(".py") or fname.startswith("_"):
+                    continue
+                py_file = Path(root) / fname
+                try:
+                    spec = importlib.util.spec_from_file_location(
+                        py_file.stem, str(py_file)
+                    )
+                    if spec and spec.loader:
+                        module = importlib.util.module_from_spec(spec)
+                        spec.loader.exec_module(module)
+                except Exception as e:
+                    logger.warning(f"Failed to load {label} {py_file}: {e}")
 
     def _register_mcp_tools(self) -> None:
         """Register tools from connected MCP servers."""

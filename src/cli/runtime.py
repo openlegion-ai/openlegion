@@ -526,7 +526,11 @@ class RuntimeContext:
                     daily_usd=budget.get("daily_usd", 10.0),
                     monthly_usd=budget.get("monthly_usd", 200.0),
                 )
-            tools_dir = os.path.abspath(agent_cfg.get("tools_dir", ""))
+            # Guard the empty case: os.path.abspath("") resolves to the CWD
+            # (the repo root), which would bind-mount the whole tree — .venv,
+            # .git, src — into the agent. Empty stays empty (no tools mount).
+            _td = agent_cfg.get("tools_dir", "")
+            tools_dir = os.path.abspath(_td) if _td else ""
             agent_model = agent_cfg.get("model", default_model)
             agent_mcp_servers = agent_cfg.get("mcp_servers") or None
             agent_thinking = agent_cfg.get("thinking", "")

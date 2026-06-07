@@ -474,9 +474,12 @@ class HealthMonitor:
         default_model = fresh_cfg.get("llm", {}).get(
             "default_model", "openai/gpt-4o-mini",
         )
+        # Empty stays empty: os.path.abspath("") resolves to the CWD (repo
+        # root), which would bind-mount the whole tree into the rebuilt agent.
+        _td = agent_cfg.get("tools_dir", "")
         return {
             "role": agent_cfg.get("role", ""),
-            "tools_dir": os.path.abspath(agent_cfg.get("tools_dir", "")),
+            "tools_dir": os.path.abspath(_td) if _td else "",
             "model": agent_cfg.get("model", default_model),
             "mcp_servers": agent_cfg.get("mcp_servers") or None,
             "thinking": agent_cfg.get("thinking", ""),
