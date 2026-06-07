@@ -10922,6 +10922,7 @@ function dashboard() {
         file_read: 'reading a file',
         file_write: 'writing a file',
         file_list: 'listing files',
+        commit_file: 'committing a file to GitHub',
         memory_search: 'checking memory',
         memory_think: 'reasoning over memory',
         memory_save: 'saving to memory',
