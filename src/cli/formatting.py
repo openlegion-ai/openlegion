@@ -44,6 +44,8 @@ def _format_tool_summary(name: str, inp: dict, out: dict) -> str:
         return inp.get("key", inp.get("content", ""))[:60]
     elif name == "memory_search":
         return inp.get("query", "")
+    elif name == "memory_think":
+        return inp.get("query", "")
     else:
         text = dumps_safe(inp)
         if len(text) > 80:
