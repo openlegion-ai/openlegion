@@ -1301,6 +1301,12 @@ function dashboard() {
             // Queue state is WS-driven (no poll) — re-seed it on reconnect so
             // any transitions missed during the outage are reflected.
             this.fetchQueues();
+            // Platform success is browser_metrics-driven (no poll); if the
+            // operator is on the Browser panel, re-seed it too so a blip
+            // doesn't leave the rollup frozen until the next metrics event.
+            if (this.activeTab === 'system' && this.systemTab === 'browser') {
+              this.fetchPlatformSuccess();
+            }
           }
         },
         onDisconnect: () => { this.connected = false; },
@@ -1621,10 +1627,10 @@ function dashboard() {
               this.fetchSystemLogs();
             }
           }
-          // Resume model health + queue polling
+          // Resume model-health polling; queue state is WS-driven now, so
+          // just re-seed it once on tab-return.
           this.fetchModelHealth();
           this._modelHealthInterval = setInterval(() => this.fetchModelHealth(), 60000);
-          // Re-seed queue state on tab-return; live updates flow via WS.
           this.fetchQueues();
           // Refresh agent detail if we're viewing one
           if (this.detailAgent) {
@@ -4540,24 +4546,28 @@ function dashboard() {
         this._queueRefreshDebounce = setTimeout(() => this.fetchQueues(), 300);
       }
 
-      // System-tab settings/integrations/storage changed elsewhere — re-fetch
-      // just the affected panel, and only while the System tab is on screen
-      // (off-screen panels re-sync on their next open). ``data.scope`` maps to
-      // the panel's existing loader(s); unknown scopes are ignored.
+      // System-tab config changed elsewhere — re-fetch just the affected
+      // panel, and only while the System tab is on screen (off-screen panels
+      // re-sync on their next open). ``data.scope`` maps to the panel's
+      // read-only list loader; unknown scopes are ignored.
+      //
+      // NOTE: only the display-list panels are auto-refetched. The edit-FORM
+      // panels (browser_settings / system_settings / captcha_solver /
+      // network_proxy / wallet) are deliberately excluded — their loaders
+      // overwrite the same state the form inputs bind to (e.g.
+      // loadNetworkProxy resets networkProxy.form), so a background reload
+      // would clobber an operator's in-progress edit. Those panels already
+      // refresh on tab-open, which is sufficient for rarely-changed,
+      // single-operator settings.
       if (evt.type === 'config_changed' && this.activeTab === 'system') {
         const _configLoaders = {
-          browser_settings: ['fetchBrowserSettings'],
-          system_settings: ['fetchSystemSettings'],
-          captcha_solver: ['fetchCaptchaSolver'],
           channels: ['fetchChannels'],
           webhooks: ['fetchWebhooks'],
           api_keys: ['fetchApiKeys'],
           integrations: ['loadIntegrations'],
-          network_proxy: ['loadNetworkProxy'],
           storage: ['fetchStorage', 'fetchDatabaseDetails'],
           uploads: ['fetchUploads'],
           skills: ['loadSkillsCatalog'],
-          wallet: ['fetchWallet', 'fetchWalletRpc'],
         };
         for (const fn of (_configLoaders[evt.data?.scope] || [])) {
           if (typeof this[fn] === 'function') this[fn]();
