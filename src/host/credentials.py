@@ -53,6 +53,50 @@ _OPENAI_TOKEN_URL = "https://auth.openai.com/oauth/token"
 _OPENAI_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 _OPENAI_OAUTH_REDIRECT_URI = "http://localhost:1455/auth/callback"
 
+# ── Anthropic prompt caching (OAuth path) ────────────────────
+_PROMPT_CACHE_ENABLED = os.environ.get(
+    "OPENLEGION_PROMPT_CACHING", "1"
+).strip().lower() not in ("0", "false", "no", "off", "")
+
+
+def _mark_anthropic_cache_breakpoints(body: dict) -> None:
+    """Tag the stable Anthropic request prefix with ephemeral prompt-cache
+    breakpoints so repeated within-turn re-sends are billed as cache reads
+    (~0.10x) instead of full input.
+
+    Anthropic caches the request prefix up to and including each block marked
+    with ``cache_control``. We mark, at most, three breakpoints (limit is 4):
+      (a) the LAST tool definition  -> caches the whole tools array,
+      (b) the LAST system content block -> caches tools + system,
+      (c) the LAST message's last content block -> caches the append-only
+          message history within a turn (rolling breakpoint).
+    Mutates ``body`` in place. Safe no-op on missing/empty fields; idempotent.
+    """
+    if not _PROMPT_CACHE_ENABLED:
+        return
+    cc = {"type": "ephemeral"}
+    tools = body.get("tools")
+    if isinstance(tools, list) and tools and isinstance(tools[-1], dict):
+        tools[-1]["cache_control"] = cc
+    system = body.get("system")
+    if isinstance(system, list) and system and isinstance(system[-1], dict):
+        system[-1]["cache_control"] = cc
+    messages = body.get("messages")
+    if isinstance(messages, list) and messages and isinstance(messages[-1], dict):
+        content = messages[-1].get("content")
+        if isinstance(content, str) and content:
+            messages[-1]["content"] = [
+                {"type": "text", "text": content, "cache_control": cc}
+            ]
+        elif isinstance(content, list) and content and isinstance(content[-1], dict):
+            # Only tag a cacheable block type. Anthropic rejects cache_control
+            # on e.g. ``thinking`` blocks; normal agent history ends in
+            # text/tool_use/tool_result, but guard defensively so a stray
+            # block can never make the proxy emit a rejected request.
+            if content[-1].get("type") in ("text", "tool_use", "tool_result"):
+                content[-1]["cache_control"] = cc
+
+
 # ── Same-model transient retry (prod 503 incident) ───────────
 # HTTP statuses that are TRANSIENT upstream-provider blips (Anthropic /
 # OpenAI outage, rate-limit, gateway hiccup). A single one of these must
@@ -2279,6 +2323,10 @@ class CredentialVault:
             )
             body.pop("top_p", None)
 
+        # System is now a list of content blocks and the body still carries
+        # tools/messages — tag the stable prefix for prompt caching.
+        _mark_anthropic_cache_breakpoints(body)
+
     async def _oauth_chat(
         self, request: APIProxyRequest, api_key: str, model: str,
     ) -> APIProxyResponse:
@@ -2404,6 +2452,8 @@ class CredentialVault:
         collected_tool_calls: list[dict] = []
         input_tokens = 0
         output_tokens = 0
+        cache_read_tokens = 0
+        cache_creation_tokens = 0
         current_tool_idx = -1
 
         try:
@@ -2412,7 +2462,16 @@ class CredentialVault:
             async for event in stream:
                 if event.type == "message_start":
                     if hasattr(event, "message") and hasattr(event.message, "usage"):
-                        input_tokens = event.message.usage.input_tokens
+                        _u = event.message.usage
+                        input_tokens = _u.input_tokens
+                        # Prompt-cache counters may be absent on older SDKs or
+                        # when caching is disabled — read defensively.
+                        cache_read_tokens = getattr(
+                            _u, "cache_read_input_tokens", 0
+                        ) or 0
+                        cache_creation_tokens = getattr(
+                            _u, "cache_creation_input_tokens", 0
+                        ) or 0
                 elif event.type == "content_block_start":
                     cb = event.content_block
                     if cb.type == "tool_use":
@@ -2451,12 +2510,19 @@ class CredentialVault:
                 yield f"data: {json.dumps({'error': f'Model {model} returned empty response'})}\n\n"
                 return
             self._health_tracker.record_success(model)
+            logger.info(
+                "anthropic prompt cache: read=%d created=%d input=%d output=%d model=%s",
+                cache_read_tokens, cache_creation_tokens, input_tokens,
+                output_tokens, body.get("model"),
+            )
             done_data: dict = {
                 "type": "done",
                 "content": collected_content,
                 "tokens_used": tokens_used,
                 "input_tokens": input_tokens,
                 "output_tokens": output_tokens,
+                "cache_read_input_tokens": cache_read_tokens,
+                "cache_creation_input_tokens": cache_creation_tokens,
                 "model": f"anthropic/{body['model']}",
                 "oauth": True,
                 "tool_calls": [

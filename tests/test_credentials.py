@@ -1,5 +1,6 @@
 """Unit tests for credential vault."""
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -5523,3 +5524,123 @@ async def test_oauth_resolve_token_not_logged_in_full(monkeypatch, caplog):
     assert token not in logged
     assert token[:15] not in logged
     assert token[-4:] not in logged or "fp=" in logged  # fingerprint only
+
+
+# ── Anthropic prompt-cache breakpoints (OAuth path) ──────────────────────
+
+from src.host import credentials as _cred_mod  # noqa: E402
+from src.host.credentials import _mark_anthropic_cache_breakpoints  # noqa: E402
+
+_EPHEMERAL = {"type": "ephemeral"}
+
+
+class TestMarkAnthropicCacheBreakpoints:
+    """Unit tests for the prompt-cache breakpoint tagger on the OAuth path."""
+
+    def _full_body(self):
+        return {
+            "model": "claude-x",
+            "tools": [
+                {"name": "a", "description": "", "input_schema": {}},
+                {"name": "b", "description": "", "input_schema": {}},
+            ],
+            "system": [
+                {"type": "text", "text": "identity"},
+                {"type": "text", "text": "agent system"},
+            ],
+            "messages": [
+                {"role": "user", "content": "hello"},
+            ],
+        }
+
+    def test_marks_last_tool_system_and_string_message(self):
+        body = self._full_body()
+        _mark_anthropic_cache_breakpoints(body)
+
+        # (a) last tool only
+        assert "cache_control" not in body["tools"][0]
+        assert body["tools"][1]["cache_control"] == _EPHEMERAL
+        # (b) last system block only
+        assert "cache_control" not in body["system"][0]
+        assert body["system"][1]["cache_control"] == _EPHEMERAL
+        # (c) string content converted to a list block with cache_control
+        content = body["messages"][0]["content"]
+        assert content == [
+            {"type": "text", "text": "hello", "cache_control": _EPHEMERAL}
+        ]
+
+    def test_last_message_list_content_marks_last_block(self):
+        body = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "1", "content": "x"},
+                        {"type": "tool_result", "tool_use_id": "2", "content": "y"},
+                    ],
+                },
+            ],
+        }
+        _mark_anthropic_cache_breakpoints(body)
+        blocks = body["messages"][0]["content"]
+        assert "cache_control" not in blocks[0]
+        assert blocks[1]["cache_control"] == _EPHEMERAL
+
+    def test_last_message_non_cacheable_block_not_tagged(self):
+        # A non-cacheable trailing block (e.g. ``thinking``) must NOT be
+        # tagged — Anthropic rejects cache_control there. The system/tools
+        # breakpoints still apply; only the message breakpoint is skipped.
+        body = {
+            "system": [{"type": "text", "text": "s"}],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "ok"},
+                        {"type": "thinking", "thinking": "..."},
+                    ],
+                },
+            ],
+        }
+        _mark_anthropic_cache_breakpoints(body)
+        blocks = body["messages"][0]["content"]
+        assert "cache_control" not in blocks[0]
+        assert "cache_control" not in blocks[1]
+        assert body["system"][0]["cache_control"] == _EPHEMERAL
+
+    def test_empty_or_missing_fields_no_error_no_spurious_keys(self):
+        # Completely empty.
+        body = {}
+        _mark_anthropic_cache_breakpoints(body)
+        assert body == {}
+
+        # Present but empty containers.
+        body2 = {"tools": [], "system": [], "messages": []}
+        _mark_anthropic_cache_breakpoints(body2)
+        assert body2 == {"tools": [], "system": [], "messages": []}
+
+        # Empty string message content stays untouched.
+        body3 = {"messages": [{"role": "user", "content": ""}]}
+        _mark_anthropic_cache_breakpoints(body3)
+        assert body3["messages"][0]["content"] == ""
+
+    def test_disabled_flag_adds_nothing(self, monkeypatch):
+        monkeypatch.setattr(_cred_mod, "_PROMPT_CACHE_ENABLED", False)
+        body = self._full_body()
+        _mark_anthropic_cache_breakpoints(body)
+        assert "cache_control" not in body["tools"][1]
+        assert "cache_control" not in body["system"][1]
+        # String content left as a plain string (not converted).
+        assert body["messages"][0]["content"] == "hello"
+
+    def test_idempotent(self):
+        body = self._full_body()
+        _mark_anthropic_cache_breakpoints(body)
+        first = json.dumps(body, sort_keys=True)
+        _mark_anthropic_cache_breakpoints(body)
+        second = json.dumps(body, sort_keys=True)
+        assert first == second
+        # Exactly one cache_control on the (now-list) message content.
+        assert body["messages"][0]["content"] == [
+            {"type": "text", "text": "hello", "cache_control": _EPHEMERAL}
+        ]
