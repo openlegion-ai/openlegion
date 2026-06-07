@@ -1732,6 +1732,7 @@ function dashboard() {
       if (this._ws) this._ws.disconnect();
       if (this._refreshInterval) clearInterval(this._refreshInterval);
       if (this._queueRefreshDebounce) clearTimeout(this._queueRefreshDebounce);
+      if (this._platformSuccessDebounce) clearTimeout(this._platformSuccessDebounce);
       if (this._cronDebounce) clearTimeout(this._cronDebounce);
       if (this._modelHealthInterval) clearInterval(this._modelHealthInterval);
       if (this._cookieRenewalInterval) clearInterval(this._cookieRenewalInterval);
@@ -4273,9 +4274,16 @@ function dashboard() {
         }
       }
 
-      // Append to event feed (newest first, cap at 500)
-      this.events.unshift(evt);
-      if (this.events.length > 500) this.events.splice(500);
+      // Append to event feed (newest first, cap at 500). queue_changed is a
+      // high-frequency, contentless refetch trigger (≈3 per task) with no
+      // human-readable rendering — keep it out of the bounded activity buffer
+      // so it neither crowds real events out of the 500-slot history nor
+      // inflates the "+N coordination events" counter. Its handler still runs
+      // below; dedup above already recorded its id.
+      if (evt.type !== 'queue_changed') {
+        this.events.unshift(evt);
+        if (this.events.length > 500) this.events.splice(500);
+      }
 
       // Update agent activity state
       const agent = evt.agent;

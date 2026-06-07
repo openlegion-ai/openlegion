@@ -254,6 +254,42 @@ async def test_status_reports_busy_and_queue_depth():
     await task1
 
 
+# ── EventBus integration (queue_changed) ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_queue_changed_emitted_when_bus_wired():
+    """A wired EventBus receives queue_changed on enqueue, dequeue, and completion."""
+    dispatch = AsyncMock(return_value="ok")
+    bus = MagicMock()
+    lm = LaneManager(dispatch_fn=dispatch)
+    lm.set_event_bus(bus)
+
+    await lm.enqueue("agent1", "hi")
+    await asyncio.sleep(0.05)  # let the worker's finally block run
+
+    queue_emits = [
+        c for c in bus.emit.call_args_list
+        if c.args and c.args[0] == "queue_changed"
+    ]
+    # enqueue + busy=True + terminal-finally → at least 3 emits for one task
+    assert len(queue_emits) >= 3
+    for c in queue_emits:
+        assert c.kwargs.get("agent") == "agent1"
+        assert c.kwargs.get("data") == {"agent": "agent1"}
+
+
+@pytest.mark.asyncio
+async def test_no_bus_wired_does_not_break_lane():
+    """Without an EventBus the lane works identically (emits are no-ops)."""
+    dispatch = AsyncMock(return_value="ok")
+    lm = LaneManager(dispatch_fn=dispatch)  # no set_event_bus
+
+    result = await lm.enqueue("agent1", "hi")
+    assert result == "ok"
+    dispatch.assert_awaited_once_with("agent1", "hi")
+
+
 # ── Stop ─────────────────────────────────────────────────────
 
 

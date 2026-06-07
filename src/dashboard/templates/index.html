@@ -1751,7 +1751,7 @@
 
             <!-- Hub body — collapsible -->
             <div x-show="teamHubExpanded" x-transition class="border-t border-gray-800/60">
-              <!-- Mobile tab strip (sm:hidden) -->
+              <!-- Mobile tab strip (shown below lg; desktop pills take over at lg) -->
               <div class="project-hub-tabs project-hub-mobile-tabs lg:hidden" role="tablist" aria-label="Team sections">
                 <button @click="teamHubTab = 'work'; _ensureWorkplaceTasks()"
                   class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
@@ -7127,7 +7127,7 @@
                 <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19V6l12-3v13M9 19c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zm12-3c0 1.105-1.343 2-3 2s-3-.895-3-2 1.343-2 3-2 3 .895 3 2zM9 10l12-3"/></svg>
                 <h3 class="text-base font-medium text-gray-200">Per-Platform Success</h3>
               </div>
-              <span class="text-[11px] text-gray-500">last 24h · updates live</span>
+              <span class="text-[11px] text-gray-500">last 24h</span>
             </div>
             <p class="text-[11px] text-gray-400 mb-4 leading-relaxed">
               Aggregated per host across the fleet. <span class="text-gray-400">Success</span> is the share of CAPTCHA gates that solved cleanly. <span class="text-amber-400">Burns</span> are fingerprints rejected after a solve — the cue to rotate the profile. Hosts without any CAPTCHA activity show "—" for success rate.
