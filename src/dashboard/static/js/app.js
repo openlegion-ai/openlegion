@@ -7923,6 +7923,29 @@ function dashboard() {
       } catch (e) { console.warn('saveDefaultModel failed:', e); }
     },
 
+    async saveEmbeddingModel(value) {
+      if (!value) return;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/embedding-model`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ value }),
+        });
+        if (resp.ok) {
+          // Refresh the resolved status (on/off + effective model) from
+          // the server, which recomputes against the available keys.
+          await this.fetchSystemSettings();
+          this.showToast(`Embedding provider set to ${value}`);
+          // EMBEDDING_MODEL is only read at agent launch, so a restart is
+          // required to apply. Auto-apply so the change isn't silently stale.
+          await this._restartAllAgentsAuto('Applying embedding setting — restarting agents…');
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Update failed'}`);
+        }
+      } catch (e) { console.warn('saveEmbeddingModel failed:', e); }
+    },
+
     // Restart the whole fleet WITHOUT a confirmation prompt. Used to
     // auto-apply dashboard changes that are only picked up at container
     // launch (execution limits, default model). The user-facing
