@@ -63,6 +63,7 @@ class MemoryStore:
         db_path: str,
         embed_fn: EmbedFn | None = None,
         categorize_fn: CategorizeFn | None = None,
+        embedding_dim: int = EMBEDDING_DIM,
     ):
         self._close_lock = threading.Lock()
         self.db = open_db(db_path)
@@ -73,6 +74,12 @@ class MemoryStore:
         self.embed_fn = embed_fn
         self._embed_failures = 0
         self.categorize_fn = categorize_fn
+        # Dimension the vec0 tables are bound to. Configurable so non-OpenAI
+        # embedding providers work (Voyage 1024, Gemini 768, …); a change
+        # between boots triggers a vec-table rebuild in
+        # _reconcile_embedding_dim(). Falls back to the 1536 default on a
+        # non-positive value.
+        self.embedding_dim = embedding_dim if embedding_dim and embedding_dim > 0 else EMBEDDING_DIM
         self._init_schema()
 
     def _record_embed_failure(self, error: Exception, context: str = "Embedding") -> None:
@@ -88,8 +95,86 @@ class MemoryStore:
         else:
             logger.warning("%s failed: %s", context, error)
 
+    def _get_meta(self, key: str) -> str | None:
+        try:
+            row = self.db.execute(
+                "SELECT value FROM memory_meta WHERE key = ?", (key,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+        return row[0] if row else None
+
+    def _set_meta(self, key: str, value: str) -> None:
+        self.db.execute(
+            "INSERT INTO memory_meta (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        self.db.commit()
+
+    def _reconcile_embedding_dim(self) -> None:
+        """Rebuild the vec0 tables if the configured embedding dimension
+        changed since they were created.
+
+        vec0 virtual tables are bound to a fixed dimension at CREATE time,
+        and embedding spaces are incompatible across models anyway, so a
+        dimension change (operator switched embedding provider) makes the
+        old vectors unusable. We drop + recreate ``facts_vec`` /
+        ``categories_vec`` at the new dimension. Fact and category ROWS are
+        preserved — only their now-incompatible vectors are dropped; they
+        repopulate on the next ``store_fact``. Keyword search (FTS5) is
+        never touched, so recall keeps working throughout. Wrapped so a
+        rebuild failure degrades to keyword-only rather than crashing the
+        agent.
+        """
+        stored = self._get_meta("embedding_dim")
+        if stored is None:
+            # First boot at this schema (or a pre-existing DB created at the
+            # legacy 1536 default, which is also the default here) — record
+            # the current dimension without rebuilding.
+            self._set_meta("embedding_dim", str(self.embedding_dim))
+            return
+        try:
+            stored_dim = int(stored)
+        except (TypeError, ValueError):
+            self._set_meta("embedding_dim", str(self.embedding_dim))
+            return
+        if stored_dim == self.embedding_dim:
+            return
+        logger.warning(
+            "Embedding dimension changed %d→%d — rebuilding vector tables "
+            "(keyword search unaffected; vectors repopulate as facts are "
+            "re-saved).",
+            stored_dim, self.embedding_dim,
+        )
+        try:
+            self.db.executescript(
+                f"""
+                DROP TABLE IF EXISTS facts_vec;
+                DROP TABLE IF EXISTS categories_vec;
+                CREATE VIRTUAL TABLE facts_vec USING vec0(
+                    id TEXT PRIMARY KEY,
+                    embedding float[{self.embedding_dim}]
+                );
+                CREATE VIRTUAL TABLE categories_vec USING vec0(
+                    id INTEGER PRIMARY KEY,
+                    embedding float[{self.embedding_dim}]
+                );
+                """
+            )
+            # Stored category embeddings (BLOB) and fact→category links are
+            # now wrong-dimension; clear them so categories rebuild cleanly.
+            self.db.execute("UPDATE categories SET embedding = NULL")
+            self.db.execute("UPDATE facts SET category_id = NULL")
+            self._set_meta("embedding_dim", str(self.embedding_dim))
+            self.db.commit()
+        except Exception as e:
+            logger.warning(
+                "Vector-table rebuild failed (continuing keyword-only): %s", e,
+            )
+
     def _init_schema(self) -> None:
-        self.db.executescript("""
+        self.db.executescript(f"""
             CREATE TABLE IF NOT EXISTS facts (
                 id TEXT PRIMARY KEY,
                 key TEXT NOT NULL,
@@ -104,7 +189,7 @@ class MemoryStore:
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS facts_vec USING vec0(
                 id TEXT PRIMARY KEY,
-                embedding float[1536]
+                embedding float[{self.embedding_dim}]
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
                 fact_id,
@@ -122,7 +207,7 @@ class MemoryStore:
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS categories_vec USING vec0(
                 id INTEGER PRIMARY KEY,
-                embedding float[1536]
+                embedding float[{self.embedding_dim}]
             );
             CREATE TABLE IF NOT EXISTS logs (
                 id TEXT PRIMARY KEY,
@@ -168,6 +253,11 @@ class MemoryStore:
                 flush_triggered INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS memory_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
         """)
         # Lazy migration: add category_id FK to facts if not present
         try:
@@ -175,6 +265,9 @@ class MemoryStore:
         except sqlite3.OperationalError:
             pass  # Column already exists
         self.db.commit()
+        # Reconcile the dimension the vec0 tables were built at against the
+        # configured dimension (rebuilds on an embedding-provider switch).
+        self._reconcile_embedding_dim()
 
     async def _run_db(self, fn: Callable[..., _T], *args: Any) -> _T:
         """Run a blocking DB function in the default thread pool."""
@@ -246,6 +339,17 @@ class MemoryStore:
             except Exception as e:
                 self._record_embed_failure(e, "Embedding")
 
+        # Guard against a wrong-dimension vector reaching ANY vec0 table
+        # (facts_vec via _store_fact_sync, or categories_vec via
+        # _auto_categorize) — that would raise inside sqlite-vec. Drop to
+        # keyword-only for this fact instead; never crash the caller.
+        if embedding is not None and len(embedding) != self.embedding_dim:
+            logger.warning(
+                "Embedding length %d != configured dim %d; storing fact %r "
+                "keyword-only.", len(embedding), self.embedding_dim, key,
+            )
+            embedding = None
+
         # Run all DB writes in executor to avoid blocking the event loop
         fact_id = await self._run_db(
             self._store_fact_sync, key, value, category, source, confidence, embedding,
@@ -265,6 +369,16 @@ class MemoryStore:
         self.db.commit()
 
     def _store_embedding(self, fact_id: str, embedding: list[float]) -> None:
+        # Defensive: a mismatched embedding length would raise inside
+        # sqlite-vec and count toward the 3-strike disable. Skip the vector
+        # write instead — the fact stays keyword-searchable.
+        if len(embedding) != self.embedding_dim:
+            logger.warning(
+                "Embedding length %d != configured dim %d; skipping vector "
+                "store for %s (keyword search unaffected).",
+                len(embedding), self.embedding_dim, fact_id,
+            )
+            return
         blob = serialize_float32(embedding)
         self.db.execute("DELETE FROM facts_vec WHERE id = ?", (fact_id,))
         self.db.execute("INSERT INTO facts_vec (id, embedding) VALUES (?, ?)", (fact_id, blob))
@@ -310,6 +424,11 @@ class MemoryStore:
                 query_embedding = await self.embed_fn(query)
             except Exception as e:
                 self._record_embed_failure(e, "Vector search")
+
+        # A wrong-dimension query vector would raise inside sqlite-vec — skip
+        # the vector tier and use keyword search only for this query.
+        if query_embedding is not None and len(query_embedding) != self.embedding_dim:
+            query_embedding = None
 
         return await self._run_db(self._search_sync, query, query_embedding, top_k)
 
@@ -677,7 +796,7 @@ class MemoryStore:
         if not rows:
             return
 
-        dim = EMBEDDING_DIM
+        dim = self.embedding_dim
         avg = [0.0] * dim
         for (blob,) in rows:
             values = struct.unpack(f"{dim}f", blob)

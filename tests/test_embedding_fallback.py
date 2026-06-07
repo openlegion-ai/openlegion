@@ -164,3 +164,79 @@ class TestEmbeddingGracefulFallback:
         # 4th save should NOT call the embed function
         await store.store_fact("key4", "val4")
         assert tracker.call_count == 3  # still 3, not 4
+
+
+def _fixed_embed(dim: int):
+    """Return an async embed_fn that always yields a ``dim``-length vector."""
+    async def _embed(text: str):
+        return [0.1] * dim
+    return _embed
+
+
+class TestConfigurableEmbeddingDim:
+    """Configurable embedding dimension + safe provider-switch handling.
+
+    Backs the product guarantee that 'no embedding model' and 'switched
+    embedding provider' are safe, non-breaking states for every agent.
+    """
+
+    @pytest.mark.asyncio
+    async def test_keyword_only_store_and_recall(self, tmp_db):
+        # The 'no embedding model' (EMBEDDING_MODEL=none → embed_fn=None)
+        # contract: an agent must still store and recall facts via keyword.
+        store = MemoryStore(tmp_db, embed_fn=None)
+        await store.store_fact("deploy_target", "production cluster eu-west")
+        results = await store.search("production cluster")
+        assert any("production cluster" in r.value for r in results)
+        store.close()
+
+    def test_embedding_dim_defaults_to_1536(self, tmp_db):
+        store = MemoryStore(tmp_db)
+        assert store.embedding_dim == 1536
+        store.close()
+
+    def test_non_positive_dim_falls_back_to_default(self, tmp_db):
+        store = MemoryStore(tmp_db, embedding_dim=0)
+        assert store.embedding_dim == 1536
+        store.close()
+
+    @pytest.mark.asyncio
+    async def test_custom_dim_stores_and_searches(self, tmp_db):
+        # A non-1536 provider (e.g. Voyage 1024) works end to end.
+        store = MemoryStore(tmp_db, embed_fn=_fixed_embed(1024), embedding_dim=1024)
+        await store.store_fact("k", "voyage embedded value")
+        results = await store.search("voyage embedded value")
+        assert any("voyage embedded value" in r.value for r in results)
+        store.close()
+
+    @pytest.mark.asyncio
+    async def test_dim_change_rebuilds_and_preserves_rows(self, tmp_db):
+        # Create at 1536 and store a fact (with a 1536 vector).
+        store = MemoryStore(tmp_db, embed_fn=_fixed_embed(1536), embedding_dim=1536)
+        await store.store_fact("switch_key", "value before provider switch")
+        assert store._get_meta("embedding_dim") == "1536"
+        store.close()
+
+        # Reopen at 1024 (operator switched embedding provider). Must NOT
+        # crash; the fact ROW survives and stays keyword-searchable, and the
+        # recorded dim is updated.
+        store2 = MemoryStore(tmp_db, embed_fn=_fixed_embed(1024), embedding_dim=1024)
+        assert store2._get_meta("embedding_dim") == "1024"
+        results = await store2.search("value before provider switch")
+        assert any("value before provider switch" in r.value for r in results)
+        # New facts embed cleanly at the new dimension (no dim error).
+        await store2.store_fact("new_key", "value after switch")
+        store2.close()
+
+    @pytest.mark.asyncio
+    async def test_wrong_length_embedding_skips_vector_no_crash(self, tmp_db):
+        # embed_fn SUCCEEDS but returns a vector whose length disagrees with
+        # the configured dim (misconfiguration). store_fact + search must
+        # NOT raise, the embed call is not counted as a failure, and the
+        # fact stays keyword-searchable.
+        store = MemoryStore(tmp_db, embed_fn=_fixed_embed(999), embedding_dim=1536)
+        await store.store_fact("mismatch", "kept despite bad embedding")
+        assert store._embed_failures == 0  # the embed CALL itself succeeded
+        results = await store.search("kept despite bad embedding")
+        assert any("kept despite bad embedding" in r.value for r in results)
+        store.close()
