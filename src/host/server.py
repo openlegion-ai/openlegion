@@ -7050,9 +7050,9 @@ def create_mesh_app(
             "soul": raw.get("initial_soul", ""),
             "heartbeat": raw.get("initial_heartbeat", ""),
             "interface": raw.get("initial_interface", ""),
-            # Falls back to the LLMClient default (8192) when never set, so the
+            # Falls back to the LLMClient default (16384) when never set, so the
             # operator sees the effective cap, not a blank.
-            "max_output_tokens": raw.get("max_output_tokens", 8192) or 8192,
+            "max_output_tokens": raw.get("max_output_tokens", 16384) or 16384,
             # Per-agent operational caps — fall back to the EFFECTIVE value
             # (env/global → default), so the operator sees what the agent
             # actually runs, not just the static floor.
@@ -7755,17 +7755,17 @@ def create_mesh_app(
         else:
             yaml_key = _CONFIG_FIELD_MAP.get(field, field)
             # For max_output_tokens, default the "before" value to the
-            # effective cap (LLMClient default 8192) rather than "" when it
+            # effective cap (LLMClient default 16384) rather than "" when it
             # was never set. This keeps the audit before-value sensible AND
             # makes Undo work end-to-end: the undo writes back an int, which
             # the hot-reload push forwards to the agent /config (the push
             # guard requires an int) so the live agent actually drops back to
-            # 8192 instead of silently keeping the raised cap until restart.
+            # 16384 instead of silently keeping the raised cap until restart.
             # Default the audit "before" value to the effective limit (not "")
             # when a field was never set, so Undo writes back a usable int that
             # the hot-reload push will forward to the live agent.
             if field == "max_output_tokens":
-                _missing_default: object = 8192
+                _missing_default: object = 16384
             elif field in ("max_tool_rounds", "llm_timeout_seconds"):
                 # Resolve the EFFECTIVE value (env/global → built-in default),
                 # not the static default, so Undo restores what the agent was

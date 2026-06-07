@@ -587,7 +587,7 @@ class HealthMonitor:
             # Per-agent output-token cap → LLM_MAX_TOKENS so an operator's
             # max_output_tokens edit survives an automatic crash-recovery
             # restart. Read from fresh YAML (the registry ``info`` dict
-            # doesn't carry it); no-op when unset → LLMClient default 8192.
+            # doesn't carry it); no-op when unset → LLMClient default 16384.
             _hcfg = _agents_cfg.get(agent_id, {})
             set_llm_max_tokens_env(restart_env, _hcfg)
             from src.shared.limits import set_llm_limits_env

@@ -693,7 +693,7 @@ async def list_available_models(
         "- max_output_tokens: integer 256-200000 — per-agent cap on output "
         "tokens per LLM call. Raise it for agents that emit large single "
         "tool calls (e.g. a translator that PUTs a whole file in one call) "
-        "and hit 'Truncated tool-call arguments'. Default 8192.\n"
+        "and hit 'Truncated tool-call arguments'. Default 16384.\n"
         "- max_tool_rounds: integer — per-task tool-round budget before a task "
         "is closed as blocked (convergence cap). Raise it for agents doing "
         "long multi-step work that legitimately needs many rounds.\n"

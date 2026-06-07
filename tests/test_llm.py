@@ -328,10 +328,11 @@ async def test_chat_stream_auth_failure_still_raises_auth_error():
             pass
 
 
-def test_default_max_output_tokens_is_8192():
-    """The hardcoded 4096 cap was too small for large tool-call payloads."""
+def test_default_max_output_tokens_is_16384():
+    """Default raised to 16384 for a smoother out-of-box experience with
+    larger outputs (models that cap lower take a per-agent override down)."""
     llm = LLMClient(mesh_url="http://mesh:8420", agent_id="a1")
-    assert llm.max_output_tokens == 8192
+    assert llm.max_output_tokens == 16384
 
 
 def test_max_output_tokens_override():
@@ -370,18 +371,18 @@ async def test_chat_uses_instance_max_tokens_default():
     assert captured["max_tokens"] == 16384
 
 
-def test_thinking_max_tokens_preserves_default_floor():
-    """With the default 8192 cap, an Anthropic thinking call keeps the
-    historical ``budget + 4096`` ceiling — taking the max introduces no
-    regression because 8192 <= budget + 4096 at every thinking level."""
+def test_thinking_max_tokens_preserves_budget_floor():
+    """When the thinking ``budget + 4096`` floor exceeds the default output
+    cap, ``max()`` keeps the floor so thinking always has room. With the
+    raised 16384 default this still bites at ``high`` (25_000 + 4096)."""
     llm = LLMClient(
         mesh_url="http://mesh:8420", agent_id="a1",
-        default_model="anthropic/claude-sonnet-4-6", thinking="medium",
+        default_model="anthropic/claude-sonnet-4-6", thinking="high",
     )
     params = llm._get_thinking_params()
-    # medium budget = 10_000 → 10_000 + 4096
-    assert params["max_tokens"] == 14096
-    assert params["thinking"]["budget_tokens"] == 10_000
+    # high budget = 25_000 → 25_000 + 4096 = 29_096 > default 16384
+    assert params["max_tokens"] == 29096
+    assert params["thinking"]["budget_tokens"] == 25_000
 
 
 def test_thinking_max_tokens_honours_raised_cap():

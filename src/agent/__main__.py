@@ -55,10 +55,10 @@ def main() -> None:
         embedding_dim = 1536
     thinking = os.environ.get("THINKING", "off")
     try:
-        max_output_tokens = int(os.environ.get("LLM_MAX_TOKENS", "8192"))
+        max_output_tokens = int(os.environ.get("LLM_MAX_TOKENS", "16384"))
     except ValueError:
-        logger.warning("Invalid LLM_MAX_TOKENS, using default 8192")
-        max_output_tokens = 8192
+        logger.warning("Invalid LLM_MAX_TOKENS, using default 16384")
+        max_output_tokens = 16384
     max_output_tokens = max(256, min(max_output_tokens, 200_000))
     llm = LLMClient(
         mesh_url=mesh_url, agent_id=agent_id,

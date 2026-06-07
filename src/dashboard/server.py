@@ -2594,7 +2594,7 @@ def create_dashboard_router(
             # Execution caps — fall back to the EFFECTIVE resolved value so
             # the edit form shows what the agent actually runs with when no
             # explicit per-agent override is set.
-            "max_output_tokens": agent_cfg.get("max_output_tokens", 8192) or 8192,
+            "max_output_tokens": agent_cfg.get("max_output_tokens", 16384) or 16384,
             "max_tool_rounds": (
                 agent_cfg.get("max_tool_rounds")
                 or _limits.resolve("task_max_tool_rounds")
@@ -3122,7 +3122,7 @@ def create_dashboard_router(
             restart_env.update(_proxy_env)
             # Per-agent output-token cap → LLM_MAX_TOKENS so an edit_agent
             # change survives a single-agent dashboard restart (not just the
-            # live hot-reload). Absent = LLMClient default 8192.
+            # live hot-reload). Absent = LLMClient default 16384.
             set_llm_max_tokens_env(restart_env, agent_cfg)
             from src.shared.limits import set_llm_limits_env
             set_llm_limits_env(restart_env, agent_cfg)
@@ -6194,9 +6194,9 @@ def create_dashboard_router(
     })
 
     _SYSTEM_SETTINGS_DEFAULTS: dict[str, float | int] = {
-        "default_daily_budget": 10.0,
+        "default_daily_budget": 50.0,
         "default_monthly_budget": 200.0,
-        "tool_timeout": 300,
+        "tool_timeout": 900,
         "browser_idle_timeout": 30,
         "health_poll_interval": 30,
         "health_max_failures": 3,
