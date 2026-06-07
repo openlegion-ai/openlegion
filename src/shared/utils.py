@@ -25,7 +25,7 @@ def set_llm_max_tokens_env(env: dict[str, str], agent_cfg: dict) -> None:
     the already-running container.
 
     No-op when the cap is unset or not a plain int, so the LLMClient default
-    (8192) then applies. ``bool`` is rejected explicitly (it is an ``int``
+    (16384) then applies. ``bool`` is rejected explicitly (it is an ``int``
     subclass) so a stray ``True``/``False`` can't become ``1``/``0``. Also a
     no-op for a missing/malformed agent config (a null agents.yaml entry yields
     ``None``) rather than raising AttributeError on the restart path.

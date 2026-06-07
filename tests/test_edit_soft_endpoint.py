@@ -169,13 +169,13 @@ async def test_edit_soft_accepts_max_output_tokens_and_writes_yaml(mesh_app):
     assert cfg["agents"]["writer"]["max_output_tokens"] == 32000
 
     # When the cap was never set before, the recorded "before" value is the
-    # effective default (8192), not "". This makes the audit sensible and —
+    # effective default (16384), not "". This makes the audit sensible and —
     # critically — makes Undo restore an int that the hot-reload push can
     # forward to the live agent (the push guard requires an int), instead of
     # silently leaving the running container on the raised cap.
     change = app.change_history.peek(body["undo_token"])
     assert change is not None
-    assert change["old_value"] == 8192
+    assert change["old_value"] == 16384
     assert change["new_value"] == 32000
 
 

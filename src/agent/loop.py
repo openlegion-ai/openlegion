@@ -41,7 +41,7 @@ logger = setup_logging("agent.loop")
 _RETRYABLE_STATUS_CODES = {429, 502, 503, 504, 529}  # 529 = Anthropic overloaded
 _MAX_RETRIES = 3
 _BACKOFF_BASE = 1  # seconds: 1, 2, 4
-_TOOL_TIMEOUT = int(os.environ.get("OPENLEGION_TOOL_TIMEOUT", "300"))  # seconds — hard ceiling per tool
+_TOOL_TIMEOUT = int(os.environ.get("OPENLEGION_TOOL_TIMEOUT", "900"))  # seconds — hard ceiling per tool
 _FLEET_ROSTER_TTL = 600  # seconds — cache TTL for fleet roster
 _GOALS_TTL = 300  # seconds — cache TTL for goals fetch
 _FALLBACK_MAX_TOKENS = 100_000  # context trim fallback when no context manager

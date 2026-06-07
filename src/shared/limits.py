@@ -50,7 +50,7 @@ LIMIT_SPECS: dict[str, tuple[int, int, int]] = {
     # Interactive cross-turn total round ceiling for one session.
     "chat_max_total_rounds": (1000, 1, 5000),
     # Legacy execute_task bounded-loop ceiling.
-    "max_iterations": (60, 1, 500),
+    "max_iterations": (300, 1, 500),
     # Host-side lane wall-clock watchdog (hung-stream / stuck-tool backstop).
     "lane_timeout_seconds": (14400, 30, 86400),
     # Host-side per-agent followup queue depth cap (0 disables).

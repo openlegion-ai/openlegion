@@ -3340,7 +3340,7 @@
                           <!-- ── Execution caps (per-agent overrides) ── -->
                           <div>
                             <label class="text-xs text-gray-400 mb-1 block">Max output tokens</label>
-                            <input type="number" step="1" min="256" max="200000" x-model.number="editForm.max_output_tokens" class="dash-input w-full" placeholder="8192">
+                            <input type="number" step="1" min="256" max="200000" x-model.number="editForm.max_output_tokens" class="dash-input w-full" placeholder="16384">
                           </div>
                           <div>
                             <label class="text-xs text-gray-400 mb-1 block">Max tool rounds (per task)</label>
@@ -7561,7 +7561,7 @@
               </div>
               <div>
                 <label class="text-xs text-gray-400 mb-1 flex items-center gap-1.5">Tool Timeout (seconds)
-                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Hard ceiling for any single tool execution (shell command, browser action, HTTP request). If a tool exceeds this, it's killed and the agent gets an error result. Default: 300s (5 min).</span></span>
+                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Hard ceiling for any single tool execution (shell command, browser action, HTTP request). If a tool exceeds this, it's killed and the agent gets an error result. Default: 900s (15 min).</span></span>
                 </label>
                 <input type="number" step="1" min="10" max="3600"
                   class="dash-input w-full"

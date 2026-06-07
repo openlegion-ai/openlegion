@@ -2121,7 +2121,7 @@ class CredentialVault:
         body: dict = {
             "model": model,
             "messages": converted,
-            "max_tokens": params.get("max_tokens", 8192),
+            "max_tokens": params.get("max_tokens", 16384),
         }
         if system_parts:
             body["system"] = "\n\n".join(system_parts)
@@ -2356,7 +2356,7 @@ class CredentialVault:
         sdk_kwargs: dict = {
             "model": body["model"],
             "messages": body["messages"],
-            "max_tokens": body.get("max_tokens", 8192),
+            "max_tokens": body.get("max_tokens", 16384),
             "stream": True,
         }
         if "system" in body:

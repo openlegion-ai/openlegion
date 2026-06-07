@@ -39,7 +39,7 @@ class LLMClient:
         default_model: str = "openai/gpt-4o-mini",
         embedding_model: str = "",
         thinking: str = "off",
-        max_output_tokens: int = 8192,
+        max_output_tokens: int = 16384,
     ):
         if thinking and thinking not in self.VALID_THINKING_LEVELS:
             logger.warning(
@@ -59,8 +59,9 @@ class LLMClient:
         # tool calls with large argument payloads (e.g. write_file of a
         # 15-20KB file): the model hit the cap mid-tool-call, the JSON never
         # closed, and the call failed permanently with "Truncated tool-call
-        # arguments". 8192 is the safe floor across common modern models
-        # (gpt-4o family = 16384, Claude 3.5 Sonnet = 8192, Claude 4.x = 64K+).
+        # arguments". 16384 is a generous default that suits gpt-4o (16384)
+        # and Claude 4.x (64K+); models that cap lower (e.g. Claude 3.5 Sonnet
+        # at 8192) need a per-agent override down.
         self.max_output_tokens = max_output_tokens
         # LLM call timeout, resolved from the central limits table (env ->
         # high default). With streaming task execution this is an *idle*
