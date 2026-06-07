@@ -229,7 +229,7 @@ _READ_ONLY_TOOLS = frozenset({
     "list_peer_files", "read_peer_file",
     "get_team_outputs",
     # Memory / file reads (writes go through memory_save / write_file)
-    "memory_search", "read_file",
+    "memory_search", "memory_think", "read_file",
     # Credential discovery — names only, no values
     "vault_list",
     # Self-introspection
