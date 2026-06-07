@@ -427,17 +427,24 @@ class WorkspaceManager:
     def _split_memory(self, raw: str) -> tuple[str, str]:
         """Split MEMORY.md into (compiled_head, log_tail).
 
-        Structured files delimit the head with the COMPILED markers; everything
-        after the end marker is the append-only log. A legacy file (no markers)
-        is treated as ALL head + empty log, so pre-existing content keeps being
-        injected until the first structured append migrates it.
+        The structure is renderer-owned: the begin marker is anchored to the
+        top of the file (after the "# Long-Term Memory" title). A file that
+        isn't in that exact shape — a legacy file, or one a user hand-edited via
+        the workspace editor — is treated as ALL head + empty log, so its
+        content is preserved (injected) rather than split on a stray marker in
+        the body and partially dropped.
         """
-        begin = raw.find(MEMORY_COMPILED_BEGIN)
-        end = raw.find(MEMORY_COMPILED_END)
-        if begin == -1 or end == -1 or end < begin:
+        body = raw.strip()
+        if body.startswith("# Long-Term Memory"):
+            body = body[len("# Long-Term Memory"):].lstrip()
+        if not body.startswith(MEMORY_COMPILED_BEGIN):
             return raw.strip(), ""
-        head = raw[begin + len(MEMORY_COMPILED_BEGIN):end].strip()
-        log = raw[end + len(MEMORY_COMPILED_END):].strip()
+        inner = body[len(MEMORY_COMPILED_BEGIN):]
+        end = inner.find(MEMORY_COMPILED_END)
+        if end == -1:
+            return raw.strip(), ""
+        head = inner[:end].strip()
+        log = inner[end + len(MEMORY_COMPILED_END):].strip()
         return head, log
 
     @staticmethod
@@ -612,12 +619,9 @@ class WorkspaceManager:
         """
         path = self.root / self.MEMORY_FILE
         raw = path.read_text(errors="replace") if path.exists() else ""
-        structured = MEMORY_COMPILED_BEGIN in raw
+        # _split_memory returns (whole-body, "") for a legacy/unstructured file,
+        # which migrates that body into the compiled head on this first write.
         head, log = self._split_memory(raw)
-        if not structured:
-            # First structured write: migrate the legacy body into the compiled
-            # head so it keeps being injected; the log starts fresh.
-            head, log = raw.strip(), ""
         new_log = (log + "\n\n" + content.strip()).strip() if log else content.strip()
         new_log = self._trim_memory_log(new_log)
         path.write_text(self._render_memory(head, new_log))
@@ -627,10 +631,9 @@ class WorkspaceManager:
         """Replace the compiled head (consolidation), preserving the log."""
         path = self.root / self.MEMORY_FILE
         raw = path.read_text(errors="replace") if path.exists() else ""
-        structured = MEMORY_COMPILED_BEGIN in raw
+        # Legacy/unstructured files split to an empty log, so consolidation
+        # cleanly supersedes the old body with the new head.
         _, log = self._split_memory(raw)
-        if not structured:
-            log = ""  # legacy body was the old head; consolidation supersedes it
         path.write_text(self._render_memory(head, log))
         self._bootstrap_cache = None
 

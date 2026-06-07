@@ -69,6 +69,24 @@ class TestCompiledMemorySplit:
         assert self.ws.load_compiled_memory() == "NEW_HEAD"
         assert "markers" in self.ws.load_memory_log()
 
+    def test_hand_edited_stray_markers_preserve_content(self):
+        """A file with marker text NOT anchored at the top (e.g. a user hand-
+        edit via the workspace editor pasting marker-looking content) is treated
+        as a legacy whole-head, so no content is dropped on the next append."""
+        path = Path(self._tmpdir) / "MEMORY.md"
+        path.write_text(
+            "# Long-Term Memory\n\nIMPORTANT_USER_FACT\n\n"
+            f"a note mentioning {MEMORY_COMPILED_BEGIN} and {MEMORY_COMPILED_END}\n"
+        )
+        ws = WorkspaceManager(workspace_dir=self._tmpdir)
+        head, log = ws._split_memory(path.read_text())
+        assert "IMPORTANT_USER_FACT" in head  # not split on the stray markers
+        assert log == ""
+        # The next append migrates that whole body into the compiled head.
+        ws.append_memory("## Extracted\n\nNEW_LOG_ENTRY")
+        assert "IMPORTANT_USER_FACT" in ws.load_compiled_memory()
+        assert "NEW_LOG_ENTRY" in ws.load_memory_log()
+
     def test_bootstrap_injects_head_not_log(self):
         """get_bootstrap_content includes the compiled head but NOT a
         log-only entry."""
