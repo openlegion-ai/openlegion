@@ -22,7 +22,9 @@ recipient can't read your /data volume, and large payloads truncate).
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import re
 
 from src.agent.builtins.file_tool import _safe_path
 from src.agent.builtins.http_tool import http_request
@@ -35,6 +37,8 @@ _GITHUB_API = "https://api.github.com"
 # The GitHub *contents* API handles files up to ~1 MB. Larger files need the
 # git blobs/trees API (a future enhancement) — fail clearly rather than 422.
 _MAX_COMMIT_BYTES = 1_000_000
+# Matches a 40-hex git object sha in a JSON body.
+_SHA_RE = re.compile(r'"sha"\s*:\s*"([0-9a-f]{40})"')
 
 
 def _gh_headers(credential: str) -> dict:
@@ -55,6 +59,34 @@ def _parse_json_body(resp: dict) -> dict | None:
         return parsed if isinstance(parsed, dict) else None
     except (ValueError, TypeError):
         return None
+
+
+def _git_blob_sha(data: bytes) -> str:
+    """The git blob SHA-1 of ``data`` — the same value GitHub returns as a
+    file's ``content.sha``. Computing it locally lets us verify a commit
+    against ground truth without a second (size-bounded) read-back."""
+    h = hashlib.sha1()
+    h.update(b"blob " + str(len(data)).encode() + b"\x00" + data)
+    return h.hexdigest()
+
+
+def _existing_sha(get_resp: dict) -> str | None:
+    """Extract the existing file's blob sha from a contents GET response.
+
+    Falls back to a regex when the JSON can't be parsed in full: http_request
+    caps the body at ~50KB, so a large existing file's base64 content gets
+    truncated — but the top-level ``sha`` appears before ``content`` in the
+    payload, so it survives the cut. Without this, updating a large existing
+    file would lose the sha, PUT without it, and 422."""
+    meta = _parse_json_body(get_resp)
+    if meta and isinstance(meta.get("sha"), str):
+        return meta["sha"]
+    body = get_resp.get("body")
+    if isinstance(body, str):
+        m = _SHA_RE.search(body)
+        if m:
+            return m.group(1)
+    return None
 
 
 @tool(
@@ -176,8 +208,7 @@ async def commit_file(
     status = get_resp.get("status_code", 0)
     existing_sha = None
     if status == 200:
-        meta = _parse_json_body(get_resp) or {}
-        existing_sha = meta.get("sha")
+        existing_sha = _existing_sha(get_resp)
     elif status == 404:
         existing_sha = None
     else:
@@ -206,29 +237,19 @@ async def commit_file(
     commit_url = (put_body.get("commit") or {}).get("html_url", "")
     content_sha = (put_body.get("content") or {}).get("sha", "")
 
-    # 3) Verify against ground truth — re-read the file and confirm its bytes
-    #    match what we sent. This is what makes a 'done' report trustworthy:
-    #    the earlier failures returned API success while the file stayed empty.
-    verified = False
-    verify_detail = ""
-    verify_resp = await http_request(
-        url=f"{base_url}{ref_q}", method="GET", headers=headers, mesh_client=mesh_client,
+    # 3) Verify against ground truth — compare GitHub's returned blob sha to a
+    #    locally-computed git blob sha of the exact bytes we sent. GitHub's
+    #    content.sha is the hash of the object it actually stored, so a match
+    #    proves the file landed byte-for-byte. This is what makes a 'done'
+    #    report trustworthy (the original failures returned API success on an
+    #    empty file). Done from the small PUT response — no second, size-bounded
+    #    read-back that would truncate (and false-negative) on large files.
+    expected_sha = _git_blob_sha(raw)
+    verified = bool(content_sha) and content_sha == expected_sha
+    verify_detail = "" if verified else (
+        f"blob sha mismatch: sent {expected_sha}, GitHub reported "
+        f"{content_sha or '(none)'}"
     )
-    if verify_resp.get("status_code") == 200:
-        vmeta = _parse_json_body(verify_resp) or {}
-        vcontent = vmeta.get("content", "")
-        if vmeta.get("encoding") == "base64" and isinstance(vcontent, str):
-            try:
-                got = base64.b64decode(vcontent)
-                verified = len(got) == len(raw)
-                if not verified:
-                    verify_detail = f"size mismatch: sent {len(raw)}, repo has {len(got)}"
-            except (ValueError, TypeError):
-                verify_detail = "could not decode committed content for verification"
-        else:
-            verify_detail = "unexpected content encoding on read-back"
-    else:
-        verify_detail = f"read-back returned HTTP {verify_resp.get('status_code')}"
 
     result = {
         "committed": True,
@@ -242,8 +263,8 @@ async def commit_file(
     }
     if not verified:
         result["warning"] = (
-            "commit returned success but read-back verification failed — do NOT "
-            f"report this as done. {verify_detail}"
+            "commit returned success but content-hash verification failed — do "
+            f"NOT report this as done. {verify_detail}"
         )
         logger.warning("commit_file unverified for %s/%s: %s", repo, path, verify_detail)
     return result
