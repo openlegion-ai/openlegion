@@ -440,13 +440,20 @@ class WorkspaceManager:
         log = raw[end + len(MEMORY_COMPILED_END):].strip()
         return head, log
 
+    @staticmethod
+    def _strip_markers(text: str) -> str:
+        """Remove any literal COMPILED marker strings from content so the only
+        structural markers in the file are the ones ``_render_memory`` emits.
+        Prevents marker text appearing inside a fact/log entry (or LLM-authored
+        head) from corrupting the head/log split on the next read."""
+        return text.replace(MEMORY_COMPILED_BEGIN, "").replace(MEMORY_COMPILED_END, "")
+
     def _render_memory(self, head: str, log: str) -> str:
-        parts = [
-            f"# Long-Term Memory\n\n{MEMORY_COMPILED_BEGIN}\n"
-            f"{head.strip()}\n{MEMORY_COMPILED_END}"
-        ]
-        if log.strip():
-            parts.append(log.strip())
+        head = self._strip_markers(head.strip())
+        log = self._strip_markers(log.strip())
+        parts = [f"# Long-Term Memory\n\n{MEMORY_COMPILED_BEGIN}\n{head}\n{MEMORY_COMPILED_END}"]
+        if log:
+            parts.append(log)
         return "\n\n".join(parts) + "\n"
 
     def _trim_memory_log(self, log: str) -> str:

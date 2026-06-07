@@ -50,6 +50,25 @@ class TestCompiledMemorySplit:
         assert MEMORY_COMPILED_BEGIN in raw
         assert MEMORY_COMPILED_END in raw
 
+    def test_marker_strings_in_content_do_not_corrupt_split(self):
+        """Literal COMPILED marker strings inside appended content are
+        neutralized so they can't corrupt the head/log split or cause silent
+        data loss on the next compiled rewrite."""
+        self.ws.write_compiled_memory("DURABLE_HEAD_FACT")
+        self.ws.append_memory(
+            f"discussion of {MEMORY_COMPILED_BEGIN} and {MEMORY_COMPILED_END} markers"
+        )
+        # Exactly one structural marker pair survives in the file.
+        raw = (Path(self._tmpdir) / "MEMORY.md").read_text()
+        assert raw.count(MEMORY_COMPILED_BEGIN) == 1
+        assert raw.count(MEMORY_COMPILED_END) == 1
+        # Head intact; a subsequent rewrite preserves the (sanitized) log.
+        assert self.ws.load_compiled_memory() == "DURABLE_HEAD_FACT"
+        assert "markers" in self.ws.load_memory_log()
+        self.ws.write_compiled_memory("NEW_HEAD")
+        assert self.ws.load_compiled_memory() == "NEW_HEAD"
+        assert "markers" in self.ws.load_memory_log()
+
     def test_bootstrap_injects_head_not_log(self):
         """get_bootstrap_content includes the compiled head but NOT a
         log-only entry."""
