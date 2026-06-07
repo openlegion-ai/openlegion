@@ -101,7 +101,7 @@ def _resolve_embedding(
     at runtime without data loss.
     """
     if cfg_embedding_model:
-        model = cfg_embedding_model.strip()
+        model = str(cfg_embedding_model).strip()
         return model, _EMBEDDING_MODEL_DIMS.get(model, _DEFAULT_EMBEDDING_DIM)
     for provider, model, dim in _EMBEDDING_PROVIDER_LADDER:
         if provider in keyed_providers:

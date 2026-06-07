@@ -214,14 +214,14 @@ class TestConfigurableEmbeddingDim:
         # Create at 1536 and store a fact (with a 1536 vector).
         store = MemoryStore(tmp_db, embed_fn=_fixed_embed(1536), embedding_dim=1536)
         await store.store_fact("switch_key", "value before provider switch")
-        assert store._get_meta("embedding_dim") == "1536"
+        assert store._facts_vec_dim() == 1536
         store.close()
 
         # Reopen at 1024 (operator switched embedding provider). Must NOT
         # crash; the fact ROW survives and stays keyword-searchable, and the
         # recorded dim is updated.
         store2 = MemoryStore(tmp_db, embed_fn=_fixed_embed(1024), embedding_dim=1024)
-        assert store2._get_meta("embedding_dim") == "1024"
+        assert store2._facts_vec_dim() == 1024   # vec tables rebuilt to the new dim
         results = await store2.search("value before provider switch")
         assert any("value before provider switch" in r.value for r in results)
         # New facts embed cleanly at the new dimension (no dim error).
