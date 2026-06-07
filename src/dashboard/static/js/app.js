@@ -1573,7 +1573,17 @@ function dashboard() {
       // The keyboard close often only settles on the visualViewport resize that
       // follows it; catch that too (guarded by the activeElement check above so
       // it no-ops mid-typing while the keyboard is animating in).
-      if (window.visualViewport) {
+      //
+      // iOS-only: this whole recovery exists for the iOS Safari/WebKit
+      // caret-reveal-scrolls-the-document bug. On Chrome for Android the
+      // document is never scrolled (body is `overflow-hidden`), so the reset
+      // is a no-op there — but `visualViewport.resize` ALSO fires on Android's
+      // URL-bar show/hide during ordinary scrolling, so attaching it there is
+      // pure churn on the scroll path. Scope the listener to iOS to keep it.
+      // (iPadOS 13+ reports as MacIntel, hence the touch-points fallback.)
+      const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) ||
+        (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+      if (isIOS && window.visualViewport) {
         this._vvResetHandler = () => this._resetDocScroll();
         window.visualViewport.addEventListener('resize', this._vvResetHandler);
       }
