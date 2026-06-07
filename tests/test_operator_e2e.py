@@ -52,6 +52,10 @@ def _make_mock_llm(responses=None):
             ),
         )
     llm.default_model = "test-model"
+
+    async def _chat_collect_delegate(*args, **kwargs):
+        return await llm.chat(*args, **kwargs)
+    llm.chat_collect = _chat_collect_delegate
     return llm
 
 

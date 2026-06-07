@@ -32,6 +32,12 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None) -> AgentLoop:
         llm.chat = AsyncMock(return_value=LLMResponse(content="Hello!", tokens_used=50))
     llm.default_model = "test-model"
 
+    # Task/_chat_inner paths call chat_collect (streaming). Delegate to whatever
+    # llm.chat is at call time so mocks (incl. per-test reassignments) drive it.
+    async def _chat_collect_delegate(*args, **kwargs):
+        return await llm.chat(*args, **kwargs)
+    llm.chat_collect = _chat_collect_delegate
+
     mesh_client = MagicMock()
     mesh_client.send_system_message = AsyncMock(return_value={})
 
