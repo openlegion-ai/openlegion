@@ -6308,6 +6308,9 @@ function dashboard() {
         budget_daily: cfg.budget?.daily_usd || '',
         budget_monthly: cfg.budget?.monthly_usd || '',
         thinking: cfg.thinking || 'off',
+        max_output_tokens: cfg.max_output_tokens || '',
+        max_tool_rounds: cfg.max_tool_rounds || '',
+        llm_timeout_seconds: cfg.llm_timeout_seconds || '',
         can_use_browser: cfg.can_use_browser ?? false,
         can_use_internet: cfg.can_use_internet ?? false,
         can_spawn: cfg.can_spawn ?? false,
@@ -6716,6 +6719,20 @@ function dashboard() {
       }
       if (this.editForm.thinking !== undefined && this.editForm.thinking !== (cfg.thinking || 'off')) {
         body.thinking = this.editForm.thinking;
+      }
+      // Execution caps — only send when non-empty AND changed vs the
+      // effective value the GET seeded into the form.
+      const _caps = {
+        max_output_tokens: cfg.max_output_tokens,
+        max_tool_rounds: cfg.max_tool_rounds,
+        llm_timeout_seconds: cfg.llm_timeout_seconds,
+      };
+      for (const key of Object.keys(_caps)) {
+        const raw = this.editForm[key];
+        if (raw === '' || raw === null || raw === undefined) continue;
+        const val = parseInt(raw, 10);
+        if (Number.isNaN(val)) continue;
+        if (val !== _caps[key]) body[key] = val;
       }
       // MCP servers — only include if the user actually changed something
       // (mcpServersChanged handles the no-op case so a benign full-body
@@ -7921,6 +7938,29 @@ function dashboard() {
           this.showToast(`Error: ${err.detail || 'Update failed'}`);
         }
       } catch (e) { console.warn('saveDefaultModel failed:', e); }
+    },
+
+    async saveEmbeddingModel(value) {
+      if (!value) return;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/embedding-model`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ value }),
+        });
+        if (resp.ok) {
+          // Refresh the resolved status (on/off + effective model) from
+          // the server, which recomputes against the available keys.
+          await this.fetchSystemSettings();
+          this.showToast(`Embedding provider set to ${value}`);
+          // EMBEDDING_MODEL is only read at agent launch, so a restart is
+          // required to apply. Auto-apply so the change isn't silently stale.
+          await this._restartAllAgentsAuto('Applying embedding setting — restarting agents…');
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Error: ${err.detail || 'Update failed'}`);
+        }
+      } catch (e) { console.warn('saveEmbeddingModel failed:', e); }
     },
 
     // Restart the whole fleet WITHOUT a confirmation prompt. Used to
@@ -10922,7 +10962,9 @@ function dashboard() {
         file_read: 'reading a file',
         file_write: 'writing a file',
         file_list: 'listing files',
+        commit_file: 'committing a file to GitHub',
         memory_search: 'checking memory',
+        memory_think: 'reasoning over memory',
         memory_save: 'saving to memory',
         hand_off: 'handing off to a teammate',
         check_inbox: 'checking the inbox',

@@ -20,6 +20,7 @@ import httpx
 from src.agent.attachments import enrich_message_with_attachments
 from src.agent.loop_detector import ToolLoopDetector
 from src.agent.workspace import INTROSPECT_PERM_KEYS
+from src.shared import limits
 from src.shared.errors import LLMAuthError, LLMConfigError
 from src.shared.types import SILENT_REPLY_TOKEN, AgentStatus, LLMResponse, TaskAssignment, TaskResult
 from src.shared.utils import dumps_safe, format_dict, generate_id, sanitize_for_prompt, setup_logging, truncate
@@ -37,10 +38,10 @@ logger = setup_logging("agent.loop")
 
 
 # Status codes that indicate transient server-side errors worth retrying
-_RETRYABLE_STATUS_CODES = {429, 502, 503}
+_RETRYABLE_STATUS_CODES = {429, 502, 503, 504, 529}  # 529 = Anthropic overloaded
 _MAX_RETRIES = 3
 _BACKOFF_BASE = 1  # seconds: 1, 2, 4
-_TOOL_TIMEOUT = int(os.environ.get("OPENLEGION_TOOL_TIMEOUT", "300"))  # seconds — hard ceiling per tool
+_TOOL_TIMEOUT = int(os.environ.get("OPENLEGION_TOOL_TIMEOUT", "900"))  # seconds — hard ceiling per tool
 _FLEET_ROSTER_TTL = 600  # seconds — cache TTL for fleet roster
 _GOALS_TTL = 300  # seconds — cache TTL for goals fetch
 _FALLBACK_MAX_TOKENS = 100_000  # context trim fallback when no context manager
@@ -229,7 +230,7 @@ _READ_ONLY_TOOLS = frozenset({
     "list_peer_files", "read_peer_file",
     "get_team_outputs",
     # Memory / file reads (writes go through memory_save / write_file)
-    "memory_search", "read_file",
+    "memory_search", "memory_think", "read_file",
     # Credential discovery — names only, no values
     "vault_list",
     # Self-introspection
@@ -331,32 +332,23 @@ class AgentLoop:
         context_manager: ContextManager | None = None,
         allowed_tools: frozenset[str] | None = None,
     ):
-        # Override class defaults from env vars (set by dashboard system settings)
-        def _clamp_env(name: str, default: int, lo: int, hi: int) -> int:
-            try:
-                val = int(os.environ.get(name, str(default)))
-            except ValueError:
-                logger.warning("Invalid %s value, using default %d", name, default)
-                return default
-            clamped = max(lo, min(val, hi))
-            if clamped != val:
-                logger.info("%s=%d clamped to %d (range %d-%d)", name, val, clamped, lo, hi)
-            return clamped
-
-        self.MAX_ITERATIONS = _clamp_env("OPENLEGION_MAX_ITERATIONS", 20, 1, 100)
-        self.CHAT_MAX_TOOL_ROUNDS = _clamp_env("OPENLEGION_CHAT_MAX_TOOL_ROUNDS", 30, 1, 200)
-        self.CHAT_MAX_TOTAL_ROUNDS = _clamp_env("OPENLEGION_CHAT_MAX_TOTAL_ROUNDS", 200, 1, 1000)
-        # Per-task convergence budget (RC-1). A much tighter bound on tool
-        # rounds that applies ONLY when a durable ``task_id`` is driving the
-        # chat turn (handoff / lane dispatch). It bounds the task path well
-        # below the interactive ceiling (CHAT_MAX_TOOL_ROUNDS × session
-        # auto-continues) AND below the mesh-side 900s lane wall-clock cap.
-        # This is an ADVISORY convergence/UX bound, NOT a security control:
-        # it does NOT replace or weaken any mesh-side control (per-agent
-        # daily budget preflight, lane wall-clock cap). It only ADDS a
-        # tighter soft bound below them. Interactive chat (no task_id) is
-        # completely unaffected.
-        self.TASK_MAX_TOOL_ROUNDS = _clamp_env("OPENLEGION_TASK_MAX_TOOL_ROUNDS", 20, 1, 100)
+        # Round caps resolve through the central limits table (env -> default,
+        # both clamped to the spec range). Defaults are HIGH and operator-
+        # adjustable; the host injects per-agent / settings.json overrides into
+        # the container env at creation. See src/shared/limits.py.
+        self.MAX_ITERATIONS = limits.resolve("max_iterations")
+        self.CHAT_MAX_TOOL_ROUNDS = limits.resolve("chat_max_tool_rounds")
+        self.CHAT_MAX_TOTAL_ROUNDS = limits.resolve("chat_max_total_rounds")
+        # Per-task convergence budget (RC-1). A bound on tool rounds that
+        # applies ONLY when a durable ``task_id`` is driving the chat turn
+        # (handoff / lane dispatch). It bounds the task path below the
+        # interactive ceiling (CHAT_MAX_TOOL_ROUNDS × session auto-continues)
+        # AND below the mesh-side lane wall-clock cap. This is an ADVISORY
+        # convergence/UX bound, NOT a security control: it does NOT replace or
+        # weaken any mesh-side control (per-agent daily budget preflight, lane
+        # wall-clock cap). It only ADDS a soft bound below them. Interactive
+        # chat (no task_id) is completely unaffected.
+        self.TASK_MAX_TOOL_ROUNDS = limits.resolve("task_max_tool_rounds")
         # Item 3 (Codex r4): TASK_MAX and CHAT_MAX are independently
         # env-clamped, so a misconfig (TASK_MAX > CHAT_MAX) could let a task
         # exhaust the interactive CHAT_MAX_TOOL_ROUNDS bound — falling through
@@ -947,7 +939,7 @@ class AgentLoop:
 
                 available_tools = self.tools.get_tool_definitions(**self._tool_filter_kw) or None
                 llm_response = await _llm_call_with_retry(
-                    self.llm.chat,
+                    self.llm.chat_collect,
                     system=effective_system,
                     messages=messages,
                     tools=available_tools,
@@ -2133,7 +2125,7 @@ class AgentLoop:
                     )
 
                     llm_response = await _llm_call_with_retry(
-                        self.llm.chat,
+                        self.llm.chat_collect,
                         system=system_prompt,
                         messages=messages,
                         tools=iter_tools,
@@ -3329,7 +3321,7 @@ class AgentLoop:
         """
         try:
             llm_response = await _llm_call_with_retry(
-                self.llm.chat,
+                self.llm.chat_collect,
                 system=system,
                 messages=self._chat_messages,
                 tools=None,
@@ -3464,7 +3456,7 @@ class AgentLoop:
                     self.tools.get_tool_definitions(**self._tool_filter_kw) or None
                 )
                 llm_response = await _llm_call_with_retry(
-                    self.llm.chat,
+                    self.llm.chat_collect,
                     system=_round_system,
                     messages=self._chat_messages,
                     tools=_iter_tools,
@@ -3775,7 +3767,7 @@ class AgentLoop:
             # Max tool rounds exhausted — force final text response.
             # Omit tools so the LLM cannot return more tool calls.
             llm_response = await _llm_call_with_retry(
-                self.llm.chat,
+                self.llm.chat_collect,
                 system=system,
                 messages=self._chat_messages,
                 tools=None,

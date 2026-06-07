@@ -125,6 +125,142 @@ async def memory_search(
     return {"results": results, "count": len(results)}
 
 
+def _gather_evidence(query: str, max_facts: int, workspace_manager, memory_store, db_facts):
+    """Build a numbered evidence list from DB facts + workspace hits.
+
+    The numbers are the citation anchors the LLM cites inline as [n].
+    Each item is a dict carrying enough metadata to return as a citation.
+    """
+    evidence: list[dict] = []
+
+    if db_facts:
+        for fact in db_facts:
+            evidence.append({
+                "source": "memory_db",
+                "key": fact.key,
+                "value": fact.value,
+                "category": fact.category,
+                "confidence": fact.confidence,
+            })
+
+    if workspace_manager is not None:
+        try:
+            ws_hits = workspace_manager.search(query, max_results=max_facts)
+        except Exception as e:
+            logger.warning("Workspace search failed in memory_think: %s", e)
+            ws_hits = []
+        for hit in ws_hits:
+            evidence.append({
+                "source": "workspace",
+                "file": hit.get("file"),
+                "snippet": hit.get("snippet"),
+                "score": hit.get("score"),
+            })
+
+    return evidence
+
+
+def _render_evidence(evidence: list[dict]) -> str:
+    """Render the numbered evidence list for the LLM prompt.
+
+    Facts come from our own DB / workspace, so this is light; we still trim
+    whitespace to keep the prompt compact.
+    """
+    lines = []
+    for i, item in enumerate(evidence, start=1):
+        if item["source"] == "memory_db":
+            lines.append(f"[{i}] (memory_db) {item['key']}: {item['value']}".strip())
+        else:
+            snippet = (item.get("snippet") or "").strip()
+            lines.append(f"[{i}] (workspace:{item.get('file')}) {snippet}")
+    return "\n".join(lines)
+
+
+_THINK_SYSTEM_PROMPT = (
+    "You are synthesizing an answer strictly from a numbered list of memory "
+    "evidence. Rules: (1) Answer ONLY using the numbered evidence below — do "
+    "not invent facts. (2) Cite each claim inline with its source number, e.g. "
+    "[1] or [2][3]. (3) Be concise: under 150 words. (4) End with a final line "
+    "beginning exactly 'Unknown / not in memory:' that states what the "
+    "question asks for which the evidence does NOT cover (write 'nothing "
+    "obvious' if the evidence fully covers it)."
+)
+
+
+@tool(
+    name="memory_think",
+    description=(
+        "Synthesize an answer from your long-term memory. Unlike memory_search "
+        "(which returns raw hits), this retrieves the most relevant facts and "
+        "produces a SHORT cited answer plus an explicit note about what your "
+        "memory does NOT yet cover. Use when you want a reasoned recall rather "
+        "than a list of matches."
+    ),
+    parameters={
+        "query": {"type": "string", "description": "The question to answer from memory"},
+        "max_facts": {
+            "type": "integer",
+            "description": "Maximum facts to retrieve as evidence (default 8)",
+            "default": 8,
+        },
+    },
+)
+async def memory_think(
+    query: str, max_facts: int = 8,
+    *, workspace_manager=None, memory_store=None, mesh_client=None,
+) -> dict:
+    """Retrieve relevant memory and synthesize a cited answer with a gap note."""
+    if memory_store is None and workspace_manager is None:
+        return {"error": "No memory backends available"}
+
+    # 1. Retrieve evidence from both backends.
+    db_facts = None
+    if memory_store is not None:
+        db_facts = await _search_with_fallback(memory_store, query, max_facts)
+    evidence = _gather_evidence(query, max_facts, workspace_manager, memory_store, db_facts)
+
+    if not evidence:
+        return {"answer": "", "note": "No relevant memory found.", "evidence_count": 0}
+
+    # 2. Resolve the parent LLM via the established registry (tools are not
+    #    injected an LLM directly — same pattern as spawn_subagent).
+    from src.agent.builtins.subagent_tool import _get_parent_llm
+
+    agent_id = getattr(mesh_client, "agent_id", None)
+    llm = _get_parent_llm(agent_id) if agent_id else None
+
+    # 3. Graceful degradation: no LLM → return raw evidence without synthesis.
+    if llm is None:
+        return {
+            "answer": None,
+            "note": "Synthesis unavailable; returning raw matches.",
+            "results": evidence,
+            "evidence_count": len(evidence),
+        }
+
+    # 4. Synthesize. Any failure falls back to raw evidence — never crash.
+    rendered = _render_evidence(evidence)
+    user_msg = f"Question: {query}\n\nNumbered evidence:\n{rendered}"
+    try:
+        resp = await llm.chat(
+            system=_THINK_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": user_msg}],
+            max_tokens=512,
+            temperature=0.2,
+        )
+        answer = (resp.content or "").strip()
+    except Exception as e:
+        logger.warning("memory_think synthesis failed, returning raw matches: %s", e)
+        return {
+            "answer": None,
+            "note": "Synthesis unavailable; returning raw matches.",
+            "results": evidence,
+            "evidence_count": len(evidence),
+        }
+
+    return {"answer": answer, "citations": evidence, "evidence_count": len(evidence)}
+
+
 @tool(
     name="memory_save",
     description=(

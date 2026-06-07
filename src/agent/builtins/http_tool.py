@@ -21,7 +21,7 @@ import httpx
 from src.agent.builtins import CRED_HANDLE_RE
 from src.agent.tools import tool
 
-_MAX_BODY = 50_000
+_MAX_BODY = 1_000_000
 _MAX_REDIRECTS = 5
 # Hard ceiling on bytes pulled off the wire. We decode bytes→text *after*
 # bounding, so worst-case multibyte expansion can't exceed this; we read a

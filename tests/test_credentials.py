@@ -1137,13 +1137,14 @@ def test_thinking_params_anthropic():
 
 
 def test_thinking_params_anthropic_max_tokens_covers_budget():
-    """max_tokens is auto-set to budget + 4096 for Anthropic thinking."""
+    """max_tokens is max(output cap, budget + 4096) for Anthropic thinking —
+    the budget+4096 floor wins only when it exceeds the output cap."""
     from src.agent.llm import LLMClient
 
     for level, expected_budget in [("low", 5_000), ("medium", 10_000), ("high", 25_000)]:
         client = LLMClient(mesh_url="http://test", thinking=level)
         params = client._get_thinking_params("anthropic/claude-sonnet-4-5-20250929")
-        assert params["max_tokens"] == expected_budget + 4096
+        assert params["max_tokens"] == max(client.max_output_tokens, expected_budget + 4096)
 
 
 def test_thinking_params_openai_o_series():

@@ -54,7 +54,8 @@ here.
 """
 
 HARD_EDIT_FIELDS = frozenset(
-    {"model", "permissions", "budget", "thinking", "max_output_tokens"}
+    {"model", "permissions", "budget", "thinking", "max_output_tokens",
+     "max_tool_rounds", "llm_timeout_seconds"}
 )
 """Agent-config fields that earn the longer 30-min Undo window (the
 "hard" review path). Mirrors :data:`SOFT_EDIT_FIELDS` — the union is
