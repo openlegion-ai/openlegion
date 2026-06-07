@@ -415,16 +415,14 @@ class LLMClient:
                 if chunk.get("type") == "done":
                     final = chunk.get("response")
         except (LLMRetryableError, LLMAuthError, LLMConfigError):
-            raise
-        except RuntimeError:
-            # Non-retryable application errors surfaced via the SSE error frame
-            # (and budget-exceeded) arrive as plain RuntimeError. They must
-            # propagate — falling back here would swallow a real error AND fire
-            # a second, billable non-streaming generation after the stream may
-            # already have produced/billed tokens. Only genuine transport
-            # failures (httpx etc., below) fall back.
-            raise
-        except Exception as e:
+            raise  # classified errors -> _llm_call_with_retry handles backoff
+        except httpx.HTTPError as e:
+            # Only genuine transport/HTTP failures fall back to non-streaming.
+            # Everything else propagates untouched: non-retryable application
+            # errors (SSE error frames, budget) arrive as plain RuntimeError,
+            # and any unexpected error (parsing bug, etc.) must surface — not be
+            # masked by a second, billable non-streaming generation after the
+            # stream may already have produced/billed tokens.
             logger.warning(
                 "Streaming transport failed (%s); falling back to non-streaming",
                 type(e).__name__,

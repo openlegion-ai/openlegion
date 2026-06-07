@@ -90,3 +90,12 @@ def test_validate_edit_rejects_out_of_range_and_bool():
     assert _validate_edit("a", "max_tool_rounds", hi + 1) is not None
     assert _validate_edit("a", "max_tool_rounds", True) is not None
     assert _validate_edit("a", "llm_timeout_seconds", "nope") is not None
+
+
+def test_set_llm_limits_env_no_ops_on_non_dict_config():
+    # A null/malformed agents.yaml entry yields None on the restart path —
+    # must no-op, not raise AttributeError (Codex pre-merge finding).
+    env: dict[str, str] = {}
+    limits.set_llm_limits_env(env, None)
+    limits.set_llm_limits_env(env, "not-a-dict")
+    assert env == {}
