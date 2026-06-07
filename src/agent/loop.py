@@ -2841,10 +2841,30 @@ class AgentLoop:
                                         ),
                                     )
                             else:
-                                summary = response_text[:500]
+                                # Non-lazy success. When the worker returned a
+                                # structured ``{"result": {...}}`` final (the
+                                # answer-delivery shape this prompt now steers
+                                # them to), PARSE it so the originator's
+                                # await/check_inbox surfaces the clean answer —
+                                # not the raw JSON envelope. Mirrors
+                                # execute_task's _parse_final_output extraction;
+                                # without it the structured handoff reply leaks
+                                # ``{"result": {...}}`` as the deliverable.
+                                if self._is_structured_final(response_text):
+                                    result_data, _ = self._parse_final_output(
+                                        response_text,
+                                    )
+                                    result_data.setdefault(
+                                        "summary", response_text[:500],
+                                    )
+                                    result_payload = result_data
+                                else:
+                                    result_payload = {
+                                        "summary": response_text[:500],
+                                    }
                                 await self._auto_close_task(
                                     task_id, "done",
-                                    result_payload={"summary": summary},
+                                    result_payload=result_payload,
                                 )
                     # Bug 3 final net: a chat turn must never surface an
                     # empty reply unless the model deliberately chose

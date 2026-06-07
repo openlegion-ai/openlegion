@@ -360,6 +360,38 @@ async def test_chat_handoff_structured_final_no_tools_completes_as_done():
     )
 
 
+@pytest.mark.asyncio
+async def test_chat_handoff_structured_done_surfaces_extracted_summary():
+    """The answer-delivery contract: a chat-path handoff returning
+    ``{"result": {"status": "done", "summary": "<answer>"}}`` must close
+    ``done`` and surface the EXTRACTED answer as the deliverable — not the
+    raw JSON envelope. Regression guard for the Codex-caught gap where the
+    chat close stored ``response_text[:500]`` verbatim (operator/originator
+    saw ``{"result": {...}}`` instead of the answer). Mirrors execute_task's
+    _parse_final_output extraction."""
+    from src.shared.types import LLMResponse
+
+    loop = _make_loop_with_mocks()
+    answer = "Q3 revenue was $1.2M, up 18% QoQ."
+    loop.llm.chat = AsyncMock(return_value=LLMResponse(
+        content='{"result": {"status": "done", "summary": "%s"}}' % answer,
+        tokens_used=55,
+    ))
+
+    await loop.chat("what was Q3 revenue?", task_id="task_ans")
+
+    call = loop.mesh_client.set_task_status.await_args
+    assert call.args == ("task_ans", "done")
+    surfaced = call.kwargs.get("result") or {}
+    # The deliverable carries the extracted answer, not the JSON wrapper.
+    assert surfaced.get("summary") == answer, (
+        f"expected extracted answer as summary, got {surfaced!r}"
+    )
+    assert not str(surfaced.get("summary", "")).lstrip().startswith("{"), (
+        "summary must not be the raw {\"result\": ...} envelope"
+    )
+
+
 # ── 4. legacy path (no task_id) skips auto-close ─────────────────
 
 @pytest.mark.asyncio
