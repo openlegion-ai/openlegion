@@ -534,6 +534,41 @@ async def test_failed_status_promotes_error_to_blocker_note(v2_app):
 
 
 @pytest.mark.asyncio
+async def test_done_status_persists_result_summary(v2_app):
+    """``POST /mesh/tasks/{id}/status`` with a ``result.summary`` body
+    persists the worker's deliverable onto the task row (via
+    ``result_summary``) so ``await_task_event`` / GET surface it — not
+    only the origin-gated back-edge inbox event."""
+    app, _, _ = v2_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "summary check"},
+            headers={"X-Agent-ID": "scout"},
+        )
+        tid = r.json()["id"]
+        await c.post(
+            f"/mesh/tasks/{tid}/status",
+            json={"status": "working"},
+            headers={"X-Agent-ID": "analyst"},
+        )
+        r = await c.post(
+            f"/mesh/tasks/{tid}/status",
+            json={"status": "done", "result": {"summary": "done-summary"}},
+            headers={"X-Agent-ID": "analyst"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["result_summary"] == "done-summary"
+        # GET reflects the persisted value too.
+        r = await c.get(
+            f"/mesh/tasks/{tid}",
+            headers={"X-Agent-ID": "analyst"},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["result_summary"] == "done-summary"
+
+
+@pytest.mark.asyncio
 async def test_failed_status_explicit_blocker_note_wins_over_error(v2_app):
     """Explicit ``blocker_note`` in the body wins over ``error`` — the
     promotion only fires when blocker_note is missing/empty."""

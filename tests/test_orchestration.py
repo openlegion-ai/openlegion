@@ -336,6 +336,24 @@ def test_terminal_transition_sets_completed_and_retention(tmp_path):
     )
 
 
+def test_same_status_noop_persists_result_summary(tmp_path):
+    """A same-status ``done``→``done`` no-op transition must still persist a
+    ``result_summary`` carried on the re-transition (e.g. the loop's post-turn
+    auto-close fires ``done`` after the worker already self-closed via
+    complete_task) — otherwise the deliverable is lost to the no-op branch."""
+    t = _make_store(tmp_path)
+    rec = t.create(creator="c", assignee="a", title="t")
+    t.update_status(rec["id"], "working", actor="a")
+    # First reach terminal ``done`` with no summary.
+    t.update_status(rec["id"], "done", actor="a")
+    assert t.get(rec["id"])["result_summary"] is None
+    # Same-status re-transition carrying a summary — the no-op branch.
+    t.update_status(
+        rec["id"], "done", actor="a", result_summary="captured-on-noop",
+    )
+    assert t.get(rec["id"])["result_summary"] == "captured-on-noop"
+
+
 def test_blocker_note_clears_on_non_persisting_transition(tmp_path):
     """Transitions OUT of (blocked|failed) — i.e. to working/done/cancelled
     — clear the column. Both ``blocked`` (recoverable) and ``failed``
@@ -397,6 +415,35 @@ def test_update_status_cancelled_does_not_carry_blocker_note(tmp_path):
         blocker_note="should not stick",
     )
     assert result["blocker_note"] is None
+
+
+def test_update_status_persists_result_summary(tmp_path):
+    """The worker's deliverable rides ``result_summary`` onto the task row
+    so it surfaces via await_task_event / GET (not just the origin-gated
+    back-edge inbox event)."""
+    t = _make_store(tmp_path)
+    rec = t.create(creator="c", assignee="a", title="t")
+    t.update_status(rec["id"], "working", actor="a")
+    result = t.update_status(
+        rec["id"], "done", actor="a", result_summary="hello",
+    )
+    assert result["result_summary"] == "hello"
+    assert t.get(rec["id"])["result_summary"] == "hello"
+
+
+def test_update_status_result_summary_coalesce_non_clobber(tmp_path):
+    """COALESCE: a later transition WITHOUT ``result_summary`` preserves
+    the previously-captured summary rather than wiping it to NULL."""
+    t = _make_store(tmp_path)
+    rec = t.create(creator="c", assignee="a", title="t")
+    t.update_status(
+        rec["id"], "working", actor="a", result_summary="captured",
+    )
+    assert t.get(rec["id"])["result_summary"] == "captured"
+    # Subsequent transition carries no summary — stored value is unchanged.
+    result = t.update_status(rec["id"], "done", actor="a")
+    assert result["result_summary"] == "captured"
+    assert t.get(rec["id"])["result_summary"] == "captured"
 
 
 def test_repeat_status_is_recorded_as_event_but_no_op(tmp_path):

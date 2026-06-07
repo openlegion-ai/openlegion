@@ -381,6 +381,7 @@ class Tasks:
                 ("outcome", "TEXT"),
                 ("feedback_text", "TEXT"),
                 ("previous_task_id", "TEXT"),
+                ("result_summary", "TEXT"),
             )
             for col_name, col_type in outcome_columns:
                 if col_name not in existing:
@@ -479,6 +480,7 @@ class Tasks:
             "feedback_text": row[20],
             "previous_task_id": row[21],
             "outcome_set_at": row[22],
+            "result_summary": row[23],
         }
 
     # ``{team_col}`` is filled in at query time from ``self._team_col``
@@ -490,7 +492,8 @@ class Tasks:
         "assignee, status, priority, dependencies_json, artifact_refs_json, "
         "blocker_note, origin_kind, origin_channel, origin_user, "
         "created_at, updated_at, completed_at, retention_until, "
-        "outcome, feedback_text, previous_task_id, outcome_set_at"
+        "outcome, feedback_text, previous_task_id, outcome_set_at, "
+        "result_summary"
     )
 
     @property
@@ -1201,6 +1204,7 @@ class Tasks:
         actor: str,
         blocker_note: str | None = None,
         extra_payload: dict | None = None,
+        result_summary: str | None = None,
     ) -> dict:
         """Atomically transition a task to a new status.
 
@@ -1250,6 +1254,18 @@ class Tasks:
                 if current == status:
                     # No-op transition. Record the event so the audit
                     # trail still shows the call, but skip the row update.
+                    # Exception: a same-status re-transition may still carry
+                    # a worker ``result_summary`` (e.g. the loop's post-turn
+                    # auto-close fires ``done`` after the worker already
+                    # self-closed ``done`` via complete_task) — persist it so
+                    # the deliverable isn't lost to the no-op path.
+                    if result_summary is not None:
+                        conn.execute(
+                            "UPDATE tasks SET "
+                            "result_summary=COALESCE(?, result_summary) "
+                            "WHERE id=?",
+                            (result_summary, task_id),
+                        )
                     self._emit_event(
                         conn, task_id, "status_unchanged", actor,
                         {"status": status},
@@ -1272,7 +1288,8 @@ class Tasks:
                     "UPDATE tasks SET status=?, updated_at=?, "
                     "completed_at=COALESCE(?, completed_at), "
                     "retention_until=COALESCE(?, retention_until), "
-                    "blocker_note=? WHERE id=?",
+                    "blocker_note=?, "
+                    "result_summary=COALESCE(?, result_summary) WHERE id=?",
                     (
                         status, now, completed_at, retention_until,
                         # ``blocker_note`` is the canonical non-success
@@ -1283,6 +1300,10 @@ class Tasks:
                         # cancellation isn't an error, the user has the
                         # context. ``done`` clears whatever was there.
                         blocker_note if status in ("blocked", "failed") else None,
+                        # ``result_summary`` is the worker's deliverable.
+                        # COALESCE preserves a previously-captured summary
+                        # when a later (non-summary) transition lands.
+                        result_summary,
                         task_id,
                     ),
                 )
