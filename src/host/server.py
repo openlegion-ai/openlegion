@@ -5253,6 +5253,14 @@ def create_mesh_app(
         "cancelled": "task_cancelled",
     }
     _BACK_EDGE_WAKE_KINDS = frozenset({"task_failed", "task_blocked"})
+    # TTL split for back-edge events. Actionable kinds (task_failed /
+    # task_blocked) keep the 7-day window so the originator can recover even
+    # after a long gap. Informational kinds (task_completed / task_cancelled)
+    # get a much shorter window: the operator originates almost every workflow,
+    # so without this split completed-task events accumulate for a week and
+    # flood check_inbox / the operator's LLM context on every heartbeat.
+    _BACK_EDGE_TTL_ACTIONABLE = 604800  # 7 days
+    _BACK_EDGE_TTL_INFORMATIONAL = 86400  # 24 hours
     _BACK_EDGE_WAKE_WINDOW_SECONDS = 60.0
     _back_edge_wake_state: dict[str, float] = {}
 
@@ -5314,10 +5322,15 @@ def create_mesh_app(
                 for k, v in payload_extras.items():
                     if k not in payload:
                         payload[k] = v
+            back_edge_ttl = (
+                _BACK_EDGE_TTL_ACTIONABLE
+                if event_kind in _BACK_EDGE_WAKE_KINDS
+                else _BACK_EDGE_TTL_INFORMATIONAL
+            )
             try:
                 blackboard.write(
                     f"inbox/{origin_user}/task_event/{task_id}",
-                    payload, written_by="mesh", ttl=604800,  # 7 days
+                    payload, written_by="mesh", ttl=back_edge_ttl,
                 )
             except Exception as e:
                 logger.warning(

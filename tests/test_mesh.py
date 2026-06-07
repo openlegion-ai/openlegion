@@ -48,6 +48,32 @@ def test_blackboard_list_by_prefix(blackboard):
     assert len(task_entries) == 1
 
 
+def test_blackboard_list_by_prefix_excludes_ttl_expired(blackboard):
+    """TTL-expired rows must not be returned by list_by_prefix. The TTL GC is
+    throttled (once/60s, write-triggered) so a reader could otherwise see
+    entries past their TTL — the root cause of the operator inbox flood."""
+    # A live entry (no TTL) and a live TTL entry that has NOT expired.
+    blackboard.write("inbox/op/task_event/live", {"x": 1}, written_by="a1")
+    blackboard.write(
+        "inbox/op/task_event/fresh", {"x": 2}, written_by="a1", ttl=3600
+    )
+    # An entry with a TTL whose updated_at we backdate so it is firmly expired.
+    blackboard.write(
+        "inbox/op/task_event/stale", {"x": 3}, written_by="a1", ttl=60
+    )
+    blackboard.db.execute(
+        "UPDATE entries SET updated_at = datetime('now', '-2 hours') "
+        "WHERE key = ?",
+        ("inbox/op/task_event/stale",),
+    )
+    blackboard.db.commit()
+
+    entries = blackboard.list_by_prefix("inbox/op/task_event/")
+    keys = {e.key for e in entries}
+    assert keys == {"inbox/op/task_event/live", "inbox/op/task_event/fresh"}
+    assert "inbox/op/task_event/stale" not in keys
+
+
 def test_blackboard_delete(blackboard):
     blackboard.write("context/del_me", {"x": 1}, written_by="a1")
     blackboard.delete("context/del_me", deleted_by="a1")

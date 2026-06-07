@@ -641,7 +641,9 @@ async def test_terminal_transition_writes_back_edge_for_agent_origin(tmp_path):
         assert payload["recipient"] == "beta"
         assert payload["status"] == "done"
         assert payload["summary"] == "all done"
-        assert entry.ttl == 604800
+        # task_completed is an informational back-edge kind → 24h TTL (the
+        # actionable kinds task_failed/task_blocked keep the 7-day window).
+        assert entry.ttl == 86400
     finally:
         _teardown_mesh(bb, tasks_store)
 

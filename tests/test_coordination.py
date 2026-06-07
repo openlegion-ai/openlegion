@@ -387,6 +387,116 @@ class TestCheckInbox:
 
         assert result["count"] == 0
         assert result["tasks"] == []
+        assert result["events"] == []
+        assert result["event_count"] == 0
+        assert result["events_total"] == 0
+        assert result["events_truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_check_inbox_caps_events_at_25(self):
+        """A flood of completed events is capped at _MAX_INBOX_EVENTS and the
+        truncation metadata reflects the full pre-cap count."""
+        from src.agent.builtins.coordination_tool import (
+            _MAX_INBOX_EVENTS,
+            check_inbox,
+        )
+
+        mc = _make_mesh_client(agent_id="operator")
+        # 40 completed events — more than the cap.
+        entries = [
+            {
+                "key": f"inbox/operator/task_event/task_{i:03d}",
+                "value": {
+                    "kind": "task_completed",
+                    "task_id": f"task_{i:03d}",
+                    "recipient": "worker",
+                    "title": f"task {i}",
+                    "status": "done",
+                    "ts": i,  # ascending — higher i = newer
+                    "summary": f"summary {i}",
+                },
+            }
+            for i in range(40)
+        ]
+        mc.list_blackboard.return_value = entries
+
+        result = await check_inbox(mesh_client=mc)
+
+        assert result["event_count"] == _MAX_INBOX_EVENTS
+        assert len(result["events"]) == _MAX_INBOX_EVENTS
+        assert result["events_total"] == 40
+        assert result["events_truncated"] is True
+        # Newest informational events survive (ts 39 down to 15).
+        kept_ts = {e["ts"] for e in result["events"]}
+        assert max(kept_ts) == 39
+        assert min(kept_ts) == 40 - _MAX_INBOX_EVENTS  # 15
+
+    @pytest.mark.asyncio
+    async def test_check_inbox_retains_actionable_over_completed(self):
+        """task_failed / task_blocked events are NEVER dropped even when there
+        are far more than 25 completed events; completed events evict first."""
+        from src.agent.builtins.coordination_tool import check_inbox
+
+        mc = _make_mesh_client(agent_id="operator")
+        completed = [
+            {
+                "key": f"inbox/operator/task_event/done_{i:03d}",
+                "value": {
+                    "kind": "task_completed",
+                    "task_id": f"done_{i:03d}",
+                    "recipient": "worker",
+                    "title": f"done {i}",
+                    "status": "done",
+                    "ts": 1000 + i,
+                    "summary": "ok",
+                },
+            }
+            for i in range(40)
+        ]
+        actionable = [
+            {
+                "key": "inbox/operator/task_event/fail_1",
+                "value": {
+                    "kind": "task_failed",
+                    "task_id": "fail_1",
+                    "recipient": "worker",
+                    "title": "broken pipeline",
+                    "status": "failed",
+                    "ts": 5,  # deliberately old — must still survive
+                    "error": "boom",
+                },
+            },
+            {
+                "key": "inbox/operator/task_event/block_1",
+                "value": {
+                    "kind": "task_blocked",
+                    "task_id": "block_1",
+                    "recipient": "worker",
+                    "title": "stuck",
+                    "status": "blocked",
+                    "ts": 6,
+                    "blocker_note": "need creds",
+                },
+            },
+        ]
+        mc.list_blackboard.return_value = completed + actionable
+
+        result = await check_inbox(mesh_client=mc)
+
+        kinds = [e["kind"] for e in result["events"]]
+        # Both actionable events retained despite being the oldest by ts.
+        assert "task_failed" in kinds
+        assert "task_blocked" in kinds
+        # Actionable events are ordered first (newest actionable first).
+        assert kinds[0] == "task_blocked"  # ts 6 > ts 5
+        assert kinds[1] == "task_failed"
+        task_ids = {e["task_id"] for e in result["events"]}
+        assert "fail_1" in task_ids
+        assert "block_1" in task_ids
+        # Total still reflects the full set; list is capped at 25.
+        assert result["events_total"] == 42
+        assert result["event_count"] == 25
+        assert result["events_truncated"] is True
 
 
 class TestHandOffOriginPropagation:
