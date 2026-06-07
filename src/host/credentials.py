@@ -97,6 +97,49 @@ def _mark_anthropic_cache_breakpoints(body: dict) -> None:
                 content[-1]["cache_control"] = cc
 
 
+def _mark_anthropic_cache_breakpoints_openai_fmt(llm_kwargs: dict) -> None:
+    """Tag the stable prefix for prompt caching on the litellm NATIVE-anthropic
+    path, where the request is OpenAI-shaped (system is a ``role:'system'``
+    message; tools are ``{'type':'function',...}`` dicts). litellm translates
+    cache_control through to the Anthropic Messages API for native anthropic
+    models. NO-OP unless the final model is native ``anthropic/...`` — the
+    OpenAI-compatible rewrite (custom api_base / credit-proxy) drops
+    cache_control, so we must not tag there. Mutates ``llm_kwargs`` in place;
+    safe no-op on missing/empty fields; idempotent.
+    """
+    if not _PROMPT_CACHE_ENABLED:
+        return
+    model = llm_kwargs.get("model")
+    if not isinstance(model, str) or not model.startswith("anthropic/"):
+        return
+    cc = {"type": "ephemeral"}
+    tools = llm_kwargs.get("tools")
+    if isinstance(tools, list) and tools and isinstance(tools[-1], dict):
+        tools[-1]["cache_control"] = cc
+    messages = llm_kwargs.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return
+
+    def _tag_block(msg: dict) -> None:
+        c = msg.get("content")
+        if isinstance(c, str) and c:
+            msg["content"] = [{"type": "text", "text": c, "cache_control": cc}]
+        elif isinstance(c, list) and c and isinstance(c[-1], dict):
+            if c[-1].get("type") == "text":
+                c[-1]["cache_control"] = cc
+
+    # (a) system message (first one) — caches system + tools prefix
+    for m in messages:
+        if isinstance(m, dict) and m.get("role") == "system":
+            _tag_block(m)
+            break
+    # (b) last message (rolling breakpoint over append-only history),
+    #     unless it IS the system message already tagged above
+    last = messages[-1]
+    if isinstance(last, dict) and last.get("role") != "system":
+        _tag_block(last)
+
+
 # ── Same-model transient retry (prod 503 incident) ───────────
 # HTTP statuses that are TRANSIENT upstream-provider blips (Anthropic /
 # OpenAI outage, rate-limit, gateway hiccup). A single one of these must
@@ -3343,6 +3386,10 @@ class CredentialVault:
                 }
                 if api_key:
                     llm_kwargs["api_key"] = api_key
+                # Tag prompt-cache breakpoints on the native-anthropic path.
+                # Guarded on the FINAL (post-rewrite) model: the api_base /
+                # credit-proxy rewrite to ``openai/`` makes this a no-op.
+                _mark_anthropic_cache_breakpoints_openai_fmt(llm_kwargs)
                 try:
                     result = await litellm.acompletion(**llm_kwargs)
                 except Exception as litellm_err:
@@ -3373,6 +3420,21 @@ class CredentialVault:
             )
             msg = response.choices[0].message
             usage = response.usage
+            # Prompt-cache verification (litellm normalizes Anthropic cache
+            # fields; names vary by version). Logging only — billing math
+            # below is unchanged.
+            _u = usage
+            _cache_read = (
+                getattr(_u, "cache_read_input_tokens", None)
+                or (getattr(getattr(_u, "prompt_tokens_details", None), "cached_tokens", 0) if _u else 0)
+                or 0
+            )
+            _cache_creation = getattr(_u, "cache_creation_input_tokens", 0) or 0
+            if _cache_read or _cache_creation:
+                logger.info(
+                    "litellm anthropic prompt cache: read=%s created=%s model=%s",
+                    _cache_read, _cache_creation, used_model,
+                )
             content, thinking_content = _extract_content(msg.content)
             # Fallback: some litellm versions put thinking in a separate attribute
             if thinking_content is None:
@@ -3540,6 +3602,10 @@ class CredentialVault:
                 }
                 if api_key:
                     llm_kwargs["api_key"] = api_key
+                # Tag prompt-cache breakpoints on the native-anthropic path.
+                # Guarded on the FINAL (post-rewrite) model: the api_base /
+                # credit-proxy rewrite to ``openai/`` makes this a no-op.
+                _mark_anthropic_cache_breakpoints_openai_fmt(llm_kwargs)
 
                 async def _open_stream(_kwargs=llm_kwargs, _model=model):
                     try:
@@ -3604,6 +3670,10 @@ class CredentialVault:
                         }
                         if api_key:
                             llm_kwargs["api_key"] = api_key
+                        # Tag prompt-cache breakpoints on the native-anthropic
+                        # path; no-op once the rewrite makes the model
+                        # ``openai/`` (api_base / credit-proxy).
+                        _mark_anthropic_cache_breakpoints_openai_fmt(llm_kwargs)
 
                         async def _open_fb_stream(_kwargs=llm_kwargs, _model=fallback):
                             try:
@@ -3737,6 +3807,21 @@ class CredentialVault:
                 tokens_used = response.usage.total_tokens
                 prompt_tokens = getattr(response.usage, 'prompt_tokens', 0) or 0
                 completion_tokens = getattr(response.usage, 'completion_tokens', 0) or 0
+                # Prompt-cache verification (litellm normalizes Anthropic cache
+                # fields; names vary by version). Logging only — billing math
+                # is unchanged.
+                _u = response.usage
+                _cache_read = (
+                    getattr(_u, "cache_read_input_tokens", None)
+                    or (getattr(getattr(_u, "prompt_tokens_details", None), "cached_tokens", 0) if _u else 0)
+                    or 0
+                )
+                _cache_creation = getattr(_u, "cache_creation_input_tokens", 0) or 0
+                if _cache_read or _cache_creation:
+                    logger.info(
+                        "litellm anthropic prompt cache: read=%s created=%s model=%s",
+                        _cache_read, _cache_creation, used_model,
+                    )
 
             # If the model produced only reasoning tokens (common with
             # Ollama thinking models like deepseek-r1, qwen3), use that

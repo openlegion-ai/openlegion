@@ -5529,7 +5529,10 @@ async def test_oauth_resolve_token_not_logged_in_full(monkeypatch, caplog):
 # ── Anthropic prompt-cache breakpoints (OAuth path) ──────────────────────
 
 from src.host import credentials as _cred_mod  # noqa: E402
-from src.host.credentials import _mark_anthropic_cache_breakpoints  # noqa: E402
+from src.host.credentials import (  # noqa: E402
+    _mark_anthropic_cache_breakpoints,
+    _mark_anthropic_cache_breakpoints_openai_fmt,
+)
 
 _EPHEMERAL = {"type": "ephemeral"}
 
@@ -5644,3 +5647,95 @@ class TestMarkAnthropicCacheBreakpoints:
         assert body["messages"][0]["content"] == [
             {"type": "text", "text": "hello", "cache_control": _EPHEMERAL}
         ]
+
+
+class TestMarkAnthropicCacheBreakpointsOpenAiFmt:
+    """Unit tests for the prompt-cache tagger on the litellm native-anthropic
+    path, where the request is OpenAI-shaped (system as a ``role:'system'``
+    message; tools as ``{'type':'function',...}`` dicts)."""
+
+    def _kwargs(self, model="anthropic/claude-x"):
+        return {
+            "model": model,
+            "tools": [
+                {"type": "function", "function": {"name": "a"}},
+                {"type": "function", "function": {"name": "b"}},
+            ],
+            "messages": [
+                {"role": "system", "content": "agent system prompt"},
+                {"role": "user", "content": "hello"},
+            ],
+        }
+
+    def test_native_anthropic_tags_system_last_tool_and_last_message(self):
+        kw = self._kwargs()
+        _mark_anthropic_cache_breakpoints_openai_fmt(kw)
+
+        # last tool only
+        assert "cache_control" not in kw["tools"][0]
+        assert kw["tools"][1]["cache_control"] == _EPHEMERAL
+        # system message string content → list block with cache_control
+        assert kw["messages"][0]["content"] == [
+            {
+                "type": "text",
+                "text": "agent system prompt",
+                "cache_control": _EPHEMERAL,
+            }
+        ]
+        # last (user) message string content → list block with cache_control
+        assert kw["messages"][1]["content"] == [
+            {"type": "text", "text": "hello", "cache_control": _EPHEMERAL}
+        ]
+
+    def test_rewritten_openai_model_tags_nothing(self):
+        # api_base / credit-proxy rewrite turns the model into ``openai/...``,
+        # which silently drops cache_control — the guard must skip.
+        kw = self._kwargs(model="openai/claude-x")
+        _mark_anthropic_cache_breakpoints_openai_fmt(kw)
+        assert "cache_control" not in kw["tools"][1]
+        assert kw["messages"][0]["content"] == "agent system prompt"
+        assert kw["messages"][1]["content"] == "hello"
+
+    def test_non_anthropic_model_tags_nothing(self):
+        kw = self._kwargs(model="gemini/gemini-2.5-pro")
+        _mark_anthropic_cache_breakpoints_openai_fmt(kw)
+        assert "cache_control" not in kw["tools"][1]
+        assert kw["messages"][0]["content"] == "agent system prompt"
+        assert kw["messages"][1]["content"] == "hello"
+
+    def test_disabled_flag_tags_nothing(self, monkeypatch):
+        monkeypatch.setattr(_cred_mod, "_PROMPT_CACHE_ENABLED", False)
+        kw = self._kwargs()
+        _mark_anthropic_cache_breakpoints_openai_fmt(kw)
+        assert "cache_control" not in kw["tools"][1]
+        assert kw["messages"][0]["content"] == "agent system prompt"
+        assert kw["messages"][1]["content"] == "hello"
+
+    def test_single_system_message_not_double_tagged(self):
+        # When the only message IS the system message, tag it once (via the
+        # system pass) and skip the last-message pass — no error, no double.
+        kw = {
+            "model": "anthropic/claude-x",
+            "messages": [{"role": "system", "content": "only system"}],
+        }
+        _mark_anthropic_cache_breakpoints_openai_fmt(kw)
+        content = kw["messages"][0]["content"]
+        assert content == [
+            {"type": "text", "text": "only system", "cache_control": _EPHEMERAL}
+        ]
+
+    def test_empty_or_missing_fields_no_error(self):
+        # Missing model.
+        kw0 = {"messages": [{"role": "user", "content": "hi"}]}
+        _mark_anthropic_cache_breakpoints_openai_fmt(kw0)
+        assert kw0["messages"][0]["content"] == "hi"
+
+        # Native model but empty containers.
+        kw1 = {"model": "anthropic/claude-x", "tools": [], "messages": []}
+        _mark_anthropic_cache_breakpoints_openai_fmt(kw1)
+        assert kw1 == {"model": "anthropic/claude-x", "tools": [], "messages": []}
+
+        # No messages key at all.
+        kw2 = {"model": "anthropic/claude-x"}
+        _mark_anthropic_cache_breakpoints_openai_fmt(kw2)
+        assert kw2 == {"model": "anthropic/claude-x"}
