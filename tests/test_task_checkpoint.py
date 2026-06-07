@@ -41,6 +41,7 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None, *, real_memory: b
     tools.list_tools = MagicMock(return_value=[])
     tools.is_parallel_safe = MagicMock(return_value=True)
     tools.get_loop_exempt_tools = MagicMock(return_value=frozenset())
+    tools.operator_only_tools = MagicMock(return_value=frozenset())
 
     llm = MagicMock()
     if llm_responses:
@@ -486,6 +487,7 @@ class TestTaskCheckpointLoop:
         tools.list_tools = MagicMock(return_value=[])
         tools.is_parallel_safe = MagicMock(return_value=True)
         tools.get_loop_exempt_tools = MagicMock(return_value=frozenset())
+        tools.operator_only_tools = MagicMock(return_value=frozenset())
 
         mesh_client = MagicMock()
         mesh_client.is_standalone = False

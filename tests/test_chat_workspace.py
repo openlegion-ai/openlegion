@@ -40,6 +40,7 @@ def _make_loop_with_workspace(
     tools.list_tools = MagicMock(return_value=["memory_search", "memory_save"])
     tools.is_parallel_safe = MagicMock(return_value=True)
     tools.get_loop_exempt_tools = MagicMock(return_value=frozenset())
+    tools.operator_only_tools = MagicMock(return_value=frozenset())
 
     llm = MagicMock()
     if llm_responses:

@@ -93,6 +93,7 @@ def _make_loop_with_mocks():
     tools.list_tools = MagicMock(return_value=[])
     tools.is_parallel_safe = MagicMock(return_value=True)
     tools.get_loop_exempt_tools = MagicMock(return_value=frozenset())
+    tools.operator_only_tools = MagicMock(return_value=frozenset())
 
     llm = MagicMock()
     # Default mock returns a STRUCTURED final answer so the chat-path

@@ -417,6 +417,15 @@ class AgentLoop:
             from src.agent.builtins.tool_authoring import tool_authoring_enabled
             if not tool_authoring_enabled():
                 excluded |= _TOOL_AUTHORING_TOOLS
+            # Operator-only orchestration tools (edit_agent, create_team,
+            # manage_*, apply_template, install_skill, …) self-reject for
+            # worker callers at call time. Drop their schemas from the worker
+            # surface entirely so they never bloat a worker's LLM context or
+            # tempt it to call a tool it can never use. The operator gets them
+            # via its explicit allowlist, so this exclude never touches it.
+            # ``.update()`` (not ``|=``) so a non-set return can only no-op,
+            # never silently rebind ``excluded`` via the RHS's ``__ror__``.
+            excluded.update(tools.operator_only_tools())
             self._excluded_tools: frozenset[str] | None = (
                 frozenset(excluded) if excluded else None
             )
