@@ -75,6 +75,20 @@ AGENT_CONFIG_KEYS: dict[str, str] = {
     "llm_timeout_seconds": "llm_timeout_seconds",
 }
 
+# Limits surfaced in the dashboard global "Agent Execution" settings panel.
+# Declared here (not in the dashboard) so the UI can never silently diverge
+# from LIMIT_SPECS and so the deliberate exclusion is explicit:
+# ``lane_queue_max`` is intentionally omitted — it's a niche backpressure
+# knob that stays env-only (OPENLEGION_LANE_QUEUE_MAX).
+DASHBOARD_GLOBAL_KEYS: tuple[str, ...] = (
+    "max_iterations",
+    "chat_max_tool_rounds",
+    "chat_max_total_rounds",
+    "task_max_tool_rounds",
+    "llm_timeout_seconds",
+    "lane_timeout_seconds",
+)
+
 
 def clamp(key: str, value: int) -> int:
     """Clamp ``value`` into the spec range for ``key`` (logs if it moved)."""

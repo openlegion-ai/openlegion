@@ -6158,17 +6158,10 @@ def create_dashboard_router(
     # ── System settings (consolidated) ────────────────────────
 
     # Execution-limit keys whose ranges/defaults are owned by
-    # src/shared/limits.py (the single source of truth). The validators
-    # and defaults dicts below merge these in so the dashboard never
-    # disagrees with the engine's own clamp ranges.
-    _LIMIT_KEYS = (
-        "max_iterations",
-        "chat_max_tool_rounds",
-        "chat_max_total_rounds",
-        "task_max_tool_rounds",
-        "llm_timeout_seconds",
-        "lane_timeout_seconds",
-    )
+    # src/shared/limits.py (the single source of truth). The list of which
+    # limits the dashboard surfaces also lives there (DASHBOARD_GLOBAL_KEYS),
+    # so the UI can never silently diverge from / drop a LIMIT_SPECS entry.
+    _LIMIT_KEYS = _limits.DASHBOARD_GLOBAL_KEYS
 
     _SYSTEM_SETTINGS_VALIDATORS: dict[str, tuple[type, float, float]] = {
         "default_daily_budget": (float, 0.01, 10000),
