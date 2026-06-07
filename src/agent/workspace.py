@@ -93,15 +93,17 @@ _MAX_SOUL = 4_000
 _MAX_USER = 4_000
 _MAX_MEMORY = 16_000
 
-# MEMORY.md "compiled truth + timeline" structure. Only the compiled head
-# (delimited by these markers) is injected into the system prompt every
-# turn; everything after the end marker is the append-only LOG ("timeline")
-# which stays searchable via BM25 but is NOT injected. ``_MEMORY_FILE_MAX``
-# bounds the whole file on disk — the log is trimmed oldest-first, the
-# compiled head is never trimmed.
+# MEMORY.md "compiled truth + timeline" structure. The compiled head
+# (delimited by these markers) PLUS a bounded slice of the NEWEST log entries
+# are injected into the system prompt every turn (so recently-learned facts
+# auto-surface); older log entries stay searchable via BM25 but are not
+# injected. ``_MEMORY_FILE_MAX`` bounds the whole file on disk — the log is
+# trimmed oldest-first, the compiled head is never trimmed.
 MEMORY_COMPILED_BEGIN = "<!-- compiled:begin -->"
 MEMORY_COMPILED_END = "<!-- compiled:end -->"
 _MEMORY_FILE_MAX = 64_000
+# Newest slice of the log injected alongside the compiled head.
+_MEMORY_RECENT_LOG_CHARS = 5_000
 
 # Public mapping for external consumers (tool response, dashboard).
 # Files not listed have no per-file bootstrap cap.
@@ -475,12 +477,40 @@ class WorkspaceManager:
         return "... (older memory log trimmed)\n\n" + tail
 
     def load_compiled_memory(self) -> str:
-        """Return only the compiled MEMORY.md head (injected into the prompt)."""
+        """Return only the consolidated MEMORY.md head (see get_memory_injection)."""
         return self._split_memory(self._read_file(self.MEMORY_FILE) or "")[0]
 
     def load_memory_log(self) -> str:
         """Return only the append-only MEMORY.md log tail (BM25-searchable)."""
         return self._split_memory(self._read_file(self.MEMORY_FILE) or "")[1]
+
+    def get_memory_injection(self) -> str:
+        """Compose the MEMORY.md content injected into the system prompt: the
+        consolidated compiled head PLUS a bounded slice of the NEWEST log
+        entries, so recently-learned facts auto-surface before consolidation
+        folds them into the head. Older log entries are recalled via
+        memory_search. The head is capped so head + recent fits the per-file
+        bootstrap cap.
+        """
+        raw = self._read_file(self.MEMORY_FILE) or ""
+        head, log = self._split_memory(raw)
+        head, log = head.strip(), log.strip()
+        recent = ""
+        if log:
+            recent = log[-_MEMORY_RECENT_LOG_CHARS:]
+            # Begin at an entry boundary so we never start mid-entry.
+            idx = recent.find("\n## ")
+            if idx != -1:
+                recent = recent[idx + 1:]
+            recent = recent.strip()
+        if not recent:
+            return head
+        # Reserve room for the recent slice so a large head can't crowd it out
+        # under the per-file cap applied by get_bootstrap_content.
+        head_cap = max(0, _MAX_MEMORY - _MEMORY_RECENT_LOG_CHARS - 32)
+        if len(head) > head_cap:
+            head = head[:head_cap]
+        return f"{head}\n\n## Recent\n\n{recent}".strip()
 
     def load_daily_logs(self, days: int = 2) -> str:
         """Load today's + yesterday's daily logs (most recent first)."""
@@ -561,9 +591,10 @@ class WorkspaceManager:
 
         for filename, cap in caps.items():
             if filename == "MEMORY.md":
-                # Only the compiled head is injected; the append-only log
-                # is recalled via memory_search/BM25, never re-injected.
-                content = self.load_compiled_memory()
+                # Inject the consolidated head + a bounded slice of the NEWEST
+                # log entries (recent facts auto-surface); older log entries
+                # are recalled via memory_search/BM25.
+                content = self.get_memory_injection()
             else:
                 content = self._read_file(filename)
             if not content or not content.strip():

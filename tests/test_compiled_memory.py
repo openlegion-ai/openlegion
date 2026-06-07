@@ -87,15 +87,27 @@ class TestCompiledMemorySplit:
         assert "IMPORTANT_USER_FACT" in ws.load_compiled_memory()
         assert "NEW_LOG_ENTRY" in ws.load_memory_log()
 
-    def test_bootstrap_injects_head_not_log(self):
-        """get_bootstrap_content includes the compiled head but NOT a
-        log-only entry."""
+    def test_bootstrap_injects_head_and_recent_log(self):
+        """get_bootstrap_content injects the compiled head AND a recent log
+        entry, so recently-learned facts auto-surface in later sessions."""
         self.ws.write_compiled_memory("COMPILED_HEAD_MARKER")
-        self.ws.append_memory("LOG_ONLY_MARKER_STRING")
-
+        self.ws.append_memory("RECENT_LOG_FACT")
         content = self.ws.get_bootstrap_content()
         assert "COMPILED_HEAD_MARKER" in content
-        assert "LOG_ONLY_MARKER_STRING" not in content
+        assert "RECENT_LOG_FACT" in content
+
+    def test_bootstrap_excludes_old_log_beyond_recent_window(self):
+        """Log entries pushed beyond the recent window are search-only (not
+        injected), but stay in the searchable log."""
+        from src.agent.workspace import _MEMORY_RECENT_LOG_CHARS
+        self.ws.write_compiled_memory("HEAD")
+        self.ws.append_memory("## OLD\n\nOLD_LOG_FACT_MARKER")
+        filler = "## F\n\n" + ("x" * 1000)
+        for _ in range((_MEMORY_RECENT_LOG_CHARS // 1000) + 2):
+            self.ws.append_memory(filler)
+        content = self.ws.get_bootstrap_content()
+        assert "OLD_LOG_FACT_MARKER" not in content                 # not injected
+        assert "OLD_LOG_FACT_MARKER" in self.ws.load_memory_log()   # still searchable
 
     def test_write_compiled_memory_replaces_head_preserves_log(self):
         self.ws.append_memory("PERSISTENT_LOG_ENTRY")
