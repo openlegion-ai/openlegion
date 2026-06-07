@@ -7483,6 +7483,41 @@
             </div>
           </div>
 
+          <!-- ── 1c. Embedding / Semantic memory ── -->
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5" x-show="systemSettings || !systemSettingsLoading">
+            <div class="flex items-center gap-2 mb-4">
+              <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+              <h3 class="text-base font-medium text-gray-200">Semantic Memory</h3>
+              <span class="text-[11px] text-amber-500/70 ml-auto">restart required</span>
+            </div>
+            <div class="space-y-3" x-show="systemSettings">
+              <div class="text-xs text-gray-400 flex items-center gap-1.5"
+                :class="systemSettings?.embedding?.on ? 'text-green-400' : 'text-gray-400'">
+                <span class="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                  :class="systemSettings?.embedding?.on ? 'bg-green-400' : 'bg-gray-600'"></span>
+                <span x-text="systemSettings?.embedding?.on
+                  ? ('Semantic memory: ON — ' + systemSettings.embedding.effective_model)
+                  : 'Semantic memory: OFF (keyword-only)'"></span>
+              </div>
+              <div>
+                <label class="text-xs text-gray-400 mb-1 flex items-center gap-1.5">Embedding Provider
+                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Powers semantic (meaning-based) memory search. Requires a SYSTEM API key from an embedding-capable provider (OpenAI / Voyage / Gemini / Cohere). "Auto" picks the best available key; "None" falls back to keyword-only search. Changing this restarts all agents.</span></span>
+                </label>
+                <select class="dash-select w-full"
+                  x-effect="if (systemSettings?.embedding) $el.value = systemSettings.embedding.configured_provider"
+                  @change="saveEmbeddingModel($event.target.value)">
+                  <option value="auto">Auto (best available key)</option>
+                  <template x-for="p in (systemSettings?.embedding?.available_providers || [])" :key="p">
+                    <option :value="p" x-text="p.charAt(0).toUpperCase()+p.slice(1)"></option>
+                  </template>
+                  <option value="none">None (keyword-only)</option>
+                  <option value="custom" disabled x-show="systemSettings?.embedding?.configured_provider === 'custom'"
+                    x-text="'Custom: ' + (systemSettings?.embedding?.configured || '')"></option>
+                </select>
+              </div>
+            </div>
+          </div>
+
           <!-- ── 2. Budgets ── -->
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-5" x-show="systemSettings || !systemSettingsLoading">
             <div class="flex items-center gap-2 mb-4">
