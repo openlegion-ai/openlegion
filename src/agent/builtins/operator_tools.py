@@ -1074,7 +1074,7 @@ async def workflow_snapshot(
 
 # Cap below the agent loop's 300s tool execution ceiling so an await
 # completes (and returns its ``timed_out`` shape) before the loop's own
-# timeout cancels the tool call. Each inbox poll is wrapped in
+# timeout cancels the tool call. Each task-status poll is wrapped in
 # ``asyncio.wait_for(..., _AWAIT_TASK_EVENT_POLL_BUDGET_S)`` so a stuck
 # HTTP retry chain (``_get_with_retry`` worst-case ≈ 90s with 3×30s
 # attempts) can't push our wall-clock past the ceiling — the per-poll
@@ -1089,7 +1089,8 @@ _AWAIT_TASK_EVENT_DEFAULT_TIMEOUT_S = 240
     description=(
         "Block until a specific task reaches a terminal status (done / "
         "failed / blocked / cancelled) or the timeout elapses. Polls "
-        "the operator's back-edge inbox with exponential backoff. Use "
+        "the task's durable status (the authoritative tasks-store "
+        "record) with exponential backoff. Use "
         "this when you need to wait for one specific child task to "
         "finish before proceeding (e.g. confirming a setup handoff). "
         "For multi-stage chains, prefer workflow_snapshot — this tool "
@@ -1126,7 +1127,18 @@ async def await_task_event(
     mesh_client=None,
     **_kw,
 ) -> dict:
-    """Poll the operator's inbox for a terminal back-edge event.
+    """Poll the task's durable status for a terminal transition.
+
+    Reads the authoritative tasks-store record via
+    ``mesh_client.get_task`` each poll and returns once ``status``
+    reaches a terminal value. This replaced the old back-edge inbox
+    poll: that inbox event is only written when the completed task's
+    origin resolves to an agent/operator, so operator handoffs from a
+    human-driven (dashboard) or cron-driven turn left it empty and this
+    tool ALWAYS timed out returning nothing (the multi-session "await
+    returned nothing" bug). ``Tasks.update_status`` writes the
+    ``status`` column on EVERY transition regardless of origin, so it is
+    the correct source of truth.
 
     Top-level try/except ensures the tool ALWAYS returns a non-empty
     envelope (event / timed_out / error). Operator's prompt and the LLM
@@ -1159,13 +1171,17 @@ async def await_task_event(
     try:
         timeout = max(1, min(int(timeout_s), _AWAIT_TASK_EVENT_MAX_TIMEOUT_S))
         interval = max(1, int(poll_interval_s))
-        terminal_kinds = {
-            "task_completed", "task_failed",
-            "task_blocked", "task_cancelled",
+        _status_to_kind = {
+            "done": "task_completed",
+            "failed": "task_failed",
+            "blocked": "task_blocked",
+            "cancelled": "task_cancelled",
         }
+        # Single source of truth: terminal statuses ARE the map's keys, so
+        # the two can't drift out of sync.
+        terminal_statuses = set(_status_to_kind)
         deadline = _time.monotonic() + timeout
         last_status_seen: str | None = None
-        inbox_prefix = f"inbox/{mesh_client.agent_id}/task_event/"
 
         while True:
             # Don't start another poll if there isn't time for it to
@@ -1190,55 +1206,45 @@ async def await_task_event(
                 # to keep the worst-case iteration time predictable even
                 # if the mesh's ``_get_with_retry`` chain would otherwise
                 # burn ~90s on a flaky link.
-                entries = await asyncio.wait_for(
-                    mesh_client.list_blackboard(
-                        inbox_prefix, global_scope=True,
-                    ),
+                record = await asyncio.wait_for(
+                    mesh_client.get_task(task_id),
                     timeout=_AWAIT_TASK_EVENT_POLL_BUDGET_S,
                 )
             except asyncio.TimeoutError:
-                # Treat per-poll timeout as transient — the back-edge
-                # may arrive on the next poll. Fall through to sleep.
-                entries = []
+                # Per-poll timeout is transient — the next poll may succeed.
+                record = None
             except Exception as e:
                 # Redact + truncate so an HTTP-layer exception that
                 # quotes a URL with credentials in the query string
                 # can't leak into the LLM context (same precaution as
                 # coordination_tool's failure envelopes).
                 redacted = redact_text_with_urls(str(e))[:200]
-                out = {
-                    "error": f"Inbox fetch failed: {redacted}",
-                    "task_id": task_id,
-                }
-                logger.info(
-                    "await_task_event EXIT inbox_fetch_failed result=%s",
-                    out,
-                )
+                out = {"error": f"Task fetch failed: {redacted}", "task_id": task_id}
+                logger.info("await_task_event EXIT task_fetch_failed result=%s", out)
                 return out
-            for entry in entries:
-                value = entry.get("value") or {}
-                if value.get("task_id") != task_id:
-                    continue
-                kind = value.get("kind", "")
-                if kind in terminal_kinds:
+            if record:
+                status = record.get("status")
+                if status in terminal_statuses:
+                    blocker = record.get("blocker_note") or ""
                     out = {
                         "event": {
-                            "kind": kind,
+                            "kind": _status_to_kind[status],
                             "task_id": task_id,
-                            "status": value.get("status"),
-                            "title": value.get("title"),
-                            "summary": value.get("summary", ""),
-                            "error": value.get("error", ""),
-                            "blocker_note": value.get("blocker_note", ""),
-                            "ts": value.get("ts"),
+                            "status": status,
+                            "title": record.get("title"),
+                            "summary": "",
+                            "error": blocker,
+                            "blocker_note": blocker,
+                            "outcome": record.get("outcome"),
+                            "ts": record.get("completed_at") or record.get("updated_at"),
                         },
                     }
                     logger.info(
-                        "await_task_event EXIT terminal_event kind=%s "
-                        "task_id=%s", kind, task_id,
+                        "await_task_event EXIT terminal_status status=%s task_id=%s",
+                        status, task_id,
                     )
                     return out
-                last_status_seen = value.get("status") or last_status_seen
+                last_status_seen = status or last_status_seen
             remaining = deadline - _time.monotonic()
             if remaining <= 0:
                 out = {

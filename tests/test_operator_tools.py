@@ -1322,39 +1322,57 @@ class TestWorkflowSnapshotTool:
 
 
 class TestAwaitTaskEventTool:
-    """``await_task_event`` polls the operator's back-edge inbox for a
-    terminal event matching ``task_id`` with exponential backoff."""
+    """``await_task_event`` polls the task's durable status (the
+    authoritative tasks-store record via ``mesh_client.get_task``) for a
+    terminal transition with exponential backoff. It no longer reads the
+    origin-gated back-edge inbox — that left human/cron-driven operator
+    handoffs un-awaitable."""
 
     @pytest.mark.asyncio
-    async def test_returns_event_when_already_terminal_in_inbox(self):
+    async def test_returns_event_when_already_terminal(self):
         from src.agent.builtins.operator_tools import await_task_event
 
         mc = MagicMock()
         mc.agent_id = "operator"
-        mc.list_blackboard = AsyncMock(return_value=[
-            {"value": {
-                "kind": "task_completed",
-                "task_id": "task_abc",
-                "status": "done",
-                "title": "stage 1",
-                "summary": "ok",
-                "ts": 1000,
-            }},
-        ])
+        mc.get_task = AsyncMock(return_value={
+            "status": "done",
+            "title": "stage 1",
+            "blocker_note": None,
+            "outcome": "accepted",
+            "completed_at": 1000,
+            "updated_at": 1000,
+        })
         result = await await_task_event(
             "task_abc", timeout_s=60, poll_interval_s=1, mesh_client=mc,
         )
         assert "event" in result
         assert result["event"]["kind"] == "task_completed"
         assert result["event"]["task_id"] == "task_abc"
+        assert result["event"]["status"] == "done"
 
     @pytest.mark.asyncio
-    async def test_returns_timed_out_when_no_match(self):
+    async def test_returns_timed_out_when_non_terminal(self, monkeypatch):
+        import asyncio
+
+        from src.agent.builtins import operator_tools
         from src.agent.builtins.operator_tools import await_task_event
 
+        # Shrink the per-poll budget so a poll runs before the pre-deadline
+        # guard short-circuits — otherwise with timeout_s=1 the guard
+        # returns before get_task is ever observed.
+        monkeypatch.setattr(
+            operator_tools, "_AWAIT_TASK_EVENT_POLL_BUDGET_S", 0.2,
+        )
+
+        # Short-circuit the inter-poll sleep so the test doesn't wait.
+        async def _no_sleep(_seconds):
+            return None
+
+        monkeypatch.setattr(asyncio, "sleep", _no_sleep)
         mc = MagicMock()
         mc.agent_id = "operator"
-        mc.list_blackboard = AsyncMock(return_value=[])
+        # Still working → never terminal, so the loop times out.
+        mc.get_task = AsyncMock(return_value={"status": "working"})
         # Use the minimum (1s) timeout so the loop exits immediately.
         result = await await_task_event(
             "task_zzz", timeout_s=1, poll_interval_s=1, mesh_client=mc,
@@ -1362,12 +1380,13 @@ class TestAwaitTaskEventTool:
         assert result.get("timed_out") is True
         assert result["task_id"] == "task_zzz"
         assert result["waited_seconds"] == 1
+        assert result["last_status_seen"] == "working"
 
     @pytest.mark.asyncio
     async def test_timeout_capped_at_270(self):
         """``timeout_s`` is clamped to 270 (under the 300s tool ceiling).
-        We verify by passing 600 and asserting the returned
-        ``waited_seconds`` reflects the cap on a no-match timeout."""
+        We pin the module-level cap constant and confirm a terminal
+        record returns immediately via the early-return path."""
         from src.agent.builtins.operator_tools import (
             _AWAIT_TASK_EVENT_MAX_TIMEOUT_S,
             await_task_event,
@@ -1375,17 +1394,14 @@ class TestAwaitTaskEventTool:
 
         mc = MagicMock()
         mc.agent_id = "operator"
-        # Return a matching terminal event on the first poll so the call
+        # Return a terminal failed record on the first poll so the call
         # returns immediately — we just need to validate the internal cap
         # by inspecting it through the early-return path.
-        mc.list_blackboard = AsyncMock(return_value=[
-            {"value": {
-                "kind": "task_failed",
-                "task_id": "task_y",
-                "status": "failed",
-                "ts": 0,
-            }},
-        ])
+        mc.get_task = AsyncMock(return_value={
+            "status": "failed",
+            "blocker_note": "boom",
+            "updated_at": 0,
+        })
         result = await await_task_event(
             "task_y", timeout_s=600, poll_interval_s=1, mesh_client=mc,
         )
@@ -1393,29 +1409,19 @@ class TestAwaitTaskEventTool:
         # via the module-level constant — pin the value too.
         assert _AWAIT_TASK_EVENT_MAX_TIMEOUT_S == 270
         assert "event" in result
+        assert result["event"]["kind"] == "task_failed"
 
     @pytest.mark.asyncio
-    async def test_non_matching_task_ids_ignored(self):
-        """Events for OTHER task IDs in the inbox don't terminate the
-        wait — only matching task_ids count."""
+    async def test_missing_task_keeps_waiting_then_times_out(self):
+        """``get_task`` returning ``None`` (task not yet visible) is not
+        terminal — the wait continues and ultimately times out."""
         from src.agent.builtins.operator_tools import await_task_event
 
         mc = MagicMock()
         mc.agent_id = "operator"
-        mc.list_blackboard = AsyncMock(return_value=[
-            {"value": {
-                "kind": "task_completed",
-                "task_id": "task_OTHER",
-                "status": "done",
-            }},
-            {"value": {
-                "kind": "task_completed",
-                "task_id": "task_ALSO_OTHER",
-                "status": "done",
-            }},
-        ])
-        # 1s timeout — should return timed_out because the matching id
-        # is never in the inbox.
+        mc.get_task = AsyncMock(return_value=None)
+        # 1s timeout — should return timed_out because the task record is
+        # never visible (let alone terminal).
         result = await await_task_event(
             "task_target", timeout_s=1, poll_interval_s=1, mesh_client=mc,
         )
@@ -1424,11 +1430,11 @@ class TestAwaitTaskEventTool:
 
     @pytest.mark.asyncio
     async def test_per_poll_timeout_treated_as_transient(self, monkeypatch):
-        """A per-poll ``asyncio.TimeoutError`` from
-        ``list_blackboard`` must NOT terminate the wait — the watchdog
-        treats it as a transient hiccup, sleeps, and polls again. We
-        prove this by raising TimeoutError on the first call then
-        returning a matching terminal event on the second."""
+        """A per-poll ``asyncio.TimeoutError`` from ``get_task`` must NOT
+        terminate the wait — the watchdog treats it as a transient
+        hiccup, sleeps, and polls again. We prove this by raising
+        TimeoutError on the first call then returning a terminal record
+        on the second."""
         import asyncio as _aio
 
         from src.agent.builtins import operator_tools
@@ -1448,32 +1454,59 @@ class TestAwaitTaskEventTool:
 
         calls = {"n": 0}
 
-        async def flaky_list_blackboard(_prefix, *, global_scope=False):
+        async def flaky_get_task(_task_id):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise _aio.TimeoutError("simulated stuck poll")
-            return [
-                {"value": {
-                    "kind": "task_completed",
-                    "task_id": "task_t",
-                    "status": "done",
-                    "ts": 0,
-                }},
-            ]
+            return {"status": "done", "title": "t", "completed_at": 0}
 
         mc = MagicMock()
         mc.agent_id = "operator"
-        mc.list_blackboard = flaky_list_blackboard
+        mc.get_task = flaky_get_task
 
         result = await await_task_event(
             "task_t", timeout_s=60, poll_interval_s=1, mesh_client=mc,
         )
         # We polled twice: once timed out (transient), once returned the
-        # terminal event. The error envelope path must NOT have fired.
+        # terminal record. The error envelope path must NOT have fired.
         assert calls["n"] == 2
         assert "error" not in result
         assert "event" in result
         assert result["event"]["kind"] == "task_completed"
+
+    @pytest.mark.asyncio
+    async def test_polls_status_not_inbox(self, monkeypatch):
+        """Regression: the tool polls the durable task status, NOT the
+        origin-gated back-edge inbox. ``list_blackboard`` must never be
+        called — the inbox dependency is what left human/cron-driven
+        operator handoffs un-awaitable (await returned nothing)."""
+        import asyncio as _aio
+
+        from src.agent.builtins.operator_tools import await_task_event
+
+        async def _no_sleep(_seconds):
+            return None
+
+        monkeypatch.setattr(_aio, "sleep", _no_sleep)
+
+        records = [
+            {"status": "working"},
+            {"status": "done", "title": "t", "completed_at": 5},
+        ]
+
+        async def get_task(_task_id):
+            return records.pop(0)
+
+        mc = MagicMock()
+        mc.agent_id = "operator"
+        mc.get_task = get_task
+        mc.list_blackboard = AsyncMock()
+
+        result = await await_task_event(
+            "task_pin", timeout_s=60, poll_interval_s=1, mesh_client=mc,
+        )
+        assert result["event"]["kind"] == "task_completed"
+        mc.list_blackboard.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_deadline_check_skips_poll_when_too_close(self, monkeypatch):
@@ -1494,14 +1527,14 @@ class TestAwaitTaskEventTool:
         mc = MagicMock()
         mc.agent_id = "operator"
         # Should NEVER be called — the deadline check returns first.
-        mc.list_blackboard = AsyncMock(return_value=[])
+        mc.get_task = AsyncMock(return_value=None)
 
         result = await await_task_event(
             "task_short", timeout_s=5, poll_interval_s=1, mesh_client=mc,
         )
         assert result.get("timed_out") is True
         assert result["task_id"] == "task_short"
-        mc.list_blackboard.assert_not_called()
+        mc.get_task.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_unexpected_exception_returns_error_envelope_not_empty(
@@ -1509,26 +1542,29 @@ class TestAwaitTaskEventTool:
     ):
         """Bug 2 fallback: an exception escaping the inner loop body
         (NOT routed through the inner ``except Exception`` that wraps
-        ``list_blackboard``) must surface via the outer try/except as a
+        ``get_task``) must surface via the outer try/except as a
         non-empty ``{"error": "await_task_event_unexpected: ..."}``
         envelope. An empty body would let the LLM treat the call as
         silent-success and break the awareness loop."""
         from src.agent.builtins import operator_tools
         from src.agent.builtins.operator_tools import await_task_event
 
-        class BoomList:
-            """Return value from ``list_blackboard``: looks list-shaped
-            until iteration, at which point it raises an exception that
-            the inner ``except Exception`` block does NOT cover (it
-            wraps the ``wait_for(list_blackboard(...))`` call only, not
-            the subsequent ``for entry in entries`` iteration)."""
+        class BoomRecord:
+            """Return value from ``get_task``: looks dict-shaped until the
+            status read, at which point ``.get`` raises an exception that
+            the inner ``except Exception`` block does NOT cover (it wraps
+            the ``wait_for(get_task(...))`` call only, not the subsequent
+            ``record.get("status")`` access in the loop body)."""
 
-            def __iter__(self):
+            def __bool__(self):
+                return True
+
+            def get(self, *_args, **_kw):
                 raise ZeroDivisionError("synthetic boom in loop body")
 
         # Shrink the per-poll budget so the deadline pre-check
         # (``remaining <= _AWAIT_TASK_EVENT_POLL_BUDGET_S``) does NOT
-        # short-circuit to timed_out before we ever call list_blackboard.
+        # short-circuit to timed_out before we ever call get_task.
         # Default budget is 15s; with timeout_s=5 the pre-check would
         # fire on iteration 1 and never exercise the iteration that
         # raises ZeroDivisionError.
@@ -1538,7 +1574,7 @@ class TestAwaitTaskEventTool:
 
         mc = MagicMock()
         mc.agent_id = "operator"
-        mc.list_blackboard = AsyncMock(return_value=BoomList())
+        mc.get_task = AsyncMock(return_value=BoomRecord())
 
         result = await await_task_event(
             "task_boom", timeout_s=5, poll_interval_s=1, mesh_client=mc,
@@ -1568,16 +1604,16 @@ class TestAwaitTaskEventTool:
 
         from src.agent.builtins.operator_tools import await_task_event
 
-        async def slow_list_blackboard(_prefix, *, global_scope=False):
+        async def slow_get_task(_task_id):
             # Sleep long enough that wait_for's timeout fires while we
-            # are awaiting list_blackboard — propagates a
-            # CancelledError into await_task_event.
+            # are awaiting get_task — propagates a CancelledError into
+            # await_task_event.
             await asyncio.sleep(10)
-            return []
+            return None
 
         mc = MagicMock()
         mc.agent_id = "operator"
-        mc.list_blackboard = slow_list_blackboard
+        mc.get_task = slow_get_task
 
         with pytest.raises(asyncio.TimeoutError):
             await asyncio.wait_for(
