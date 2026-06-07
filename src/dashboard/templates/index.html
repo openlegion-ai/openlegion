@@ -3309,6 +3309,19 @@
                               <div class="dash-input w-full text-gray-400 cursor-not-allowed">Not supported for this model</div>
                             </template>
                           </div>
+                          <!-- ── Execution caps (per-agent overrides) ── -->
+                          <div>
+                            <label class="text-xs text-gray-400 mb-1 block">Max output tokens</label>
+                            <input type="number" step="1" min="256" max="200000" x-model.number="editForm.max_output_tokens" class="dash-input w-full" placeholder="16384">
+                          </div>
+                          <div>
+                            <label class="text-xs text-gray-400 mb-1 block">Max tool rounds (per task)</label>
+                            <input type="number" step="1" min="1" max="1000" x-model.number="editForm.max_tool_rounds" class="dash-input w-full" placeholder="300">
+                          </div>
+                          <div>
+                            <label class="text-xs text-gray-400 mb-1 block">LLM timeout (s)</label>
+                            <input type="number" step="1" min="10" max="7200" x-model.number="editForm.llm_timeout_seconds" class="dash-input w-full" placeholder="1800">
+                          </div>
                           <!-- ── Capabilities ── -->
                           <div class="md:col-span-2 pt-2 mt-1 border-t border-gray-800/60">
                             <label class="text-xs text-gray-400 mb-1.5 block">Capabilities</label>
@@ -7455,6 +7468,41 @@
             </div>
           </div>
 
+          <!-- ── 1c. Embedding / Semantic memory ── -->
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5" x-show="systemSettings || !systemSettingsLoading">
+            <div class="flex items-center gap-2 mb-4">
+              <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
+              <h3 class="text-base font-medium text-gray-200">Semantic Memory</h3>
+              <span class="text-[11px] text-amber-500/70 ml-auto">restart required</span>
+            </div>
+            <div class="space-y-3" x-show="systemSettings">
+              <div class="text-xs text-gray-400 flex items-center gap-1.5"
+                :class="systemSettings?.embedding?.on ? 'text-green-400' : 'text-gray-400'">
+                <span class="w-1.5 h-1.5 rounded-full flex-shrink-0"
+                  :class="systemSettings?.embedding?.on ? 'bg-green-400' : 'bg-gray-600'"></span>
+                <span x-text="systemSettings?.embedding?.on
+                  ? ('Semantic memory: ON — ' + systemSettings.embedding.effective_model)
+                  : 'Semantic memory: OFF (keyword-only)'"></span>
+              </div>
+              <div>
+                <label class="text-xs text-gray-400 mb-1 flex items-center gap-1.5">Embedding Provider
+                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Powers semantic (meaning-based) memory search. Requires a SYSTEM API key from an embedding-capable provider (OpenAI / Voyage / Gemini / Cohere). "Auto" picks the best available key; "None" falls back to keyword-only search. Changing this restarts all agents.</span></span>
+                </label>
+                <select class="dash-select w-full"
+                  x-effect="if (systemSettings?.embedding) $el.value = systemSettings.embedding.configured_provider"
+                  @change="saveEmbeddingModel($event.target.value)">
+                  <option value="auto">Auto (best available key)</option>
+                  <template x-for="p in (systemSettings?.embedding?.available_providers || [])" :key="p">
+                    <option :value="p" x-text="p.charAt(0).toUpperCase()+p.slice(1)"></option>
+                  </template>
+                  <option value="none">None (keyword-only)</option>
+                  <option value="custom" disabled x-show="systemSettings?.embedding?.configured_provider === 'custom'"
+                    x-text="'Custom: ' + (systemSettings?.embedding?.configured || '')"></option>
+                </select>
+              </div>
+            </div>
+          </div>
+
           <!-- ── 2. Budgets ── -->
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-5" x-show="systemSettings || !systemSettingsLoading">
             <div class="flex items-center gap-2 mb-4">
@@ -7493,39 +7541,66 @@
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 chat-grid" x-show="systemSettings">
               <div>
                 <label class="text-xs text-gray-400 mb-1 flex items-center gap-1.5">Max Iterations (task mode)
-                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">How many LLM calls an agent gets to complete a single task. Each iteration can use tools or return a final answer. If the agent hasn't finished after this many iterations, the task fails. Default: 20.</span></span>
+                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">How many LLM calls an agent gets to complete a single task. Each iteration can use tools or return a final answer. If the agent hasn't finished after this many iterations, the task fails. Default: 60.</span></span>
                 </label>
-                <input type="number" step="1" min="1" max="100"
+                <input type="number" step="1" min="1" max="500"
                   class="dash-input w-full"
                   :value="systemSettings?.max_iterations"
                   @change="saveSystemSetting('max_iterations', $event.target.value)">
               </div>
               <div>
                 <label class="text-xs text-gray-400 mb-1 flex items-center gap-1.5">Max Tool Rounds (chat)
-                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Per user message, how many consecutive tool calls the agent can chain before being forced to respond with text. Prevents runaway tool loops in a single turn. Default: 30.</span></span>
+                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Per user message, how many consecutive tool calls the agent can chain before being forced to respond with text. Prevents runaway tool loops in a single turn. Default: 500.</span></span>
                 </label>
-                <input type="number" step="1" min="1" max="200"
+                <input type="number" step="1" min="1" max="1000"
                   class="dash-input w-full"
                   :value="systemSettings?.chat_max_tool_rounds"
                   @change="saveSystemSetting('chat_max_tool_rounds', $event.target.value)">
               </div>
               <div>
                 <label class="text-xs text-gray-400 mb-1 flex items-center gap-1.5">Max Total Rounds (chat)
-                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Total tool rounds across an entire chat session before auto-compaction resets the counter. Limits how long a single conversation can run. The session auto-continues up to 5 times. Default: 200.</span></span>
+                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Total tool rounds across an entire chat session before auto-compaction resets the counter. Limits how long a single conversation can run. The session auto-continues up to 5 times. Default: 1000.</span></span>
                 </label>
-                <input type="number" step="1" min="10" max="1000"
+                <input type="number" step="1" min="10" max="5000"
                   class="dash-input w-full"
                   :value="systemSettings?.chat_max_total_rounds"
                   @change="saveSystemSetting('chat_max_total_rounds', $event.target.value)">
               </div>
               <div>
                 <label class="text-xs text-gray-400 mb-1 flex items-center gap-1.5">Tool Timeout (seconds)
-                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Hard ceiling for any single tool execution (shell command, browser action, HTTP request). If a tool exceeds this, it's killed and the agent gets an error result. Default: 300s (5 min).</span></span>
+                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Hard ceiling for any single tool execution (shell command, browser action, HTTP request). If a tool exceeds this, it's killed and the agent gets an error result. Default: 900s (15 min).</span></span>
                 </label>
                 <input type="number" step="1" min="10" max="3600"
                   class="dash-input w-full"
                   :value="systemSettings?.tool_timeout"
                   @change="saveSystemSetting('tool_timeout', $event.target.value)">
+              </div>
+              <div>
+                <label class="text-xs text-gray-400 mb-1 flex items-center gap-1.5">Max Tool Rounds (per task)
+                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Per-task convergence budget: tool rounds a handed-off/task run gets before it's closed as blocked. Default: 300.</span></span>
+                </label>
+                <input type="number" step="1" min="1" max="1000"
+                  class="dash-input w-full"
+                  :value="systemSettings?.task_max_tool_rounds"
+                  @change="saveSystemSetting('task_max_tool_rounds', $event.target.value)">
+              </div>
+              <div>
+                <label class="text-xs text-gray-400 mb-1 flex items-center gap-1.5">LLM Call Timeout (seconds)
+                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Per LLM call timeout. With streaming this is an idle (between-token) bound. Raise for agents that emit very large outputs. Default: 1800.</span></span>
+                </label>
+                <input type="number" step="1" min="10" max="7200"
+                  class="dash-input w-full"
+                  :value="systemSettings?.llm_timeout_seconds"
+                  @change="saveSystemSetting('llm_timeout_seconds', $event.target.value)">
+              </div>
+              <div>
+                <label class="text-xs text-gray-400 mb-1 flex items-center gap-1.5">Lane Wall-clock (seconds)
+                  <span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Hard watchdog: max wall-clock a single task may hold an agent's queue before it's force-killed. Default: 14400.</span></span>
+                </label>
+                <input type="number" step="1" min="30" max="86400"
+                  class="dash-input w-full"
+                  :value="systemSettings?.lane_timeout_seconds"
+                  @change="saveSystemSetting('lane_timeout_seconds', $event.target.value)">
               </div>
             </div>
           </div>

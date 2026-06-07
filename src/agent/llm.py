@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 
+from src.shared import limits
 from src.shared.types import APIProxyRequest, LLMResponse, ToolCallInfo
 from src.shared.utils import setup_logging
 
@@ -38,7 +39,7 @@ class LLMClient:
         default_model: str = "openai/gpt-4o-mini",
         embedding_model: str = "",
         thinking: str = "off",
-        max_output_tokens: int = 8192,
+        max_output_tokens: int = 16384,
     ):
         if thinking and thinking not in self.VALID_THINKING_LEVELS:
             logger.warning(
@@ -58,9 +59,33 @@ class LLMClient:
         # tool calls with large argument payloads (e.g. write_file of a
         # 15-20KB file): the model hit the cap mid-tool-call, the JSON never
         # closed, and the call failed permanently with "Truncated tool-call
-        # arguments". 8192 is the safe floor across common modern models
-        # (gpt-4o family = 16384, Claude 3.5 Sonnet = 8192, Claude 4.x = 64K+).
+        # arguments". 16384 is a generous default that suits gpt-4o (16384)
+        # and Claude 4.x (64K+); models that cap lower (e.g. Claude 3.5 Sonnet
+        # at 8192) need a per-agent override down.
         self.max_output_tokens = max_output_tokens
+        # LLM call timeout, resolved from the central limits table (env ->
+        # high default). With streaming task execution this is an *idle*
+        # (between-chunk) ceiling; on the non-streaming path it is the total
+        # response wait. The old hard-coded 120s could not accommodate the
+        # large generations the per-agent max_output_tokens permits (an 80k
+        # token output cannot complete in 120s) — that mismatch surfaced as
+        # httpx.ReadTimeout and failed the task. See src/shared/limits.py.
+        self.timeout_seconds = limits.resolve("llm_timeout_seconds")
+        # Consistency guardrail: the timeout must be able to accommodate the
+        # output the agent is permitted to generate, or large completions
+        # ReadTimeout and fail the task (the exact mismatch that bit the
+        # production fleet). Warn loudly rather than silently shipping a
+        # self-contradictory config. ~20 tok/s is a deliberately conservative
+        # floor (real throughput is several times higher).
+        _needed = self.max_output_tokens / 20
+        if self.timeout_seconds < _needed:
+            logger.warning(
+                "llm_timeout_seconds=%ds may be too low for max_output_tokens=%d "
+                "(needs ~%ds at a conservative 20 tok/s) — large generations may "
+                "ReadTimeout. Raise OPENLEGION_LLM_TIMEOUT_SECONDS or lower the "
+                "output cap.",
+                self.timeout_seconds, self.max_output_tokens, int(_needed),
+            )
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
         self._auth_token: str = os.environ.get("MESH_AUTH_TOKEN", "")
@@ -74,7 +99,7 @@ class LLMClient:
                 headers: dict[str, str] = {}
                 if self._auth_token:
                     headers["Authorization"] = f"Bearer {self._auth_token}"
-                self._client = httpx.AsyncClient(timeout=120, headers=headers)
+                self._client = httpx.AsyncClient(timeout=self.timeout_seconds, headers=headers)
             return self._client
 
     async def close(self) -> None:
@@ -169,7 +194,7 @@ class LLMClient:
         # whack-a-mole'ing message text.
         _retryable = (
             "rate limit", "ratelimit", "429", "too many requests",
-            "overloaded", "503", "empty response", "retrying may help",
+            "overloaded", "503", "529", "empty response", "retrying may help",
         )
         if any(kw in error_msg.lower() for kw in _retryable):
             raise LLMRetryableError(f"{prefix}: {error_msg}")
@@ -241,7 +266,7 @@ class LLMClient:
         params.update(kwargs)
         self._apply_thinking_params(params, model, kwargs)
 
-        request = APIProxyRequest(service="llm", action="chat", params=params, timeout=120)
+        request = APIProxyRequest(service="llm", action="chat", params=params, timeout=self.timeout_seconds)
 
         from src.shared.trace import trace_headers
 
@@ -302,7 +327,7 @@ class LLMClient:
         params.update(kwargs)
         self._apply_thinking_params(params, model, kwargs)
 
-        request = APIProxyRequest(service="llm", action="chat", params=params, timeout=120)
+        request = APIProxyRequest(service="llm", action="chat", params=params, timeout=self.timeout_seconds)
 
         from src.shared.trace import trace_headers
 
@@ -313,7 +338,7 @@ class LLMClient:
             json=request.model_dump(mode="json"),
             params={"agent_id": self.agent_id},
             headers=trace_headers(),
-            timeout=120,
+            timeout=self.timeout_seconds,
         ) as response:
             response.raise_for_status()
             async for line in response.aiter_lines():
@@ -352,6 +377,64 @@ class LLMClient:
                         model=data.get("model", ""),
                     )
                     yield {"type": "done", "response": llm_resp}
+
+    async def chat_collect(
+        self,
+        system: str,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float = 0.7,
+        **kwargs,
+    ) -> LLMResponse:
+        """Run a completion over the streaming endpoint, returning the final
+        assembled ``LLMResponse``.
+
+        Streaming makes the httpx read timeout a per-chunk (idle) bound instead
+        of a total-response bound, so a large generation the agent's
+        ``max_output_tokens`` permits can't ``ReadTimeout`` mid-flight — the
+        failure that broke task execution on the fleet. Contract-identical to
+        ``chat``: the stream's terminal ``done`` frame carries the same
+        fully-parsed ``LLMResponse`` (content, thinking, tool_calls, tokens).
+
+        Falls back to non-streaming ``chat`` only when the stream ends without
+        a terminal frame or the transport fails for a non-classified reason
+        (mirrors the documented ``chat_stream`` fallback intent) — that
+        fallback is resilience, not a toggle. Classified errors (auth / config
+        / retryable) and other RuntimeErrors propagate to
+        ``_llm_call_with_retry`` so its backoff still applies.
+        """
+        _passthru = dict(
+            tools=tools, model=model, max_tokens=max_tokens,
+            temperature=temperature, **kwargs,
+        )
+        from src.shared.errors import LLMAuthError, LLMConfigError
+        final: LLMResponse | None = None
+        try:
+            async for chunk in self.chat_stream(system, messages, **_passthru):
+                if chunk.get("type") == "done":
+                    final = chunk.get("response")
+        except (LLMRetryableError, LLMAuthError, LLMConfigError):
+            raise  # classified errors -> _llm_call_with_retry handles backoff
+        except httpx.HTTPError as e:
+            # Only genuine transport/HTTP failures fall back to non-streaming.
+            # Everything else propagates untouched: non-retryable application
+            # errors (SSE error frames, budget) arrive as plain RuntimeError,
+            # and any unexpected error (parsing bug, etc.) must surface — not be
+            # masked by a second, billable non-streaming generation after the
+            # stream may already have produced/billed tokens.
+            logger.warning(
+                "Streaming transport failed (%s); falling back to non-streaming",
+                type(e).__name__,
+            )
+            return await self.chat(system, messages, **_passthru)
+        if final is None:
+            logger.warning(
+                "Stream ended without a final frame; falling back to non-streaming",
+            )
+            return await self.chat(system, messages, **_passthru)
+        return final
 
     async def embed(self, text: str, model: str | None = None) -> list[float]:
         """Generate an embedding vector through the mesh proxy."""

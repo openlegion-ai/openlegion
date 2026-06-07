@@ -1758,7 +1758,7 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     # Operator self-notes + workspace management. Workspace file caps
     # already enforce safety on writes; write_file is intentionally NOT
     # granted (operator orchestrates, doesn't author arbitrary files).
-    "memory_save", "memory_search",
+    "memory_save", "memory_search", "memory_think",
     "update_workspace", "read_file",
     # Internet access (gated by ``can_use_internet`` permission — the
     # agent's runtime filters these out of the effective allowlist when

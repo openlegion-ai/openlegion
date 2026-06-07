@@ -1,0 +1,106 @@
+"""Unit tests for LLMClient.chat_collect (streaming task execution, P3)."""
+
+from unittest.mock import AsyncMock
+
+import httpx
+import pytest
+
+from src.agent.llm import LLMClient, LLMRetryableError
+from src.shared.types import LLMResponse
+
+
+def _client() -> LLMClient:
+    return LLMClient(mesh_url="http://mesh.invalid", agent_id="a")
+
+
+@pytest.mark.asyncio
+async def test_chat_collect_returns_done_response():
+    c = _client()
+    resp = LLMResponse(content="hi", tokens_used=5)
+
+    async def fake_stream(*a, **k):
+        yield {"type": "text_delta", "content": "h"}
+        yield {"type": "done", "response": resp}
+
+    c.chat_stream = fake_stream
+    out = await c.chat_collect("sys", [{"role": "user", "content": "x"}])
+    assert out is resp
+
+
+@pytest.mark.asyncio
+async def test_chat_collect_falls_back_on_stream_transport_error():
+    c = _client()
+    fallback = LLMResponse(content="fb", tokens_used=1)
+
+    async def boom(*a, **k):
+        raise httpx.ConnectError("stream endpoint down")
+        yield  # pragma: no cover — makes this an async generator
+
+    c.chat_stream = boom
+    c.chat = AsyncMock(return_value=fallback)
+    out = await c.chat_collect("sys", [])
+    assert out is fallback
+    c.chat.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_chat_collect_propagates_runtime_error_without_second_call():
+    # A non-retryable SSE error frame (or budget) arrives as plain RuntimeError
+    # — it must propagate, NOT trigger a second (billable) non-streaming call.
+    c = _client()
+
+    async def app_error(*a, **k):
+        raise RuntimeError("LLM stream error: invalid request")
+        yield  # pragma: no cover
+
+    c.chat_stream = app_error
+    c.chat = AsyncMock()
+    with pytest.raises(RuntimeError):
+        await c.chat_collect("sys", [])
+    c.chat.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_chat_collect_falls_back_when_no_done_frame():
+    c = _client()
+    fallback = LLMResponse(content="fb", tokens_used=1)
+
+    async def only_text(*a, **k):
+        yield {"type": "text_delta", "content": "h"}
+
+    c.chat_stream = only_text
+    c.chat = AsyncMock(return_value=fallback)
+    out = await c.chat_collect("sys", [])
+    assert out is fallback
+
+
+@pytest.mark.asyncio
+async def test_chat_collect_propagates_classified_errors():
+    c = _client()
+
+    async def transient(*a, **k):
+        raise LLMRetryableError("overloaded")
+        yield  # pragma: no cover
+
+    c.chat_stream = transient
+    c.chat = AsyncMock()
+    with pytest.raises(LLMRetryableError):
+        await c.chat_collect("sys", [])
+    c.chat.assert_not_called()  # classified errors must NOT silently fall back
+
+
+@pytest.mark.asyncio
+async def test_chat_collect_does_not_swallow_non_transport_errors():
+    # A non-transport, non-RuntimeError exception (e.g. a parsing bug) must
+    # propagate, not be masked by a second non-streaming call (Codex finding).
+    c = _client()
+
+    async def bug(*a, **k):
+        raise KeyError("unexpected stream shape")
+        yield  # pragma: no cover
+
+    c.chat_stream = bug
+    c.chat = AsyncMock()
+    with pytest.raises(KeyError):
+        await c.chat_collect("sys", [])
+    c.chat.assert_not_called()

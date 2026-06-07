@@ -28,7 +28,7 @@ def _default_budget() -> dict:
         if p.exists():
             data = json.loads(p.read_text())
             return {
-                "daily_usd": data.get("default_daily_budget", 10.0),
+                "daily_usd": data.get("default_daily_budget", 50.0),
                 "monthly_usd": data.get("default_monthly_budget", 200.0),
             }
     except (json.JSONDecodeError, OSError):

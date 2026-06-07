@@ -2458,3 +2458,22 @@ class TestOnWsEventHandlersForLiveCoverage:
 
     def test_blackboard_delete_handler_present(self):
         assert "evt.type === 'blackboard_delete'" in _APP_JS_TEXT
+
+
+class TestLimitsConfigUICompleteness:
+    """Every dashboard-surfaced limit must have a global UI input, so a new
+    limit can't be added to limits.DASHBOARD_GLOBAL_KEYS without its control
+    (the drift Codex flagged)."""
+
+    def test_every_global_limit_has_a_settings_input(self):
+        from src.shared import limits
+        missing = [
+            k for k in limits.DASHBOARD_GLOBAL_KEYS
+            if f"saveSystemSetting('{k}'" not in _INDEX_HTML
+        ]
+        assert not missing, f"global limits missing a system-settings input: {missing}"
+
+    def test_per_agent_caps_wired_in_edit_form(self):
+        # The three per-agent caps must be bound in the agent edit panel.
+        for field in ("max_output_tokens", "max_tool_rounds", "llm_timeout_seconds"):
+            assert f"editForm.{field}" in _INDEX_HTML, f"{field} missing from agent edit UI"

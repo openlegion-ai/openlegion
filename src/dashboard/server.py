@@ -46,6 +46,7 @@ from pydantic import ValidationError
 
 from src.cli.proxy import build_proxy_env_vars, resolve_agent_proxy
 from src.dashboard.auth import verify_session_cookie
+from src.shared import limits as _limits
 from src.shared.paths import resolve_under_root
 from src.shared.sqlite_helpers import open_db
 from src.shared.types import CRED_HANDLE_RE, MCPServerConfig
@@ -2359,7 +2360,8 @@ def create_dashboard_router(
             acfg = cfg.get("agents", {}).get(name, {})
             if template:
                 role = acfg.get("role", role)
-            tools_dir = os.path.abspath(acfg.get("tools_dir", ""))
+            _td = acfg.get("tools_dir", "")
+            tools_dir = os.path.abspath(_td) if _td else ""
             # Build per-agent env overrides (no shared extra_env mutation)
             agent_env: dict[str, str] = {}
             for env_key, cfg_key in (
@@ -2589,6 +2591,18 @@ def create_dashboard_router(
             "color": agent_cfg.get("color"),
             "budget": agent_cfg.get("budget", {}),
             "thinking": agent_cfg.get("thinking", "off") or "off",
+            # Execution caps — fall back to the EFFECTIVE resolved value so
+            # the edit form shows what the agent actually runs with when no
+            # explicit per-agent override is set.
+            "max_output_tokens": agent_cfg.get("max_output_tokens", 16384) or 16384,
+            "max_tool_rounds": (
+                agent_cfg.get("max_tool_rounds")
+                or _limits.resolve("task_max_tool_rounds")
+            ),
+            "llm_timeout_seconds": (
+                agent_cfg.get("llm_timeout_seconds")
+                or _limits.resolve("llm_timeout_seconds")
+            ),
             # MCP server entries are masked: env values (which may be
             # plaintext secrets or ``$CRED{name}`` handles pointing at
             # one) are NEVER returned. The UI binds to ``env_keys`` to
@@ -2705,7 +2719,7 @@ def create_dashboard_router(
         # response the caller sees.
         pending_writes: list[tuple[str, object]] = []
         budget_apply: dict[str, float] | None = None
-        runtime_payload: dict[str, str] = {}
+        runtime_payload: dict[str, object] = {}
         mcp_touched = False
 
         if "model" in body:
@@ -2769,6 +2783,78 @@ def create_dashboard_router(
                 )
             pending_writes.append(("thinking", thinking_val))
             runtime_payload["thinking"] = thinking_val
+
+        # ── Execution caps (per-agent overrides) ──────────────────
+        # The agent /config endpoint keys the output cap as ``max_tokens``,
+        # so runtime_payload uses that name while the YAML field stays
+        # ``max_output_tokens`` (matching agents.yaml / set_llm_max_tokens_env).
+        if "max_output_tokens" in body:
+            raw_mot = body["max_output_tokens"]
+            if isinstance(raw_mot, bool):
+                raise HTTPException(
+                    status_code=400,
+                    detail="max_output_tokens must be an integer between 256 and 200000",
+                )
+            try:
+                mot = int(raw_mot)
+            except (ValueError, TypeError):
+                raise HTTPException(
+                    status_code=400,
+                    detail="max_output_tokens must be an integer between 256 and 200000",
+                )
+            if mot < 256 or mot > 200000:
+                raise HTTPException(
+                    status_code=400,
+                    detail="max_output_tokens must be between 256 and 200000",
+                )
+            pending_writes.append(("max_output_tokens", mot))
+            runtime_payload["max_tokens"] = mot
+
+        if "max_tool_rounds" in body:
+            raw_mtr = body["max_tool_rounds"]
+            _lo, _hi = _limits.LIMIT_SPECS["task_max_tool_rounds"][1:]
+            if isinstance(raw_mtr, bool):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"max_tool_rounds must be an integer between {_lo} and {_hi}",
+                )
+            try:
+                mtr = int(raw_mtr)
+            except (ValueError, TypeError):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"max_tool_rounds must be an integer between {_lo} and {_hi}",
+                )
+            if mtr < _lo or mtr > _hi:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"max_tool_rounds must be between {_lo} and {_hi}",
+                )
+            pending_writes.append(("max_tool_rounds", mtr))
+            runtime_payload["max_tool_rounds"] = mtr
+
+        if "llm_timeout_seconds" in body:
+            raw_lts = body["llm_timeout_seconds"]
+            _lo, _hi = _limits.LIMIT_SPECS["llm_timeout_seconds"][1:]
+            if isinstance(raw_lts, bool):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"llm_timeout_seconds must be an integer between {_lo} and {_hi}",
+                )
+            try:
+                lts = int(raw_lts)
+            except (ValueError, TypeError):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"llm_timeout_seconds must be an integer between {_lo} and {_hi}",
+                )
+            if lts < _lo or lts > _hi:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"llm_timeout_seconds must be between {_lo} and {_hi}",
+                )
+            pending_writes.append(("llm_timeout_seconds", lts))
+            runtime_payload["llm_timeout_seconds"] = lts
 
         if "mcp_servers" in body:
             mcp_val = body["mcp_servers"]
@@ -3036,8 +3122,10 @@ def create_dashboard_router(
             restart_env.update(_proxy_env)
             # Per-agent output-token cap → LLM_MAX_TOKENS so an edit_agent
             # change survives a single-agent dashboard restart (not just the
-            # live hot-reload). Absent = LLMClient default 8192.
+            # live hot-reload). Absent = LLMClient default 16384.
             set_llm_max_tokens_env(restart_env, agent_cfg)
+            from src.shared.limits import set_llm_limits_env
+            set_llm_limits_env(restart_env, agent_cfg)
             url = await asyncio.wait_for(
                 asyncio.to_thread(
                     runtime.start_agent,
@@ -6070,18 +6158,26 @@ def create_dashboard_router(
 
     # ── System settings (consolidated) ────────────────────────
 
+    # Execution-limit keys whose ranges/defaults are owned by
+    # src/shared/limits.py (the single source of truth). The list of which
+    # limits the dashboard surfaces also lives there (DASHBOARD_GLOBAL_KEYS),
+    # so the UI can never silently diverge from / drop a LIMIT_SPECS entry.
+    _LIMIT_KEYS = _limits.DASHBOARD_GLOBAL_KEYS
+
     _SYSTEM_SETTINGS_VALIDATORS: dict[str, tuple[type, float, float]] = {
         "default_daily_budget": (float, 0.01, 10000),
         "default_monthly_budget": (float, 0.01, 100000),
-        "max_iterations": (int, 1, 100),
-        "chat_max_tool_rounds": (int, 1, 200),
-        "chat_max_total_rounds": (int, 10, 1000),
         "tool_timeout": (int, 10, 3600),
         "browser_idle_timeout": (int, 5, 120),
         "health_poll_interval": (int, 5, 300),
         "health_max_failures": (int, 1, 20),
         "health_restart_limit": (int, 0, 20),
         "health_restart_window": (int, 60, 86400),
+        # Execution limits sourced from limits.py (default, lo, hi).
+        **{
+            k: (int, _limits.LIMIT_SPECS[k][1], _limits.LIMIT_SPECS[k][2])
+            for k in _LIMIT_KEYS
+        },
     }
 
     # Settings seeded into agent containers as env vars at launch — they
@@ -6093,20 +6189,21 @@ def create_dashboard_router(
     _RESTART_REQUIRED_SETTINGS: frozenset[str] = frozenset({
         "max_iterations", "chat_max_tool_rounds",
         "chat_max_total_rounds", "tool_timeout",
+        "task_max_tool_rounds", "llm_timeout_seconds",
+        "lane_timeout_seconds",
     })
 
     _SYSTEM_SETTINGS_DEFAULTS: dict[str, float | int] = {
-        "default_daily_budget": 10.0,
+        "default_daily_budget": 50.0,
         "default_monthly_budget": 200.0,
-        "max_iterations": 20,
-        "chat_max_tool_rounds": 30,
-        "chat_max_total_rounds": 200,
-        "tool_timeout": 300,
+        "tool_timeout": 900,
         "browser_idle_timeout": 30,
         "health_poll_interval": 30,
         "health_max_failures": 3,
         "health_restart_limit": 3,
         "health_restart_window": 3600,
+        # Execution-limit defaults sourced from limits.py.
+        **{k: _limits.LIMIT_SPECS[k][0] for k in _LIMIT_KEYS},
     }
 
     @api_router.get("/api/system-settings")
@@ -6120,6 +6217,46 @@ def create_dashboard_router(
         # Include default_model from mesh.yaml
         cfg = _load_config()
         result["default_model"] = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+
+        # Embedding / semantic-memory selection + resolved status.
+        from src.cli.runtime import (
+            _EMBEDDING_PROVIDER_LADDER,
+            _embedding_providers_with_keys,
+            _resolve_embedding,
+        )
+
+        raw_embed = cfg.get("llm", {}).get("embedding_model")
+        keyed = _embedding_providers_with_keys()
+        eff_model, _eff_dim = _resolve_embedding(raw_embed, keyed)
+        if raw_embed is None:
+            configured_provider = "auto"
+        elif str(raw_embed).lower() == "none":
+            configured_provider = "none"
+        else:
+            configured_provider = next(
+                (p for p, m, _d in _EMBEDDING_PROVIDER_LADDER if m == raw_embed),
+                "custom",
+            )
+        # An explicit configured model bypasses the resolver's key check, so
+        # verify the provider actually has a key — otherwise the status would
+        # claim ON after the key was removed. A "custom" model outside the
+        # ladder can't be verified here, so it's trusted.
+        on = str(eff_model).lower() != "none"
+        if (
+            on and raw_embed is not None
+            and configured_provider != "custom"
+            and configured_provider not in keyed
+        ):
+            on = False
+        result["embedding"] = {
+            "configured": raw_embed,
+            "configured_provider": configured_provider,
+            "effective_model": eff_model,
+            "on": on,
+            "available_providers": [
+                p for p, _m, _d in _EMBEDDING_PROVIDER_LADDER if p in keyed
+            ],
+        }
         return result
 
     @api_router.post("/api/system-settings")
@@ -6188,6 +6325,65 @@ def create_dashboard_router(
 
         return {"model": model}
 
+    @api_router.post("/api/embedding-model")
+    async def api_set_embedding_model(request: Request) -> dict:
+        """Update the embedding model selection in mesh.yaml.
+
+        Body: ``{"value": "<provider>|none|auto"}``.
+          - ``"auto"``  → remove ``llm.embedding_model`` so the resolver
+            auto-picks the best available embedding-capable key.
+          - ``"none"``  → store ``"none"`` (keyword-only memory).
+          - a provider in the embedding ladder → store that provider's model.
+        """
+        import yaml
+
+        from src.cli.runtime import (
+            _EMBEDDING_PROVIDER_LADDER,
+            _embedding_providers_with_keys,
+        )
+
+        body = await request.json()
+        value = str(body.get("value", "")).strip()
+        if not value:
+            raise HTTPException(400, "value is required")
+
+        stored: str | None
+        if value == "auto":
+            stored = None
+        elif value.lower() == "none":
+            stored = "none"
+        else:
+            model = next(
+                (m for p, m, _d in _EMBEDDING_PROVIDER_LADDER if p == value), None
+            )
+            if model is None:
+                raise HTTPException(400, f"Unknown embedding provider: {value}")
+            # Reject a provider with no configured key — persisting it would
+            # mint a dead embedding model that agents restart into (the embed
+            # proxy authenticates by key only). Validate at config-write time,
+            # matching the model-allowlist convention used elsewhere.
+            if value not in _embedding_providers_with_keys():
+                raise HTTPException(
+                    400, f"No API key configured for embedding provider: {value}",
+                )
+            stored = model
+
+        config_path = Path("config/mesh.yaml")
+        mesh_cfg: dict = {}
+        if config_path.exists():
+            with open(config_path) as f:
+                mesh_cfg = yaml.safe_load(f) or {}
+        llm_cfg = mesh_cfg.setdefault("llm", {})
+        if stored is None:
+            llm_cfg.pop("embedding_model", None)
+        else:
+            llm_cfg["embedding_model"] = stored
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(config_path, "w") as f:
+            yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
+
+        return {"value": value, "embedding_model": stored}
+
     # ── Restart agents ────────────────────────────────────────
 
     @api_router.post("/api/restart-agents")
@@ -6214,6 +6410,9 @@ def create_dashboard_router(
                     "OPENLEGION_CHAT_MAX_TOOL_ROUNDS": "chat_max_tool_rounds",
                     "OPENLEGION_CHAT_MAX_TOTAL_ROUNDS": "chat_max_total_rounds",
                     "OPENLEGION_TOOL_TIMEOUT": "tool_timeout",
+                    "OPENLEGION_TASK_MAX_TOOL_ROUNDS": "task_max_tool_rounds",
+                    "OPENLEGION_LLM_TIMEOUT_SECONDS": "llm_timeout_seconds",
+                    "OPENLEGION_LANE_TIMEOUT_SECONDS": "lane_timeout_seconds",
                 }.items():
                     if cfg_key in sys_settings:
                         runtime.extra_env[env_key] = str(sys_settings[cfg_key])
@@ -6291,6 +6490,8 @@ def create_dashboard_router(
                 # Per-agent output-token cap → LLM_MAX_TOKENS (survives the
                 # dashboard "restart all agents" flow, not just hot-reload).
                 set_llm_max_tokens_env(_restart_env, agent_cfg)
+                from src.shared.limits import set_llm_limits_env
+                set_llm_limits_env(_restart_env, agent_cfg)
                 url = await loop.run_in_executor(
                     None,
                     lambda aid=agent_id, acfg=agent_cfg, sd=tools_dir, re=_restart_env: runtime.start_agent(

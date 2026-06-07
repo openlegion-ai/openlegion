@@ -93,6 +93,18 @@ _MAX_SOUL = 4_000
 _MAX_USER = 4_000
 _MAX_MEMORY = 16_000
 
+# MEMORY.md "compiled truth + timeline" structure. The compiled head
+# (delimited by these markers) PLUS a bounded slice of the NEWEST log entries
+# are injected into the system prompt every turn (so recently-learned facts
+# auto-surface); older log entries stay searchable via BM25 but are not
+# injected. ``_MEMORY_FILE_MAX`` bounds the whole file on disk — the log is
+# trimmed oldest-first, the compiled head is never trimmed.
+MEMORY_COMPILED_BEGIN = "<!-- compiled:begin -->"
+MEMORY_COMPILED_END = "<!-- compiled:end -->"
+_MEMORY_FILE_MAX = 64_000
+# Newest slice of the log injected alongside the compiled head.
+_MEMORY_RECENT_LOG_CHARS = 5_000
+
 # Public mapping for external consumers (tool response, dashboard).
 # Files not listed have no per-file bootstrap cap.
 BOOTSTRAP_CAPS: dict[str, int] = {
@@ -239,6 +251,7 @@ class WorkspaceManager:
     """Reads and writes the agent's persistent workspace files."""
 
     MEMORY_FILE = "MEMORY.md"
+    _CONSOLIDATION_STAMP = ".memory_consolidated"
     HEARTBEAT_FILE = "HEARTBEAT.md"
     DAILY_DIR = "memory"
     LEARNINGS_DIR = "learnings"
@@ -411,6 +424,94 @@ class WorkspaceManager:
         """Load MEMORY.md content."""
         return self._read_file(self.MEMORY_FILE) or ""
 
+    # ── MEMORY.md "compiled truth + timeline" ────────────────
+
+    def _split_memory(self, raw: str) -> tuple[str, str]:
+        """Split MEMORY.md into (compiled_head, log_tail).
+
+        The structure is renderer-owned: the begin marker is anchored to the
+        top of the file (after the "# Long-Term Memory" title). A file that
+        isn't in that exact shape — a legacy file, or one a user hand-edited via
+        the workspace editor — is treated as ALL head + empty log, so its
+        content is preserved (injected) rather than split on a stray marker in
+        the body and partially dropped.
+        """
+        body = raw.strip()
+        if body.startswith("# Long-Term Memory"):
+            body = body[len("# Long-Term Memory"):].lstrip()
+        if not body.startswith(MEMORY_COMPILED_BEGIN):
+            return raw.strip(), ""
+        inner = body[len(MEMORY_COMPILED_BEGIN):]
+        end = inner.find(MEMORY_COMPILED_END)
+        if end == -1:
+            return raw.strip(), ""
+        head = inner[:end].strip()
+        log = inner[end + len(MEMORY_COMPILED_END):].strip()
+        return head, log
+
+    @staticmethod
+    def _strip_markers(text: str) -> str:
+        """Remove any literal COMPILED marker strings from content so the only
+        structural markers in the file are the ones ``_render_memory`` emits.
+        Prevents marker text appearing inside a fact/log entry (or LLM-authored
+        head) from corrupting the head/log split on the next read."""
+        return text.replace(MEMORY_COMPILED_BEGIN, "").replace(MEMORY_COMPILED_END, "")
+
+    def _render_memory(self, head: str, log: str) -> str:
+        head = self._strip_markers(head.strip())
+        log = self._strip_markers(log.strip())
+        parts = [f"# Long-Term Memory\n\n{MEMORY_COMPILED_BEGIN}\n{head}\n{MEMORY_COMPILED_END}"]
+        if log:
+            parts.append(log)
+        return "\n\n".join(parts) + "\n"
+
+    def _trim_memory_log(self, log: str) -> str:
+        """Bound the on-disk log, keeping the most RECENT entries (tail)."""
+        if len(log) <= _MEMORY_FILE_MAX:
+            return log
+        tail = log[-_MEMORY_FILE_MAX:]
+        # Re-align to an entry boundary ("\n## ") so we don't start mid-entry.
+        idx = tail.find("\n## ")
+        if idx != -1:
+            tail = tail[idx + 1:]
+        return "... (older memory log trimmed)\n\n" + tail
+
+    def load_compiled_memory(self) -> str:
+        """Return only the consolidated MEMORY.md head (see get_memory_injection)."""
+        return self._split_memory(self._read_file(self.MEMORY_FILE) or "")[0]
+
+    def load_memory_log(self) -> str:
+        """Return only the append-only MEMORY.md log tail (BM25-searchable)."""
+        return self._split_memory(self._read_file(self.MEMORY_FILE) or "")[1]
+
+    def get_memory_injection(self) -> str:
+        """Compose the MEMORY.md content injected into the system prompt: the
+        consolidated compiled head PLUS a bounded slice of the NEWEST log
+        entries, so recently-learned facts auto-surface before consolidation
+        folds them into the head. Older log entries are recalled via
+        memory_search. The head is capped so head + recent fits the per-file
+        bootstrap cap.
+        """
+        raw = self._read_file(self.MEMORY_FILE) or ""
+        head, log = self._split_memory(raw)
+        head, log = head.strip(), log.strip()
+        recent = ""
+        if log:
+            recent = log[-_MEMORY_RECENT_LOG_CHARS:]
+            # Begin at an entry boundary so we never start mid-entry.
+            idx = recent.find("\n## ")
+            if idx != -1:
+                recent = recent[idx + 1:]
+            recent = recent.strip()
+        if not recent:
+            return head
+        # Reserve room for the recent slice so a large head can't crowd it out
+        # under the per-file cap applied by get_bootstrap_content.
+        head_cap = max(0, _MAX_MEMORY - _MEMORY_RECENT_LOG_CHARS - 32)
+        if len(head) > head_cap:
+            head = head[:head_cap]
+        return f"{head}\n\n## Recent\n\n{recent}".strip()
+
     def load_daily_logs(self, days: int = 2) -> str:
         """Load today's + yesterday's daily logs (most recent first)."""
         parts: list[str] = []
@@ -489,7 +590,13 @@ class WorkspaceManager:
             parts.append(_maybe_add_header("SYSTEM.md", system))
 
         for filename, cap in caps.items():
-            content = self._read_file(filename)
+            if filename == "MEMORY.md":
+                # Inject the consolidated head + a bounded slice of the NEWEST
+                # log entries (recent facts auto-surface); older log entries
+                # are recalled via memory_search/BM25.
+                content = self.get_memory_injection()
+            else:
+                content = self._read_file(filename)
             if not content or not content.strip():
                 continue
             content = content.strip()
@@ -535,11 +642,50 @@ class WorkspaceManager:
             f.write(line)
 
     def append_memory(self, content: str) -> None:
-        """Append to MEMORY.md (used by context manager before compacting)."""
+        """Append to the MEMORY.md LOG (the append-only 'timeline').
+
+        Only the compiled head is injected into the prompt; log entries are
+        recalled via memory_search/BM25. The log is trimmed (oldest first) to
+        keep the file bounded; the compiled head is never trimmed.
+        """
         path = self.root / self.MEMORY_FILE
-        with path.open("a") as f:
-            f.write(f"\n{content}\n")
+        raw = path.read_text(errors="replace") if path.exists() else ""
+        # _split_memory returns (whole-body, "") for a legacy/unstructured file,
+        # which migrates that body into the compiled head on this first write.
+        head, log = self._split_memory(raw)
+        new_log = (log + "\n\n" + content.strip()).strip() if log else content.strip()
+        new_log = self._trim_memory_log(new_log)
+        path.write_text(self._render_memory(head, new_log))
         self._bootstrap_cache = None  # MEMORY.md is part of bootstrap
+
+    def write_compiled_memory(self, head: str) -> None:
+        """Replace the compiled head (consolidation), preserving the log."""
+        path = self.root / self.MEMORY_FILE
+        raw = path.read_text(errors="replace") if path.exists() else ""
+        # Legacy/unstructured files split to an empty log, so consolidation
+        # cleanly supersedes the old body with the new head.
+        _, log = self._split_memory(raw)
+        path.write_text(self._render_memory(head, log))
+        self._bootstrap_cache = None
+
+    # ── Consolidation stamp (mirrors seed_bootstrap_greeting's sentinel) ──
+
+    def consolidation_due(self, min_interval_s: float) -> bool:
+        """True when the compiled head hasn't been re-derived within the window."""
+        p = self.root / self._CONSOLIDATION_STAMP
+        try:
+            if p.exists():
+                return (time.time() - p.stat().st_mtime) >= min_interval_s
+        except OSError:
+            pass
+        return True  # never consolidated → due
+
+    def mark_consolidated(self) -> None:
+        """Stamp the last-consolidation time (touch the sentinel)."""
+        try:
+            (self.root / self._CONSOLIDATION_STAMP).touch()
+        except OSError as e:
+            logger.debug("Failed to stamp consolidation: %s", e)
 
     # Files agents are allowed to update themselves
     AGENT_WRITABLE = frozenset({"HEARTBEAT.md", "USER.md", "SOUL.md", "INSTRUCTIONS.md", "INTERFACE.md"})

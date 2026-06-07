@@ -3678,6 +3678,9 @@ def create_mesh_app(
                     env_overrides[env_key] = val
             # Per-agent output-token cap → LLM_MAX_TOKENS (survives restart).
             set_llm_max_tokens_env(env_overrides, acfg)
+            # Per-agent round/timeout caps → OPENLEGION_* (survives restart).
+            from src.shared.limits import set_llm_limits_env
+            set_llm_limits_env(env_overrides, acfg)
 
             try:
                 # Start container with per-agent env_overrides (not shared extra_env)
@@ -7036,6 +7039,7 @@ def create_mesh_app(
             raise HTTPException(404, f"Agent '{agent_id}' not found")
         raw = agents[agent_id]
 
+        from src.shared import limits as _limits_mod
         # Translate yaml internals -> canonical edit_agent field names.
         full: dict = {
             "model": raw.get("model", ""),
@@ -7046,9 +7050,16 @@ def create_mesh_app(
             "soul": raw.get("initial_soul", ""),
             "heartbeat": raw.get("initial_heartbeat", ""),
             "interface": raw.get("initial_interface", ""),
-            # Falls back to the LLMClient default (8192) when never set, so the
+            # Falls back to the LLMClient default (16384) when never set, so the
             # operator sees the effective cap, not a blank.
-            "max_output_tokens": raw.get("max_output_tokens", 8192) or 8192,
+            "max_output_tokens": raw.get("max_output_tokens", 16384) or 16384,
+            # Per-agent operational caps — fall back to the EFFECTIVE value
+            # (env/global → default), so the operator sees what the agent
+            # actually runs, not just the static floor.
+            "max_tool_rounds": raw.get("max_tool_rounds")
+            or _limits_mod.resolve("task_max_tool_rounds"),
+            "llm_timeout_seconds": raw.get("llm_timeout_seconds")
+            or _limits_mod.resolve("llm_timeout_seconds"),
         }
 
         # Permissions live in PERMISSIONS_FILE, not agents.yaml. Load via
@@ -7405,14 +7416,17 @@ def create_mesh_app(
             "model": "model",
             "thinking": "thinking",
             "max_output_tokens": "max_tokens",
+            "max_tool_rounds": "max_tool_rounds",
+            "llm_timeout_seconds": "llm_timeout_seconds",
         }.get(field)
+        _int_push_fields = ("max_output_tokens", "max_tool_rounds", "llm_timeout_seconds")
         if (
             transport
             and agent_id in router.agent_registry
             and _config_push_key is not None
             and (
                 isinstance(new_value, str)
-                or (field == "max_output_tokens" and isinstance(new_value, int))
+                or (field in _int_push_fields and isinstance(new_value, int))
             )
         ):
             try:
@@ -7688,6 +7702,18 @@ def create_mesh_app(
                 raise HTTPException(
                     400, "max_output_tokens must be between 256 and 200000",
                 )
+        elif field in ("max_tool_rounds", "llm_timeout_seconds"):
+            # Per-agent operational caps. Re-enforce server-side; range is the
+            # central limits clamp spec (single source of truth). bool is an
+            # int subclass — reject it so True/False can't slip through as 1/0.
+            from src.shared import limits as _limits
+            if not isinstance(new_value, int) or isinstance(new_value, bool):
+                raise HTTPException(400, f"{field} must be an integer")
+            _d, _lo, _hi = _limits.LIMIT_SPECS[_limits.AGENT_CONFIG_KEYS[field]]
+            if not (_lo <= new_value <= _hi):
+                raise HTTPException(
+                    400, f"{field} must be between {_lo} and {_hi}",
+                )
         elif field == "permissions":
             # Finding H1 (May 2026 remediation): re-enforce the operator
             # permission ceiling server-side. The operator tool's
@@ -7729,13 +7755,25 @@ def create_mesh_app(
         else:
             yaml_key = _CONFIG_FIELD_MAP.get(field, field)
             # For max_output_tokens, default the "before" value to the
-            # effective cap (LLMClient default 8192) rather than "" when it
+            # effective cap (LLMClient default 16384) rather than "" when it
             # was never set. This keeps the audit before-value sensible AND
             # makes Undo work end-to-end: the undo writes back an int, which
             # the hot-reload push forwards to the agent /config (the push
             # guard requires an int) so the live agent actually drops back to
-            # 8192 instead of silently keeping the raised cap until restart.
-            _missing_default = 8192 if field == "max_output_tokens" else ""
+            # 16384 instead of silently keeping the raised cap until restart.
+            # Default the audit "before" value to the effective limit (not "")
+            # when a field was never set, so Undo writes back a usable int that
+            # the hot-reload push will forward to the live agent.
+            if field == "max_output_tokens":
+                _missing_default: object = 16384
+            elif field in ("max_tool_rounds", "llm_timeout_seconds"):
+                # Resolve the EFFECTIVE value (env/global → built-in default),
+                # not the static default, so Undo restores what the agent was
+                # actually running, not the floor.
+                from src.shared import limits as _limits
+                _missing_default = _limits.resolve(_limits.AGENT_CONFIG_KEYS[field])
+            else:
+                _missing_default = ""
             old_value = agents[agent_id].get(yaml_key, _missing_default)
 
         # Apply directly via the same write helper used by the confirm

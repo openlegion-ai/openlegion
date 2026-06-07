@@ -456,7 +456,8 @@ class REPLSession:
         # Reload permissions so the mesh grants the new agent API access
         self.ctx.permissions.reload()
         agent_cfg_data = _load_config().get("agents", {}).get(new_name, {})
-        tools_dir = os.path.abspath(agent_cfg_data.get("tools_dir", ""))
+        _td = agent_cfg_data.get("tools_dir", "")
+        tools_dir = os.path.abspath(_td) if _td else ""
         add_mcp_servers = agent_cfg_data.get("mcp_servers") or None
         add_thinking = agent_cfg_data.get("thinking", "")
         # Build per-agent env overrides (no shared extra_env mutation)
@@ -1403,7 +1404,8 @@ class REPLSession:
         fresh_cfg = _load_config()
         agent_cfg = fresh_cfg.get("agents", {}).get(name, {})
         default_model = fresh_cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
-        tools_dir = os.path.abspath(agent_cfg.get("tools_dir", ""))
+        _td = agent_cfg.get("tools_dir", "")
+        tools_dir = os.path.abspath(_td) if _td else ""
         agent_model = agent_cfg.get("model", default_model)
         agent_mcp_servers = agent_cfg.get("mcp_servers") or None
         agent_thinking = agent_cfg.get("thinking", "")
@@ -1415,6 +1417,8 @@ class REPLSession:
             restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
         # Per-agent output-token cap → LLM_MAX_TOKENS (survives /restart).
         set_llm_max_tokens_env(restart_env, agent_cfg)
+        from src.shared.limits import set_llm_limits_env
+        set_llm_limits_env(restart_env, agent_cfg)
 
         # Start new container
         url = self.ctx.runtime.start_agent(

@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.cli.runtime import _default_embedding_model
+from src.cli.runtime import _embedding_providers_with_keys, _resolve_embedding
 from src.host.runtime import (
     DockerBackend,
     RuntimeBackend,
@@ -463,24 +463,57 @@ class TestShouldUseHostNetwork:
             assert _should_use_host_network() is False
 
 
-# ── _default_embedding_model ─────────────────────────────────
+# ── _resolve_embedding / _embedding_providers_with_keys ──────
 
-class TestDefaultEmbeddingModel:
-    def test_openai_provider(self):
-        assert _default_embedding_model("openai/gpt-4o-mini") == "text-embedding-3-small"
+class TestResolveEmbedding:
+    def test_explicit_override_wins(self):
+        # An explicit operator choice is honored even with other keys present.
+        assert _resolve_embedding("voyage/voyage-3.5", {"openai"}) == ("voyage/voyage-3.5", 1024)
 
-    def test_gpt_prefix(self):
-        assert _default_embedding_model("gpt-4o") == "text-embedding-3-small"
+    def test_explicit_none_disables(self):
+        assert _resolve_embedding("none", {"openai"}) == ("none", 1536)
 
-    def test_gemini_no_compatible_embeddings(self):
-        """Gemini embedding models are 768-dim, incompatible with EMBEDDING_DIM=1536."""
-        assert _default_embedding_model("gemini/gemini-2.0-flash") == "none"
+    def test_openai_key_selected(self):
+        assert _resolve_embedding(None, {"openai"}) == ("text-embedding-3-small", 1536)
 
-    def test_anthropic_no_embeddings(self):
-        assert _default_embedding_model("anthropic/claude-haiku-4-5-20251001") == "none"
+    def test_voyage_for_anthropic_chat_deployment(self):
+        # No OpenAI key, but a Voyage key — Anthropic-chat users still get
+        # semantic memory (Voyage is Anthropic's recommended embedder).
+        assert _resolve_embedding(None, {"voyage"}) == ("voyage/voyage-3.5", 1024)
 
-    def test_unknown_provider_no_embeddings(self):
-        assert _default_embedding_model("deepseek/deepseek-chat") == "none"
+    def test_ladder_prefers_openai(self):
+        assert _resolve_embedding(
+            None, {"openai", "voyage", "cohere"},
+        ) == ("text-embedding-3-small", 1536)
+
+    def test_no_keys_keyword_only(self):
+        assert _resolve_embedding(None, set()) == ("none", 1536)
+
+    def test_unknown_override_uses_default_dim(self):
+        assert _resolve_embedding("some/custom-embed", set()) == ("some/custom-embed", 1536)
+
+
+class TestEmbeddingProvidersWithKeys:
+    def test_detects_configured_key(self):
+        with patch.dict(
+            "os.environ", {"OPENLEGION_SYSTEM_VOYAGE_API_KEY": "vk-test"}, clear=False,
+        ):
+            assert "voyage" in _embedding_providers_with_keys()
+
+    def test_ignores_non_ladder_or_unkeyed(self):
+        # A provider with no key must not appear. Clear the four ladder keys,
+        # set only cohere, and assert the others are absent.
+        env = {
+            "OPENLEGION_SYSTEM_OPENAI_API_KEY": "",
+            "OPENLEGION_SYSTEM_VOYAGE_API_KEY": "",
+            "OPENLEGION_SYSTEM_GEMINI_API_KEY": "",
+            "OPENLEGION_SYSTEM_COHERE_API_KEY": "ck-test",
+        }
+        with patch.dict("os.environ", env, clear=False):
+            keyed = _embedding_providers_with_keys()
+            assert "cohere" in keyed
+            assert "voyage" not in keyed
+            assert "gemini" not in keyed
 
 
 # ── _docker_safe_name ────────────────────────────────────────

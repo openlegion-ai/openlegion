@@ -474,9 +474,12 @@ class HealthMonitor:
         default_model = fresh_cfg.get("llm", {}).get(
             "default_model", "openai/gpt-4o-mini",
         )
+        # Empty stays empty: os.path.abspath("") resolves to the CWD (repo
+        # root), which would bind-mount the whole tree into the rebuilt agent.
+        _td = agent_cfg.get("tools_dir", "")
         return {
             "role": agent_cfg.get("role", ""),
-            "tools_dir": os.path.abspath(agent_cfg.get("tools_dir", "")),
+            "tools_dir": os.path.abspath(_td) if _td else "",
             "model": agent_cfg.get("model", default_model),
             "mcp_servers": agent_cfg.get("mcp_servers") or None,
             "thinking": agent_cfg.get("thinking", ""),
@@ -584,8 +587,11 @@ class HealthMonitor:
             # Per-agent output-token cap → LLM_MAX_TOKENS so an operator's
             # max_output_tokens edit survives an automatic crash-recovery
             # restart. Read from fresh YAML (the registry ``info`` dict
-            # doesn't carry it); no-op when unset → LLMClient default 8192.
-            set_llm_max_tokens_env(restart_env, _agents_cfg.get(agent_id, {}))
+            # doesn't carry it); no-op when unset → LLMClient default 16384.
+            _hcfg = _agents_cfg.get(agent_id, {})
+            set_llm_max_tokens_env(restart_env, _hcfg)
+            from src.shared.limits import set_llm_limits_env
+            set_llm_limits_env(restart_env, _hcfg)
             try:
                 url = await loop.run_in_executor(
                     None,

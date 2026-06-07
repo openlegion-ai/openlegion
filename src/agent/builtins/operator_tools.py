@@ -41,7 +41,7 @@ _VALID_FIELDS = frozenset({
     "instructions", "soul", "model", "role", "heartbeat",
     "heartbeat_schedule",
     "interface", "thinking", "budget", "permissions",
-    "max_output_tokens",
+    "max_output_tokens", "max_tool_rounds", "llm_timeout_seconds",
 })
 
 # Per-agent output-token cap bounds. Mirrors the clamp in
@@ -164,6 +164,15 @@ def _validate_edit(agent_id: str, field: str, value) -> dict | None:
                     f"got {value}"
                 ),
             }
+    if field in ("max_tool_rounds", "llm_timeout_seconds"):
+        # Per-agent operational caps. Range = the clamp spec in the central
+        # limits table (single source of truth). bool rejected explicitly.
+        from src.shared import limits
+        if not isinstance(value, int) or isinstance(value, bool):
+            return {"error": f"{field} must be an integer, got {value!r}"}
+        _d, lo, hi = limits.LIMIT_SPECS[limits.AGENT_CONFIG_KEYS[field]]
+        if not (lo <= value <= hi):
+            return {"error": f"{field} must be {lo}-{hi}, got {value}"}
     return None
 
 
@@ -179,7 +188,7 @@ def _validate_edit(agent_id: str, field: str, value) -> dict | None:
         "Returns ``{agent_id, config: {...}}`` with these fields: "
         "model, instructions, soul, heartbeat, heartbeat_schedule, "
         "interface, role, permissions, budget, thinking, "
-        "max_output_tokens. Pass "
+        "max_output_tokens, max_tool_rounds, llm_timeout_seconds. Pass "
         "``fields=['instructions','soul']`` to scope the read to a subset."
     ),
     parameters={
@@ -684,7 +693,13 @@ async def list_available_models(
         "- max_output_tokens: integer 256-200000 — per-agent cap on output "
         "tokens per LLM call. Raise it for agents that emit large single "
         "tool calls (e.g. a translator that PUTs a whole file in one call) "
-        "and hit 'Truncated tool-call arguments'. Default 8192."
+        "and hit 'Truncated tool-call arguments'. Default 16384.\n"
+        "- max_tool_rounds: integer — per-task tool-round budget before a task "
+        "is closed as blocked (convergence cap). Raise it for agents doing "
+        "long multi-step work that legitimately needs many rounds.\n"
+        "- llm_timeout_seconds: integer — per-call LLM timeout. Raise it for "
+        "agents that produce very large outputs (paired with a high "
+        "max_output_tokens) so big generations don't time out."
     ),
     parameters={
         "agent_id": {
@@ -698,14 +713,15 @@ async def list_available_models(
                 "instructions", "soul", "model", "role", "heartbeat",
                 "heartbeat_schedule",
                 "interface", "thinking", "budget", "permissions",
-                "max_output_tokens",
+                "max_output_tokens", "max_tool_rounds", "llm_timeout_seconds",
             ],
         },
         "value": {
             "type": ["string", "object", "integer"],
             "description": (
                 "New value for the field. String/object for most fields; "
-                "integer for max_output_tokens."
+                "integer for max_output_tokens / max_tool_rounds / "
+                "llm_timeout_seconds."
             ),
         },
         "reason": {
