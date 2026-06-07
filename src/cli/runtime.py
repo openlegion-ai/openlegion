@@ -33,26 +33,80 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("cli")
 
-# Provider prefix → default embedding model.  Providers without embedding
-# APIs (Anthropic, xAI, Groq, …) map to "none" which disables vector search.
-# Only map providers whose embedding models output 1536-dim vectors,
-# matching EMBEDDING_DIM in memory.py.  Other providers default to "none".
-_PROVIDER_EMBEDDING_DEFAULTS: list[tuple[str, str]] = [
-    ("openai/",  "text-embedding-3-small"),
-    ("gpt-",     "text-embedding-3-small"),
-    ("o1",       "text-embedding-3-small"),
-    ("o3",       "text-embedding-3-small"),
-    ("o4",       "text-embedding-3-small"),
+# Embedding-provider ladder for auto-selecting a default embedding model
+# when the operator hasn't set one. Each entry: (provider, litellm model,
+# output dim), ordered by preference. Only providers that actually offer an
+# embeddings API appear — Anthropic/xAI/Groq have none, so an Anthropic-only
+# deployment correctly falls through to keyword-only memory. Non-OpenAI
+# models are fully qualified (``voyage/…``) so the mesh provider resolver
+# maps them to the right SYSTEM API key with no extra config.
+_EMBEDDING_PROVIDER_LADDER: list[tuple[str, str, int]] = [
+    ("openai", "text-embedding-3-small", 1536),
+    ("voyage", "voyage/voyage-3.5", 1024),        # Anthropic's recommended embedder
+    ("gemini", "gemini/text-embedding-004", 768),
+    ("cohere", "cohere/embed-english-v3.0", 1024),
 ]
 
+# Known embedding model → output dimension. Sets EMBEDDING_DIM for an
+# explicit operator override. Unknown models fall back to the 1536 default;
+# the agent self-heals a wrong dim at runtime (memory.py
+# _reconcile_embedding_dim + the _store_embedding length guard), so this map
+# is an optimization, not a correctness dependency.
+_EMBEDDING_MODEL_DIMS: dict[str, int] = {
+    "text-embedding-3-small": 1536,
+    "text-embedding-3-large": 3072,
+    "text-embedding-ada-002": 1536,
+    "voyage/voyage-3.5": 1024,
+    "voyage/voyage-3": 1024,
+    "gemini/text-embedding-004": 768,
+    "cohere/embed-english-v3.0": 1024,
+    "cohere/embed-multilingual-v3.0": 1024,
+}
+_DEFAULT_EMBEDDING_DIM = 1536
 
-def _default_embedding_model(llm_model: str) -> str:
-    """Pick a sensible embedding model default based on the LLM provider."""
-    lower = llm_model.lower()
-    for prefix, embed_model in _PROVIDER_EMBEDDING_DEFAULTS:
-        if lower.startswith(prefix):
-            return embed_model
-    return "none"
+
+def _embedding_providers_with_keys() -> set[str]:
+    """Embedding-capable providers (from the ladder) that have a SYSTEM API
+    key configured in the environment.
+
+    Deliberately checks the API key directly rather than reusing
+    ``get_available_providers()``: the mesh embed proxy authenticates with
+    an API key only (no OAuth path), so an OAuth-only provider must NOT be
+    treated as embedding-capable — it would select embeddings that then fail.
+    """
+    return {
+        provider
+        for provider, _model, _dim in _EMBEDDING_PROVIDER_LADDER
+        if os.environ.get(f"OPENLEGION_SYSTEM_{provider.upper()}_API_KEY")
+    }
+
+
+def _resolve_embedding(
+    cfg_embedding_model: str | None,
+    keyed_providers: set[str],
+) -> tuple[str, int]:
+    """Resolve ``(embedding_model, output_dim)`` to run with.
+
+    Priority:
+      1. Explicit operator choice (``llm.embedding_model`` in config),
+         including the literal ``"none"`` to force keyword-only memory.
+      2. First embedding-capable provider with a configured API key, walked
+         in ``_EMBEDDING_PROVIDER_LADDER`` order — this is what lets an
+         Anthropic-chat deployment light up semantic memory via a Voyage or
+         OpenAI key.
+      3. ``"none"`` — no embedding-capable key; memory runs on BM25/FTS5
+         keyword search only (fully supported, never an error).
+
+    The returned ``dim`` is advisory; the agent corrects a wrong dimension
+    at runtime without data loss.
+    """
+    if cfg_embedding_model:
+        model = str(cfg_embedding_model).strip()
+        return model, _EMBEDDING_MODEL_DIMS.get(model, _DEFAULT_EMBEDDING_DIM)
+    for provider, model, dim in _EMBEDDING_PROVIDER_LADDER:
+        if provider in keyed_providers:
+            return model, dim
+    return "none", _DEFAULT_EMBEDDING_DIM
 
 
 # Cap on the operator-visible ``blocker_note`` written when a mesh→agent
@@ -403,8 +457,14 @@ class RuntimeContext:
             ordered.update({k: v for k, v in agents_cfg.items() if k != _OPERATOR_AGENT_ID})
             agents_cfg = ordered
 
-        embedding_model = self.cfg.get("llm", {}).get(
-            "embedding_model", _default_embedding_model(default_model),
+        # Resolve embedding model + dimension. Auto-selects from configured
+        # provider keys when the operator hasn't set one (an Anthropic-chat
+        # deployment lights up semantic memory via a Voyage/OpenAI key);
+        # falls back to keyword-only memory when no embedding-capable key
+        # exists — never an error.
+        embedding_model, embedding_dim = _resolve_embedding(
+            self.cfg.get("llm", {}).get("embedding_model"),
+            _embedding_providers_with_keys(),
         )
         mesh_port = self.cfg["mesh"]["port"]
         agent_projects = self.cfg.get("_agent_projects", {})
@@ -425,6 +485,17 @@ class RuntimeContext:
             agents_cfg = trimmed
 
         self.runtime.extra_env["EMBEDDING_MODEL"] = embedding_model
+        self.runtime.extra_env["EMBEDDING_DIM"] = str(embedding_dim)
+        if embedding_model and embedding_model.lower() != "none":
+            logger.info(
+                "Semantic memory: ON — embedding model %s (dim %d)",
+                embedding_model, embedding_dim,
+            )
+        else:
+            logger.info(
+                "Semantic memory: OFF (keyword-only) — no embedding-capable "
+                "provider key configured",
+            )
 
         # Inject dashboard system settings as env vars for agent containers
         settings_path = Path("config/settings.json")

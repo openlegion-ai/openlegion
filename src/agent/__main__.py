@@ -48,6 +48,11 @@ def main() -> None:
 
     llm_model = os.environ.get("LLM_MODEL", "openai/gpt-4o-mini")
     embedding_model = os.environ.get("EMBEDDING_MODEL", "")
+    try:
+        embedding_dim = int(os.environ.get("EMBEDDING_DIM", "1536"))
+    except ValueError:
+        logger.warning("Invalid EMBEDDING_DIM, using default 1536")
+        embedding_dim = 1536
     thinking = os.environ.get("THINKING", "off")
     try:
         max_output_tokens = int(os.environ.get("LLM_MAX_TOKENS", "8192"))
@@ -65,7 +70,9 @@ def main() -> None:
         mesh_url=mesh_url, agent_id=agent_id, project_name=project_name or None,
     )
     embed_fn = llm.embed if embedding_model and embedding_model.lower() != "none" else None
-    memory = MemoryStore(db_path=f"/data/{agent_id}.db", embed_fn=embed_fn)
+    memory = MemoryStore(
+        db_path=f"/data/{agent_id}.db", embed_fn=embed_fn, embedding_dim=embedding_dim,
+    )
 
     # MCP server support — parse config from environment
     mcp_client = None
