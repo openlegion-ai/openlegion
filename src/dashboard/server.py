@@ -782,6 +782,21 @@ def create_dashboard_router(
         except Exception as e:
             logger.debug("%s emit failed: %s", team_event, e)
 
+    def _emit_config_changed(scope: str, **extra: Any) -> None:
+        """Emit a generic ``config_changed`` event for a System-tab panel.
+
+        One discriminated event covers every settings/integrations/storage
+        mutation: ``data.scope`` tells the SPA which panel to re-fetch (e.g.
+        ``browser_settings`` / ``channels`` / ``webhooks`` / ``integrations``).
+        Best-effort — never raises into the request handler.
+        """
+        if event_bus is None:
+            return
+        try:
+            event_bus.emit("config_changed", data={"scope": scope, **extra})
+        except Exception as e:
+            logger.debug("config_changed emit failed (scope=%s): %s", scope, e)
+
     async def _csrf_check(request: Request) -> None:
         """Require X-Requested-With header on state-changing requests.
 
@@ -2219,6 +2234,7 @@ def create_dashboard_router(
         perms["fleet_skills"] = skills
         _save_permissions(perms)
         permissions.reload()
+        _emit_config_changed("skills")
         return {"fleet_skills": skills}
 
     @api_router.post("/api/skills/install")
@@ -2240,6 +2256,7 @@ def create_dashboard_router(
         )
         if "error" in result:
             raise HTTPException(400, result["error"])
+        _emit_config_changed("skills")
         return result
 
     @api_router.post("/api/skills/remove")
@@ -2259,6 +2276,7 @@ def create_dashboard_router(
         if "error" in result:
             status = 404 if "not found" in result["error"].lower() else 400
             raise HTTPException(status, result["error"])
+        _emit_config_changed("skills")
         return result
 
     @api_router.post("/api/agents")
@@ -3325,6 +3343,8 @@ def create_dashboard_router(
                 os.environ["OPENLEGION_SYSTEM_PROXY"] = full_url
                 updated.append("system_proxy")
 
+        if updated:
+            _emit_config_changed("network_proxy")
         return {"updated": updated, "restart_required": bool(updated)}
 
     @api_router.put("/api/agents/{agent_id}/proxy")
@@ -3378,6 +3398,7 @@ def create_dashboard_router(
         # browser resets pick up the change without a full agent restart.
         await _push_browser_proxy_for_agent(agent_id)
 
+        _emit_config_changed("network_proxy", agent=agent_id)
         return {"updated": ["proxy"], "restart_required": True}
 
     @api_router.get("/api/agents/{agent_id}/permissions")
@@ -4504,6 +4525,7 @@ def create_dashboard_router(
             raise HTTPException(400, "client_id and client_secret are required")
         credential_vault.add_credential(p.client_id_key, client_id, system=True)
         credential_vault.add_credential(p.client_secret_key, client_secret, system=True)
+        _emit_config_changed("integrations", provider=provider)
         return {
             "configured": True,
             "provider": provider,
@@ -4595,6 +4617,7 @@ def create_dashboard_router(
         logger.info(
             "Integration connected: %s (%s)", pending.connection_name, provider,
         )
+        _emit_config_changed("integrations", name=pending.connection_name, provider=provider)
         return _back(f"integration_connected={pending.connection_name}")
 
     @api_router.post("/api/integrations/{name}/disconnect")
@@ -4606,6 +4629,7 @@ def create_dashboard_router(
         existed = credential_vault.remove_credential(name)
         if not existed:
             raise HTTPException(404, f"Connection '{name}' not found")
+        _emit_config_changed("integrations", name=name)
         return {"removed": True, "name": name}
 
     # ── External API key management ─────────────────────────
@@ -4636,6 +4660,7 @@ def create_dashboard_router(
             key_id, raw_key = api_key_manager.create_key(name)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
+        _emit_config_changed("api_keys", id=key_id)
         return {"id": key_id, "name": name, "key": raw_key}
 
     @api_router.delete("/api/external-api-keys/{key_id}")
@@ -4646,6 +4671,7 @@ def create_dashboard_router(
             raise HTTPException(status_code=503, detail="API key manager not available")
         if not api_key_manager.revoke_key(key_id):
             raise HTTPException(status_code=404, detail=f"API key not found: {key_id}")
+        _emit_config_changed("api_keys", id=key_id)
         return {"revoked": True, "id": key_id}
 
     # ── Dashboard telemetry (Phase -1 onboarding wizard) ────────
@@ -4748,6 +4774,7 @@ def create_dashboard_router(
         except Exception as e:
             logger.warning("WalletService init failed: %s", e)
 
+        _emit_config_changed("wallet")
         from starlette.responses import JSONResponse
         return JSONResponse(
             content={"initialized": True, "seed": words, "sample_addresses": addresses},
@@ -4853,6 +4880,7 @@ def create_dashboard_router(
         perms_data.setdefault("permissions", {})[agent_id] = agent_perms
         _save_permissions(perms_data)
         permissions.reload()
+        _emit_config_changed("wallet", agent=agent_id)
         return {"enabled": True, "agent_id": agent_id}
 
     @api_router.get("/api/wallet/rpc")
@@ -4912,6 +4940,7 @@ def create_dashboard_router(
             _ws_local._evm_providers.pop(chain_id, None)
             _ws_local._solana_clients.pop(chain_id, None)
 
+        _emit_config_changed("wallet", chain_id=chain_id)
         return {"updated": True, "chain_id": chain_id}
 
     # ── Cost detail per agent ────────────────────────────────
@@ -6100,6 +6129,7 @@ def create_dashboard_router(
                 logger.debug("Failed to push browser settings: %s", e)
 
         settings = _load_settings()
+        _emit_config_changed("browser_settings")
         return {
             "speed": settings.get("browser_speed", 1.0),
             "delay": settings.get("browser_delay", 0.0),
@@ -6140,6 +6170,7 @@ def create_dashboard_router(
 
         settings = _load_settings()
         stored_key = settings.get("captcha_solver_key", "")
+        _emit_config_changed("captcha_solver")
         return {
             "provider": settings.get("captcha_solver_provider", ""),
             "key_masked": f"...{stored_key[-4:]}" if len(stored_key) >= 4 else "",
@@ -6154,6 +6185,7 @@ def create_dashboard_router(
             settings.pop("captcha_solver_provider", None)
             settings.pop("captcha_solver_key", None)
             _save_settings(settings)
+        _emit_config_changed("captcha_solver")
         return {"removed": True}
 
     # ── System settings (consolidated) ────────────────────────
@@ -6300,6 +6332,8 @@ def create_dashboard_router(
                     setattr(health_monitor, attr, settings[cfg_key])
 
         restart_required = bool(set(updated) & _RESTART_REQUIRED_SETTINGS)
+        if updated:
+            _emit_config_changed("system_settings")
         return {"updated": updated, "restart_required": restart_required}
 
     @api_router.post("/api/default-model")
@@ -6323,6 +6357,7 @@ def create_dashboard_router(
         with open(config_path, "w") as f:
             yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
 
+        _emit_config_changed("system_settings")
         return {"model": model}
 
     @api_router.post("/api/embedding-model")
@@ -6382,6 +6417,7 @@ def create_dashboard_router(
         with open(config_path, "w") as f:
             yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
 
+        _emit_config_changed("system_settings")
         return {"value": value, "embedding_model": stored}
 
     # ── Restart agents ────────────────────────────────────────
@@ -6831,7 +6867,9 @@ def create_dashboard_router(
 
             return {"purged": True, "deleted_records": total_deleted}
 
-        return await asyncio.get_running_loop().run_in_executor(None, _do_purge)
+        result = await asyncio.get_running_loop().run_in_executor(None, _do_purge)
+        _emit_config_changed("storage", db_id=db_id)
+        return result
 
     # ── Messages log ─────────────────────────────────────────
 
@@ -6879,6 +6917,7 @@ def create_dashboard_router(
         # secret once so the user can copy it at creation time.
         result = dict(hook)
         result["url"] = f"{base}/webhook/hook/{hook['id']}"
+        _emit_config_changed("webhooks", hook_id=hook["id"])
         return {"created": True, "hook": result}
 
     @api_router.delete("/api/webhooks/{hook_id}")
@@ -6888,6 +6927,7 @@ def create_dashboard_router(
         removed = webhook_manager.remove_hook(hook_id)
         if not removed:
             raise HTTPException(status_code=404, detail=f"Webhook '{hook_id}' not found")
+        _emit_config_changed("webhooks", hook_id=hook_id)
         return {"removed": True, "id": hook_id}
 
     @api_router.patch("/api/webhooks/{hook_id}")
@@ -6913,6 +6953,7 @@ def create_dashboard_router(
             raise HTTPException(status_code=404, detail=f"Webhook '{hook_id}' not found")
         base = str(request.base_url).rstrip("/")
         updated["url"] = f"{base}/webhook/hook/{updated['id']}"
+        _emit_config_changed("webhooks", hook_id=hook_id)
         return {"updated": True, "hook": updated}
 
     @api_router.post("/api/webhooks/{hook_id}/test")
@@ -6972,6 +7013,7 @@ def create_dashboard_router(
             if routers:
                 for ch_router in routers:
                     request.app.include_router(ch_router)
+            _emit_config_changed("channels", channel=channel_type)
             return {"connected": True, "type": channel_type}
         except ValueError as e:
             _rollback_credentials()
@@ -6996,6 +7038,7 @@ def create_dashboard_router(
             for _token_key, env_name in _CHANNEL_TOKEN_KEYS[channel_type]:
                 with contextlib.suppress(Exception):
                     credential_vault.remove_credential(env_name)
+        _emit_config_changed("channels", channel=channel_type)
         return {"disconnected": True, "type": channel_type}
 
     # ── Agent Workspace (proxy to agent) ─────────────────────
@@ -7257,6 +7300,7 @@ def create_dashboard_router(
         if len(body) > _MAX_UPLOAD_BYTES:
             raise HTTPException(413, f"File too large (max {_MAX_UPLOAD_BYTES // (1024 * 1024)} MB)")
         dest.write_bytes(body)
+        _emit_config_changed("uploads", name=name)
         return {"uploaded": True, "name": name, "size": len(body)}
 
     @api_router.get("/api/uploads/{name:path}/download")
@@ -7288,6 +7332,7 @@ def create_dashboard_router(
         while parent != root and not any(parent.iterdir()):
             parent.rmdir()
             parent = parent.parent
+        _emit_config_changed("uploads", name=name)
         return {"deleted": True, "name": name}
 
     # ── Task 9 — Workplace tab + pending-action review ──────────────

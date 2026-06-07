@@ -276,7 +276,7 @@ function dashboard() {
     // load on the dashboard process modest when the panel is left open.
     platformSuccessData: { platforms: [], since: null },
     platformSuccessLoading: false,
-    _platformSuccessTimer: null,
+    _platformSuccessDebounce: null,
 
     // System settings
     systemSettings: null,
@@ -745,7 +745,7 @@ function dashboard() {
     _ws: null,
     _refreshInterval: null,
     _fleetDebounce: null,
-    _queuePollInterval: null,
+    _queueRefreshDebounce: null,
     _cronDebounce: null,
     _seenEventIds: new Set(),
 
@@ -1298,6 +1298,9 @@ function dashboard() {
               if (this._chatAborts && this._chatAborts[agentId]) continue;
               this._loadChatHistory(agentId);
             }
+            // Queue state is WS-driven (no poll) — re-seed it on reconnect so
+            // any transitions missed during the outage are reflected.
+            this.fetchQueues();
           }
         },
         onDisconnect: () => { this.connected = false; },
@@ -1314,7 +1317,8 @@ function dashboard() {
       this.fetchQueues();
       this._refreshInterval = setInterval(() => this.fetchAgents(), 15000);
       this._modelHealthInterval = setInterval(() => this.fetchModelHealth(), 60000);
-      this._queuePollInterval = setInterval(() => this.fetchQueues(), 2000);
+      // Queue depth/busy is now pushed live via the ``queue_changed`` WS event
+      // (see onWsEvent); the one-shot fetchQueues() above seeds initial state.
 
       // Renew session cookie every 6 hours (sliding window).
       // The auth gate issues 24h cookies; renew when <12h remaining.
@@ -1592,7 +1596,6 @@ function dashboard() {
       document.addEventListener('visibilitychange', () => {
         if (document.hidden) {
           if (this._refreshInterval) { clearInterval(this._refreshInterval); this._refreshInterval = null; }
-          if (this._queuePollInterval) { clearInterval(this._queuePollInterval); this._queuePollInterval = null; }
           if (this._cronDebounce) { clearTimeout(this._cronDebounce); this._cronDebounce = null; }
           if (this._modelHealthInterval) { clearInterval(this._modelHealthInterval); this._modelHealthInterval = null; }
           this._stopActivityRefresh();
@@ -1621,8 +1624,8 @@ function dashboard() {
           // Resume model health + queue polling
           this.fetchModelHealth();
           this._modelHealthInterval = setInterval(() => this.fetchModelHealth(), 60000);
+          // Re-seed queue state on tab-return; live updates flow via WS.
           this.fetchQueues();
-          this._queuePollInterval = setInterval(() => this.fetchQueues(), 2000);
           // Refresh agent detail if we're viewing one
           if (this.detailAgent) {
             this.fetchAgentDetail(this.detailAgent);
@@ -1722,7 +1725,7 @@ function dashboard() {
     destroy() {
       if (this._ws) this._ws.disconnect();
       if (this._refreshInterval) clearInterval(this._refreshInterval);
-      if (this._queuePollInterval) clearInterval(this._queuePollInterval);
+      if (this._queueRefreshDebounce) clearTimeout(this._queueRefreshDebounce);
       if (this._cronDebounce) clearTimeout(this._cronDebounce);
       if (this._modelHealthInterval) clearInterval(this._modelHealthInterval);
       if (this._cookieRenewalInterval) clearInterval(this._cookieRenewalInterval);
@@ -2472,7 +2475,7 @@ function dashboard() {
           this.fetchBrowserSettings();
           this.fetchSystemSettings();
           this.fetchCaptchaSolver();
-          this.startPlatformSuccessRefresh();
+          this.fetchPlatformSuccess();
         }
         if (this.systemTab === 'activity') {
           if (this.activityView === 'traces') {
@@ -2496,8 +2499,7 @@ function dashboard() {
       if (tabId === 'skills') { this.loadSkillsCatalog(); }
       if (tabId === 'network') { this.loadNetworkProxy(); }
       if (tabId === 'settings') { this.fetchBrowserSettings(); this.fetchSystemSettings(); }
-      if (tabId === 'browser') { this.fetchBrowserSettings(); this.fetchSystemSettings(); this.fetchCaptchaSolver(); this.startPlatformSuccessRefresh(); }
-      if (tabId !== 'browser') { this.stopPlatformSuccessRefresh(); }
+      if (tabId === 'browser') { this.fetchBrowserSettings(); this.fetchSystemSettings(); this.fetchCaptchaSolver(); this.fetchPlatformSuccess(); }
       if (tabId === 'operator') {
         this.fetchAuditLog();
       }
@@ -4519,6 +4521,47 @@ function dashboard() {
           if (this._teamsRefreshDebounce) clearTimeout(this._teamsRefreshDebounce);
           this._teamsRefreshDebounce = setTimeout(() => this.fetchTeams(), 250);
         }
+        // Brief (TEAM.md) edited elsewhere — live-reload the content for the
+        // active team unless the user is mid-edit (don't clobber their buffer).
+        const d = evt.data || {};
+        const changedTeam = d.team_name || d.name || d.team_id || d.project_id;
+        if (d.field === 'project_md' && changedTeam === this.activeTeam &&
+            !this.teamEditing && typeof this.fetchTeamContent === 'function') {
+          this.fetchTeamContent();
+        }
+      }
+
+      // Lane queue depth/busy changed — debounced refetch of /api/queues
+      // (replaces the old 2s poll). The endpoint merges with the agent
+      // registry so idle agents keep their zero rows; chat-recovery reads
+      // the same ``queueStatus`` this keeps fresh.
+      if (evt.type === 'queue_changed') {
+        if (this._queueRefreshDebounce) clearTimeout(this._queueRefreshDebounce);
+        this._queueRefreshDebounce = setTimeout(() => this.fetchQueues(), 300);
+      }
+
+      // System-tab settings/integrations/storage changed elsewhere — re-fetch
+      // just the affected panel, and only while the System tab is on screen
+      // (off-screen panels re-sync on their next open). ``data.scope`` maps to
+      // the panel's existing loader(s); unknown scopes are ignored.
+      if (evt.type === 'config_changed' && this.activeTab === 'system') {
+        const _configLoaders = {
+          browser_settings: ['fetchBrowserSettings'],
+          system_settings: ['fetchSystemSettings'],
+          captcha_solver: ['fetchCaptchaSolver'],
+          channels: ['fetchChannels'],
+          webhooks: ['fetchWebhooks'],
+          api_keys: ['fetchApiKeys'],
+          integrations: ['loadIntegrations'],
+          network_proxy: ['loadNetworkProxy'],
+          storage: ['fetchStorage', 'fetchDatabaseDetails'],
+          uploads: ['fetchUploads'],
+          skills: ['loadSkillsCatalog'],
+          wallet: ['fetchWallet', 'fetchWalletRpc'],
+        };
+        for (const fn of (_configLoaders[evt.data?.scope] || [])) {
+          if (typeof this[fn] === 'function') this[fn]();
+        }
       }
 
       // Credential stored — flip the matching credential_request
@@ -4610,6 +4653,17 @@ function dashboard() {
         // the detail panel can render trend sparklines without an extra
         // fetch round-trip per tick.
         this._appendBrowserMetricsHistory(evt.agent, evt.data);
+        // Platform-success rollup is driven off this same event (replaces the
+        // old 30s poll). The server-side aggregate is updated synchronously by
+        // this emit, so a refetch here is fresh. Only the captcha/fingerprint/
+        // pre-nav sub-types change the rollup, and only refetch when the panel
+        // is on screen.
+        const _psKinds = ['captcha_gate', 'fingerprint_event', 'fingerprint_burn', 'platform_pre_nav_delay'];
+        if (_psKinds.includes(evt.data.type) &&
+            this.activeTab === 'system' && this.systemTab === 'browser') {
+          if (this._platformSuccessDebounce) clearTimeout(this._platformSuccessDebounce);
+          this._platformSuccessDebounce = setTimeout(() => this.fetchPlatformSuccess(), 500);
+        }
       }
 
       // §6.3 navigator self-test result (one-shot per browser start).
@@ -7554,25 +7608,6 @@ function dashboard() {
         }
       } catch (e) { console.warn('fetchPlatformSuccess failed:', e); }
       this.platformSuccessLoading = false;
-    },
-
-    startPlatformSuccessRefresh() {
-      // Idempotent — calling twice will not stack timers.  30s polling
-      // matches the panel's "operator-glance" use case; the live
-      // EventBus already streams the underlying signals to the
-      // browser metrics + fingerprint cards on faster cadences.
-      if (this._platformSuccessTimer) return;
-      this.fetchPlatformSuccess();
-      this._platformSuccessTimer = setInterval(() => {
-        this.fetchPlatformSuccess();
-      }, 30000);
-    },
-
-    stopPlatformSuccessRefresh() {
-      if (this._platformSuccessTimer) {
-        clearInterval(this._platformSuccessTimer);
-        this._platformSuccessTimer = null;
-      }
     },
 
     platformSuccessBarClass(rate) {

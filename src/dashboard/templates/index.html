@@ -1691,7 +1691,7 @@
                 :title="'Goal: ' + (activeTeamData?.north_star || '')"
                 x-text="'🎯 ' + (activeTeamData?.north_star || '')"></span>
               <!-- Tab pills — desktop only, click stops propagation to header toggle -->
-              <div class="project-hub-desktop-tabs seg-group hidden md:flex ml-auto flex-shrink-0" @click.stop role="tablist" aria-label="Team sections">
+              <div class="project-hub-desktop-tabs seg-group hidden lg:flex ml-auto flex-shrink-0" @click.stop role="tablist" aria-label="Team sections">
                 <button @click="teamHubExpanded = true; teamHubTab = 'work'; _ensureWorkplaceTasks()"
                   class="seg-tab seg-tab-sm"
                   :class="teamHubExpanded && teamHubTab === 'work' ? 'seg-tab-active' : ''"
@@ -1730,7 +1730,7 @@
                 </button>
               </div>
               <!-- Team options kebab menu -->
-              <div class="project-hub-kebab relative flex-shrink-0 ml-auto md:ml-0" x-data="{ open: false }" @click.stop @keydown.escape.window="open = false">
+              <div class="project-hub-kebab relative flex-shrink-0 ml-auto lg:ml-0" x-data="{ open: false }" @click.stop @keydown.escape.window="open = false">
                 <button @click="open = !open"
                   class="p-1.5 rounded-md text-gray-500 hover:text-gray-300 hover:bg-gray-800 transition-colors"
                   aria-label="Team options">
@@ -1752,7 +1752,7 @@
             <!-- Hub body — collapsible -->
             <div x-show="teamHubExpanded" x-transition class="border-t border-gray-800/60">
               <!-- Mobile tab strip (sm:hidden) -->
-              <div class="project-hub-tabs project-hub-mobile-tabs md:hidden" role="tablist" aria-label="Team sections">
+              <div class="project-hub-tabs project-hub-mobile-tabs lg:hidden" role="tablist" aria-label="Team sections">
                 <button @click="teamHubTab = 'work'; _ensureWorkplaceTasks()"
                   class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
                   :class="teamHubTab === 'work' ? 'text-white border-indigo-500' : 'text-gray-400 border-transparent hover:text-gray-300'"
