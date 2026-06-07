@@ -46,6 +46,7 @@ from pydantic import ValidationError
 
 from src.cli.proxy import build_proxy_env_vars, resolve_agent_proxy
 from src.dashboard.auth import verify_session_cookie
+from src.shared import limits as _limits
 from src.shared.paths import resolve_under_root
 from src.shared.sqlite_helpers import open_db
 from src.shared.types import CRED_HANDLE_RE, MCPServerConfig
@@ -2589,6 +2590,18 @@ def create_dashboard_router(
             "color": agent_cfg.get("color"),
             "budget": agent_cfg.get("budget", {}),
             "thinking": agent_cfg.get("thinking", "off") or "off",
+            # Execution caps — fall back to the EFFECTIVE resolved value so
+            # the edit form shows what the agent actually runs with when no
+            # explicit per-agent override is set.
+            "max_output_tokens": agent_cfg.get("max_output_tokens", 8192) or 8192,
+            "max_tool_rounds": (
+                agent_cfg.get("max_tool_rounds")
+                or _limits.resolve("task_max_tool_rounds")
+            ),
+            "llm_timeout_seconds": (
+                agent_cfg.get("llm_timeout_seconds")
+                or _limits.resolve("llm_timeout_seconds")
+            ),
             # MCP server entries are masked: env values (which may be
             # plaintext secrets or ``$CRED{name}`` handles pointing at
             # one) are NEVER returned. The UI binds to ``env_keys`` to
@@ -2705,7 +2718,7 @@ def create_dashboard_router(
         # response the caller sees.
         pending_writes: list[tuple[str, object]] = []
         budget_apply: dict[str, float] | None = None
-        runtime_payload: dict[str, str] = {}
+        runtime_payload: dict[str, object] = {}
         mcp_touched = False
 
         if "model" in body:
@@ -2769,6 +2782,78 @@ def create_dashboard_router(
                 )
             pending_writes.append(("thinking", thinking_val))
             runtime_payload["thinking"] = thinking_val
+
+        # ── Execution caps (per-agent overrides) ──────────────────
+        # The agent /config endpoint keys the output cap as ``max_tokens``,
+        # so runtime_payload uses that name while the YAML field stays
+        # ``max_output_tokens`` (matching agents.yaml / set_llm_max_tokens_env).
+        if "max_output_tokens" in body:
+            raw_mot = body["max_output_tokens"]
+            if isinstance(raw_mot, bool):
+                raise HTTPException(
+                    status_code=400,
+                    detail="max_output_tokens must be an integer between 256 and 200000",
+                )
+            try:
+                mot = int(raw_mot)
+            except (ValueError, TypeError):
+                raise HTTPException(
+                    status_code=400,
+                    detail="max_output_tokens must be an integer between 256 and 200000",
+                )
+            if mot < 256 or mot > 200000:
+                raise HTTPException(
+                    status_code=400,
+                    detail="max_output_tokens must be between 256 and 200000",
+                )
+            pending_writes.append(("max_output_tokens", mot))
+            runtime_payload["max_tokens"] = mot
+
+        if "max_tool_rounds" in body:
+            raw_mtr = body["max_tool_rounds"]
+            _lo, _hi = _limits.LIMIT_SPECS["task_max_tool_rounds"][1:]
+            if isinstance(raw_mtr, bool):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"max_tool_rounds must be an integer between {_lo} and {_hi}",
+                )
+            try:
+                mtr = int(raw_mtr)
+            except (ValueError, TypeError):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"max_tool_rounds must be an integer between {_lo} and {_hi}",
+                )
+            if mtr < _lo or mtr > _hi:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"max_tool_rounds must be between {_lo} and {_hi}",
+                )
+            pending_writes.append(("max_tool_rounds", mtr))
+            runtime_payload["max_tool_rounds"] = mtr
+
+        if "llm_timeout_seconds" in body:
+            raw_lts = body["llm_timeout_seconds"]
+            _lo, _hi = _limits.LIMIT_SPECS["llm_timeout_seconds"][1:]
+            if isinstance(raw_lts, bool):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"llm_timeout_seconds must be an integer between {_lo} and {_hi}",
+                )
+            try:
+                lts = int(raw_lts)
+            except (ValueError, TypeError):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"llm_timeout_seconds must be an integer between {_lo} and {_hi}",
+                )
+            if lts < _lo or lts > _hi:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"llm_timeout_seconds must be between {_lo} and {_hi}",
+                )
+            pending_writes.append(("llm_timeout_seconds", lts))
+            runtime_payload["llm_timeout_seconds"] = lts
 
         if "mcp_servers" in body:
             mcp_val = body["mcp_servers"]
@@ -6072,18 +6157,33 @@ def create_dashboard_router(
 
     # ── System settings (consolidated) ────────────────────────
 
+    # Execution-limit keys whose ranges/defaults are owned by
+    # src/shared/limits.py (the single source of truth). The validators
+    # and defaults dicts below merge these in so the dashboard never
+    # disagrees with the engine's own clamp ranges.
+    _LIMIT_KEYS = (
+        "max_iterations",
+        "chat_max_tool_rounds",
+        "chat_max_total_rounds",
+        "task_max_tool_rounds",
+        "llm_timeout_seconds",
+        "lane_timeout_seconds",
+    )
+
     _SYSTEM_SETTINGS_VALIDATORS: dict[str, tuple[type, float, float]] = {
         "default_daily_budget": (float, 0.01, 10000),
         "default_monthly_budget": (float, 0.01, 100000),
-        "max_iterations": (int, 1, 100),
-        "chat_max_tool_rounds": (int, 1, 200),
-        "chat_max_total_rounds": (int, 10, 1000),
         "tool_timeout": (int, 10, 3600),
         "browser_idle_timeout": (int, 5, 120),
         "health_poll_interval": (int, 5, 300),
         "health_max_failures": (int, 1, 20),
         "health_restart_limit": (int, 0, 20),
         "health_restart_window": (int, 60, 86400),
+        # Execution limits sourced from limits.py (default, lo, hi).
+        **{
+            k: (int, _limits.LIMIT_SPECS[k][1], _limits.LIMIT_SPECS[k][2])
+            for k in _LIMIT_KEYS
+        },
     }
 
     # Settings seeded into agent containers as env vars at launch — they
@@ -6095,20 +6195,21 @@ def create_dashboard_router(
     _RESTART_REQUIRED_SETTINGS: frozenset[str] = frozenset({
         "max_iterations", "chat_max_tool_rounds",
         "chat_max_total_rounds", "tool_timeout",
+        "task_max_tool_rounds", "llm_timeout_seconds",
+        "lane_timeout_seconds",
     })
 
     _SYSTEM_SETTINGS_DEFAULTS: dict[str, float | int] = {
         "default_daily_budget": 10.0,
         "default_monthly_budget": 200.0,
-        "max_iterations": 20,
-        "chat_max_tool_rounds": 30,
-        "chat_max_total_rounds": 200,
         "tool_timeout": 300,
         "browser_idle_timeout": 30,
         "health_poll_interval": 30,
         "health_max_failures": 3,
         "health_restart_limit": 3,
         "health_restart_window": 3600,
+        # Execution-limit defaults sourced from limits.py.
+        **{k: _limits.LIMIT_SPECS[k][0] for k in _LIMIT_KEYS},
     }
 
     @api_router.get("/api/system-settings")
@@ -6216,6 +6317,9 @@ def create_dashboard_router(
                     "OPENLEGION_CHAT_MAX_TOOL_ROUNDS": "chat_max_tool_rounds",
                     "OPENLEGION_CHAT_MAX_TOTAL_ROUNDS": "chat_max_total_rounds",
                     "OPENLEGION_TOOL_TIMEOUT": "tool_timeout",
+                    "OPENLEGION_TASK_MAX_TOOL_ROUNDS": "task_max_tool_rounds",
+                    "OPENLEGION_LLM_TIMEOUT_SECONDS": "llm_timeout_seconds",
+                    "OPENLEGION_LANE_TIMEOUT_SECONDS": "lane_timeout_seconds",
                 }.items():
                     if cfg_key in sys_settings:
                         runtime.extra_env[env_key] = str(sys_settings[cfg_key])
