@@ -560,6 +560,8 @@ class RuntimeContext:
                 agent_env["OPENLEGION_MAX_ITERATIONS"] = str(agent_max_iters)
             # Per-agent output-token cap → LLM_MAX_TOKENS (survives restart).
             set_llm_max_tokens_env(agent_env, agent_cfg)
+            from src.shared.limits import set_llm_limits_env
+            set_llm_limits_env(agent_env, agent_cfg)
             if agent_id == _OPERATOR_AGENT_ID:
                 agent_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
                 # NOTE: the operator no longer seeds a boot greeting into

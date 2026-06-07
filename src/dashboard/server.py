@@ -3039,6 +3039,8 @@ def create_dashboard_router(
             # change survives a single-agent dashboard restart (not just the
             # live hot-reload). Absent = LLMClient default 8192.
             set_llm_max_tokens_env(restart_env, agent_cfg)
+            from src.shared.limits import set_llm_limits_env
+            set_llm_limits_env(restart_env, agent_cfg)
             url = await asyncio.wait_for(
                 asyncio.to_thread(
                     runtime.start_agent,
@@ -6292,6 +6294,8 @@ def create_dashboard_router(
                 # Per-agent output-token cap → LLM_MAX_TOKENS (survives the
                 # dashboard "restart all agents" flow, not just hot-reload).
                 set_llm_max_tokens_env(_restart_env, agent_cfg)
+                from src.shared.limits import set_llm_limits_env
+                set_llm_limits_env(_restart_env, agent_cfg)
                 url = await loop.run_in_executor(
                     None,
                     lambda aid=agent_id, acfg=agent_cfg, sd=tools_dir, re=_restart_env: runtime.start_agent(

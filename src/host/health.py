@@ -588,7 +588,10 @@ class HealthMonitor:
             # max_output_tokens edit survives an automatic crash-recovery
             # restart. Read from fresh YAML (the registry ``info`` dict
             # doesn't carry it); no-op when unset → LLMClient default 8192.
-            set_llm_max_tokens_env(restart_env, _agents_cfg.get(agent_id, {}))
+            _hcfg = _agents_cfg.get(agent_id, {})
+            set_llm_max_tokens_env(restart_env, _hcfg)
+            from src.shared.limits import set_llm_limits_env
+            set_llm_limits_env(restart_env, _hcfg)
             try:
                 url = await loop.run_in_executor(
                     None,

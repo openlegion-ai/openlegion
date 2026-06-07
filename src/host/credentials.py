@@ -2313,7 +2313,14 @@ class CredentialVault:
             # ``error_type="transient"`` and the agent's classifier routes
             # via ``LLMRetryableError`` instead of failing the task.
             le_lower = last_error.lower()
-            if "retrying may help" in le_lower or "empty response" in le_lower:
+            # "Overloaded" / overloaded_error / 529 is Anthropic's transient
+            # capacity signal — over OAuth it can surface as an HTTP-200 body
+            # ("Anthropic API error (HTTP 200): Overloaded") rather than a 529
+            # status, so it must be matched by substring here or it falls
+            # through to a non-retryable RuntimeError and needlessly fails the
+            # task instead of backing off.
+            _transient = ("retrying may help", "empty response", "overloaded", "529")
+            if any(sig in le_lower for sig in _transient):
                 raise LLMTransientError(
                     f"Anthropic OAuth error: {last_error}",
                     provider="anthropic",

@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 
+from src.shared import limits
 from src.shared.types import APIProxyRequest, LLMResponse, ToolCallInfo
 from src.shared.utils import setup_logging
 
@@ -61,6 +62,29 @@ class LLMClient:
         # arguments". 8192 is the safe floor across common modern models
         # (gpt-4o family = 16384, Claude 3.5 Sonnet = 8192, Claude 4.x = 64K+).
         self.max_output_tokens = max_output_tokens
+        # LLM call timeout, resolved from the central limits table (env ->
+        # high default). With streaming task execution this is an *idle*
+        # (between-chunk) ceiling; on the non-streaming path it is the total
+        # response wait. The old hard-coded 120s could not accommodate the
+        # large generations the per-agent max_output_tokens permits (an 80k
+        # token output cannot complete in 120s) — that mismatch surfaced as
+        # httpx.ReadTimeout and failed the task. See src/shared/limits.py.
+        self.timeout_seconds = limits.resolve("llm_timeout_seconds")
+        # Consistency guardrail: the timeout must be able to accommodate the
+        # output the agent is permitted to generate, or large completions
+        # ReadTimeout and fail the task (the exact mismatch that bit the
+        # production fleet). Warn loudly rather than silently shipping a
+        # self-contradictory config. ~20 tok/s is a deliberately conservative
+        # floor (real throughput is several times higher).
+        _needed = self.max_output_tokens / 20
+        if self.timeout_seconds < _needed:
+            logger.warning(
+                "llm_timeout_seconds=%ds may be too low for max_output_tokens=%d "
+                "(needs ~%ds at a conservative 20 tok/s) — large generations may "
+                "ReadTimeout. Raise OPENLEGION_LLM_TIMEOUT_SECONDS or lower the "
+                "output cap.",
+                self.timeout_seconds, self.max_output_tokens, int(_needed),
+            )
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
         self._auth_token: str = os.environ.get("MESH_AUTH_TOKEN", "")
@@ -74,7 +98,7 @@ class LLMClient:
                 headers: dict[str, str] = {}
                 if self._auth_token:
                     headers["Authorization"] = f"Bearer {self._auth_token}"
-                self._client = httpx.AsyncClient(timeout=120, headers=headers)
+                self._client = httpx.AsyncClient(timeout=self.timeout_seconds, headers=headers)
             return self._client
 
     async def close(self) -> None:
@@ -169,7 +193,7 @@ class LLMClient:
         # whack-a-mole'ing message text.
         _retryable = (
             "rate limit", "ratelimit", "429", "too many requests",
-            "overloaded", "503", "empty response", "retrying may help",
+            "overloaded", "503", "529", "empty response", "retrying may help",
         )
         if any(kw in error_msg.lower() for kw in _retryable):
             raise LLMRetryableError(f"{prefix}: {error_msg}")
@@ -241,7 +265,7 @@ class LLMClient:
         params.update(kwargs)
         self._apply_thinking_params(params, model, kwargs)
 
-        request = APIProxyRequest(service="llm", action="chat", params=params, timeout=120)
+        request = APIProxyRequest(service="llm", action="chat", params=params, timeout=self.timeout_seconds)
 
         from src.shared.trace import trace_headers
 
@@ -302,7 +326,7 @@ class LLMClient:
         params.update(kwargs)
         self._apply_thinking_params(params, model, kwargs)
 
-        request = APIProxyRequest(service="llm", action="chat", params=params, timeout=120)
+        request = APIProxyRequest(service="llm", action="chat", params=params, timeout=self.timeout_seconds)
 
         from src.shared.trace import trace_headers
 
@@ -313,7 +337,7 @@ class LLMClient:
             json=request.model_dump(mode="json"),
             params={"agent_id": self.agent_id},
             headers=trace_headers(),
-            timeout=120,
+            timeout=self.timeout_seconds,
         ) as response:
             response.raise_for_status()
             async for line in response.aiter_lines():

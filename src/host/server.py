@@ -3678,6 +3678,9 @@ def create_mesh_app(
                     env_overrides[env_key] = val
             # Per-agent output-token cap → LLM_MAX_TOKENS (survives restart).
             set_llm_max_tokens_env(env_overrides, acfg)
+            # Per-agent round/timeout caps → OPENLEGION_* (survives restart).
+            from src.shared.limits import set_llm_limits_env
+            set_llm_limits_env(env_overrides, acfg)
 
             try:
                 # Start container with per-agent env_overrides (not shared extra_env)
