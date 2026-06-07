@@ -1696,7 +1696,7 @@
                   class="seg-tab seg-tab-sm"
                   :class="teamHubExpanded && teamHubTab === 'work' ? 'seg-tab-active' : ''"
                   role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'work'">
-                  <span>Work</span><span x-show="teamWork.blocked.length > 0" class="ml-1 w-1.5 h-1.5 rounded-full bg-amber-400 inline-block" :title="teamWork.blocked.length + ' blocked'"></span>
+                  <span>Work</span>
                 </button>
                 <button @click="teamHubExpanded = true; teamHubTab = 'artifacts'; fetchArtifacts()"
                   class="seg-tab seg-tab-sm"
@@ -1803,39 +1803,29 @@
                       <svg class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
                       <span class="text-xs">Loading work…</span>
                     </div>
-                    <!-- empty (only when there's genuinely nothing — internal-only activity still shows the Technical group below) -->
-                    <div x-show="!workplaceSectionLoading.tasks && teamWork.total === 0 && teamWork.technical.length === 0" class="text-gray-500 text-sm py-6 text-center">
+                    <!-- empty -->
+                    <div x-show="!workplaceSectionLoading.tasks && teamWork.total === 0" class="text-gray-500 text-sm py-6 text-center">
                       No active work for <span class="text-gray-400" x-text="activeTeam"></span> yet.<br>
                       <span class="text-xs text-gray-600">Tasks appear here as agents pick them up and hand off to each other.</span>
                     </div>
+                    <!-- Read-only progress glance. Blocked / failed tasks are deliberately
+                         NOT surfaced here — the operator handles them and narrates them in
+                         the team's Work summary; user-actionable approvals (credentials /
+                         browser login) appear in the Work tab's "Needs you" panel. Rows are
+                         non-interactive: the Work tab is the place to read what shipped. -->
                     <div x-show="teamWork.total > 0" class="space-y-4">
-                      <!-- Blocked -->
-                      <div x-show="teamWork.blocked.length > 0">
-                        <h4 class="text-[11px] font-semibold uppercase tracking-wide text-amber-400/90 mb-1.5">&#9888; Blocked &middot; <span x-text="teamWork.blocked.length"></span></h4>
-                        <div class="space-y-1">
-                          <template x-for="t in teamWork.blocked" :key="t.id">
-                            <button @click="switchTab('workplace'); openTaskDrillIn(t.id)" class="w-full text-left bg-amber-500/5 hover:bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2 transition-colors">
-                              <div class="flex items-center justify-between gap-2">
-                                <span class="text-sm text-gray-200 truncate" x-text="t.title"></span>
-                                <span class="text-[11px] text-gray-500 flex-shrink-0 font-mono" x-text="teamHandoffLabel(t)"></span>
-                              </div>
-                              <div x-show="t.blocker_note" class="text-[11px] text-amber-300/90 mt-0.5 truncate" x-text="_humanizeBlocker(t.blocker_note).label"></div>
-                            </button>
-                          </template>
-                        </div>
-                      </div>
                       <!-- In flight -->
                       <div x-show="teamWork.inflight.length > 0">
                         <h4 class="text-[11px] font-semibold uppercase tracking-wide text-blue-400/90 mb-1.5">&#9679; In flight &middot; <span x-text="teamWork.inflight.length"></span></h4>
                         <div class="space-y-1">
                           <template x-for="t in teamWork.inflight" :key="t.id">
-                            <button @click="switchTab('workplace'); openTaskDrillIn(t.id)" class="w-full text-left bg-gray-800/40 hover:bg-gray-800/70 border border-gray-700/50 rounded-lg px-3 py-2 transition-colors">
+                            <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg px-3 py-2">
                               <div class="flex items-center justify-between gap-2">
                                 <span class="text-sm text-gray-200 truncate" x-text="t.title"></span>
                                 <span class="text-[11px] text-gray-500 flex-shrink-0 font-mono" x-text="teamHandoffLabel(t)"></span>
                               </div>
                               <div class="text-[11px] text-gray-600 mt-0.5" x-text="t.status"></div>
-                            </button>
+                            </div>
                           </template>
                         </div>
                       </div>
@@ -1844,33 +1834,15 @@
                         <h4 class="text-[11px] font-semibold uppercase tracking-wide text-emerald-400/90 mb-1.5">&#10003; Delivered today &middot; <span x-text="teamWork.doneToday.length"></span></h4>
                         <div class="space-y-1">
                           <template x-for="t in teamWork.doneToday" :key="t.id">
-                            <button @click="switchTab('workplace'); openTaskDrillIn(t.id)" class="w-full text-left bg-gray-800/30 hover:bg-gray-800/60 border border-gray-800 rounded-lg px-3 py-2 transition-colors">
+                            <div class="bg-gray-800/30 border border-gray-800 rounded-lg px-3 py-2">
                               <div class="flex items-center justify-between gap-2">
                                 <span class="text-sm text-gray-300 truncate" x-text="t.title"></span>
                                 <span class="text-[11px] text-gray-600 flex-shrink-0 font-mono" x-text="teamHandoffLabel(t)"></span>
                               </div>
                               <div x-show="t.outcome" class="text-[11px] text-emerald-400/80 mt-0.5" x-text="'✓ ' + (t.outcome || '')"></div>
-                            </button>
+                            </div>
                           </template>
                         </div>
-                      </div>
-                    </div>
-                    <!-- Technical activity — engine-internal failures the user can't act on. Collapsed by default; shown even when there's no user-facing work so it's always reachable. -->
-                    <div x-show="teamWork.technical.length > 0" x-data="{ open: false }" :class="teamWork.total > 0 ? 'mt-4' : ''">
-                      <button @click="open = !open" class="w-full flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-gray-500 hover:text-gray-400 mb-1.5">
-                        <span x-text="open ? '▾' : '▸'"></span>
-                        <span>Technical activity &middot; <span x-text="teamWork.technical.length"></span></span>
-                      </button>
-                      <div x-show="open" class="space-y-1">
-                        <template x-for="t in teamWork.technical" :key="t.id">
-                          <button @click="switchTab('workplace'); openTaskDrillIn(t.id)" class="w-full text-left bg-gray-800/20 hover:bg-gray-800/50 border border-gray-800 rounded-lg px-3 py-2 transition-colors">
-                            <div class="flex items-center justify-between gap-2">
-                              <span class="text-sm text-gray-400 truncate" x-text="t.title"></span>
-                              <span class="text-[11px] text-gray-600 flex-shrink-0 font-mono" x-text="teamHandoffLabel(t)"></span>
-                            </div>
-                            <div x-show="t.blocker_note" class="text-[11px] text-gray-500 mt-0.5 truncate" x-text="_humanizeBlocker(t.blocker_note).label"></div>
-                          </button>
-                        </template>
                       </div>
                     </div>
                   </div>
