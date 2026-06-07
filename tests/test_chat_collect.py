@@ -87,3 +87,20 @@ async def test_chat_collect_propagates_classified_errors():
     with pytest.raises(LLMRetryableError):
         await c.chat_collect("sys", [])
     c.chat.assert_not_called()  # classified errors must NOT silently fall back
+
+
+@pytest.mark.asyncio
+async def test_chat_collect_does_not_swallow_non_transport_errors():
+    # A non-transport, non-RuntimeError exception (e.g. a parsing bug) must
+    # propagate, not be masked by a second non-streaming call (Codex finding).
+    c = _client()
+
+    async def bug(*a, **k):
+        raise KeyError("unexpected stream shape")
+        yield  # pragma: no cover
+
+    c.chat_stream = bug
+    c.chat = AsyncMock()
+    with pytest.raises(KeyError):
+        await c.chat_collect("sys", [])
+    c.chat.assert_not_called()
