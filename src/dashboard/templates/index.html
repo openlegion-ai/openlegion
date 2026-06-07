@@ -57,7 +57,7 @@
   <!-- Custom CSS -->
   <link rel="stylesheet" href="/dashboard/static/css/dashboard.css?v={{ v }}">
 </head>
-<body class="bg-gray-950 text-gray-100 h-[100dvh] overflow-hidden">
+<body class="bg-gray-950 text-gray-100 h-[100svh] overflow-hidden">
   <script>
     window.__config = {
       wsUrl: (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + "{{ ws_path }}",
@@ -67,7 +67,7 @@
     };
   </script>
 
-  <div x-data="dashboard()" x-init="init()" class="flex flex-col md:flex-row h-[100dvh]">
+  <div x-data="dashboard()" x-init="init()" class="flex flex-col md:flex-row h-[100svh]">
 
     <!-- Toast notifications -->
     <div class="fixed top-16 left-1/2 -translate-x-1/2 z-[100] flex flex-col gap-2 items-center pointer-events-none max-w-sm w-full" role="status" aria-live="polite">
@@ -500,7 +500,7 @@
       </div>
 
       <!-- Operator Chat Tab -->
-      <div x-show="activeTab === 'chat'" x-cloak class="h-full flex flex-col" style="min-height: calc(100dvh - 8rem);">
+      <div x-show="activeTab === 'chat'" x-cloak class="h-full flex flex-col" style="min-height: calc(100svh - 8rem);">
           <!-- Page header — full-width contextual top nav for the chat tab.
                Avatar alt is empty (decorative): the name sits right beside
                it, and an empty alt avoids a doubled "Operator" if the image
@@ -4132,7 +4132,7 @@
                keeps the default render to 5 rows so the panel stays small
                in the common case; once expanded it stays expanded for the
                session (no re-collapse behavior). -->
-          <div class="space-y-2 max-h-[40vh] overflow-y-auto custom-scrollbar pr-0.5">
+          <div class="space-y-2 max-h-[40dvh] overflow-y-auto custom-scrollbar pr-0.5">
             <template x-for="item in (needsYouExpanded ? needsYouItems : needsYouItems.slice(0, needsYouCollapsedCap))" :key="item.id">
               <div class="bg-gray-900/50 border border-gray-700/50 rounded-lg p-2.5 sm:p-3">
                 <div class="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
@@ -6430,7 +6430,7 @@
               </template>
             </div>
           </div>
-          <div class="space-y-1 max-h-[calc(100vh-16rem)] overflow-y-auto custom-scrollbar">
+          <div class="space-y-1 max-h-[calc(100dvh-16rem)] overflow-y-auto custom-scrollbar">
             <template x-for="t in filteredTraces" :key="t.trace_id">
               <div>
                 <div @click="toggleTraceExpand(t.trace_id)"
@@ -6538,7 +6538,7 @@
               Show technical detail
             </label>
           </div>
-          <div class="space-y-1 max-h-[calc(100vh-16rem)] overflow-y-auto custom-scrollbar"
+          <div class="space-y-1 max-h-[calc(100dvh-16rem)] overflow-y-auto custom-scrollbar"
                data-testid="system-activity-feed">
             <!-- Tech-detail mode: raw event stream (one row per event). -->
             <template x-if="showTechDetail">
@@ -6638,7 +6638,7 @@
             <button @click="fetchSystemLogs()" class="text-xs text-gray-400 hover:text-white transition-colors">Refresh</button>
           </div>
           <div class="bg-gray-900/70 border border-gray-800/60 rounded-md overflow-hidden">
-            <div class="max-h-[calc(100vh-16rem)] overflow-y-auto custom-scrollbar p-3 font-mono text-xs">
+            <div class="max-h-[calc(100dvh-16rem)] overflow-y-auto custom-scrollbar p-3 font-mono text-xs">
               <p x-show="systemLogs.length === 0 && !systemLogsLoading" class="text-gray-500 text-center py-8">No logs available. <button @click="fetchSystemLogs()" class="text-indigo-400 hover:underline">Refresh</button></p>
               <div x-show="systemLogsLoading" class="text-center py-8">
                 <div class="inline-flex items-center gap-2 text-gray-400">

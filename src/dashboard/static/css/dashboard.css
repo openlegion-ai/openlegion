@@ -634,23 +634,38 @@
   scrollbar-color: rgba(55, 55, 75, 0.6) transparent;
 }
 
-/* ── Scroll containment ──────────────────────────────
-   The body is a non-scrolling shell (`h-[100dvh] overflow-hidden`) and ALL
-   real scrolling happens in inner containers. Without containment, when an
-   inner scroller hits its top/bottom edge the overscroll *chains* outward to
-   that locked body — on iOS this produces a dead rubber-band that reads as a
-   frozen page (the same symptom class as the keyboard-scroll bug). Stop the
-   chain at each primary scroller, and kill any document-level bounce outright.
-   Additive + gracefully ignored on browsers without `overscroll-behavior`. */
+/* ── Scroll containment + momentum ───────────────────
+   The body is a non-scrolling shell (fixed-height, `overflow-hidden`) and ALL
+   real scrolling happens in inner containers. `overscroll-behavior: none` on
+   the document kills any page-level rubber-band outright.
+
+   We contain overscroll ONLY on the large primary scrollers (main + the chat
+   logs) so a fling that bottoms out there doesn't chain to the locked body.
+   We deliberately do NOT contain the dozens of small `.custom-scrollbar` cards
+   (trace lists, code blocks, pending queues, pickers): on touch a drag usually
+   lands on one of them, and containing it would swallow the remaining gesture
+   instead of letting it chain to `main` — i.e. the page would feel "stuck".
+   Letting these chain restores natural page scrolling on mobile; the document
+   is already locked + `overscroll-behavior: none`, so nothing bounces.
+
+   Momentum (`-webkit-overflow-scrolling: touch`) is applied to every real
+   scroller so inner scrolling has inertia on WebKit / Chrome-on-iOS.
+   Additive + gracefully ignored on browsers without these properties. */
 html, body {
   overscroll-behavior: none;
 }
 
 main,
 [id^="chat-messages-"],
+[id^="side-chat-messages-"] {
+  overscroll-behavior: contain;
+}
+
+main,
+[id^="chat-messages-"],
 [id^="side-chat-messages-"],
 .custom-scrollbar {
-  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
 /* ── Scrollbar-hidden utility for tab strips ───────── */
