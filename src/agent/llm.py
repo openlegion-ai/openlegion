@@ -377,6 +377,64 @@ class LLMClient:
                     )
                     yield {"type": "done", "response": llm_resp}
 
+    async def chat_collect(
+        self,
+        system: str,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+        model: str | None = None,
+        max_tokens: int | None = None,
+        temperature: float = 0.7,
+        **kwargs,
+    ) -> LLMResponse:
+        """Run a completion over the streaming endpoint, returning the final
+        assembled ``LLMResponse``.
+
+        Streaming makes the httpx read timeout a per-chunk (idle) bound instead
+        of a total-response bound, so a large generation the agent's
+        ``max_output_tokens`` permits can't ``ReadTimeout`` mid-flight — the
+        failure that broke task execution on the fleet. Contract-identical to
+        ``chat``: the stream's terminal ``done`` frame carries the same
+        fully-parsed ``LLMResponse`` (content, thinking, tool_calls, tokens).
+
+        Falls back to non-streaming ``chat`` only when the stream ends without
+        a terminal frame or the transport fails for a non-classified reason
+        (mirrors the documented ``chat_stream`` fallback intent) — that
+        fallback is resilience, not a toggle. Classified errors (auth / config
+        / retryable) and other RuntimeErrors propagate to
+        ``_llm_call_with_retry`` so its backoff still applies.
+        """
+        _passthru = dict(
+            tools=tools, model=model, max_tokens=max_tokens,
+            temperature=temperature, **kwargs,
+        )
+        from src.shared.errors import LLMAuthError, LLMConfigError
+        final: LLMResponse | None = None
+        try:
+            async for chunk in self.chat_stream(system, messages, **_passthru):
+                if chunk.get("type") == "done":
+                    final = chunk.get("response")
+        except (LLMRetryableError, LLMAuthError, LLMConfigError):
+            raise  # classified errors -> _llm_call_with_retry handles backoff
+        except httpx.HTTPError as e:
+            # Only genuine transport/HTTP failures fall back to non-streaming.
+            # Everything else propagates untouched: non-retryable application
+            # errors (SSE error frames, budget) arrive as plain RuntimeError,
+            # and any unexpected error (parsing bug, etc.) must surface — not be
+            # masked by a second, billable non-streaming generation after the
+            # stream may already have produced/billed tokens.
+            logger.warning(
+                "Streaming transport failed (%s); falling back to non-streaming",
+                type(e).__name__,
+            )
+            return await self.chat(system, messages, **_passthru)
+        if final is None:
+            logger.warning(
+                "Stream ended without a final frame; falling back to non-streaming",
+            )
+            return await self.chat(system, messages, **_passthru)
+        return final
+
     async def embed(self, text: str, model: str | None = None) -> list[float]:
         """Generate an embedding vector through the mesh proxy."""
         request = APIProxyRequest(

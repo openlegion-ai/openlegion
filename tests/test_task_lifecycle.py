@@ -106,6 +106,10 @@ def _make_loop_with_mocks():
     ))
     llm.default_model = "test-model"
 
+    async def _chat_collect_delegate(*args, **kwargs):
+        return await llm.chat(*args, **kwargs)
+    llm.chat_collect = _chat_collect_delegate
+
     mesh_client = MagicMock()
     mesh_client.agent_id = "test_agent"
     mesh_client.is_standalone = True

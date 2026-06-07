@@ -48,6 +48,10 @@ def _make_loop_with_workspace(
         llm.chat = AsyncMock(return_value=LLMResponse(content="Hello!", tokens_used=50))
     llm.default_model = "test-model"
 
+    async def _chat_collect_delegate(*args, **kwargs):
+        return await llm.chat(*args, **kwargs)
+    llm.chat_collect = _chat_collect_delegate
+
     mesh_client = MagicMock()
     mesh_client.send_system_message = AsyncMock(return_value={})
 
@@ -365,6 +369,10 @@ class TestChatTranscriptIntegration:
         llm = MagicMock()
         llm.chat = AsyncMock(return_value=LLMResponse(content="Reply", tokens_used=10))
         llm.default_model = "test"
+
+        async def _chat_collect_delegate(*args, **kwargs):
+            return await llm.chat(*args, **kwargs)
+        llm.chat_collect = _chat_collect_delegate
 
         mesh = MagicMock()
         mesh.send_system_message = AsyncMock(return_value={})
