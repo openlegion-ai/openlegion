@@ -1,5 +1,6 @@
 """Unit tests for credential vault."""
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -640,6 +641,91 @@ async def test_stream_failover(monkeypatch):
     # Should have text_delta and done events
     assert any("streamed" in e for e in events)
     assert any("done" in e for e in events)
+
+
+async def test_stream_captures_trailing_usage_chunk(monkeypatch):
+    """Streaming anthropic: a trailing usage-only chunk (empty choices) is
+    captured so the ``done`` event's token accounting is non-zero and the
+    request asks for usage via ``stream_options={"include_usage": True}``.
+
+    Regression: native-anthropic streaming returns no ``response.usage``, so
+    prior to capturing the trailing chunk, ``tokens_used`` (and cache
+    metrics) were always blank on the streaming path agents actually use.
+    """
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant")
+    v = CredentialVault()
+
+    captured_kwargs = {}
+
+    async def mock_chunk_generator():
+        # Two content chunks with real choices...
+        for piece in ("hello ", "world"):
+            chunk = MagicMock()
+            chunk.choices = [MagicMock()]
+            chunk.choices[0].delta.content = piece
+            chunk.choices[0].delta.tool_calls = None
+            chunk.choices[0].delta.reasoning_content = None
+            chunk.usage = None
+            yield chunk
+        # ...then a final usage-only chunk with EMPTY choices (litellm emits
+        # this when include_usage is set). The empty-choices guard prevents
+        # an IndexError; our code reads chunk.usage off it.
+        final = MagicMock()
+        final.choices = []
+        usage = MagicMock()
+        usage.total_tokens = 1234
+        usage.prompt_tokens = 1000
+        usage.completion_tokens = 234
+        usage.cache_read_input_tokens = 800
+        usage.cache_creation_input_tokens = 50
+        final.usage = usage
+        yield final
+
+    async def mock_acompletion(model, messages, api_key, stream=False, **kwargs):
+        captured_kwargs.update(kwargs)
+        captured_kwargs["model"] = model
+        return mock_chunk_generator()
+
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={
+                "model": "anthropic/claude-haiku-4-5-20251001",
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        )
+        events = []
+        async for event in v.stream_llm(req):
+            events.append(event)
+
+    # include_usage requested on the anthropic stream.
+    assert captured_kwargs.get("stream_options") == {"include_usage": True}
+
+    # The done event carries the captured trailing-chunk token accounting.
+    done_payloads = [
+        json.loads(e[len("data: "):]) for e in events
+        if e.startswith("data: ") and '"type": "done"' in e
+    ]
+    assert done_payloads, f"no done event in {events!r}"
+    assert done_payloads[0]["tokens_used"] == 1234
+    # Content from the real-choices chunks survived too.
+    assert done_payloads[0]["content"] == "hello world"
+
+
+def test_stream_options_guard_anthropic_only():
+    """The include_usage guard fires only for ``anthropic/`` models and is a
+    no-op for openai/gemini, matching the in-line guard in ``stream_llm``."""
+    def _apply(model: str) -> dict:
+        llm_kwargs: dict = {"model": model}
+        if isinstance(llm_kwargs.get("model"), str) and llm_kwargs["model"].startswith("anthropic/"):
+            llm_kwargs["stream_options"] = {"include_usage": True}
+        return llm_kwargs
+
+    assert _apply("anthropic/claude-haiku-4-5-20251001").get("stream_options") == {
+        "include_usage": True,
+    }
+    assert "stream_options" not in _apply("openai/gpt-4o-mini")
+    assert "stream_options" not in _apply("gemini/gemini-2.5-flash")
 
 
 # ── Hot-reload credential management ──────────────────────────
@@ -5523,3 +5609,218 @@ async def test_oauth_resolve_token_not_logged_in_full(monkeypatch, caplog):
     assert token not in logged
     assert token[:15] not in logged
     assert token[-4:] not in logged or "fp=" in logged  # fingerprint only
+
+
+# ── Anthropic prompt-cache breakpoints (OAuth path) ──────────────────────
+
+from src.host import credentials as _cred_mod  # noqa: E402
+from src.host.credentials import (  # noqa: E402
+    _mark_anthropic_cache_breakpoints,
+    _mark_anthropic_cache_breakpoints_openai_fmt,
+)
+
+_EPHEMERAL = {"type": "ephemeral"}
+
+
+class TestMarkAnthropicCacheBreakpoints:
+    """Unit tests for the prompt-cache breakpoint tagger on the OAuth path."""
+
+    def _full_body(self):
+        return {
+            "model": "claude-x",
+            "tools": [
+                {"name": "a", "description": "", "input_schema": {}},
+                {"name": "b", "description": "", "input_schema": {}},
+            ],
+            "system": [
+                {"type": "text", "text": "identity"},
+                {"type": "text", "text": "agent system"},
+            ],
+            "messages": [
+                {"role": "user", "content": "hello"},
+            ],
+        }
+
+    def test_marks_last_tool_system_and_string_message(self):
+        body = self._full_body()
+        _mark_anthropic_cache_breakpoints(body)
+
+        # (a) last tool only
+        assert "cache_control" not in body["tools"][0]
+        assert body["tools"][1]["cache_control"] == _EPHEMERAL
+        # (b) last system block only
+        assert "cache_control" not in body["system"][0]
+        assert body["system"][1]["cache_control"] == _EPHEMERAL
+        # (c) string content converted to a list block with cache_control
+        content = body["messages"][0]["content"]
+        assert content == [
+            {"type": "text", "text": "hello", "cache_control": _EPHEMERAL}
+        ]
+
+    def test_last_message_list_content_marks_last_block(self):
+        body = {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "1", "content": "x"},
+                        {"type": "tool_result", "tool_use_id": "2", "content": "y"},
+                    ],
+                },
+            ],
+        }
+        _mark_anthropic_cache_breakpoints(body)
+        blocks = body["messages"][0]["content"]
+        assert "cache_control" not in blocks[0]
+        assert blocks[1]["cache_control"] == _EPHEMERAL
+
+    def test_last_message_non_cacheable_block_not_tagged(self):
+        # A non-cacheable trailing block (e.g. ``thinking``) must NOT be
+        # tagged — Anthropic rejects cache_control there. The system/tools
+        # breakpoints still apply; only the message breakpoint is skipped.
+        body = {
+            "system": [{"type": "text", "text": "s"}],
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "ok"},
+                        {"type": "thinking", "thinking": "..."},
+                    ],
+                },
+            ],
+        }
+        _mark_anthropic_cache_breakpoints(body)
+        blocks = body["messages"][0]["content"]
+        assert "cache_control" not in blocks[0]
+        assert "cache_control" not in blocks[1]
+        assert body["system"][0]["cache_control"] == _EPHEMERAL
+
+    def test_empty_or_missing_fields_no_error_no_spurious_keys(self):
+        # Completely empty.
+        body = {}
+        _mark_anthropic_cache_breakpoints(body)
+        assert body == {}
+
+        # Present but empty containers.
+        body2 = {"tools": [], "system": [], "messages": []}
+        _mark_anthropic_cache_breakpoints(body2)
+        assert body2 == {"tools": [], "system": [], "messages": []}
+
+        # Empty string message content stays untouched.
+        body3 = {"messages": [{"role": "user", "content": ""}]}
+        _mark_anthropic_cache_breakpoints(body3)
+        assert body3["messages"][0]["content"] == ""
+
+    def test_disabled_flag_adds_nothing(self, monkeypatch):
+        monkeypatch.setattr(_cred_mod, "_PROMPT_CACHE_ENABLED", False)
+        body = self._full_body()
+        _mark_anthropic_cache_breakpoints(body)
+        assert "cache_control" not in body["tools"][1]
+        assert "cache_control" not in body["system"][1]
+        # String content left as a plain string (not converted).
+        assert body["messages"][0]["content"] == "hello"
+
+    def test_idempotent(self):
+        body = self._full_body()
+        _mark_anthropic_cache_breakpoints(body)
+        first = json.dumps(body, sort_keys=True)
+        _mark_anthropic_cache_breakpoints(body)
+        second = json.dumps(body, sort_keys=True)
+        assert first == second
+        # Exactly one cache_control on the (now-list) message content.
+        assert body["messages"][0]["content"] == [
+            {"type": "text", "text": "hello", "cache_control": _EPHEMERAL}
+        ]
+
+
+class TestMarkAnthropicCacheBreakpointsOpenAiFmt:
+    """Unit tests for the prompt-cache tagger on the litellm native-anthropic
+    path, where the request is OpenAI-shaped (system as a ``role:'system'``
+    message; tools as ``{'type':'function',...}`` dicts)."""
+
+    def _kwargs(self, model="anthropic/claude-x"):
+        return {
+            "model": model,
+            "tools": [
+                {"type": "function", "function": {"name": "a"}},
+                {"type": "function", "function": {"name": "b"}},
+            ],
+            "messages": [
+                {"role": "system", "content": "agent system prompt"},
+                {"role": "user", "content": "hello"},
+            ],
+        }
+
+    def test_native_anthropic_tags_system_last_tool_and_last_message(self):
+        kw = self._kwargs()
+        _mark_anthropic_cache_breakpoints_openai_fmt(kw)
+
+        # last tool only
+        assert "cache_control" not in kw["tools"][0]
+        assert kw["tools"][1]["cache_control"] == _EPHEMERAL
+        # system message string content → list block with cache_control
+        assert kw["messages"][0]["content"] == [
+            {
+                "type": "text",
+                "text": "agent system prompt",
+                "cache_control": _EPHEMERAL,
+            }
+        ]
+        # last (user) message string content → list block with cache_control
+        assert kw["messages"][1]["content"] == [
+            {"type": "text", "text": "hello", "cache_control": _EPHEMERAL}
+        ]
+
+    def test_rewritten_openai_model_tags_nothing(self):
+        # api_base / credit-proxy rewrite turns the model into ``openai/...``,
+        # which silently drops cache_control — the guard must skip.
+        kw = self._kwargs(model="openai/claude-x")
+        _mark_anthropic_cache_breakpoints_openai_fmt(kw)
+        assert "cache_control" not in kw["tools"][1]
+        assert kw["messages"][0]["content"] == "agent system prompt"
+        assert kw["messages"][1]["content"] == "hello"
+
+    def test_non_anthropic_model_tags_nothing(self):
+        kw = self._kwargs(model="gemini/gemini-2.5-pro")
+        _mark_anthropic_cache_breakpoints_openai_fmt(kw)
+        assert "cache_control" not in kw["tools"][1]
+        assert kw["messages"][0]["content"] == "agent system prompt"
+        assert kw["messages"][1]["content"] == "hello"
+
+    def test_disabled_flag_tags_nothing(self, monkeypatch):
+        monkeypatch.setattr(_cred_mod, "_PROMPT_CACHE_ENABLED", False)
+        kw = self._kwargs()
+        _mark_anthropic_cache_breakpoints_openai_fmt(kw)
+        assert "cache_control" not in kw["tools"][1]
+        assert kw["messages"][0]["content"] == "agent system prompt"
+        assert kw["messages"][1]["content"] == "hello"
+
+    def test_single_system_message_not_double_tagged(self):
+        # When the only message IS the system message, tag it once (via the
+        # system pass) and skip the last-message pass — no error, no double.
+        kw = {
+            "model": "anthropic/claude-x",
+            "messages": [{"role": "system", "content": "only system"}],
+        }
+        _mark_anthropic_cache_breakpoints_openai_fmt(kw)
+        content = kw["messages"][0]["content"]
+        assert content == [
+            {"type": "text", "text": "only system", "cache_control": _EPHEMERAL}
+        ]
+
+    def test_empty_or_missing_fields_no_error(self):
+        # Missing model.
+        kw0 = {"messages": [{"role": "user", "content": "hi"}]}
+        _mark_anthropic_cache_breakpoints_openai_fmt(kw0)
+        assert kw0["messages"][0]["content"] == "hi"
+
+        # Native model but empty containers.
+        kw1 = {"model": "anthropic/claude-x", "tools": [], "messages": []}
+        _mark_anthropic_cache_breakpoints_openai_fmt(kw1)
+        assert kw1 == {"model": "anthropic/claude-x", "tools": [], "messages": []}
+
+        # No messages key at all.
+        kw2 = {"model": "anthropic/claude-x"}
+        _mark_anthropic_cache_breakpoints_openai_fmt(kw2)
+        assert kw2 == {"model": "anthropic/claude-x"}
