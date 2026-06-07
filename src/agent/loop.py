@@ -2844,20 +2844,17 @@ class AgentLoop:
                                 # Non-lazy success. When the worker returned a
                                 # structured ``{"result": {...}}`` final (the
                                 # answer-delivery shape this prompt now steers
-                                # them to), PARSE it so the originator's
-                                # await/check_inbox surfaces the clean answer —
-                                # not the raw JSON envelope. Mirrors
-                                # execute_task's _parse_final_output extraction;
-                                # without it the structured handoff reply leaks
-                                # ``{"result": {...}}`` as the deliverable.
+                                # them to), pass the PARSED envelope through —
+                                # exactly as execute_task does — so the
+                                # originator's await/check_inbox surfaces the
+                                # clean ``result.summary`` answer rather than the
+                                # raw JSON wrapper. The mesh reads ``.summary``
+                                # tolerantly (``.get`` → "" when absent, e.g. a
+                                # noop), so no summary is synthesized here.
                                 if self._is_structured_final(response_text):
-                                    result_data, _ = self._parse_final_output(
+                                    result_payload, _ = self._parse_final_output(
                                         response_text,
                                     )
-                                    result_data.setdefault(
-                                        "summary", response_text[:500],
-                                    )
-                                    result_payload = result_data
                                 else:
                                     result_payload = {
                                         "summary": response_text[:500],
