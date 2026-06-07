@@ -33,6 +33,9 @@ _encoding_cache: dict[str, object | None] = {}
 
 _SUMMARIZATION_INPUT_LIMIT = 20_000  # max chars fed to the summarization LLM call
 
+_CONSOLIDATION_MIN_INTERVAL_S = 6 * 3600   # at most every 6 hours
+_CONSOLIDATION_MIN_LOG_CHARS = 1_500       # skip if little new material accrued
+
 
 def _get_tiktoken_encoding(model: str):
     """Get cached tiktoken encoding for an OpenAI model. Returns None if unavailable."""
@@ -284,6 +287,13 @@ class ContextManager:
                     label.lower(), e,
                 )
 
+        # Step 1b: opportunistically consolidate the compiled memory head.
+        if self.workspace and self.llm:
+            try:
+                await self._maybe_consolidate_memory()
+            except Exception as e:
+                logger.warning("Memory consolidation skipped: %s", e)
+
         # Step 2: Summarize and compress
         if self.llm:
             result = await self._summarize_compact(system_prompt, messages)
@@ -399,6 +409,60 @@ class ContextManager:
             self.workspace.append_daily_log(
                 f"Context compacted — {count} facts flushed to memory"
             )
+
+    async def _maybe_consolidate_memory(self) -> None:
+        """Re-derive the compiled MEMORY.md head from the append-only log +
+        high-salience facts. Time-gated (>=6h) and material-gated (>=1.5k log
+        chars) so it adds at most one LLM call to the occasional compaction.
+        Best-effort: never raises into the compaction path.
+        """
+        ws, llm = self.workspace, self.llm
+        if not ws or not llm:
+            return
+        if not ws.consolidation_due(_CONSOLIDATION_MIN_INTERVAL_S):
+            return
+        log = ws.load_memory_log()
+        if len(log) < _CONSOLIDATION_MIN_LOG_CHARS:
+            return
+        head = ws.load_compiled_memory()
+        salient = ""
+        if self.memory:
+            try:
+                facts = await self.memory.get_high_salience_facts(top_k=30)
+                salient = "\n".join(f"- {f.key}: {f.value}" for f in facts)
+            except Exception as e:
+                logger.debug("consolidation: salience fetch failed: %s", e)
+        prompt = (
+            "You maintain an agent's COMPILED long-term memory — a small, durable, "
+            "deduplicated brief that is injected into context every turn.\n\n"
+            "Rewrite it from the inputs below. Rules: merge duplicates; on "
+            "contradiction prefer the most RECENT; drop stale/transient/one-off "
+            "items; keep durable facts, user preferences, and decisions. Group "
+            "related points under short markdown headings. Be concise (aim < 1200 "
+            "words). Output ONLY the compiled memory markdown — no preamble.\n\n"
+            f"## Current compiled memory\n{head[:_SUMMARIZATION_INPUT_LIMIT]}\n\n"
+            f"## High-salience facts\n{salient[:4000]}\n\n"
+            f"## Recent activity log (newest last)\n{log[:_SUMMARIZATION_INPUT_LIMIT]}"
+        )
+        try:
+            resp = await llm.chat(
+                system="You compile concise, durable agent memory.",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=1500, temperature=0.3,
+            )
+        except Exception as e:
+            logger.warning("Memory consolidation LLM call failed: %s", e)
+            return
+        new_head = (resp.content or "").strip()
+        if not new_head:
+            return
+        ws.write_compiled_memory(sanitize_for_prompt(new_head))
+        ws.mark_consolidated()
+        if self._on_memory_update:
+            try:
+                await self._on_memory_update()
+            except Exception:
+                logger.debug("Non-fatal: memory update notification failed")
 
     _SUMMARIZE_RETRIES = 2
     _SUMMARIZE_BACKOFF = 2  # seconds
