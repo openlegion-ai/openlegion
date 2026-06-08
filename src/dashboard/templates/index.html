@@ -1820,8 +1820,8 @@
                         <div class="space-y-1">
                           <template x-for="t in teamWork.inflight" :key="t.id">
                             <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg px-3 py-2">
-                              <div class="flex items-center justify-between gap-2">
-                                <span class="text-sm text-gray-200 truncate" x-text="t.title"></span>
+                              <div class="flex flex-col gap-0.5 sm:flex-row sm:items-center sm:justify-between sm:gap-2">
+                                <span class="text-sm text-gray-200 truncate min-w-0" x-text="t.title"></span>
                                 <span class="text-[11px] text-gray-500 flex-shrink-0 font-mono" x-text="teamHandoffLabel(t)"></span>
                               </div>
                               <div class="text-[11px] text-gray-600 mt-0.5" x-text="t.status"></div>
@@ -1835,8 +1835,8 @@
                         <div class="space-y-1">
                           <template x-for="t in teamWork.doneToday" :key="t.id">
                             <div class="bg-gray-800/30 border border-gray-800 rounded-lg px-3 py-2">
-                              <div class="flex items-center justify-between gap-2">
-                                <span class="text-sm text-gray-300 truncate" x-text="t.title"></span>
+                              <div class="flex flex-col gap-0.5 sm:flex-row sm:items-center sm:justify-between sm:gap-2">
+                                <span class="text-sm text-gray-300 truncate min-w-0" x-text="t.title"></span>
                                 <span class="text-[11px] text-gray-600 flex-shrink-0 font-mono" x-text="teamHandoffLabel(t)"></span>
                               </div>
                               <div x-show="t.outcome" class="text-[11px] text-emerald-400/80 mt-0.5" x-text="'✓ ' + (t.outcome || '')"></div>
