@@ -17,6 +17,7 @@ import functools
 import hashlib
 import json
 import math
+import os
 import re
 import sqlite3
 import struct
@@ -51,6 +52,21 @@ _TASK_CHECKPOINT_VERSION = 1
 _CATEGORY_SIM_THRESHOLD = 0.7
 # Recompute category embedding every N new members
 _CATEGORY_RECOMPUTE_INTERVAL = 10
+# Semantic dedup: when storing a fact, an existing fact whose embedding is at or
+# above this similarity (and category-compatible) is treated as the SAME fact and
+# updated in place instead of inserting a near-duplicate row. Deliberately high so
+# distinct facts ("user_name" vs "user_email") are never collapsed — only genuine
+# near-synonym keys ("preferred_language" vs "user_language_preference") merge.
+# Similarity uses the same 1/(1+L2_distance) convention as search/categorization.
+_SEMANTIC_DEDUP_SIM_THRESHOLD = 0.93
+
+
+def _semantic_dedup_enabled() -> bool:
+    """Vector-similarity dedup on the write path is opt-in (embedding path is not
+    always available; ships safe behind a flag, default off)."""
+    return os.environ.get("OPENLEGION_SEMANTIC_DEDUP", "").lower() in (
+        "1", "true", "yes", "on",
+    )
 
 _T = TypeVar("_T")
 
@@ -263,22 +279,69 @@ class MemoryStore:
         recency_factor = max(0.1, 1.0 - days_since_last_access * 0.05)
         return 1.0 + math.log(1 + access_count) * recency_factor
 
+    def _find_semantic_duplicate(
+        self, embedding: list[float], category: str,
+    ) -> str | None:
+        """Return the id of an existing fact that is a near-duplicate of the one
+        being stored (cosine-equivalent similarity at/above the dedup threshold and
+        category-compatible), or None. Conservative by design — only collapses
+        genuine near-synonyms. Used on the write path when the flag is enabled.
+        """
+        blob = serialize_float32(embedding)
+        rows = self.db.execute(
+            "SELECT id, distance FROM facts_vec WHERE embedding MATCH ? "
+            "ORDER BY distance LIMIT ?",
+            (blob, 5),
+        ).fetchall()
+        for fact_id, distance in rows:
+            similarity = 1.0 / (1.0 + distance)
+            if similarity < _SEMANTIC_DEDUP_SIM_THRESHOLD:
+                break  # rows are distance-ordered; first miss ends the scan
+            row = self.db.execute(
+                "SELECT category FROM facts WHERE id = ?", (fact_id,),
+            ).fetchone()
+            if row is None:
+                continue
+            existing_category = row[0] or "general"
+            # Category-compatible = identical, or one side is the catch-all
+            # "general" (so an uncategorized near-dup still merges).
+            if existing_category == category or "general" in (existing_category, category):
+                return fact_id
+        return None
+
     def _store_fact_sync(
         self, key: str, value: str, category: str, source: str,
         confidence: float, embedding: list[float] | None,
+        merge_into: str | None = None,
     ) -> str:
-        """Sync DB portion of store_fact. Returns the fact ID."""
-        existing = self.db.execute("SELECT id, access_count FROM facts WHERE key = ?", (key,)).fetchone()
+        """Sync DB portion of store_fact. Returns the fact ID.
+
+        ``merge_into`` is a fact id resolved by semantic-similarity dedup; when set,
+        that existing row is updated in place (prefer-newer value, bump salience)
+        instead of matching purely on exact key.
+        """
+        existing = None
+        if merge_into is not None:
+            existing = self.db.execute(
+                "SELECT id, access_count FROM facts WHERE id = ?", (merge_into,),
+            ).fetchone()
+        if existing is None:
+            existing = self.db.execute(
+                "SELECT id, access_count FROM facts WHERE key = ?", (key,),
+            ).fetchone()
 
         if existing:
             fact_id = existing[0]
             new_count = existing[1] + 1
             boost = self._compute_boost(new_count)
+            # Prefer the newer value AND adopt the newer key/category so the
+            # surviving row reflects the latest phrasing (a semantic merge may
+            # have matched a row stored under a different key).
             self.db.execute(
-                "UPDATE facts SET value = ?, confidence = ?, "
+                "UPDATE facts SET key = ?, value = ?, category = ?, confidence = ?, "
                 "access_count = ?, last_accessed = datetime('now'), "
                 "decay_score = MIN(?, 10.0) WHERE id = ?",
-                (value, confidence, new_count, boost, fact_id),
+                (key, value, category, confidence, new_count, boost, fact_id),
             )
             self.db.execute("DELETE FROM facts_fts WHERE fact_id = ?", (fact_id,))
             self.db.execute(
@@ -332,9 +395,19 @@ class MemoryStore:
             )
             embedding = None
 
+        # Semantic dedup (opt-in): if an existing fact is a near-duplicate of this
+        # one, update it in place instead of inserting a near-dup row. Resolved
+        # here (sync probe in executor) so the value reaches _store_fact_sync.
+        merge_into = None
+        if embedding is not None and _semantic_dedup_enabled():
+            merge_into = await self._run_db(
+                self._find_semantic_duplicate, embedding, category,
+            )
+
         # Run all DB writes in executor to avoid blocking the event loop
         fact_id = await self._run_db(
-            self._store_fact_sync, key, value, category, source, confidence, embedding,
+            self._store_fact_sync, key, value, category, source, confidence,
+            embedding, merge_into,
         )
 
         if embedding is not None:

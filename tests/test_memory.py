@@ -410,3 +410,131 @@ class TestToolOutcomes:
         ).fetchall()]
         assert "tool_outcomes" in tables
         store.close()
+
+
+class TestSemanticDedup:
+    """Vector-similarity dedup on the write path (OPENLEGION_SEMANTIC_DEDUP).
+
+    Uses a controllable stub embedder so near-duplicate vs distinct facts are
+    deterministic and independent of any real embedding provider.
+    """
+
+    @staticmethod
+    def _grouped_embedder(groups):
+        """Return an async embed_fn that maps each key (the part before ': ') to a
+        deterministic vector per ``groups`` membership. Keys in the same group get
+        an identical vector (similarity 1.0); keys in different groups get near-
+        orthogonal vectors (similarity well below the dedup threshold)."""
+        # group_index -> base vector
+        async def _embed(text: str) -> list[float]:
+            key = text.split(":", 1)[0].strip()
+            for gi, members in enumerate(groups):
+                if key in members:
+                    vec = [0.0] * 1536
+                    vec[gi] = 1.0
+                    return vec
+            # Unknown key: unique-ish vector far from the named groups.
+            vec = [0.0] * 1536
+            vec[1535] = 1.0
+            return vec
+        return _embed
+
+    @pytest.fixture
+    def dedup_on(self, monkeypatch):
+        monkeypatch.setenv("OPENLEGION_SEMANTIC_DEDUP", "1")
+
+    @pytest.fixture
+    def dedup_off(self, monkeypatch):
+        monkeypatch.delenv("OPENLEGION_SEMANTIC_DEDUP", raising=False)
+
+    def _make_store(self, tmp_path, name, groups):
+        embed = self._grouped_embedder(groups)
+        return MemoryStore(db_path=str(tmp_path / name), embed_fn=embed)
+
+    @staticmethod
+    def _count_facts(store) -> int:
+        return store.db.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+
+    @pytest.mark.asyncio
+    async def test_near_duplicate_keys_merge_into_one_row(self, tmp_path, dedup_on):
+        groups = [{"preferred_language", "user_language_preference"}]
+        store = self._make_store(tmp_path, "merge.db", groups)
+        try:
+            await store.store_fact("preferred_language", "Python")
+            await store.store_fact("user_language_preference", "Rust")
+            # Both near-synonym keys collapse to a single surviving row.
+            assert self._count_facts(store) == 1
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_distinct_facts_stay_separate(self, tmp_path, dedup_on):
+        groups = [{"user_name"}, {"user_email"}]
+        store = self._make_store(tmp_path, "distinct.db", groups)
+        try:
+            await store.store_fact("user_name", "Alice")
+            await store.store_fact("user_email", "alice@example.com")
+            # Clearly-distinct facts (orthogonal vectors) are never collapsed.
+            assert self._count_facts(store) == 2
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_merge_prefers_newer_value(self, tmp_path, dedup_on):
+        groups = [{"preferred_language", "user_language_preference"}]
+        store = self._make_store(tmp_path, "newer.db", groups)
+        try:
+            await store.store_fact("preferred_language", "Python")
+            await store.store_fact("user_language_preference", "Rust")
+            assert self._count_facts(store) == 1
+            # Surviving row reflects the newer value + key.
+            fact = store._get_fact_by_key("user_language_preference")
+            assert fact is not None
+            assert fact.value == "Rust"
+            # Old key no longer resolves (the single row was rewritten).
+            assert store._get_fact_by_key("preferred_language") is None
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_merge_bumps_salience(self, tmp_path, dedup_on):
+        groups = [{"preferred_language", "user_language_preference"}]
+        store = self._make_store(tmp_path, "salience.db", groups)
+        try:
+            await store.store_fact("preferred_language", "Python")
+            first = store._get_fact_by_key("preferred_language")
+            assert first is not None
+            await store.store_fact("user_language_preference", "Rust")
+            merged = store._get_fact_by_key("user_language_preference")
+            assert merged is not None
+            assert merged.access_count > first.access_count
+            assert merged.decay_score > first.decay_score
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_flag_off_keeps_exact_key_behavior(self, tmp_path, dedup_off):
+        groups = [{"preferred_language", "user_language_preference"}]
+        store = self._make_store(tmp_path, "flagoff.db", groups)
+        try:
+            await store.store_fact("preferred_language", "Python")
+            await store.store_fact("user_language_preference", "Rust")
+            # Flag off: near-dup keys are NOT merged — two rows, today's behavior.
+            assert self._count_facts(store) == 2
+            # Exact-key update still collapses (unchanged behavior).
+            await store.store_fact("preferred_language", "Go")
+            assert self._count_facts(store) == 2
+            assert store._get_fact_by_key("preferred_language").value == "Go"
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_flag_off_no_embedder_unchanged(self, tmp_path, dedup_off):
+        # No embed_fn at all → write path identical to today regardless of flag.
+        store = MemoryStore(db_path=str(tmp_path / "noembed.db"))
+        try:
+            await store.store_fact("preferred_language", "Python")
+            await store.store_fact("user_language_preference", "Rust")
+            assert self._count_facts(store) == 2
+        finally:
+            store.close()
