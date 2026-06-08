@@ -20,6 +20,7 @@ def _is_operator() -> bool:
 
 @tool(
     name="install_skill",
+    operator_only=True,
     description=(
         "Install a SKILL.md skill pack from a public git repo so the fleet can "
         "use it. The repo must have a SKILL.md (name + description) at its root. "
@@ -58,6 +59,7 @@ async def install_skill(repo_url: str, ref: str = "", *, mesh_client=None, _mess
 
 @tool(
     name="remove_skill",
+    operator_only=True,
     description=(
         "Remove a previously installed skill pack by name. Operator-only; "
         "requires the user to have asked for it. Bundled skills cannot be removed."
@@ -84,6 +86,7 @@ async def remove_skill(name: str, *, mesh_client=None, _messages=None, **_kw) ->
 
 @tool(
     name="list_skill_assignments",
+    operator_only=True,
     description=(
         "Show which skill packs are assigned where: the fleet-wide list (every "
         "agent sees these) and each agent's per-agent list. Operator-only. Read "
@@ -101,6 +104,7 @@ async def list_skill_assignments(*, mesh_client=None, **_kw) -> dict:
 
 @tool(
     name="assign_skill",
+    operator_only=True,
     description=(
         "Give or take away a skill pack for an agent (or the whole fleet). "
         "Skills are scoped per agent so each agent only sees the procedures it "

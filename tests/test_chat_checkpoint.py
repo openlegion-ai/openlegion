@@ -130,6 +130,7 @@ def _make_loop(tmp_path, *, chat_messages=None):
     tools.get_tool_definitions.return_value = []
     tools.get_descriptions.return_value = ""
     tools.get_loop_exempt_tools.return_value = set()
+    tools.operator_only_tools.return_value = set()
     mesh_client = MagicMock()
     mesh_client.is_standalone = False
     mesh_client.list_agents = AsyncMock(return_value={})
@@ -228,6 +229,7 @@ async def test_no_restore_without_memory(tmp_path):
     tools.get_tool_definitions.return_value = []
     tools.get_descriptions.return_value = ""
     tools.get_loop_exempt_tools.return_value = set()
+    tools.operator_only_tools.return_value = set()
     mesh_client = MagicMock()
     mesh_client.is_standalone = False
 

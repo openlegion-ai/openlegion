@@ -178,6 +178,7 @@ def _validate_edit(agent_id: str, field: str, value) -> dict | None:
 
 @tool(
     name="read_agent_config",
+    operator_only=True,
     description=(
         "Read an agent's current configuration. Symmetric inverse of "
         "edit_agent — returns the same fields edit_agent can change so you "
@@ -267,6 +268,7 @@ async def read_agent_config(
 
 @tool(
     name="read_user_notifications",
+    operator_only=True,
     description=(
         "Read recent notifications that AGENTS pushed to the human USER's "
         "chat (via notify_user). OBSERVATIONAL / diagnostic only — surfaced "
@@ -334,6 +336,7 @@ async def read_user_notifications(
 
 @tool(
     name="list_peer_artifacts",
+    operator_only=True,
     description=(
         "List a teammate's artifact files. Artifacts are files agents "
         "write via save_artifact — design docs, reports, generated "
@@ -389,6 +392,7 @@ async def list_peer_artifacts(
 
 @tool(
     name="read_peer_artifact",
+    operator_only=True,
     description=(
         "Read a single artifact file written by a teammate. Use this "
         "after list_peer_artifacts to pull the content of a specific "
@@ -473,6 +477,7 @@ async def read_peer_artifact(
 
 @tool(
     name="list_peer_files",
+    operator_only=True,
     description=(
         "List the files in a teammate's workspace/data volume — "
         "operator-only. Unlike list_peer_artifacts (which only sees the "
@@ -538,6 +543,7 @@ async def list_peer_files(
 
 @tool(
     name="read_peer_file",
+    operator_only=True,
     description=(
         "Read the content of any file in a teammate's workspace/data "
         "volume — operator-only. This is how you retrieve a worker's "
@@ -613,6 +619,7 @@ async def read_peer_file(
 
 @tool(
     name="list_available_models",
+    operator_only=True,
     description=(
         "List models currently usable given the active credential setup. "
         "Use this BEFORE edit_agent or create_agent — never memorize the "
@@ -673,6 +680,7 @@ async def list_available_models(
 
 @tool(
     name="edit_agent",
+    operator_only=True,
     description=(
         "Change an agent's configuration. All edits apply IMMEDIATELY and "
         "emit a receipt card with [View diff] [Undo]. No confirmation step "
@@ -807,6 +815,7 @@ async def edit_agent(
 
 @tool(
     name="undo_change",
+    operator_only=True,
     description=(
         "Reverse a recent soft edit by undo_token. Use this if you realize "
         "mid-conversation that an edit you applied was wrong, OR if the user "
@@ -859,6 +868,7 @@ async def undo_change(
 
 @tool(
     name="create_agent",
+    operator_only=True,
     description=(
         "Create a new custom agent with role/model/instructions. "
         "Requires user confirmation."
@@ -959,6 +969,7 @@ def _parse_over_budget(error: Exception) -> dict | None:
 
 @tool(
     name="list_agent_queue",
+    operator_only=True,
     description=(
         "Read an agent's task queue: current and recent tasks grouped by "
         "status (active / blocked / done / failed / cancelled), up to "
@@ -996,6 +1007,7 @@ async def list_agent_queue(
 
 @tool(
     name="get_team_outputs",
+    operator_only=True,
     description=(
         "Completed task artifacts for a project in a time window. "
         "`since` accepts ISO timestamps or duration strings ('24h', '7d'); "
@@ -1033,6 +1045,7 @@ async def get_team_outputs(
 
 @tool(
     name="workflow_snapshot",
+    operator_only=True,
     description=(
         "Read a workflow chain snapshot for a multi-stage handoff. Pass "
         "the kickoff task_id (the root task you created when launching "
@@ -1086,6 +1099,7 @@ _AWAIT_TASK_EVENT_DEFAULT_TIMEOUT_S = 240
 
 @tool(
     name="await_task_event",
+    operator_only=True,
     description=(
         "Block until a specific task reaches a terminal status (done / "
         "failed / blocked / cancelled) or the timeout elapses. Polls "
@@ -1323,6 +1337,7 @@ async def await_task_event(
 
 @tool(
     name="inspect_agents",
+    operator_only=True,
     description=(
         "Read agents. Without agent_id: roster summary. With agent_id: "
         "depth='profile' returns role/capabilities/INTERFACE; "
@@ -1470,6 +1485,7 @@ async def inspect_agents(
 
 @tool(
     name="manage_task",
+    operator_only=True,
     description=(
         "Cancel, reroute, or retry a task. action='cancel' stops the task; "
         "action='reroute' moves it to new_assignee (required); "
@@ -1579,6 +1595,7 @@ async def manage_task(
 
 @tool(
     name="manage_agent",
+    operator_only=True,
     description=(
         "Archive or delete an agent. action='archive' is reversible and "
         "stops scheduling. action='delete' returns a confirmation nonce; "
@@ -1649,6 +1666,7 @@ async def manage_agent(
 
 @tool(
     name="list_pending",
+    operator_only=True,
     description=(
         "List every non-expired pending action awaiting user "
         "confirmation. Returns the nonce, action_kind, target_kind, "
@@ -1674,6 +1692,7 @@ async def list_pending(*, mesh_client=None, **_kw) -> dict:
 
 @tool(
     name="cancel_pending_action",
+    operator_only=True,
     description=(
         "Cancel a pending action by nonce. Use this to clean up stale or "
         "incorrect proposals that the user no longer wants. The action "
@@ -1731,6 +1750,7 @@ async def cancel_pending_action(
 
 @tool(
     name="archive_audit_before",
+    operator_only=True,
     description=(
         "Archive operator audit entries older than the given date. Removes "
         "them from the active audit-log view but preserves them in the "
@@ -1795,6 +1815,7 @@ async def archive_audit_before(
 
 @tool(
     name="inspect_teams",
+    operator_only=True,
     description=(
         "Read team info. detail='names' lists name+description; "
         "detail='status' adds task-count rollups (requires v2). "
@@ -1853,6 +1874,7 @@ async def inspect_teams(
 
 @tool(
     name="create_team",
+    operator_only=True,
     description=(
         "Create a new team and optionally assign agents to it. "
         "Requires user confirmation."
@@ -1892,6 +1914,7 @@ async def create_team(
 
 @tool(
     name="add_agents_to_team",
+    operator_only=True,
     description="Add one or more agents to a team. Requires user confirmation.",
     parameters={
         "team_name": {"type": "string", "description": "Team name"},
@@ -1929,6 +1952,7 @@ async def add_agents_to_team(
 
 @tool(
     name="remove_agents_from_team",
+    operator_only=True,
     description="Remove one or more agents from a team. Requires user confirmation.",
     parameters={
         "team_name": {"type": "string", "description": "Team name"},
@@ -1966,6 +1990,7 @@ async def remove_agents_from_team(
 
 @tool(
     name="update_team_context",
+    operator_only=True,
     description="Update a team's description / shared context.",
     parameters={
         "team_name": {"type": "string", "description": "Team name"},
@@ -1995,6 +2020,7 @@ async def update_team_context(
 
 @tool(
     name="set_team_goal",
+    operator_only=True,
     description="Set a team's north star + success criteria.",
     parameters={
         "team_name": {"type": "string", "description": "Team name"},
@@ -2065,6 +2091,7 @@ async def set_team_goal(
 
 @tool(
     name="summarize_team_progress",
+    operator_only=True,
     description="Synthesised progress summary for a team.",
     parameters={
         "team_id": {"type": "string", "description": "Team id"},
@@ -2091,6 +2118,7 @@ async def summarize_team_progress(
 
 @tool(
     name="compose_work_summary",
+    operator_only=True,
     description=(
         "Compose and persist a work summary for a team or solo agent "
         "(the Work tab's default landing surface). Reads the team's "
@@ -2265,6 +2293,7 @@ async def compose_work_summary(
 
 @tool(
     name="manage_team",
+    operator_only=True,
     description=(
         "Team lifecycle action (archive / unarchive / propose-delete). "
         "Destructive actions require user confirmation."
@@ -2640,6 +2669,7 @@ def _validate_goal_input(goal, *, require_status: bool = True) -> tuple[dict | N
 
 @tool(
     name="manage_goals",
+    operator_only=True,
     description=(
         "Manage tracked business goals shown on the user's Work tab. "
         "Source of truth is GOALS.json (rendered to GOALS.md for humans). "
@@ -2913,6 +2943,7 @@ _MAX_RATE_FEEDBACK_CHARS = 2000
 
 @tool(
     name="rate_delivery",
+    operator_only=True,
     description=(
         "Record outcome for a completed task. Operator's per-task "
         "judgment — preserves the agent-feedback machine loop "

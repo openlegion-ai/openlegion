@@ -37,6 +37,7 @@ def _make_mock_tools():
     tools.list_tools = MagicMock(return_value=[])
     tools.is_parallel_safe = MagicMock(return_value=True)
     tools.get_loop_exempt_tools = MagicMock(return_value=frozenset())
+    tools.operator_only_tools = MagicMock(return_value=frozenset())
     return tools
 
 

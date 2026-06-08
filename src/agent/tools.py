@@ -72,6 +72,7 @@ def tool(
     parameters: dict,
     parallel_safe: bool = True,
     loop_exempt: bool = False,
+    operator_only: bool = False,
 ):
     """Decorator to register a function as an agent tool.
 
@@ -82,6 +83,14 @@ def tool(
     *loop_exempt* — when ``True``, the tool is exempt from warn/block
     escalation in the loop detector (but still respects the terminate
     threshold as a hard safety cap).
+
+    *operator_only* — when ``True``, the tool's handler self-rejects for
+    non-operator callers (an ``_is_operator()`` guard in the body). Marking
+    it here lets the worker tool surface drop the schema entirely so it
+    never reaches a worker's LLM context — saving tokens and removing an
+    attractive-nuisance surface (a worker LLM can't be tempted to call a
+    tool it can never use). The operator still receives these via its
+    explicit ``allowed`` allowlist. See ``ToolRegistry.operator_only_tools``.
     """
 
     def decorator(func):
@@ -106,6 +115,7 @@ def tool(
             "_sig_required_params": required_params,
             "_parallel_safe": parallel_safe,
             "_loop_exempt": loop_exempt,
+            "_operator_only": operator_only,
         }
         return func
 
@@ -400,6 +410,22 @@ class ToolRegistry:
         return frozenset(
             name for name, info in self.tools.items()
             if info.get("_loop_exempt", False)
+        )
+
+    def operator_only_tools(self) -> frozenset[str]:
+        """Return the set of tool names marked ``operator_only``.
+
+        These tools self-reject for non-operator callers at call time
+        (``_is_operator()`` guards in their handlers). The worker tool
+        surface unions this set into its exclude list so the schemas are
+        never emitted to a worker's LLM — they would only ever return a
+        permission error if called. The operator receives them via its
+        explicit ``allowed`` allowlist, so this exclusion does not affect
+        the operator.
+        """
+        return frozenset(
+            name for name, info in self.tools.items()
+            if info.get("_operator_only", False)
         )
 
     def list_tools(

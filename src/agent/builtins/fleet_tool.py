@@ -14,6 +14,7 @@ def _is_operator() -> bool:
 
 @tool(
     name="list_templates",
+    operator_only=True,
     description=(
         "List available fleet templates that can be used to create agent teams. "
         "Returns template names, descriptions, and agent counts."
@@ -34,6 +35,7 @@ async def list_templates(*, mesh_client=None, **_kw) -> dict:
 
 @tool(
     name="apply_template",
+    operator_only=True,
     description=(
         "Create a team of agents from a fleet template. Use list_templates first "
         "to see available templates. This creates all agents defined in the template "
