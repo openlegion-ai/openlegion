@@ -160,6 +160,12 @@ _RUNTIME_GATE_TOOLS: dict[str, frozenset[str]] = {
 # without it (marketplace tools load at container start, not via runtime reload).
 _TOOL_AUTHORING_TOOLS = frozenset({"create_tool", "reload_tools"})
 
+# Code-as-action surface — hidden from the worker tool surface unless the
+# OPENLEGION_EXECUTE_CODE opt-in is set. Ships dormant (Phase 2 of the operator
+# memory/context overhaul, §7 C2). The tool also self-rejects at call time, so
+# the operator allowlist path (which bypasses this exclude) stays gated too.
+_EXECUTE_CODE_TOOLS = frozenset({"execute_code"})
+
 # Read-only tools allowed during operator heartbeat (unsupervised execution).
 # The full operator allowlist is restricted to this subset so heartbeats
 # cannot mutate fleet state without user approval. ``check_inbox`` is
@@ -417,6 +423,10 @@ class AgentLoop:
             from src.agent.builtins.tool_authoring import tool_authoring_enabled
             if not tool_authoring_enabled():
                 excluded |= _TOOL_AUTHORING_TOOLS
+            # Code-as-action ships dormant — hide execute_code unless opted in.
+            from src.agent.builtins.exec_tool import execute_code_enabled
+            if not execute_code_enabled():
+                excluded |= _EXECUTE_CODE_TOOLS
             # Operator-only orchestration tools (edit_agent, create_team,
             # manage_*, apply_template, install_skill, …) self-reject for
             # worker callers at call time. Drop their schemas from the worker
