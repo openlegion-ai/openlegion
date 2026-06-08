@@ -1684,6 +1684,10 @@ def _setup_agent_wizard(model: str) -> str:
 _OPERATOR_AGENT_ID = "operator"
 
 _OPERATOR_ALLOWED_TOOLS: list[str] = [
+    # Grouped Tool Search (B2) bridge — pulls a deferred capability group's
+    # full schemas into context for the next turn. Always-available core tool;
+    # a no-op when OPENLEGION_GROUPED_TOOLS is off (the default).
+    "load_tools",
     # Monitoring + heartbeat
     "get_system_status", "notify_user",
     "inspect_agents", "inspect_teams",

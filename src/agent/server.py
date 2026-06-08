@@ -299,6 +299,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
                 mesh_client=loop.mesh_client,
                 workspace_manager=loop.workspace,
                 memory_store=loop.memory,
+                agent_loop=loop,
             )
             return {"result": result}
         except ValueError as e:

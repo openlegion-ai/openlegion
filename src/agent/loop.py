@@ -19,6 +19,12 @@ import httpx
 
 from src.agent.attachments import enrich_message_with_attachments
 from src.agent.loop_detector import ToolLoopDetector
+from src.agent.tool_groups import (
+    GroupedPlan,
+    grouped_tools_enabled,
+    plan_grouped_tools,
+    resolve_load_request,
+)
 from src.agent.workspace import INTROSPECT_PERM_KEYS
 from src.shared import limits
 from src.shared.errors import LLMAuthError, LLMConfigError
@@ -320,6 +326,11 @@ class AgentLoop:
 
     MAX_ITERATIONS = 20
 
+    # Class-level default so ``_tool_filter_kw`` is safe even when ``__init__``
+    # is bypassed (e.g. ``AgentLoop.__new__`` in tests). None = grouped tool
+    # search inactive (the default); the instance value is set in ``__init__``.
+    _grouped_plan: "GroupedPlan | None" = None
+
     def __init__(
         self,
         agent_id: str,
@@ -452,6 +463,17 @@ class AgentLoop:
             self._disabled_gates.add("browser")
         self._runtime_disabled_tools: frozenset[str] = frozenset()
         self._recompute_runtime_disabled()
+        # ── Grouped Tool Search (B2, default-OFF via OPENLEGION_GROUPED_TOOLS) ──
+        # ``_loaded_tool_groups`` are groups whose full schemas are present in
+        # context. ``_pending_tool_groups`` are groups requested via
+        # ``load_tools`` this turn — promoted into ``_loaded_tool_groups`` at the
+        # NEXT system-prompt build (turn boundary) so the toolset never mutates
+        # mid-conversation (which would bust the prompt cache). The currently
+        # planned defer set is cached so ``_tool_filter_kw`` and the system
+        # prompt stay consistent within a single turn.
+        self._loaded_tool_groups: set[str] = set()
+        self._pending_tool_groups: set[str] = set()
+        self._grouped_plan: GroupedPlan | None = None
         self._tools_reloaded: bool = False
         self._is_operator: bool = allowed_tools is not None
         self._operator_playbook_state: dict[str, int] = {}  # playbook -> turns since trigger
@@ -508,7 +530,83 @@ class AgentLoop:
                 if runtime_disabled
                 else self._allowed_tools
             )
+        # Grouped Tool Search (B2): omit deferred tool schemas for this turn.
+        # The plan is recomputed at each system-prompt build (turn boundary) so
+        # the defer set here stays consistent with the capability index that was
+        # injected into the same turn's system prompt. ``defer`` folds into the
+        # ``get_tool_definitions`` memo cache key, so a different loaded-groups
+        # set yields different definitions (and a fresh cache entry).
+        plan = self._grouped_plan
+        if plan is not None and plan.active and plan.defer:
+            kw["defer"] = plan.defer
         return kw
+
+    # ── Grouped Tool Search (B2) ───────────────────────────────────────────
+    def _refresh_grouped_plan(self) -> str:
+        """Promote pending loads, recompute the grouped-tools plan, return index.
+
+        Called at each system-prompt build — the TURN BOUNDARY. This is where a
+        ``load_tools`` request made during the previous turn actually takes
+        effect (pending → loaded), so the toolset never changes mid-turn (which
+        would bust the prompt cache; mirrors hermes' "don't change toolsets
+        mid-conversation" invariant).
+
+        Returns the capability-index text to append to the system prompt (""
+        when the feature is off or the budget gate didn't trip).
+        """
+        if not grouped_tools_enabled():
+            self._grouped_plan = None
+            return ""
+        # Apply deferred loads requested last turn.
+        if self._pending_tool_groups:
+            self._loaded_tool_groups |= self._pending_tool_groups
+            self._pending_tool_groups.clear()
+        # Available = what this agent can actually call this turn, BEFORE the
+        # grouped defer (so the index reflects every callable capability).
+        base_kw = {
+            k: v for k, v in self._tool_filter_kw.items() if k != "defer"
+        }
+        available = set(self.tools.list_tools(**base_kw))
+        context_window = (
+            self.context_manager.max_tokens if self.context_manager else 0
+        )
+        self._grouped_plan = plan_grouped_tools(
+            available=available,
+            loaded_groups=self._loaded_tool_groups,
+            operator=(self._allowed_tools is not None),
+            context_window=context_window,
+        )
+        return self._grouped_plan.index_text if self._grouped_plan.active else ""
+
+    def request_load_tools(self, *, group: str | None, tool: str | None) -> dict:
+        """Bridge for the ``load_tools`` builtin — queue a group for next turn.
+
+        Does NOT mutate the loaded set immediately: the actual schema change is
+        deferred to the next system-prompt build (``_refresh_grouped_plan``) so
+        the toolset stays stable for the remainder of the current turn.
+        """
+        if not grouped_tools_enabled():
+            return {
+                "loaded": [],
+                "note": "Grouped tool search is disabled; all tools already loaded.",
+            }
+        base_kw = {
+            k: v for k, v in self._tool_filter_kw.items() if k != "defer"
+        }
+        available = set(self.tools.list_tools(**base_kw))
+        keys, error = resolve_load_request(
+            group=group, tool=tool, available=available,
+        )
+        if error:
+            return {"loaded": [], "error": error}
+        self._pending_tool_groups |= keys
+        return {
+            "loaded": sorted(keys),
+            "note": (
+                "Full schemas for these group(s) will be available on your "
+                "NEXT turn. Call the tool then."
+            ),
+        }
 
     def _recompute_runtime_disabled(self) -> None:
         """Rebuild ``_runtime_disabled_tools`` from the active gate set."""
@@ -1767,6 +1865,10 @@ class AgentLoop:
             if runtime_ctx:
                 parts.append(runtime_ctx)
 
+        index_text = self._refresh_grouped_plan()
+        if index_text:
+            parts.append(index_text)
+
         return "\n\n".join(parts)
 
     # Round-4 structural fix: hand_off failures are now enforced from
@@ -2060,6 +2162,10 @@ class AgentLoop:
                     )
                     if runtime_ctx:
                         parts.append(runtime_ctx)
+
+                index_text = self._refresh_grouped_plan()
+                if index_text:
+                    parts.append(index_text)
 
                 system_prompt = "\n\n".join(parts)
 
@@ -3110,6 +3216,7 @@ class AgentLoop:
                     workspace_manager=self.workspace,
                     memory_store=self.memory,
                     _messages=self._current_messages,
+                    agent_loop=self,
                 ),
                 timeout=_TOOL_TIMEOUT,
             )
@@ -4278,6 +4385,10 @@ class AgentLoop:
                 f"Context will be auto-refreshed in ~{remaining} rounds. "
                 f"Consider saving important context to memory if you haven't already."
             )
+
+        index_text = self._refresh_grouped_plan()
+        if index_text:
+            parts.append(index_text)
 
         return "\n\n".join(parts)
 
