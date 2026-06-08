@@ -1583,6 +1583,32 @@ body {
   overflow-x: hidden;
 }
 
+/* ── Mobile vertical-scroll guarantee ─────────────────
+   The locked-shell model bounds <main> via the flex chain
+   (root `h-[100svh]` → `main flex-1`) so its `overflow-y:auto` becomes the
+   page scroller. On some mobile Chrome builds that flex height chain does
+   NOT constrain <main>: it grows to its full content height, so nothing
+   scrolls vertically and the body's `overflow:hidden` clips everything below
+   the fold. The page reads as frozen — you can pan horizontally (content
+   wider than the viewport) but never scroll down to off-screen content.
+
+   Pin an explicit viewport-relative cap so <main> is ALWAYS a bounded
+   scroller on phones, independent of the flex computation: the mobile shell
+   is the top nav (`--topnav-h`, `.nav-bar` is `flex md:hidden`) plus <main>,
+   so the cap is the remaining viewport. This is a no-op where the flex chain
+   already constrains main (the cap equals the height it already has) and it
+   rescues the case where it doesn't. svh (not dvh) matches the locked shell
+   and avoids URL-bar reflow.
+
+   Mobile-only (<768px): at md+ the layout swaps to the in-flow sidebar
+   (`md:flex-row`) with no top nav, where <main> correctly fills 100svh. */
+@media (max-width: 767px) {
+  main {
+    min-height: 0;
+    max-height: calc(100svh - var(--topnav-h));
+  }
+}
+
 /* iOS Safari auto-zooms on inputs with font-size < 16px.
    Use element selectors to catch ALL form controls regardless of CSS class. */
 @media (max-width: 767px) {
