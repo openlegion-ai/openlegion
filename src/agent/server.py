@@ -179,35 +179,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         if os.environ.get("OPENLEGION_ENABLE_DOCS", "").lower() in ("1", "true", "yes", "on")
         else {"docs_url": None, "redoc_url": None, "openapi_url": None}
     )
-    @contextlib.asynccontextmanager
-    async def _lifespan(_app: FastAPI):
-        """Run a periodic background memory-maintenance pass for this agent's
-        lifetime (consolidation + salience decay, off the live turn)."""
-        async def _maintenance_loop() -> None:
-            delay = _MAINTENANCE_INITIAL_DELAY_S
-            while True:
-                await asyncio.sleep(delay)
-                delay = _MAINTENANCE_TICK_S
-                try:
-                    await loop.run_maintenance()
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    logger.warning("maintenance pass failed: %s", e)
-
-        task = asyncio.create_task(_maintenance_loop())
-        try:
-            yield
-        finally:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-
-    app = FastAPI(
-        title=f"OpenLegion Agent: {loop.agent_id}",
-        lifespan=_lifespan,
-        **_docs_kwargs,
-    )
+    app = FastAPI(title=f"OpenLegion Agent: {loop.agent_id}", **_docs_kwargs)
     _install_body_size_limit(app)
     _task_accept_lock = asyncio.Lock()
 
@@ -1089,3 +1061,23 @@ def _log_task_exception(task: asyncio.Task) -> None:
     exc = task.exception()
     if exc:
         logger.error(f"Background task failed: {exc}", exc_info=exc)
+
+
+async def run_maintenance_loop(loop: AgentLoop) -> None:
+    """Periodic background memory-maintenance pass for an agent's lifetime.
+
+    Launched from the agent process lifespan (``__main__``). The first run is
+    delayed so boot + the first user turn settle; thereafter it ticks
+    periodically. ``loop.run_maintenance`` is internally idle-guarded and
+    6h-gated, so a frequent tick is cheap and never races a live turn.
+    """
+    delay = _MAINTENANCE_INITIAL_DELAY_S
+    while True:
+        await asyncio.sleep(delay)
+        delay = _MAINTENANCE_TICK_S
+        try:
+            await loop.run_maintenance()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("maintenance pass failed: %s", e)

@@ -22,7 +22,7 @@ from src.agent.llm import LLMClient
 from src.agent.loop import AgentLoop
 from src.agent.memory import MemoryStore
 from src.agent.mesh_client import MeshClient
-from src.agent.server import create_agent_app
+from src.agent.server import create_agent_app, run_maintenance_loop
 from src.agent.tools import ToolRegistry
 from src.agent.workspace import WorkspaceManager
 from src.shared.trace import new_trace_id
@@ -258,7 +258,15 @@ def main() -> None:
                     loop.current_task = None
                 logger.warning("Auto-resume check failed: %s", e)
 
+        # Background memory-maintenance pass (consolidation + salience decay),
+        # off the live turn. Internally idle-guarded + 6h-gated.
+        _maintenance_task = asyncio.create_task(run_maintenance_loop(loop))
+
         yield
+
+        _maintenance_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await _maintenance_task
         if loop.state == "working":
             loop._cancel_requested = True
             handle = loop._current_task_handle

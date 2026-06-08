@@ -1951,7 +1951,16 @@ class AgentLoop:
         if self.state != "idle" or self._chat_lock.locked():
             return
         async with self._chat_lock:
-            await self.context_manager.run_maintenance()
+            # Re-check under the lock, then mark busy so a concurrent POST
+            # /task (which gates on ``state``, not the chat lock) can't start
+            # and race the consolidation's memory writes. Restored in finally.
+            if self.state != "idle":
+                return
+            self.state = "working"
+            try:
+                await self.context_manager.run_maintenance()
+            finally:
+                self.state = "idle"
 
     # ── Heartbeat mode ────────────────────────────────────────
 
