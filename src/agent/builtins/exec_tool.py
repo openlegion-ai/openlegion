@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import tempfile
 
 from src.agent.tools import tool
@@ -75,6 +76,12 @@ def _scrubbed_env() -> dict[str, str]:
     Strategy is allowlist-first (only ``_SAFE_ENV_KEYS`` pass through) with a
     sensitive-name denylist applied on top as belt-and-suspenders. The agent's
     full env is never forwarded.
+
+    SCOPE: this scrubs ENVIRONMENT VARIABLES only. It does NOT sandbox the
+    filesystem — a snippet can still read any file the container user owns
+    (e.g. ``~/.netrc``). That is by design and identical to ``run_command``;
+    the Docker container hardening (no host mounts, no host credentials, agents
+    hold no API keys) is the actual boundary, not this scrub.
     """
     env: dict[str, str] = {}
     for key in _SAFE_ENV_KEYS:
@@ -84,6 +91,23 @@ def _scrubbed_env() -> dict[str, str]:
     # Force unbuffered stdout so print() output is captured even on early exit.
     env.setdefault("PYTHONUNBUFFERED", "1")
     return env
+
+
+def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+    """SIGKILL the child AND any grandchildren it spawned.
+
+    The child is started in its own session (``start_new_session=True``), so it
+    leads a process group. Killing the group reaps any subprocesses the snippet
+    forked — otherwise a snippet that spawns a long-running child leaves orphans
+    that accumulate against the container ``pids_limit``.
+    """
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            pass
 
 
 @tool(
@@ -200,7 +224,12 @@ async def execute_code(code: str, timeout: int = 30) -> dict:
         fd, path = tempfile.mkstemp(suffix=".py", prefix="execcode_")
         with os.fdopen(fd, "w") as fh:
             fh.write(code)
+        # Read-only before exec — closes the (already narrow, container-only)
+        # TOCTOU window between write and run.
+        os.chmod(path, 0o400)
 
+        # start_new_session: the child leads its own process group so a timeout
+        # can SIGKILL the whole group (child + any snippet-spawned grandchildren).
         proc = await asyncio.create_subprocess_exec(
             "python3",
             path,
@@ -208,6 +237,7 @@ async def execute_code(code: str, timeout: int = 30) -> dict:
             stderr=asyncio.subprocess.PIPE,
             cwd=workdir,
             env=_scrubbed_env(),
+            start_new_session=True,
         )
         stdout_bytes, stderr_bytes = await asyncio.wait_for(
             proc.communicate(), timeout=timeout
@@ -222,7 +252,7 @@ async def execute_code(code: str, timeout: int = 30) -> dict:
             "stderr": stderr if proc.returncode != 0 else "",
         }
     except asyncio.TimeoutError:
-        proc.kill()
+        _kill_process_group(proc)
         await proc.wait()
         return {"exit_code": -1, "stdout": "", "stderr": f"Code timed out after {timeout}s"}
     except Exception as e:

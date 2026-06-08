@@ -10995,6 +10995,7 @@ function dashboard() {
         browser_solve_captcha: 'solving a CAPTCHA',
         http_request: 'making an HTTP request',
         exec: 'running a command',
+        execute_code: 'running code',
         file_read: 'reading a file',
         file_write: 'writing a file',
         file_list: 'listing files',
