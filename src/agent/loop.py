@@ -810,6 +810,8 @@ class AgentLoop:
                 messages = await self._build_initial_context(assignment)
                 if self.memory:
                     await self.memory.decay_all()
+                    if self.workspace:
+                        self.workspace.mark_decayed()
             else:
                 # Reconcile TokenBudget mutable state
                 if assignment.token_budget:
@@ -852,9 +854,13 @@ class AgentLoop:
             start_iteration = 0
             assignment_json = assignment.model_dump_json()
             messages = await self._build_initial_context(assignment)
-            # Decay salience scores only on fresh start (not resume, to avoid double-decay)
+            # Decay salience scores only on fresh start (not resume, to avoid double-decay).
+            # Stamp the shared decay sentinel so the background maintenance pass
+            # (ContextManager._maybe_decay_salience) won't double-decay a busy agent.
             if self.memory:
                 await self.memory.decay_all()
+                if self.workspace:
+                    self.workspace.mark_decayed()
 
         introspect_data = await self._fetch_introspect_cached()
         system_prompt = self._build_system_prompt(assignment, introspect_data=introspect_data)
@@ -1927,6 +1933,25 @@ class AgentLoop:
             return parsed.get("result", {"raw": content}), parsed.get("promote", {})
         except (json.JSONDecodeError, AttributeError):
             return {"raw": content}, {}
+
+    # ── Background memory maintenance ─────────────────────────
+
+    async def run_maintenance(self) -> None:
+        """Run the off-live-path memory maintenance pass (consolidation +
+        salience decay), driven by the agent's periodic background task.
+
+        Skips while a turn is in flight — same idle/lock guard the heartbeat
+        uses — so it never races a turn's memory writes (``_flush_to_memory``
+        + salience updates) or adds latency to a user-facing turn. The work
+        itself is internally time-gated (>=6h), so a frequent tick is cheap
+        when nothing is due. Best-effort: never raises.
+        """
+        if not self.context_manager:
+            return
+        if self.state != "idle" or self._chat_lock.locked():
+            return
+        async with self._chat_lock:
+            await self.context_manager.run_maintenance()
 
     # ── Heartbeat mode ────────────────────────────────────────
 

@@ -252,6 +252,7 @@ class WorkspaceManager:
 
     MEMORY_FILE = "MEMORY.md"
     _CONSOLIDATION_STAMP = ".memory_consolidated"
+    _DECAY_STAMP = ".memory_decayed"
     HEARTBEAT_FILE = "HEARTBEAT.md"
     DAILY_DIR = "memory"
     LEARNINGS_DIR = "learnings"
@@ -686,6 +687,28 @@ class WorkspaceManager:
             (self.root / self._CONSOLIDATION_STAMP).touch()
         except OSError as e:
             logger.debug("Failed to stamp consolidation: %s", e)
+
+    def decay_due(self, min_interval_s: float) -> bool:
+        """True when fact salience hasn't been decayed within the window.
+
+        Shared by the task path (stamps on every fresh-task decay) and the
+        background maintenance pass, so an idle agent still decays and a busy
+        one is never double-decayed.
+        """
+        p = self.root / self._DECAY_STAMP
+        try:
+            if p.exists():
+                return (time.time() - p.stat().st_mtime) >= min_interval_s
+        except OSError:
+            pass
+        return True  # never decayed → due
+
+    def mark_decayed(self) -> None:
+        """Stamp the last salience-decay time (touch the sentinel)."""
+        try:
+            (self.root / self._DECAY_STAMP).touch()
+        except OSError as e:
+            logger.debug("Failed to stamp decay: %s", e)
 
     # Files agents are allowed to update themselves
     AGENT_WRITABLE = frozenset({"HEARTBEAT.md", "USER.md", "SOUL.md", "INSTRUCTIONS.md", "INTERFACE.md"})

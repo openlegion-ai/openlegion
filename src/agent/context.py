@@ -35,6 +35,24 @@ _SUMMARIZATION_INPUT_LIMIT = 20_000  # max chars fed to the summarization LLM ca
 
 _CONSOLIDATION_MIN_INTERVAL_S = 6 * 3600   # at most every 6 hours
 _CONSOLIDATION_MIN_LOG_CHARS = 1_500       # skip if little new material accrued
+_CONSOLIDATION_FAIL_BACKOFF_S = 30 * 60    # after a failed run, wait before retrying
+_DECAY_MIN_INTERVAL_S = 6 * 3600           # salience-decay cadence for the maintenance pass
+
+
+def _tail_on_boundary(text: str, limit: int) -> str:
+    """Return the last ``limit`` chars of ``text``, re-aligned forward to the
+    next ``\\n## `` section boundary so the slice never starts mid-entry.
+
+    The memory log is append-only (oldest first), so the NEWEST entries live
+    at the tail — this is what consolidation must read.
+    """
+    if len(text) <= limit:
+        return text
+    tail = text[-limit:]
+    idx = tail.find("\n## ")
+    if idx != -1:
+        tail = tail[idx + 1:]
+    return tail
 
 
 def _get_tiktoken_encoding(model: str):
@@ -178,6 +196,9 @@ class ContextManager:
         self._flush_triggered = False
         self._flush_lock = asyncio.Lock()
         self._on_memory_update = on_memory_update
+        # Backoff clock for the maintenance pass: set to a future time after a
+        # failed consolidation so a frequent tick doesn't hammer the LLM.
+        self._consolidation_retry_after = 0.0
 
     def reset(self) -> None:
         """Reset per-session state for a new conversation."""
@@ -410,15 +431,49 @@ class ContextManager:
                 f"Context compacted — {count} facts flushed to memory"
             )
 
+    async def run_maintenance(self) -> None:
+        """Off-live-path memory maintenance: re-derive the compiled MEMORY.md
+        head and decay fact salience.
+
+        Driven by the agent's periodic background pass (gbrain "dream cycle" /
+        hermes "Curator"), NOT the live turn — the caller is expected to hold
+        the chat lock so this never races a turn's memory writes. Each step is
+        internally gated (consolidation/decay >=6h), so a frequent tick is
+        cheap when nothing is due. Best-effort: never raises.
+        """
+        await self._maybe_consolidate_memory()
+        await self._maybe_decay_salience()
+
+    async def _maybe_decay_salience(self) -> None:
+        """Decay fact salience at most once per window.
+
+        Gated by the shared ``.memory_decayed`` sentinel that the task path
+        also stamps on every fresh-task decay (loop.py): a busy worker is thus
+        never double-decayed, while an idle agent (e.g. the operator, which
+        runs no tasks) still decays through this pass — the gap this closes.
+        """
+        ws, mem = self.workspace, self.memory
+        if not ws or not mem:
+            return
+        if not ws.decay_due(_DECAY_MIN_INTERVAL_S):
+            return
+        try:
+            await mem.decay_all()
+            ws.mark_decayed()
+        except Exception as e:
+            logger.debug("salience decay failed: %s", e)
+
     async def _maybe_consolidate_memory(self) -> None:
         """Re-derive the compiled MEMORY.md head from the append-only log +
         high-salience facts. Time-gated (>=6h) and material-gated (>=1.5k log
-        chars) so it adds at most one LLM call to the occasional compaction.
-        Best-effort: never raises into the compaction path.
+        chars) so it adds at most one LLM call per cycle. Best-effort: never
+        raises into the caller (compaction or the maintenance pass).
         """
         ws, llm = self.workspace, self.llm
         if not ws or not llm:
             return
+        if time.time() < self._consolidation_retry_after:
+            return  # backing off after a recent failure
         if not ws.consolidation_due(_CONSOLIDATION_MIN_INTERVAL_S):
             return
         log = ws.load_memory_log()
@@ -442,7 +497,8 @@ class ContextManager:
             "words). Output ONLY the compiled memory markdown — no preamble.\n\n"
             f"## Current compiled memory\n{head[:_SUMMARIZATION_INPUT_LIMIT]}\n\n"
             f"## High-salience facts\n{salient[:4000]}\n\n"
-            f"## Recent activity log (newest last)\n{log[:_SUMMARIZATION_INPUT_LIMIT]}"
+            f"## Recent activity log (newest last)\n"
+            f"{_tail_on_boundary(log, _SUMMARIZATION_INPUT_LIMIT)}"
         )
         try:
             resp = await llm.chat(
@@ -452,12 +508,15 @@ class ContextManager:
             )
         except Exception as e:
             logger.warning("Memory consolidation LLM call failed: %s", e)
+            self._consolidation_retry_after = time.time() + _CONSOLIDATION_FAIL_BACKOFF_S
             return
         new_head = (resp.content or "").strip()
         if not new_head:
+            self._consolidation_retry_after = time.time() + _CONSOLIDATION_FAIL_BACKOFF_S
             return
         ws.write_compiled_memory(sanitize_for_prompt(new_head))
         ws.mark_consolidated()
+        self._consolidation_retry_after = 0.0
         if self._on_memory_update:
             try:
                 await self._on_memory_update()

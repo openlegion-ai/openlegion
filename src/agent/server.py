@@ -144,6 +144,14 @@ _MAX_HISTORY_MEMORY_CHARS = 5000
 _MAX_HISTORY_LOGS_CHARS = 16000
 _MAX_HISTORY_LEARNINGS_CHARS = 8000
 
+# Background memory-maintenance pass cadence. The first run is delayed so boot
+# and the first user turn settle; thereafter it ticks periodically. The actual
+# work (consolidation + decay) is internally 6h-gated, so the short delay also
+# gives a frequently-restarted agent (e.g. the operator) a maintenance attempt
+# soon after each boot rather than never reaching a long interval.
+_MAINTENANCE_INITIAL_DELAY_S = 180
+_MAINTENANCE_TICK_S = 30 * 60
+
 
 def _origin_from_mesh_request(request: Request):
     """Parse origin from a host-to-agent request.
@@ -171,7 +179,35 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         if os.environ.get("OPENLEGION_ENABLE_DOCS", "").lower() in ("1", "true", "yes", "on")
         else {"docs_url": None, "redoc_url": None, "openapi_url": None}
     )
-    app = FastAPI(title=f"OpenLegion Agent: {loop.agent_id}", **_docs_kwargs)
+    @contextlib.asynccontextmanager
+    async def _lifespan(_app: FastAPI):
+        """Run a periodic background memory-maintenance pass for this agent's
+        lifetime (consolidation + salience decay, off the live turn)."""
+        async def _maintenance_loop() -> None:
+            delay = _MAINTENANCE_INITIAL_DELAY_S
+            while True:
+                await asyncio.sleep(delay)
+                delay = _MAINTENANCE_TICK_S
+                try:
+                    await loop.run_maintenance()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.warning("maintenance pass failed: %s", e)
+
+        task = asyncio.create_task(_maintenance_loop())
+        try:
+            yield
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    app = FastAPI(
+        title=f"OpenLegion Agent: {loop.agent_id}",
+        lifespan=_lifespan,
+        **_docs_kwargs,
+    )
     _install_body_size_limit(app)
     _task_accept_lock = asyncio.Lock()
 

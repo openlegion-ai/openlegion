@@ -2269,6 +2269,34 @@ async def test_heartbeat_skips_when_chat_locked():
 
 
 @pytest.mark.asyncio
+async def test_run_maintenance_skips_when_busy_else_runs_under_lock():
+    """The background maintenance pass must skip while a turn is in flight
+    (same idle/lock guard the heartbeat uses) and otherwise run the
+    ContextManager pass under the chat lock."""
+    loop = _make_loop()
+    loop.context_manager = MagicMock()
+    loop.context_manager.run_maintenance = AsyncMock()
+
+    # Busy with a task → skip.
+    loop.state = "working"
+    await loop.run_maintenance()
+    loop.context_manager.run_maintenance.assert_not_awaited()
+
+    # Idle but a chat turn holds the lock → skip.
+    loop.state = "idle"
+    await loop._chat_lock.acquire()
+    try:
+        await loop.run_maintenance()
+    finally:
+        loop._chat_lock.release()
+    loop.context_manager.run_maintenance.assert_not_awaited()
+
+    # Idle and unlocked → runs.
+    await loop.run_maintenance()
+    loop.context_manager.run_maintenance.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_heartbeat_skips_when_no_rules():
     """Heartbeat skips LLM call when HEARTBEAT.md is empty and no goals set."""
     loop = _make_loop()
