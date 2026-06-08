@@ -42,6 +42,15 @@ _RETRYABLE_STATUS_CODES = {429, 502, 503, 504, 529}  # 529 = Anthropic overloade
 _MAX_RETRIES = 3
 _BACKOFF_BASE = 1  # seconds: 1, 2, 4
 _TOOL_TIMEOUT = int(os.environ.get("OPENLEGION_TOOL_TIMEOUT", "900"))  # seconds — hard ceiling per tool
+# C3 — cache-prefix stabilization (Phase 2 of the operator memory/context
+# overhaul). When ON, per-turn-volatile prompt fragments (context/round
+# warnings, operator playbooks, 5-min runtime context, the ``## Recent``
+# memory slice) are relocated OUT of the cached system block and appended
+# AFTER the mesh-side cache breakpoint (into the last message) so the stable
+# system prefix stays byte-identical turn-to-turn and #1073's prompt cache
+# actually hits. Default OFF: flag-off rebuilds the exact legacy prompt, so
+# behavior (instruction ordering is weighting-sensitive) is unchanged.
+_STABLE_PREFIX = os.environ.get("OPENLEGION_STABLE_PREFIX", "false").lower() == "true"
 _FLEET_ROSTER_TTL = 600  # seconds — cache TTL for fleet roster
 _GOALS_TTL = 300  # seconds — cache TTL for goals fetch
 _FALLBACK_MAX_TOKENS = 100_000  # context trim fallback when no context manager
@@ -381,6 +390,12 @@ class AgentLoop:
         self._current_task_handle: asyncio.Task | None = None
         self._last_result: TaskResult | None = None
         self._chat_messages: list[dict] = []
+        # C3 — per-turn-volatile prompt fragments relocated out of the cached
+        # system block by ``_build_*_system_prompt`` when ``_STABLE_PREFIX`` is
+        # ON. Re-injected after the cache breakpoint via
+        # ``_messages_with_volatile`` at the LLM call site. Always "" when the
+        # flag is OFF (legacy path leaves these IN the system prompt).
+        self._volatile_prompt_suffix: str = ""
         self._chat_lock = asyncio.Lock()
         self._chat_total_rounds: int = 0
         self._chat_auto_continues: int = 0
@@ -939,18 +954,32 @@ class AgentLoop:
                     return result
 
                 # === DECIDE (LLM call) ===
-                # Refresh system prompt with context warning if applicable
+                # Refresh system prompt with context warning if applicable.
+                # Stable-prefix path: keep ``system_prompt`` byte-stable and
+                # relocate the per-iteration warning below the cache breakpoint
+                # alongside the suffix stashed by ``_build_system_prompt``. The
+                # warning is folded into a LOCAL suffix (not the stashed one) so
+                # it doesn't leak into a later iteration that has no warning.
                 effective_system = system_prompt
-                if self.context_manager:
-                    warning = self.context_manager.context_warning(messages)
+                warning = (
+                    self.context_manager.context_warning(messages)
+                    if self.context_manager else None
+                )
+                if _STABLE_PREFIX:
+                    iter_suffix = "\n\n".join(
+                        p for p in (self._volatile_prompt_suffix, f"## {warning}" if warning else "") if p
+                    )
+                    eff_messages = self._append_volatile_to_messages(messages, iter_suffix)
+                else:
                     if warning:
                         effective_system = system_prompt + f"\n\n## {warning}"
+                    eff_messages = messages
 
                 available_tools = self.tools.get_tool_definitions(**self._tool_filter_kw) or None
                 llm_response = await _llm_call_with_retry(
                     self.llm.chat_collect,
                     system=effective_system,
-                    messages=messages,
+                    messages=eff_messages,
                     tools=available_tools,
                 )
                 # Bug 1 (codex P2 r2): tick after the LLM call returns —
@@ -1715,10 +1744,15 @@ class AgentLoop:
         self, assignment: TaskAssignment, introspect_data: dict | None = None,
     ) -> str:
         parts = []
+        # C3 — see _build_chat_system_prompt. Volatile fragments are stashed on
+        # self._volatile_prompt_suffix and re-injected after the cache
+        # breakpoint when _STABLE_PREFIX is ON; inline (legacy) otherwise.
+        volatile: list[str] = []
+        stable = _STABLE_PREFIX
 
         # Load workspace identity + project files into system prompt
         if self.workspace:
-            bootstrap = self.workspace.get_bootstrap_content()
+            bootstrap = self.workspace.get_bootstrap_content(include_recent=not stable)
             if bootstrap:
                 parts.append(bootstrap)  # pre-sanitized by workspace cache
 
@@ -1762,11 +1796,22 @@ class AgentLoop:
         if tool_history:
             parts.append(sanitize_for_prompt(tool_history))
 
+        # ── Volatile fragments (relocated below the cache breakpoint when ON). ──
+        sink = volatile if stable else parts
+
+        # Relocated ``## Recent`` memory slice (only when stable — otherwise it
+        # is already embedded in the head-inclusive bootstrap above).
+        if stable and self.workspace:
+            recent = self.workspace.get_recent_memory_slice()
+            if recent:
+                sink.append(sanitize_for_prompt(recent))
+
         if introspect_data:
             runtime_ctx = self._format_runtime_context(introspect_data)
             if runtime_ctx:
-                parts.append(runtime_ctx)
+                sink.append(runtime_ctx)
 
+        self._volatile_prompt_suffix = "\n\n".join(volatile)
         return "\n\n".join(parts)
 
     # Round-4 structural fix: hand_off failures are now enforced from
@@ -2003,6 +2048,10 @@ class AgentLoop:
                     )
 
                 parts: list[str] = []
+                # Heartbeat builds its own system prompt (not via
+                # _build_*_system_prompt); clear any suffix stashed by a prior
+                # chat/task build so stale volatile content can't leak in.
+                self._volatile_prompt_suffix = ""
 
                 # 1. Goals — the agent's north star
                 if goals:
@@ -3361,7 +3410,7 @@ class AgentLoop:
             llm_response = await _llm_call_with_retry(
                 self.llm.chat_collect,
                 system=system,
-                messages=self._chat_messages,
+                messages=self._messages_with_volatile(self._chat_messages),
                 tools=None,
             )
         except (LLMAuthError, LLMConfigError):
@@ -3496,7 +3545,7 @@ class AgentLoop:
                 llm_response = await _llm_call_with_retry(
                     self.llm.chat_collect,
                     system=_round_system,
-                    messages=self._chat_messages,
+                    messages=self._messages_with_volatile(self._chat_messages),
                     tools=_iter_tools,
                 )
                 # Bug 1 (codex P2 r2): tick after the LLM call returns —
@@ -3807,7 +3856,7 @@ class AgentLoop:
             llm_response = await _llm_call_with_retry(
                 self.llm.chat_collect,
                 system=system,
-                messages=self._chat_messages,
+                messages=self._messages_with_volatile(self._chat_messages),
                 tools=None,
             )
             total_tokens += llm_response.tokens_used
@@ -4170,12 +4219,22 @@ class AgentLoop:
         introspect_data: dict | None = None,
     ) -> str:
         parts = []
+        # C3 cache-prefix stabilization: when ON, per-turn-volatile fragments
+        # are collected here instead of appended to ``parts``, so the returned
+        # system block stays byte-identical across turns (the cacheable prefix).
+        # They are re-injected after the cache breakpoint via
+        # ``_messages_with_volatile``. When OFF, ``volatile`` is unused and the
+        # fragments stay inline in ``parts`` exactly as before — byte-identical.
+        volatile: list[str] = []
+        stable = _STABLE_PREFIX
 
         if goals:
             parts.append(f"## Your Current Goals\n\n{sanitize_for_prompt(format_dict(goals))}")
 
         if self.workspace:
-            bootstrap = self.workspace.get_bootstrap_content()
+            # Stable path drops the volatile ``## Recent`` memory slice from the
+            # cached bootstrap (head-only) and relocates it below.
+            bootstrap = self.workspace.get_bootstrap_content(include_recent=not stable)
             if bootstrap:
                 parts.append(bootstrap)  # pre-sanitized by workspace cache
 
@@ -4246,6 +4305,17 @@ class AgentLoop:
         if tool_history:
             parts.append(sanitize_for_prompt(tool_history))
 
+        # ── Volatile fragments (relocated below the cache breakpoint when the
+        # stable-prefix flag is ON; inline otherwise — byte-identical legacy). ──
+        sink = volatile if stable else parts
+
+        # Relocated ``## Recent`` memory slice (only when stable — otherwise it
+        # is already embedded in the head-inclusive bootstrap above).
+        if stable and self.workspace:
+            recent = self.workspace.get_recent_memory_slice()
+            if recent:
+                sink.append(sanitize_for_prompt(recent))
+
         # Inject operator playbooks based on tool-call patterns
         if self._is_operator:
             active_playbooks = self._update_operator_playbooks()
@@ -4254,32 +4324,72 @@ class AgentLoop:
 
                 playbook_text = get_playbook_content(active_playbooks)
                 if playbook_text:
-                    parts.append(playbook_text)
+                    sink.append(playbook_text)
 
         if introspect_data:
             runtime_ctx = self._format_runtime_context(
                 introspect_data, exclude_fleet=has_fleet_ctx,
             )
             if runtime_ctx:
-                parts.append(runtime_ctx)
+                sink.append(runtime_ctx)
 
         # Context usage warning at 80%+
         if self.context_manager and self._chat_messages:
             warning = self.context_manager.context_warning(self._chat_messages)
             if warning:
-                parts.append(f"## {warning}")
+                sink.append(f"## {warning}")
 
         # Round-count warning at 80% of checkpoint interval
         if self._chat_total_rounds >= self._CHAT_ROUND_WARNING:
             remaining = self.CHAT_MAX_TOTAL_ROUNDS - self._chat_total_rounds
-            parts.append(
+            sink.append(
                 f"## Session Note\n"
                 f"This session has been running for {self._chat_total_rounds} tool rounds. "
                 f"Context will be auto-refreshed in ~{remaining} rounds. "
                 f"Consider saving important context to memory if you haven't already."
             )
 
+        # Stash the relocated content for re-injection after the cache
+        # breakpoint. Empty string when flag-off or nothing volatile.
+        self._volatile_prompt_suffix = "\n\n".join(volatile)
+
         return "\n\n".join(parts)
+
+    def _messages_with_volatile(self, messages: list[dict]) -> list[dict]:
+        """Return ``messages`` for the LLM call, re-injecting the relocated
+        volatile prompt suffix (stashed by ``_build_*_system_prompt``) AFTER
+        the cache breakpoint. No-op when the flag is off / nothing relocated.
+        """
+        return self._append_volatile_to_messages(messages, self._volatile_prompt_suffix)
+
+    def _append_volatile_to_messages(
+        self, messages: list[dict], suffix: str,
+    ) -> list[dict]:
+        """Append ``suffix`` after the cache breakpoint by folding it into a
+        COPY of the last message's content.
+
+        No-op (returns the same list) when ``_STABLE_PREFIX`` is off or there
+        is nothing to relocate — so the legacy path is untouched. When active,
+        the persistent ``messages``/``_chat_messages`` list is never mutated
+        and NO new message is added — whatever the last message's role is stays
+        the last message's role, so role-alternation (Constraint #7) holds.
+        """
+        if not _STABLE_PREFIX or not suffix or not messages:
+            return messages
+        out = list(messages)
+        last = dict(out[-1])
+        block = f"\n\n[Live context — re-read every turn]\n\n{suffix}"
+        content = last.get("content")
+        if isinstance(content, str):
+            last["content"] = content + block
+        elif isinstance(content, list):
+            # Multimodal/structured content — append a trailing text block.
+            last["content"] = [*content, {"type": "text", "text": block.strip()}]
+        else:
+            # Unexpected shape — leave untouched rather than risk a bad request.
+            return messages
+        out[-1] = last
+        return out
 
     def get_status(self) -> AgentStatus:
         """Return current agent status."""
@@ -4391,9 +4501,10 @@ class AgentLoop:
                 used_streaming = False
                 any_text_streamed = False
                 tools = self.tools.get_tool_definitions(**self._tool_filter_kw) or None
+                _msgs = self._messages_with_volatile(self._chat_messages)
                 try:
                     async for event in self.llm.chat_stream(
-                        system=system, messages=self._chat_messages, tools=tools,
+                        system=system, messages=_msgs, tools=tools,
                     ):
                         etype = event.get("type", "")
                         if etype == "text_delta":
@@ -4411,7 +4522,7 @@ class AgentLoop:
                     if used_streaming:
                         logger.warning("LLM stream ended without done event, falling back")
                     llm_response = await _llm_call_with_retry(
-                        self.llm.chat, system=system, messages=self._chat_messages, tools=tools,
+                        self.llm.chat, system=system, messages=_msgs, tools=tools,
                     )
 
                 # Bug 1 (codex P2 r2): tick after the LLM call returns —
@@ -4623,7 +4734,7 @@ class AgentLoop:
             llm_response = await _llm_call_with_retry(
                 self.llm.chat,
                 system=system,
-                messages=self._chat_messages,
+                messages=self._messages_with_volatile(self._chat_messages),
                 tools=None,
             )
             total_tokens += llm_response.tokens_used
