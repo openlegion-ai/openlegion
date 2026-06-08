@@ -2255,7 +2255,7 @@
         <div x-show="artifactPreview" x-cloak
           class="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm"
           @click.self="artifactPreview = null" @keydown.escape.window="artifactPreview = null">
-          <div class="bg-gray-900 border border-gray-700 rounded-lg shadow-2xl w-full max-w-3xl max-h-[80vh] flex flex-col mx-4">
+          <div class="bg-gray-900 border border-gray-700 rounded-lg shadow-2xl w-full max-w-3xl max-h-[80dvh] flex flex-col mx-4">
             <div class="flex items-center justify-between px-4 py-3 border-b border-gray-800">
               <div class="flex items-center gap-2 min-w-0">
                 <span class="text-xs font-mono text-blue-400 truncate" x-text="artifactPreview?.name"></span>
@@ -4511,7 +4511,7 @@
             @keydown.escape.window="closeTaskDrillIn()"
             @keydown.window="handleDrillInKey($event)">
             <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" @click="closeTaskDrillIn()"></div>
-            <div class="relative w-full max-w-3xl max-h-[90vh] flex flex-col bg-gray-900 border border-gray-700 rounded-xl shadow-2xl overflow-hidden">
+            <div class="relative w-full max-w-3xl max-h-[90dvh] flex flex-col bg-gray-900 border border-gray-700 rounded-xl shadow-2xl overflow-hidden">
               <!-- Header -->
               <div class="flex items-start justify-between gap-3 p-5 border-b border-gray-800">
                 <div class="min-w-0 flex-1">
@@ -9005,7 +9005,7 @@
         <div x-show="showSetup && !loading" x-cloak
              x-init="$watch('showSetup', v => { if (v) { onboardDefaultModel = onboardDefaultModel || (systemSettings && systemSettings.default_model) || ''; onboardOperatorModel = onboardOperatorModel || ((agents.find(a => a.id === 'operator') || {}).model) || ''; } })"
              class="fixed inset-0 z-[160] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm">
-          <div class="w-full max-w-lg bg-gray-900 border border-indigo-800/40 rounded-xl p-6 shadow-2xl max-h-[90vh] overflow-y-auto" data-testid="setup-modal">
+          <div class="w-full max-w-lg bg-gray-900 border border-indigo-800/40 rounded-xl p-6 shadow-2xl max-h-[90dvh] overflow-y-auto" data-testid="setup-modal">
           <h3 class="text-lg font-semibold text-white mb-1">Welcome to OpenLegion</h3>
           <p class="text-xs text-gray-400 mb-5">A couple of quick steps to get your workspace ready.</p>
           <div class="space-y-5">
