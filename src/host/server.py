@@ -38,6 +38,7 @@ from src.host.orchestration import (
     TaskNotFound,
     Tasks,
 )
+from src.host.help_requests import HelpRequests
 from src.host.pending_actions import PendingActions
 from src.shared.paths import resolve_under_root
 from src.shared.redaction import redact_url
@@ -767,6 +768,7 @@ def create_mesh_app(
     dispatch_loop: asyncio.AbstractEventLoop | None = None,
     wallet_service_ref: list | None = None,
     api_key_manager: ApiKeyManager | None = None,
+    help_requests_db: str | None = None,
     cfg: dict | None = None,
 ) -> FastAPI:
     """Create the FastAPI application for the mesh host process."""
@@ -898,40 +900,25 @@ def create_mesh_app(
     user_notification_log = UserNotificationLog(db_path=_user_notifications_db_path)
     app.user_notification_log = user_notification_log  # exposed for tests/dashboard
 
-    # In-memory registry of open "agent asks user for help" requests:
+    # Persistent registry of open "agent asks user for help" requests:
     # credential_request, browser_login_request, browser_captcha_help_request.
-    # Keyed by request_id (uuid). The dict lets the cancel endpoints
-    # address a specific request and lets the dashboard cancel-button
-    # path resolve a card without needing to reconstruct (agent_id,
-    # service) identity. State is small (a handful of open asks at a
-    # time per fleet) and intentionally NOT persisted: a mesh restart
-    # already loses the in-flight steer-message contract anyway, so the
-    # cards just become stale on the dashboard and gracefully degrade
-    # (the Cancel button 404s, which the UI handles).
-    help_requests: dict[str, dict] = {}
-    _MAX_HELP_REQUESTS = 256  # cap so a noisy agent can't OOM the host
-    app.help_requests = help_requests  # exposed for tests + dashboard
+    # Keyed by request_id (uuid). This is the AUTHORITATIVE source for the
+    # dashboard "Needs you" panel — so it's persisted (SQLite WAL): a mesh
+    # restart must NOT blank the panel while requests are still open and
+    # agents still blocked (an empty panel must mean "nothing needs you").
+    # The cancel/resolve endpoints address a specific request by id; the
+    # ``GET /mesh/help-requests`` feed lists what's open.
+    _help_requests_db_path = help_requests_db or os.environ.get(
+        "OPENLEGION_HELP_REQUESTS_DB", "data/help_requests.db",
+    )
+    help_requests_store = HelpRequests(db_path=_help_requests_db_path)
+    app.help_requests_store = help_requests_store  # exposed for tests + dashboard
 
     def _record_help_request(
         kind: str, agent_id: str, payload: dict,
     ) -> str:
         """Register an open help request and return its request_id."""
-        if len(help_requests) >= _MAX_HELP_REQUESTS:
-            # Evict oldest to bound growth.
-            oldest = min(
-                help_requests.items(),
-                key=lambda kv: kv[1].get("created_at", 0),
-            )[0]
-            help_requests.pop(oldest, None)
-        request_id = str(_uuid.uuid4())
-        help_requests[request_id] = {
-            "kind": kind,
-            "agent_id": agent_id,
-            "created_at": time.time(),
-            "status": "open",
-            "payload": payload,
-        }
-        return request_id
+        return help_requests_store.record(kind, agent_id, payload)
 
     # Idempotent legacy-data migration. Existing fleets that had
     # blackboard-stored tasks before the v2 rollout (PR #835) get them
@@ -2586,7 +2573,11 @@ def create_mesh_app(
         request_id = _record_help_request(
             "credential_request",
             agent_id,
-            {"name": name, "service": service[:128]},
+            {
+                "name": name,
+                "service": service[:128],
+                "description": description[:500],
+            },
         )
 
         if event_bus:
@@ -2652,7 +2643,11 @@ def create_mesh_app(
         request_id = _record_help_request(
             "browser_login_request",
             agent_id,
-            {"service": service[:128]},
+            {
+                "service": service[:128],
+                "description": description[:500],
+                "url": redact_url(url)[:2048],
+            },
         )
 
         if event_bus:
@@ -2719,7 +2714,10 @@ def create_mesh_app(
         request_id = _record_help_request(
             "browser_captcha_help_request",
             agent_id,
-            {"service": service[:128]},
+            {
+                "service": service[:128],
+                "description": description[:500],
+            },
         )
 
         if event_bus:
@@ -2745,28 +2743,19 @@ def create_mesh_app(
     ) -> dict:
         """Resolve an open help request as cancelled.
 
-        Returns the popped record. Raises HTTPException(404) if the id
-        is unknown or already resolved. Caller is responsible for
-        emitting any follow-up event / steer.
+        Returns the claimed record. Raises HTTPException(404) if the id
+        is unknown, already resolved, or of a different kind. The atomic
+        claim in ``HelpRequests.resolve`` is what makes a cancel racing a
+        save resolve exactly once. Caller emits the follow-up event / steer.
         """
-        record = help_requests.get(request_id)
+        record = help_requests_store.resolve(
+            request_id, expected_kind=kind, status="cancelled",
+        )
         if record is None:
             raise HTTPException(
                 404, f"{kind} request not found or already resolved",
             )
-        if record.get("kind") != kind:
-            raise HTTPException(
-                404, f"{kind} request not found or already resolved",
-            )
-        if record.get("status") != "open":
-            raise HTTPException(
-                404, f"{kind} request not found or already resolved",
-            )
-        record["status"] = "cancelled"
         record["reason"] = reason
-        # Pop after mutating so the dict is the source of truth on
-        # whether the request is still resolvable.
-        help_requests.pop(request_id, None)
         return record
 
     async def _enqueue_cancel_steer(agent_id: str, message: str) -> None:
@@ -2911,6 +2900,103 @@ def create_mesh_app(
             "status": "cancelled",
             "reason": reason,
         }
+
+    @app.get("/mesh/help-requests")
+    async def list_help_requests(request: Request) -> dict:
+        """Open help requests — the authoritative source for the dashboard
+        "Needs you" panel (credential / browser-login / captcha asks).
+
+        Operator-or-internal only, same access model as ``/mesh/pending``.
+        Returns the open set so the panel never has to scrape volatile
+        client chat state; an empty list reliably means nothing needs the
+        user. Raises (not empty) on failure so the dashboard can tell a
+        backend error apart from "nothing open".
+        """
+        caller = _extract_verified_agent_id(request)
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can list help requests")
+        items = [
+            {
+                "request_id": r["request_id"],
+                "kind": r["kind"],
+                "agent_id": r["agent_id"],
+                "service": r.get("service") or "",
+                "name": r.get("name") or "",
+                "description": r.get("description") or "",
+                "url": r.get("url") or "",
+                "created_at": r.get("created_at"),
+            }
+            for r in help_requests_store.list_open()
+        ]
+        return {"help_requests": items}
+
+    @app.post("/mesh/help-requests/{request_id}/resolve")
+    async def resolve_help_request(
+        request_id: str, data: dict, request: Request,
+    ) -> dict:
+        """Mark an open help request satisfied (credential saved / login or
+        CAPTCHA completed) — the counterpart to the per-kind cancel endpoints.
+
+        Generic across kinds: atomically claims the record (so a save racing a
+        cancel resolves exactly once), then emits the kind-appropriate
+        ``*_completed`` / ``credential_stored`` event and steers the awaiting
+        agent to resume — but ONLY if THIS call won the claim. A no-op (already
+        resolved/cancelled) returns ``claimed=false`` and fires no steer, so
+        the agent never gets a contradictory "resume" + "cancelled" pair.
+        """
+        caller = _extract_verified_agent_id(request)
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can resolve a help request")
+        record = help_requests_store.resolve(request_id, status="resolved")
+        if record is None:
+            # Lost the race (already resolved/cancelled) or unknown id —
+            # idempotent no-op, NOT an error. The side effect was already
+            # dispatched by whoever won the claim.
+            return {"ok": True, "request_id": request_id, "claimed": False}
+        kind = record.get("kind")
+        agent_id = record.get("agent_id", "")
+        payload = record.get("payload", {}) or {}
+        service = payload.get("service") or payload.get("name") or ""
+        name = payload.get("name") or service
+        if kind == "credential_request":
+            if event_bus:
+                event_bus.emit(
+                    "credential_stored",
+                    agent=agent_id or "",
+                    data={
+                        "name": name, "service": service,
+                        "request_id": request_id, "agent_id": agent_id or None,
+                    },
+                )
+            await _enqueue_cancel_steer(
+                agent_id,
+                f"The user just saved credential '{name}' to the vault. "
+                f"You can now use $CRED{{{name}}} in your requests.",
+            )
+        elif kind == "browser_login_request":
+            if event_bus:
+                event_bus.emit(
+                    "browser_login_completed", agent=agent_id,
+                    data={"service": service},
+                )
+            await _enqueue_cancel_steer(
+                agent_id,
+                f"The user has completed the browser login for {service}. "
+                f"The session is saved in your browser profile — resume using "
+                f"browser tools to interact with {service}.",
+            )
+        elif kind == "browser_captcha_help_request":
+            if event_bus:
+                event_bus.emit(
+                    "browser_captcha_help_completed", agent=agent_id,
+                    data={"service": service},
+                )
+            await _enqueue_cancel_steer(
+                agent_id,
+                f"The user has completed the CAPTCHA challenge for {service}. "
+                f"Resume browser interaction; the page should now be past it.",
+            )
+        return {"ok": True, "request_id": request_id, "claimed": True, "kind": kind}
 
     @app.get("/mesh/agents")
     async def list_agents(request: Request, project: str = "", agent_id: str = "") -> dict:

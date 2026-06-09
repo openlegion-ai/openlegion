@@ -4225,32 +4225,47 @@ def create_dashboard_router(
                 detail=f"Cannot store system credential via chat card: {service}",
             )
         credential_vault.add_credential(service, key)
-        # Notify the requesting agent that the credential is now available.
         agent_id = body.get("agent_id", "").strip()
-        if agent_id and lane_manager is not None and agent_id in agent_registry:
-            from src.shared.trace import new_trace_id
+        request_id = (body.get("request_id", "") or "").strip()
+        if request_id:
+            # Card-driven save: hand off to the generic mesh resolve, which
+            # atomically claims the open request and owns the steer +
+            # credential_stored emit — so a save racing a cancel resolves
+            # exactly once and the agent never gets contradictory steers.
+            # Best-effort: the credential is already stored; a resolve-proxy
+            # failure must not fail the save (mirrors the legacy steer's
+            # swallow-on-error contract). Other clients re-sync on the next
+            # /api/help-requests poll.
             try:
-                await lane_manager.enqueue(
-                    agent_id,
-                    f"The user just saved credential '{service}' to the vault. "
-                    f"You can now use $CRED{{{service}}} in your requests.",
-                    mode="steer",
-                    trace_id=new_trace_id(),
-                )
+                await _proxy_help_resolve(request_id, {})
             except Exception:
-                pass  # Best effort — credential is already stored
-        if event_bus:
-            request_id = body.get("request_id", "") or ""
-            event_bus.emit(
-                "credential_stored",
-                agent=agent_id or "",
-                data={
-                    "name": service,
-                    "service": service,
-                    "request_id": request_id,
-                    "agent_id": agent_id or None,
-                },
-            )
+                pass
+        else:
+            # No request id (e.g. a manual add not tied to an open card):
+            # keep the best-effort direct steer + cross-client emit.
+            if agent_id and lane_manager is not None and agent_id in agent_registry:
+                from src.shared.trace import new_trace_id
+                try:
+                    await lane_manager.enqueue(
+                        agent_id,
+                        f"The user just saved credential '{service}' to the vault. "
+                        f"You can now use $CRED{{{service}}} in your requests.",
+                        mode="steer",
+                        trace_id=new_trace_id(),
+                    )
+                except Exception:
+                    pass  # Best effort — credential is already stored
+            if event_bus:
+                event_bus.emit(
+                    "credential_stored",
+                    agent=agent_id or "",
+                    data={
+                        "name": service,
+                        "service": service,
+                        "request_id": "",
+                        "agent_id": agent_id or None,
+                    },
+                )
         return {"stored": True, "service": service, "tier": "agent"}
 
     @api_router.post("/api/browser-login/complete")
@@ -4259,9 +4274,17 @@ def create_dashboard_router(
         body = await request.json()
         agent_id = body.get("agent_id", "").strip()
         service = body.get("service", "").strip()[:128]
+        request_id = (body.get("request_id", "") or "").strip()
         if not agent_id or not service:
             raise HTTPException(status_code=400, detail="agent_id and service are required")
-        # Notify the agent that login is complete
+        if request_id:
+            # Card/feed-driven: mesh atomically claims + steers + emits once.
+            try:
+                await _proxy_help_resolve(request_id, {})
+            except Exception:
+                pass
+            return {"completed": True, "agent_id": agent_id, "service": service}
+        # Legacy (no request id): best-effort direct steer + emit.
         if agent_id in agent_registry and lane_manager is not None:
             from src.shared.trace import new_trace_id
             from src.shared.utils import sanitize_for_prompt
@@ -4286,11 +4309,19 @@ def create_dashboard_router(
         body = await request.json()
         agent_id = body.get("agent_id", "").strip()
         service = body.get("service", "").strip()[:128]
+        request_id = (body.get("request_id", "") or "").strip()
         if not agent_id or not service:
             raise HTTPException(
                 status_code=400,
                 detail="agent_id and service are required",
             )
+        if request_id:
+            try:
+                await _proxy_help_resolve(request_id, {})
+            except Exception:
+                pass
+            return {"completed": True, "agent_id": agent_id, "service": service}
+        # Legacy (no request id): best-effort direct steer + emit.
         if agent_id in agent_registry and lane_manager is not None:
             from src.shared.trace import new_trace_id
             from src.shared.utils import sanitize_for_prompt
@@ -8080,6 +8111,59 @@ def create_dashboard_router(
             return resp.json()
         except Exception:
             return {"ok": True}
+
+    async def _proxy_help_resolve(request_id: str, body: dict | None) -> dict:
+        """Proxy a "request satisfied" event to the generic mesh resolve.
+
+        Used by the credential-save and browser login/captcha complete paths
+        so the mesh atomically claims the record and steers the agent exactly
+        once (the claim gates the steer — no save/cancel double-fire). Same
+        loopback + x-mesh-internal contract as :func:`_proxy_help_cancel`.
+        Idempotent: an already-resolved id returns ``claimed=false``, not 404.
+        """
+        import httpx
+        url = f"http://127.0.0.1:{mesh_port}/mesh/help-requests/{request_id}/resolve"
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.post(
+                    url,
+                    json=body or {},
+                    headers={
+                        "x-mesh-internal": "1",
+                        "X-Agent-ID": "operator",
+                        "Content-Type": "application/json",
+                    },
+                )
+        except Exception as e:
+            raise HTTPException(502, f"mesh resolve proxy failed: {e}")
+        if resp.status_code >= 400:
+            raise HTTPException(resp.status_code, resp.text)
+        try:
+            return resp.json()
+        except Exception:
+            return {"ok": True}
+
+    @api_router.get("/api/help-requests")
+    async def api_help_requests(request: Request) -> dict:
+        """Open help requests for the "Needs you" panel — proxied from the
+        authoritative mesh registry.
+
+        Distinguishes a backend error (502) from "nothing open" ({items: []})
+        so an outage never reads to the user as "nothing needs you". The
+        frontend renders an explicit error state on non-200.
+        """
+        import httpx
+        url = f"http://127.0.0.1:{mesh_port}/mesh/help-requests"
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.get(
+                    url, headers={"x-mesh-internal": "1", "X-Agent-ID": "operator"},
+                )
+        except Exception as e:
+            raise HTTPException(502, f"mesh help-requests proxy failed: {e}")
+        if resp.status_code >= 400:
+            raise HTTPException(resp.status_code, resp.text)
+        return resp.json()
 
     @api_router.post("/api/credential-request/{request_id}/cancel")
     async def api_credential_request_cancel(

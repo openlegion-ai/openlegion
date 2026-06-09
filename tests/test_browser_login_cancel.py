@@ -50,6 +50,7 @@ def _build_mesh(tmp_path, *, lane_manager=None, perms_map=None):
         event_bus=event_bus,
         container_manager=container_manager,
         lane_manager=lane_manager,
+        help_requests_db=str(tmp_path / "help_requests.db"),
     )
     return app, event_bus
 
@@ -80,7 +81,7 @@ async def test_browser_login_request_returns_request_id(tmp_path):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["request_id"]
-    assert body["request_id"] in app.help_requests
+    assert app.help_requests_store.get(body["request_id"]) is not None
 
 
 @pytest.mark.asyncio
@@ -243,7 +244,7 @@ async def test_captcha_help_request_returns_request_id(tmp_path):
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["request_id"]
-    assert body["request_id"] in app.help_requests
+    assert app.help_requests_store.get(body["request_id"]) is not None
 
 
 @pytest.mark.asyncio
