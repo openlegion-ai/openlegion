@@ -183,6 +183,19 @@ class HttpTransport(Transport):
                             yield json_module.loads(line[6:])
                         except json_module.JSONDecodeError:
                             yield {"raw": line[6:]}
+                    elif line.startswith(":"):
+                        # SSE comment. The agent emits ": keepalive" every
+                        # ~15s while a tool runs silently (agent/server.py
+                        # chat_stream). Receiving the line here already resets
+                        # THIS hop's read-idle clock, but historically the
+                        # comment was dropped — so a downstream streaming hop
+                        # (dashboard -> browser) saw zero bytes during a long
+                        # quiet tool call and its own idle-abort fired at 120s,
+                        # cancelling the whole turn. Forward it as a liveness
+                        # sentinel so each hop can reset its timer. It is a true
+                        # end-to-end liveness signal: if the agent's loop wedges
+                        # the keepalive stops and downstream correctly times out.
+                        yield {"type": "keepalive"}
         except httpx.HTTPStatusError as e:
             logger.warning("Stream HTTP %d from agent '%s' %s", e.response.status_code, agent_id, path)
             yield {"type": "error", "message": f"HTTP {e.response.status_code}"}

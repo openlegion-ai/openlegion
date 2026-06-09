@@ -3627,6 +3627,13 @@ def create_dashboard_router(
                     headers=_hdrs,
                 ):
                     if isinstance(event, dict):
+                        if event.get("type") == "keepalive":
+                            # Forward upstream liveness as an SSE comment so the
+                            # browser's idle-abort timer (app.js, 120s) resets
+                            # during long silent tool calls. Not a data event —
+                            # carries no UI state and updates no other session.
+                            yield ": keepalive\n\n"
+                            continue
                         yield f"data: {dumps_safe(event)}\n\n"
                         etype = event.get("type", "")
                         if event_bus:
@@ -3754,6 +3761,12 @@ def create_dashboard_router(
                     headers=bcs_hdrs,
                 ):
                     if isinstance(event, dict):
+                        if event.get("type") == "keepalive":
+                            # Liveness only — forward untagged so the generator
+                            # emits an SSE comment (resets the browser idle
+                            # timer) without counting toward agent completion.
+                            await queue.put({"type": "keepalive"})
+                            continue
                         tagged = {**event, "agent": aid}
                         await queue.put(tagged)
                         if event.get("type") == "done":
@@ -3773,6 +3786,9 @@ def create_dashboard_router(
             try:
                 while done_count < len(agents):
                     event = await queue.get()
+                    if event.get("type") == "keepalive":
+                        yield ": keepalive\n\n"
+                        continue
                     if event.get("type") == "agent_done":
                         done_count += 1
                     yield f"data: {dumps_safe(event)}\n\n"
