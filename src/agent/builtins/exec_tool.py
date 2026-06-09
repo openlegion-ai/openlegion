@@ -218,6 +218,7 @@ async def execute_code(code: str, timeout: int = 30) -> dict:
     timeout = min(timeout, _CODE_MAX_TIMEOUT)
     workdir = "/data" if os.path.isdir("/data") else None
     path = None
+    proc: asyncio.subprocess.Process | None = None
     try:
         # Write the snippet to a temp file so we exec `python3 <file>` with no
         # shell interpolation of the (untrusted, possibly quote-laden) source.
@@ -252,8 +253,9 @@ async def execute_code(code: str, timeout: int = 30) -> dict:
             "stderr": stderr if proc.returncode != 0 else "",
         }
     except asyncio.TimeoutError:
-        _kill_process_group(proc)
-        await proc.wait()
+        if proc is not None:
+            _kill_process_group(proc)
+            await proc.wait()
         return {"exit_code": -1, "stdout": "", "stderr": f"Code timed out after {timeout}s"}
     except Exception as e:
         return {"exit_code": -1, "stdout": "", "stderr": str(e)}
