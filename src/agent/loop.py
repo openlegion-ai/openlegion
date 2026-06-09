@@ -583,9 +583,10 @@ class AgentLoop:
             k: v for k, v in self._tool_filter_kw.items() if k != "defer"
         }
         available = set(self.tools.list_tools(**base_kw))
-        context_window = (
-            self.context_manager.max_tokens if self.context_manager else 0
-        )
+        # Degrade to an inactive plan (full surface) if the context window is
+        # unavailable — the capability index is an optimization and must never
+        # hard-fail a turn.
+        context_window = getattr(self.context_manager, "max_tokens", 0) or 0
         self._grouped_plan = plan_grouped_tools(
             available=available,
             loaded_groups=self._loaded_tool_groups,

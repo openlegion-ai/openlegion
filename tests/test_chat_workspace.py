@@ -9,6 +9,7 @@ Verifies:
 
 from __future__ import annotations
 
+import json
 import shutil
 import tempfile
 from pathlib import Path
@@ -198,7 +199,13 @@ class TestCrossSessionMemory:
 
     @pytest.mark.asyncio
     async def test_fact_persists_across_sessions(self):
-        """Session 1 saves a fact. Session 2 sees it in system prompt."""
+        """Session 1 saves a fact. Session 2 sees it in the prompt payload.
+
+        The recently-appended memory rides in the relocated ``## Recent`` slice
+        (volatile, folded into the last message after the cache breakpoint), not
+        the cached system head — so assert against the full system+messages
+        payload, which is what the model actually receives.
+        """
         # Session 1: save a fact
         loop1 = _make_loop_with_workspace(self._tmpdir)
         loop1.workspace.append_daily_log("User's dog is named Biscuit")
@@ -209,10 +216,12 @@ class TestCrossSessionMemory:
         loop2 = _make_loop_with_workspace(self._tmpdir)
         await loop2.chat("What is my dog's name?")
 
-        # Verify system prompt in session 2 contains the fact from session 1
+        # Verify the full payload in session 2 contains the fact from session 1.
         call_args = loop2.llm.chat.call_args
         system_prompt = call_args.kwargs.get("system") or call_args[1].get("system", "")
-        assert "Biscuit" in system_prompt
+        messages = call_args.kwargs.get("messages") or call_args[1].get("messages", [])
+        payload = system_prompt + json.dumps(messages, default=str)
+        assert "Biscuit" in payload
 
     @pytest.mark.asyncio
     async def test_daily_log_accessible_via_search(self):
