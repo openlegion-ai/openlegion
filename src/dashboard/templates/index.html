@@ -1031,7 +1031,9 @@
                     </template>
                     <!-- Browser login request card -->
                     <template x-if="msg.role === 'browser_login_request'">
-                      <div class="flex justify-start gap-2.5">
+                      <div class="flex justify-start gap-2.5"
+                        x-effect="if (msg._flash) { $el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }"
+                        :class="msg._flash ? 'ring-2 ring-amber-400/70 rounded-2xl transition-shadow duration-300' : ''">
                         <div class="shrink-0 mt-1">
                           <img src="/dashboard/static/avatars/operator.png" alt="Operator" class="w-6 h-6 rounded-full">
                         </div>
@@ -1126,7 +1128,9 @@
                     </template>
                     <!-- Browser CAPTCHA help request card (Phase 8 §11.14) -->
                     <template x-if="msg.role === 'browser_captcha_help_request'">
-                      <div class="flex justify-start gap-2.5">
+                      <div class="flex justify-start gap-2.5"
+                        x-effect="if (msg._flash) { $el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }"
+                        :class="msg._flash ? 'ring-2 ring-amber-400/70 rounded-2xl transition-shadow duration-300' : ''">
                         <div class="shrink-0 mt-1">
                           <img src="/dashboard/static/avatars/operator.png" alt="Operator" class="w-6 h-6 rounded-full">
                         </div>
@@ -4109,8 +4113,29 @@
               <div class="bg-gray-900/50 border border-gray-700/50 rounded-lg p-2.5 sm:p-3">
                 <div class="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
                   <div class="flex items-start gap-2.5 min-w-0 flex-1">
-                    <span class="shrink-0 w-6 h-6 rounded-full bg-amber-700/30 text-amber-200 text-[11px] font-bold flex items-center justify-center"
-                      x-text="item.icon"></span>
+                    <!-- Per-kind glyph — mirrors the icon on the matching
+                         chat card so the two surfaces read as the same thing.
+                         Replaces the old cryptic single letters (K/W/C/M/B/!). -->
+                    <span class="shrink-0 w-6 h-6 rounded-full bg-amber-700/30 text-amber-200 flex items-center justify-center" aria-hidden="true">
+                      <template x-if="item.kind === 'credential'">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                      </template>
+                      <template x-if="item.kind === 'browser_login'">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                      </template>
+                      <template x-if="item.kind === 'captcha'">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v2m0 4h.01M5 19h14a2 2 0 001.84-2.75L13.74 4a2 2 0 00-3.48 0L3.16 16.25A2 2 0 005 19z"/></svg>
+                      </template>
+                      <template x-if="item.kind === 'worker_dm'">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                      </template>
+                      <template x-if="item.kind === 'pending'">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                      </template>
+                      <template x-if="item.kind === 'blocker'">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
+                      </template>
+                    </span>
                     <div class="min-w-0 flex-1">
                       <div class="text-sm text-gray-200 break-words" x-text="item.title"></div>
                       <div x-show="item.subtitle" class="text-[11px] text-gray-400 mt-0.5 break-words" x-text="item.subtitle"></div>
@@ -4128,6 +4153,41 @@
                     </template>
                   </div>
                 </div>
+                <!-- Inline credential resolution. Credential items carry an
+                     ``inlineCredential`` descriptor so the user pastes the key
+                     and saves it to the vault WITHOUT a trip to the chat
+                     transcript — same POST the operator-chat credential card
+                     makes. On success we mark the backing chat message saved
+                     (``item.msg``, which drops the row on the next getter pass)
+                     and/or fire ``item.onResolved`` (card-less blocker rows),
+                     so the row clears itself the instant the key lands. -->
+                <template x-if="item.inlineCredential">
+                  <div class="mt-2.5 sm:pl-8" x-data="{ credValue: '', saving: false, saved: false, saveError: '' }">
+                    <template x-if="!saved">
+                      <div>
+                        <input type="password" x-model="credValue" autocomplete="off"
+                          @keydown.enter.stop.prevent="if (credValue.trim() && !saving) { saving = true; saveError = ''; track('needs_you_click', { item_count: needsYouItems.length, item_kind: 'credential', action_label: 'Save to Vault' }); fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({ service: item.inlineCredential.service, key: credValue.trim(), agent_id: item.inlineCredential.agentId }) }).then(r => { if (r.ok) { saved = true; credValue = ''; if (item.msg) item.msg.saved = true; if (item.onResolved) item.onResolved(); showToast('Saved to your vault — the agent can continue.'); } else { saveError = 'Couldn\'t save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
+                          class="w-full px-3 py-1.5 rounded-lg bg-gray-900 border border-gray-700 text-xs text-white placeholder-gray-500 focus:border-indigo-500 focus:outline-none mb-2"
+                          :placeholder="'Paste your ' + item.inlineCredential.display + ' key'">
+                        <div x-show="saveError" class="text-[11px] text-red-400 mb-1.5" x-text="saveError"></div>
+                        <button type="button"
+                          @click="if (credValue.trim() && !saving) { saving = true; saveError = ''; track('needs_you_click', { item_count: needsYouItems.length, item_kind: 'credential', action_label: 'Save to Vault' }); fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({ service: item.inlineCredential.service, key: credValue.trim(), agent_id: item.inlineCredential.agentId }) }).then(r => { if (r.ok) { saved = true; credValue = ''; if (item.msg) item.msg.saved = true; if (item.onResolved) item.onResolved(); showToast('Saved to your vault — the agent can continue.'); } else { saveError = 'Couldn\'t save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
+                          :disabled="!credValue.trim() || saving"
+                          class="text-[11px] font-medium px-2.5 py-1 rounded transition-colors"
+                          :class="credValue.trim() && !saving ? 'bg-emerald-700 hover:bg-emerald-600 text-emerald-50' : 'bg-gray-700 text-gray-400 cursor-not-allowed'">
+                          <span x-show="!saving">Save to Vault</span>
+                          <span x-show="saving">Saving…</span>
+                        </button>
+                      </div>
+                    </template>
+                    <template x-if="saved">
+                      <div class="flex items-center gap-1.5 text-xs text-emerald-400">
+                        <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                        <span>Saved securely.</span>
+                      </div>
+                    </template>
+                  </div>
+                </template>
                 <!-- Preview disclosure for pending actions that carry
                      a server-side diff. Hidden by default; clicking
                      "Review" in the action row flips item.previewExpanded
@@ -8453,7 +8513,9 @@
               </template>
               <!-- Browser login request card -->
               <template x-if="msg.role === 'browser_login_request'">
-                <div class="flex justify-start">
+                <div class="flex justify-start"
+                  x-effect="if (msg._flash) { $el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }"
+                  :class="msg._flash ? 'ring-2 ring-amber-400/70 rounded-2xl transition-shadow duration-300' : ''">
                   <div class="min-w-0" :class="msg._browserExpanded ? 'max-w-[95%]' : 'max-w-[80%]'">
                     <div class="px-4 py-3 rounded-2xl rounded-bl-md bg-gray-800 border border-violet-600/30"
                       x-data="{ browserOpen: false, focusDone: false, focusing: false, vncLoaded: false }">
@@ -8545,7 +8607,9 @@
               </template>
               <!-- Browser CAPTCHA help request card (Phase 8 §11.14) -->
               <template x-if="msg.role === 'browser_captcha_help_request'">
-                <div class="flex justify-start">
+                <div class="flex justify-start"
+                  x-effect="if (msg._flash) { $el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }"
+                  :class="msg._flash ? 'ring-2 ring-amber-400/70 rounded-2xl transition-shadow duration-300' : ''">
                   <div class="min-w-0" :class="msg._browserExpanded ? 'max-w-[95%]' : 'max-w-[80%]'">
                     <div class="px-4 py-3 rounded-2xl rounded-bl-md bg-gray-800 border border-amber-600/30"
                       x-data="{ browserOpen: false, focusDone: false, focusing: false, vncLoaded: false }">

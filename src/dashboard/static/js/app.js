@@ -3077,6 +3077,11 @@ function dashboard() {
     get needsYouItems() {
       const items = [];
       const opChat = (this.chatHistories && this.chatHistories['operator']) || [];
+      // Services already surfaced by a request CARD (credential / browser
+      // login). Blockers that name the same service are duplicates of a
+      // card the user can already act on, so we suppress them below rather
+      // than render a second, less-actionable row pointing at the same thing.
+      const seenServices = new Set();
 
       for (const p of (this.workplacePending || [])) {
         // Build a "Review →" / "Confirm" two-step flow when the row
@@ -3100,7 +3105,6 @@ function dashboard() {
         items.push({
           id: itemId,
           kind: 'pending',
-          icon: '!',
           title: this._humanizeAction(p.action_kind, p.target_kind, p.target_id, p.summary),
           subtitle: this._needsYouSubtitle({
             actor: p.actor,
@@ -3119,46 +3123,69 @@ function dashboard() {
       for (const m of opChat) {
         if (m.cancelled || m.completed || m.saved) continue;
         if (m.role === 'credential_request') {
+          // Resolve IN PLACE. The card carries everything the save needs
+          // (``name`` = vault key, ``_from_agent`` = who unblocks), so the
+          // panel renders the same paste-and-save form the chat card does —
+          // no trip to the transcript. ``item.msg`` is the live chat message
+          // object; setting ``saved=true`` on success both removes this row
+          // (the filter above skips saved cards) and syncs the chat copy.
+          const who = this.agentDisplayName ? this.agentDisplayName(m._from_agent || '') : (m._from_agent || 'an agent');
+          if (m.service || m.name) seenServices.add('credential:' + String(m.service || m.name).toLowerCase());
           items.push({
             id: 'cred-' + (m.request_id || m.name) + '-' + (m.ts || 0),
             kind: 'credential',
-            icon: 'K',
-            title: `Credential needed: ${m.service || m.name || 'unknown'}`,
+            title: `Add the ${m.service || m.name} key`,
             subtitle: this._needsYouSubtitle({
               actor: m._from_agent || 'agent',
-              text: m.content || '',
+              text: `Paste it below — saved straight to your vault, ${who} continues automatically.`,
             }),
-            actions: [
-              { label: 'Open chat', style: 'indigo', handler: () => { this.activeTab = 'chat'; this.openChat && this.openChat('operator'); } },
-            ],
+            inlineCredential: { service: m.name, agentId: m._from_agent || '', display: m.service || m.name },
+            msg: m,
+            // No primary button — the inline form owns Save. Offer a
+            // dismiss only when the request is cancellable (has request_id).
+            actions: m.request_id
+              ? [{ label: 'Not now', style: 'gray', handler: () => this._cancelCredentialRequest(m) }]
+              : [],
           });
         } else if (m.role === 'browser_login_request') {
+          // Browser login needs the live VNC viewer, which only fits in the
+          // chat surface — so we DON'T fake it inline. Instead the button
+          // slides the operator messenger in over the current tab and flashes
+          // THIS exact card (via _jumpToNeedsYouCard → msg._flash), instead of
+          // dumping the user at the bottom of the transcript.
+          const who = this.agentDisplayName ? this.agentDisplayName(m._from_agent || '') : (m._from_agent || 'an agent');
+          if (m.service) seenServices.add('browser_login:' + String(m.service).toLowerCase());
           items.push({
             id: 'login-' + (m.request_id || m.service) + '-' + (m.ts || 0),
             kind: 'browser_login',
-            icon: 'W',
-            title: `Browser login: ${m.service || 'unknown service'}`,
+            title: `Sign in to ${m.service || 'a site'} for ${who}`,
             subtitle: this._needsYouSubtitle({
               actor: m._from_agent || 'agent',
-              text: m.content || '',
+              text: 'Opens a live browser here — sign in, then press Complete login.',
             }),
             actions: [
-              { label: 'Open in chat', style: 'indigo', handler: () => { this.activeTab = 'chat'; this.openChat && this.openChat('operator'); } },
-            ],
+              { label: 'Sign in', style: 'indigo', handler: () => this._jumpToNeedsYouCard(m) },
+              m.request_id
+                ? { label: 'Not now', style: 'gray', handler: () => this._cancelBrowserLogin(m, m._from_agent) }
+                : null,
+            ].filter(Boolean),
           });
         } else if (m.role === 'browser_captcha_help_request') {
+          const who = this.agentDisplayName ? this.agentDisplayName(m._from_agent || '') : (m._from_agent || 'an agent');
           items.push({
             id: 'captcha-' + (m.request_id || m.service) + '-' + (m.ts || 0),
             kind: 'captcha',
-            icon: 'C',
-            title: `CAPTCHA help: ${m.service || 'unknown service'}`,
+            title: `Solve a CAPTCHA on ${m.service || 'a site'} for ${who}`,
             subtitle: this._needsYouSubtitle({
               actor: m._from_agent || 'agent',
-              text: m.content || '',
+              text: 'Opens a live browser here — clear the check, then press Done.',
             }),
             actions: [
-              { label: 'Open in chat', style: 'indigo', handler: () => { this.activeTab = 'chat'; this.openChat && this.openChat('operator'); } },
-            ],
+              { label: 'Solve it', style: 'indigo', handler: () => this._jumpToNeedsYouCard(m) },
+              m.request_id
+                ? { label: 'Not now', style: 'gray', handler: () => this._cancelBrowserCaptchaHelp(m, m._from_agent) }
+                : null,
+            ].filter(Boolean),
           });
         }
       }
@@ -3178,18 +3205,18 @@ function dashboard() {
         items.push({
           id: 'worker_dm:' + agentId,
           kind: 'worker_dm',
-          icon: 'M',
-          title: `${this.agentDisplayName(agentId)} has a message for you`,
+          title: `${this.agentDisplayName(agentId)} messaged you`,
           subtitle: this._needsYouSubtitle({
             actor: agentId,
-            text: n === 1 ? '1 unread' : `${n} unread`,
+            text: (n === 1 ? '1 unread' : `${n} unread`) + ' · read and reply here',
           }),
           actions: [
             {
               label: 'Read',
               style: 'indigo',
+              // Slide the messenger in over the current tab (it shows
+              // whenever activeTab !== 'chat'); no full tab-yank needed.
               handler: () => {
-                this.activeTab = 'chat';
                 if (this.openChat) this.openChat(agentId);
               },
             },
@@ -3199,33 +3226,66 @@ function dashboard() {
 
       for (const b of (this.workplaceBlockers || [])) {
         // Surface ONLY blockers with a real, working resolution for the user:
-        // credential + browser-login approvals, whose "Fix" jumps to the
-        // operator chat card that already renders the request. Every other
-        // blocked/failed task is operator-handled (and narrated in the team's
-        // Work summary) — the old "Drill in" fallback dead-ended on the
-        // summaries-only Work page and could never resolve the item, so it's
-        // gone. ``_humanizeBlocker`` decodes the machine code to plain English.
+        // credential + browser-login. Every other blocked/failed task is
+        // operator-handled (and narrated in the team's Work summary).
+        // ``_humanizeBlocker`` decodes the machine code to plain English.
         const classification = this._humanizeBlocker(b.blocker_note || '');
         if (classification.kind !== 'credential' && classification.kind !== 'browser_login') continue;
-        const primary = {
-          label: 'Fix',
-          style: 'indigo',
-          handler: () => {
-            this.activeTab = 'chat';
-            if (this.openChat) this.openChat('operator');
-          },
-        };
+        // Dismissed locally after an inline save (the server-side blocker
+        // clears on the next poll; this hides the row immediately so the
+        // form doesn't flash back as "unsaved").
+        if (this._needsYouResolvedBlockers && this._needsYouResolvedBlockers[b.id]) continue;
+        // Dedupe: if a request CARD for this service is already surfaced
+        // above, that row is strictly more actionable — skip the blocker so
+        // the user doesn't see the same need twice.
+        const svc = String(classification.service || '').toLowerCase();
+        if (svc && seenServices.has(classification.kind + ':' + svc)) continue;
+
+        const who = this.agentDisplayName ? this.agentDisplayName(b.assignee || '') : (b.assignee || 'an agent');
+        // Credential blockers carry the vault key name in the note
+        // (``cred:<name>``) — authoritative — so we can resolve in place
+        // with the same paste-and-save form, no chat trip. Without a known
+        // key name there's nothing to save inline, so fall back to opening
+        // the operator chat where the agent can re-state what it needs.
+        if (classification.kind === 'credential' && classification.service) {
+          items.push({
+            id: 'blocker-' + b.id,
+            kind: 'credential',
+            title: `Add the ${classification.service} key`,
+            subtitle: this._needsYouSubtitle({
+              actor: b.assignee || '',
+              text: `${who} is blocked on "${b.title || 'a task'}" — paste it below to unblock.`,
+            }),
+            inlineCredential: { service: classification.service, agentId: b.assignee || '', display: classification.service },
+            // No live chat message backs a blocker; mark it resolved
+            // client-side so the row disappears the moment we save.
+            onResolved: () => { this._needsYouResolvedBlockers = { ...this._needsYouResolvedBlockers, [b.id]: true }; },
+            actions: [],
+          });
+          continue;
+        }
+        // Browser-login blocker with no surfaced card: the live VNC only
+        // exists in the chat surface, so slide the messenger in there.
         items.push({
           id: 'blocker-' + b.id,
-          kind: 'blocker',
-          icon: 'B',
-          title: b.title || '(untitled blocked task)',
+          kind: classification.kind === 'browser_login' ? 'browser_login' : 'blocker',
+          title: classification.kind === 'browser_login'
+            ? `Sign in for ${who}`
+            : (b.title || '(untitled blocked task)'),
           subtitle: this._needsYouSubtitle({
             actor: b.assignee || '',
             project: b.project_id || '',
-            text: classification.label,
+            text: classification.kind === 'browser_login'
+              ? `Blocked on "${b.title || 'a task'}" — open the chat to sign in.`
+              : classification.label,
           }),
-          actions: [primary],
+          actions: [
+            {
+              label: classification.kind === 'browser_login' ? 'Sign in' : 'Open chat',
+              style: 'indigo',
+              handler: () => { if (this.openChat) this.openChat('operator'); },
+            },
+          ],
         });
       }
 
@@ -3348,6 +3408,30 @@ function dashboard() {
     // needsYouItems read; we keep it on the component instance so
     // toggling stays sticky as the list re-renders.
     _needsYouPreviewExpanded: {},
+
+    // Blocker ids resolved inline (credential saved) but not yet cleared
+    // server-side. Keyed by blocker id → true; the getter skips these so
+    // the row vanishes immediately instead of flashing back as unsaved
+    // until the next workplaceBlockers poll.
+    _needsYouResolvedBlockers: {},
+
+    // Jump-to-card: slide the operator messenger in over the current tab
+    // (it renders whenever activeTab !== 'chat') and flag THIS message so
+    // its card scrolls into view and flashes — instead of openChat's
+    // default scroll-to-bottom, which is what stranded the old "Open chat"
+    // buttons at the wrong spot. If already on the Chat tab, openChat just
+    // refocuses operator and the same flash fires there.
+    _jumpToNeedsYouCard(msg) {
+      if (this.openChat) this.openChat('operator');
+      this.$nextTick(() => {
+        if (!msg) return;
+        // Increment (not just set true) so a repeat click on an already-
+        // flagged card retriggers the x-effect and re-scrolls/re-flashes.
+        msg._flash = (msg._flash || 0) + 1;
+        // Clear after the highlight has been seen so it doesn't linger.
+        setTimeout(() => { try { msg._flash = 0; } catch (_) { /* gone */ } }, 2600);
+      });
+    },
 
     // Build the small grey sub-line shared by every Needs-you card.
     // Joins the populated bits with " · " so blank fields don't leave

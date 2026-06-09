@@ -1484,6 +1484,76 @@ class TestWorkerDmInNeedsYou:
         # naturally for either case.
         assert "'1 unread'" in _APP_JS_TEXT
         assert "${n} unread" in _APP_JS_TEXT
+
+
+class TestNeedsYouInlineResolution:
+    """The Needs-You panel must let the user RESOLVE items, not just point
+    at the operator chat. Credentials resolve inline; browser-login / CAPTCHA
+    deep-link to the exact card and flash it instead of scroll-to-bottom."""
+
+    def test_no_cryptic_letter_icons(self):
+        # The old single-letter badges (K/W/C/M/B) are gone — the panel
+        # renders per-kind SVGs keyed on item.kind instead.
+        for bad in ("icon: 'K'", "icon: 'W'", "icon: 'C'", "icon: 'M'", "icon: 'B'"):
+            assert bad not in _APP_JS_TEXT, f"cryptic icon {bad!r} should be removed"
+        # The template no longer text-renders item.icon.
+        assert 'x-text="item.icon"' not in _INDEX_HTML
+        # Per-kind glyphs exist for every actionable kind.
+        for kind in ("credential", "browser_login", "captcha", "worker_dm", "pending", "blocker"):
+            assert f"item.kind === '{kind}'" in _INDEX_HTML, f"missing icon branch for {kind}"
+
+    def test_credential_items_resolve_inline(self):
+        # Credential needs-you items carry an inlineCredential descriptor so
+        # the panel can save to the vault without a chat trip.
+        assert "inlineCredential:" in _APP_JS_TEXT
+        # The panel renders the inline form and posts to the same endpoint
+        # the operator-chat credential card uses.
+        assert 'x-if="item.inlineCredential"' in _INDEX_HTML
+        assert "'/credentials/agent'" in _INDEX_HTML
+        # Success path drops the row: marks the backing chat message saved
+        # and/or fires the item's onResolved (card-less blocker rows).
+        assert "item.msg.saved = true" in _INDEX_HTML
+        assert "item.onResolved" in _INDEX_HTML
+
+    def test_browser_login_and_captcha_deeplink_not_deadend(self):
+        # The dead-end "Open chat"/"Open in chat" buttons that dumped the
+        # user at the bottom of the transcript are gone for these kinds —
+        # they now jump to the exact card.
+        assert "_jumpToNeedsYouCard" in _APP_JS_TEXT
+        # Old labels retired.
+        assert "label: 'Open in chat'" not in _APP_JS_TEXT
+        # The jump helper flags the specific message so its card flashes.
+        assert "msg._flash" in _APP_JS_TEXT
+
+    def test_jump_helper_flags_message_for_flash(self):
+        # _jumpToNeedsYouCard opens operator and increments msg._flash so the
+        # card's x-effect re-scrolls/re-flashes even on a repeat click.
+        m = re.search(
+            r"_jumpToNeedsYouCard\(msg\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "_jumpToNeedsYouCard body missing"
+        body = m.group(1)
+        assert "openChat('operator')" in body
+        assert "msg._flash = (msg._flash || 0) + 1" in body
+
+    def test_request_cards_carry_flash_anchor(self):
+        # Both chat surfaces (Chat tab + messenger side panel) must scroll
+        # the flagged card into view and ring it — one x-effect per card,
+        # two cards, two surfaces = four anchors.
+        assert _INDEX_HTML.count("$el.scrollIntoView({ behavior: 'smooth', block: 'center' })") == 4
+        assert _INDEX_HTML.count("ring-2 ring-amber-400/70 rounded-2xl") == 4
+
+    def test_blockers_deduped_against_request_cards(self):
+        # A blocker naming a service already surfaced by a request card is a
+        # duplicate of a more-actionable row, so it's suppressed.
+        assert "seenServices" in _APP_JS_TEXT
+        assert "seenServices.has(" in _APP_JS_TEXT
+        # Credential blockers resolve inline too (vault key from the note).
+        assert "_needsYouResolvedBlockers" in _APP_JS_TEXT
+
+
 # ── Browser notification + activity rollup + connect-channel ────
 
 
