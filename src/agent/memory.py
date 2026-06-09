@@ -58,6 +58,8 @@ _CATEGORY_RECOMPUTE_INTERVAL = 10
 # distinct facts ("user_name" vs "user_email") are never collapsed — only genuine
 # near-synonym keys ("preferred_language" vs "user_language_preference") merge.
 # Similarity uses the same 1/(1+L2_distance) convention as search/categorization.
+# NOTE: the metric is 1/(1+L2), so 0.93 ≈ ~0.997 cosine for unit-normalized
+# vectors — tune with care; this value is wrong for unnormalized providers.
 _SEMANTIC_DEDUP_SIM_THRESHOLD = 0.93
 
 
@@ -312,36 +314,45 @@ class MemoryStore:
     def _store_fact_sync(
         self, key: str, value: str, category: str, source: str,
         confidence: float, embedding: list[float] | None,
-        merge_into: str | None = None,
+        semantic_dedup: bool = False,
     ) -> str:
         """Sync DB portion of store_fact. Returns the fact ID.
 
-        ``merge_into`` is a fact id resolved by semantic-similarity dedup; when set,
-        that existing row is updated in place (prefer-newer value, bump salience)
-        instead of matching purely on exact key.
+        Probe + conflict-check + write happen in ONE executor call / SQLite
+        transaction (no await gap) so a concurrent store can't mutate the target
+        between the dedup probe and the write.
+
+        ``semantic_dedup`` enables the in-transaction near-duplicate probe (only
+        meaningful when an ``embedding`` is available). The EXACT-key row always
+        wins: a semantic merge only fires when no row already holds ``key``, which
+        guarantees the merge can never rewrite one row's key onto another's and
+        create a duplicate-key orphan.
         """
-        existing = None
-        if merge_into is not None:
-            existing = self.db.execute(
-                "SELECT id, access_count FROM facts WHERE id = ?", (merge_into,),
-            ).fetchone()
-        if existing is None:
-            existing = self.db.execute(
-                "SELECT id, access_count FROM facts WHERE key = ?", (key,),
-            ).fetchone()
+        existing = self.db.execute(
+            "SELECT id, access_count FROM facts WHERE key = ?", (key,),
+        ).fetchone()
+        # Only consider a semantic merge for a genuinely-new key — otherwise the
+        # in-place UPDATE below would rewrite this row's key to equal an existing
+        # row's key, leaving two rows sharing a key (an unreachable orphan).
+        if existing is None and semantic_dedup and embedding is not None:
+            merge_id = self._find_semantic_duplicate(embedding, category)
+            if merge_id is not None:
+                existing = self.db.execute(
+                    "SELECT id, access_count FROM facts WHERE id = ?", (merge_id,),
+                ).fetchone()
 
         if existing:
             fact_id = existing[0]
             new_count = existing[1] + 1
             boost = self._compute_boost(new_count)
-            # Prefer the newer value AND adopt the newer key/category so the
-            # surviving row reflects the latest phrasing (a semantic merge may
-            # have matched a row stored under a different key).
+            # Prefer the newer value AND adopt the newer key/category/source so the
+            # surviving row reflects the latest phrasing + provenance (a semantic
+            # merge may have matched a row stored under a different key).
             self.db.execute(
-                "UPDATE facts SET key = ?, value = ?, category = ?, confidence = ?, "
-                "access_count = ?, last_accessed = datetime('now'), "
+                "UPDATE facts SET key = ?, value = ?, category = ?, source = ?, "
+                "confidence = ?, access_count = ?, last_accessed = datetime('now'), "
                 "decay_score = MIN(?, 10.0) WHERE id = ?",
-                (key, value, category, confidence, new_count, boost, fact_id),
+                (key, value, category, source, confidence, new_count, boost, fact_id),
             )
             self.db.execute("DELETE FROM facts_fts WHERE fact_id = ?", (fact_id,))
             self.db.execute(
@@ -395,19 +406,15 @@ class MemoryStore:
             )
             embedding = None
 
-        # Semantic dedup (opt-in): if an existing fact is a near-duplicate of this
-        # one, update it in place instead of inserting a near-dup row. Resolved
-        # here (sync probe in executor) so the value reaches _store_fact_sync.
-        merge_into = None
-        if embedding is not None and _semantic_dedup_enabled():
-            merge_into = await self._run_db(
-                self._find_semantic_duplicate, embedding, category,
-            )
+        # Semantic dedup (opt-in): the near-duplicate probe runs INSIDE
+        # _store_fact_sync (same executor call / SQLite transaction as the write)
+        # so the probe + exact-key conflict check + write are atomic.
+        semantic_dedup = embedding is not None and _semantic_dedup_enabled()
 
         # Run all DB writes in executor to avoid blocking the event loop
         fact_id = await self._run_db(
             self._store_fact_sync, key, value, category, source, confidence,
-            embedding, merge_into,
+            embedding, semantic_dedup,
         )
 
         if embedding is not None:

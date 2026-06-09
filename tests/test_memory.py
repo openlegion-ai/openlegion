@@ -538,3 +538,51 @@ class TestSemanticDedup:
             assert self._count_facts(store) == 2
         finally:
             store.close()
+
+    @pytest.mark.asyncio
+    async def test_no_duplicate_key_orphans_after_semantic_merge(self, tmp_path, dedup_on):
+        # BLOCKER regression: a semantic merge must never rewrite one row's key
+        # onto another row's key (which would leave two rows sharing a key — the
+        # exact-key dedup path becomes ambiguous and one row is an unreachable
+        # orphan). lang_a and lang_b share an embedding group (near-duplicates).
+        groups = [{"lang_a", "lang_b"}]
+        store = self._make_store(tmp_path, "orphan.db", groups)
+        try:
+            await store.store_fact("lang_a", "X")
+            # Near-duplicate embedding → merges into the lang_a row, flipping its
+            # key to lang_b. Now a single row, keyed lang_b.
+            await store.store_fact("lang_b", "Y")
+            assert self._count_facts(store) == 1
+            # Re-store lang_a (exact-key path: no row holds lang_a, but its
+            # embedding still matches the lang_b row — must NOT clobber lang_b's
+            # key) and lang_b again (genuine exact-key update).
+            await store.store_fact("lang_a", "Z")
+            await store.store_fact("lang_b", "W")
+            # Invariant: no two rows share a key.
+            dupes = store.db.execute(
+                "SELECT key, COUNT(*) FROM facts GROUP BY key HAVING COUNT(*) > 1",
+            ).fetchall()
+            assert dupes == []
+            # The surviving values are reachable by exact key.
+            for key in ("lang_a", "lang_b"):
+                fact = store._get_fact_by_key(key)
+                if fact is not None:
+                    # Every key that resolves resolves to exactly one row.
+                    assert fact.key == key
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_dedup_on_no_embedder_graceful(self, tmp_path, dedup_on):
+        # Flag ON but embed_fn is None → no embedding, so the semantic probe is
+        # skipped entirely and the write path falls back to exact-key behavior.
+        store = MemoryStore(db_path=str(tmp_path / "ondnoembed.db"))
+        try:
+            await store.store_fact("preferred_language", "Python")
+            await store.store_fact("user_language_preference", "Rust")
+            assert self._count_facts(store) == 2
+            await store.store_fact("preferred_language", "Go")
+            assert self._count_facts(store) == 2
+            assert store._get_fact_by_key("preferred_language").value == "Go"
+        finally:
+            store.close()
