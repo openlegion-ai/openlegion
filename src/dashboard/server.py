@@ -682,6 +682,11 @@ def create_dashboard_router(
     # the relevant store is absent.
     pending_actions: Any = None,
     tasks_store: Any = None,
+    # Open help-requests registry (credential / browser-login / captcha asks)
+    # backing the "Needs you" feed. Optional so existing tests keep working;
+    # when absent the credential-save / complete paths fall back to their
+    # legacy direct steer+emit without an in-process registry pop.
+    help_requests_store: Any = None,
     # PR-A — Work summaries backing the new Work-tab default landing.
     # Optional so existing dashboard tests that don't construct one keep
     # working; the endpoints return ``{enabled: False}`` when absent.
@@ -4227,22 +4232,20 @@ def create_dashboard_router(
         credential_vault.add_credential(service, key)
         agent_id = body.get("agent_id", "").strip()
         request_id = (body.get("request_id", "") or "").strip()
-        if request_id:
-            # Card-driven save: hand off to the generic mesh resolve, which
-            # atomically claims the open request and owns the steer +
-            # credential_stored emit — so a save racing a cancel resolves
-            # exactly once and the agent never gets contradictory steers.
-            # Best-effort: the credential is already stored; a resolve-proxy
-            # failure must not fail the save (mirrors the legacy steer's
-            # swallow-on-error contract). Other clients re-sync on the next
-            # /api/help-requests poll.
-            try:
-                await _proxy_help_resolve(request_id, {})
-            except Exception:
-                pass
-        else:
-            # No request id (e.g. a manual add not tied to an open card):
-            # keep the best-effort direct steer + cross-client emit.
+        # Gate the steer + cross-client emit on an ATOMIC claim of the open
+        # request, so a save racing a cancel resolves exactly once and the
+        # agent never gets contradictory "use it" + "cancelled" steers. The
+        # claim also POPS the registry record, clearing the "Needs you" row.
+        # With no request_id (manual add) or no registry wired, there's nothing
+        # to race — proceed (legacy direct path). Done in-process (the
+        # dashboard is mounted on the mesh app): a loopback hop would add a
+        # socket dependency and isn't needed since we hold the store ref.
+        claimed = True
+        if request_id and help_requests_store is not None:
+            claimed = help_requests_store.resolve(
+                request_id, expected_kind="credential_request", status="resolved",
+            ) is not None
+        if claimed:
             if agent_id and lane_manager is not None and agent_id in agent_registry:
                 from src.shared.trace import new_trace_id
                 try:
@@ -4262,7 +4265,7 @@ def create_dashboard_router(
                     data={
                         "name": service,
                         "service": service,
-                        "request_id": "",
+                        "request_id": request_id,
                         "agent_id": agent_id or None,
                     },
                 )
@@ -4277,14 +4280,15 @@ def create_dashboard_router(
         request_id = (body.get("request_id", "") or "").strip()
         if not agent_id or not service:
             raise HTTPException(status_code=400, detail="agent_id and service are required")
-        if request_id:
-            # Card/feed-driven: mesh atomically claims + steers + emits once.
-            try:
-                await _proxy_help_resolve(request_id, {})
-            except Exception:
-                pass
+        # Atomic claim gates the steer/emit (no save/cancel double-fire) and
+        # pops the registry record so the "Needs you" row clears.
+        claimed = True
+        if request_id and help_requests_store is not None:
+            claimed = help_requests_store.resolve(
+                request_id, expected_kind="browser_login_request", status="resolved",
+            ) is not None
+        if not claimed:
             return {"completed": True, "agent_id": agent_id, "service": service}
-        # Legacy (no request id): best-effort direct steer + emit.
         if agent_id in agent_registry and lane_manager is not None:
             from src.shared.trace import new_trace_id
             from src.shared.utils import sanitize_for_prompt
@@ -4315,13 +4319,13 @@ def create_dashboard_router(
                 status_code=400,
                 detail="agent_id and service are required",
             )
-        if request_id:
-            try:
-                await _proxy_help_resolve(request_id, {})
-            except Exception:
-                pass
+        claimed = True
+        if request_id and help_requests_store is not None:
+            claimed = help_requests_store.resolve(
+                request_id, expected_kind="browser_captcha_help_request", status="resolved",
+            ) is not None
+        if not claimed:
             return {"completed": True, "agent_id": agent_id, "service": service}
-        # Legacy (no request id): best-effort direct steer + emit.
         if agent_id in agent_registry and lane_manager is not None:
             from src.shared.trace import new_trace_id
             from src.shared.utils import sanitize_for_prompt
@@ -8105,37 +8109,6 @@ def create_dashboard_router(
             raise HTTPException(502, f"mesh cancel proxy failed: {e}")
         if resp.status_code == 404:
             raise HTTPException(404, "Request not found or already resolved")
-        if resp.status_code >= 400:
-            raise HTTPException(resp.status_code, resp.text)
-        try:
-            return resp.json()
-        except Exception:
-            return {"ok": True}
-
-    async def _proxy_help_resolve(request_id: str, body: dict | None) -> dict:
-        """Proxy a "request satisfied" event to the generic mesh resolve.
-
-        Used by the credential-save and browser login/captcha complete paths
-        so the mesh atomically claims the record and steers the agent exactly
-        once (the claim gates the steer — no save/cancel double-fire). Same
-        loopback + x-mesh-internal contract as :func:`_proxy_help_cancel`.
-        Idempotent: an already-resolved id returns ``claimed=false``, not 404.
-        """
-        import httpx
-        url = f"http://127.0.0.1:{mesh_port}/mesh/help-requests/{request_id}/resolve"
-        try:
-            async with httpx.AsyncClient(timeout=5) as client:
-                resp = await client.post(
-                    url,
-                    json=body or {},
-                    headers={
-                        "x-mesh-internal": "1",
-                        "X-Agent-ID": "operator",
-                        "Content-Type": "application/json",
-                    },
-                )
-        except Exception as e:
-            raise HTTPException(502, f"mesh resolve proxy failed: {e}")
         if resp.status_code >= 400:
             raise HTTPException(resp.status_code, resp.text)
         try:

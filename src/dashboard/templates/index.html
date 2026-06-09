@@ -4089,7 +4089,7 @@
              cards still render in chat too; this is an additional
              surface, not a replacement. Rendered only when there's at
              least one item so an idle Board has no extra chrome. -->
-        <section x-show="needsYouItems.length > 0" x-cloak
+        <section x-show="needsYouItems.length > 0 || workplaceErrors.help" x-cloak
           x-data="{ needsYouExpanded: false, needsYouCollapsedCap: 5 }"
           role="region" aria-label="Pending items that need you"
           class="mb-4 bg-amber-900/15 border border-amber-700/30 rounded-xl p-3 sm:p-4 sticky top-0 z-10 backdrop-blur-sm">
@@ -4102,6 +4102,17 @@
               class="text-[11px] font-medium px-2 py-0.5 rounded-full bg-amber-700/50 text-amber-100"
               x-text="needsYouItems.length"></span>
           </div>
+          <!-- Error state — distinguishes a backend outage from "nothing
+               needs you". Without this, a failed /api/help-requests would
+               silently read as an empty panel. Retry re-pulls the feed. -->
+          <template x-if="workplaceErrors.help">
+            <div class="bg-red-900/20 border border-red-800/40 rounded-lg p-2.5 mb-2 flex flex-wrap items-center gap-2"
+                 role="alert" data-testid="needs-you-help-error">
+              <span class="text-[11px] text-red-200 flex-1" x-text="workplaceErrors.help"></span>
+              <button type="button" @click="retryWorkplaceSection('help')"
+                class="text-[11px] font-medium px-2.5 py-1 rounded bg-red-800/40 hover:bg-red-700/50 text-red-100 transition-colors">Retry</button>
+            </div>
+          </template>
           <!-- Cap the visible items at ~40vh and scroll inside the panel
                so a long pending queue can never push the sub-tab bar off
                the viewport on mobile. The "Show N more" disclosure below
@@ -4126,14 +4137,8 @@
                       <template x-if="item.kind === 'captcha'">
                         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v2m0 4h.01M5 19h14a2 2 0 001.84-2.75L13.74 4a2 2 0 00-3.48 0L3.16 16.25A2 2 0 005 19z"/></svg>
                       </template>
-                      <template x-if="item.kind === 'worker_dm'">
-                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                      </template>
                       <template x-if="item.kind === 'pending'">
                         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-                      </template>
-                      <template x-if="item.kind === 'blocker'">
-                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg>
                       </template>
                     </span>
                     <div class="min-w-0 flex-1">
@@ -4167,12 +4172,12 @@
                     <template x-if="!saved">
                       <div>
                         <input type="password" x-model="credValue" autocomplete="off"
-                          @keydown.enter.stop.prevent="if (credValue.trim() && !saving) { saving = true; saveError = ''; track('needs_you_click', { item_count: needsYouItems.length, item_kind: 'credential', action_label: 'Save to Vault' }); fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({ service: item.inlineCredential.service, key: credValue.trim(), agent_id: item.inlineCredential.agentId }) }).then(r => { if (r.ok) { saved = true; credValue = ''; if (item.msg) item.msg.saved = true; showToast('Saved to your vault — the agent can continue.'); } else { saveError = 'Couldn\'t save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
+                          @keydown.enter.stop.prevent="if (credValue.trim() && !saving) { saving = true; saveError = ''; track('needs_you_click', { item_count: needsYouItems.length, item_kind: 'credential', action_label: 'Save to Vault' }); fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({ service: item.inlineCredential.service, key: credValue.trim(), agent_id: item.inlineCredential.agentId, request_id: item.inlineCredential.requestId }) }).then(r => { if (r.ok) { saved = true; credValue = ''; loadWorkplaceHelpRequests(); showToast('Saved to your vault — the agent can continue.'); } else { saveError = 'Couldn\'t save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
                           class="w-full px-3 py-1.5 rounded-lg bg-gray-900 border border-gray-700 text-xs text-white placeholder-gray-500 focus:border-indigo-500 focus:outline-none mb-2"
                           :placeholder="'Paste your ' + item.inlineCredential.display + ' key'">
                         <div x-show="saveError" class="text-[11px] text-red-400 mb-1.5" x-text="saveError"></div>
                         <button type="button"
-                          @click="if (credValue.trim() && !saving) { saving = true; saveError = ''; track('needs_you_click', { item_count: needsYouItems.length, item_kind: 'credential', action_label: 'Save to Vault' }); fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({ service: item.inlineCredential.service, key: credValue.trim(), agent_id: item.inlineCredential.agentId }) }).then(r => { if (r.ok) { saved = true; credValue = ''; if (item.msg) item.msg.saved = true; showToast('Saved to your vault — the agent can continue.'); } else { saveError = 'Couldn\'t save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
+                          @click="if (credValue.trim() && !saving) { saving = true; saveError = ''; track('needs_you_click', { item_count: needsYouItems.length, item_kind: 'credential', action_label: 'Save to Vault' }); fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({ service: item.inlineCredential.service, key: credValue.trim(), agent_id: item.inlineCredential.agentId, request_id: item.inlineCredential.requestId }) }).then(r => { if (r.ok) { saved = true; credValue = ''; loadWorkplaceHelpRequests(); showToast('Saved to your vault — the agent can continue.'); } else { saveError = 'Couldn\'t save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
                           :disabled="!credValue.trim() || saving"
                           class="text-[11px] font-medium px-2.5 py-1 rounded transition-colors"
                           :class="credValue.trim() && !saving ? 'bg-emerald-700 hover:bg-emerald-600 text-emerald-50' : 'bg-gray-700 text-gray-400 cursor-not-allowed'">

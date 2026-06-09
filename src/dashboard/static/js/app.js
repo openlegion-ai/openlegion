@@ -428,6 +428,10 @@ function dashboard() {
     // subtle loading affordance, preventing double-fires.
     _summaryRateInFlight: {},
     workplacePending: [],
+    // Open credential / browser-login / captcha asks — the authoritative
+    // feed (GET /api/help-requests) that drives those "Needs you" rows,
+    // replacing the old volatile operator-chat scrape.
+    needsYouRequests: [],
     workplaceLoading: false,
     // Per-section loading + error state. Failures used to be swallowed
     // silently (console.error) which left the user staring at an empty
@@ -441,6 +445,7 @@ function dashboard() {
       tasks: false,
       blockers: false,
       pending: false,
+      help: false,
       summaries: false,
       goals: false,
     },
@@ -449,6 +454,7 @@ function dashboard() {
       tasks: '',
       blockers: '',
       pending: '',
+      help: '',
       summaries: '',
       goals: '',
     },
@@ -1301,6 +1307,12 @@ function dashboard() {
             // Queue state is WS-driven (no poll) — re-seed it on reconnect so
             // any transitions missed during the outage are reflected.
             this.fetchQueues();
+            // The "Needs you" help-request feed is likewise refreshed so a
+            // request that arrived or resolved during the outage is reflected
+            // — otherwise the panel could under- or over-report after a blip.
+            if (typeof this.loadWorkplaceHelpRequests === 'function') {
+              this.loadWorkplaceHelpRequests();
+            }
             // Platform success is browser_metrics-driven (no poll); if the
             // operator is on the Browser panel, re-seed it too so a blip
             // doesn't leave the rollup frozen until the next metrics event.
@@ -1321,6 +1333,12 @@ function dashboard() {
       this.fetchTeams();
       this.fetchModelHealth();
       this.fetchQueues();
+      // Seed the "Needs you" help-request feed at startup so the navbar badge
+      // is correct on EVERY tab (not just after the Work tab mounts). Live
+      // WS events keep it fresh; this slow poll is a completeness backstop in
+      // case an event is dropped (the panel must never silently under-report).
+      this.loadWorkplaceHelpRequests();
+      this._helpRequestsInterval = setInterval(() => this.loadWorkplaceHelpRequests(), 60000);
       this._refreshInterval = setInterval(() => this.fetchAgents(), 15000);
       this._modelHealthInterval = setInterval(() => this.fetchModelHealth(), 60000);
       // Queue depth/busy is now pushed live via the ``queue_changed`` WS event
@@ -2601,6 +2619,7 @@ function dashboard() {
           this.loadWorkplaceTasks(),
           this.loadWorkplaceBlockers(),
           this.loadWorkplacePending(),
+          this.loadWorkplaceHelpRequests(),
           this.loadWorkplaceSummaries(),
           this.loadWorkplaceGoals(),
         ]);
@@ -2619,6 +2638,7 @@ function dashboard() {
         tasks: this.loadWorkplaceTasks,
         blockers: this.loadWorkplaceBlockers,
         pending: this.loadWorkplacePending,
+        help: this.loadWorkplaceHelpRequests,
         summaries: this.loadWorkplaceSummaries,
         goals: this.loadWorkplaceGoals,
       }[section];
@@ -2866,6 +2886,41 @@ function dashboard() {
       }
     },
 
+    async loadWorkplaceHelpRequests() {
+      // Authoritative source for the credential / browser-login / captcha
+      // rows in "Needs you". Replaces scraping volatile operator-chat state
+      // (which silently vanished on reload / transcript refresh). An empty
+      // list reliably means nothing of these kinds needs the user; an HTTP
+      // error sets ``help`` so the panel shows an explicit error state rather
+      // than a misleading empty.
+      this.workplaceSectionLoading.help = true;
+      this.workplaceErrors.help = '';
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/help-requests`);
+        if (!resp.ok) {
+          this.workplaceErrors.help = `Couldn't load open requests (HTTP ${resp.status})`;
+          return;
+        }
+        const data = await resp.json();
+        this.needsYouRequests = data.help_requests || [];
+      } catch (e) {
+        this.workplaceErrors.help = (e && e.message) ? `Couldn't load open requests: ${e.message}` : "Couldn't load open requests";
+      } finally {
+        this.workplaceSectionLoading.help = false;
+      }
+    },
+
+    // Debounced refresh used by WS event handlers — credential/login/captcha
+    // request + resolve + cancel events all just re-pull the authoritative
+    // feed rather than surgically mutating client state (avoids drift).
+    _refreshHelpRequestsSoon() {
+      if (this._helpRefreshTimer) clearTimeout(this._helpRefreshTimer);
+      this._helpRefreshTimer = setTimeout(() => {
+        this._helpRefreshTimer = null;
+        this.loadWorkplaceHelpRequests();
+      }, 250);
+    },
+
     async loadWorkplaceGoals() {
       // PR 2 — workplace-wide business goals managed by the operator
       // via ``manage_goals`` (PR 1). Render is a horizontal chip strip
@@ -3065,23 +3120,18 @@ function dashboard() {
       return `${Math.floor(remain / 3600)}h`;
     },
 
-    // Aggregate every "needs human" surface into one ordered list so the
-    // sticky Board panel can render them with a single x-for. Sources:
-    //   - workplacePending (durable propose/confirm rows)
-    //   - operator-chat credential / browser-login / captcha cards
-    //     (matched on role, not on a separate fetch — these live in
-    //     chatHistories['operator'] alongside the conversation)
-    //   - workplaceBlockers (tasks the agent flagged stuck)
-    // The cards stay rendered in chat too; this just surfaces them in
-    // one place so the user doesn't have to hunt.
+    // Aggregate every BLOCKING, user-resolvable surface into one ordered
+    // list for the sticky panel. Only two sources, both SERVER-AUTHORITATIVE
+    // (so an empty panel reliably means "nothing needs you" and items never
+    // silently vanish on reload/tab-switch the way the old chat-scrape did):
+    //   - workplacePending     (← /api/workplace/pending) durable delete-confirms
+    //   - needsYouRequests      (← /api/help-requests) open credential /
+    //     browser-login / captcha asks from the mesh registry
+    // Deliberately NOT here: worker DMs (a notification, not a blocker — the
+    // bell/unread dot owns those) and free-form blocked tasks (operator-
+    // handled, not user-resolvable — showing them would be a dead end).
     get needsYouItems() {
       const items = [];
-      const opChat = (this.chatHistories && this.chatHistories['operator']) || [];
-      // Services already surfaced by a request CARD (credential / browser
-      // login). Blockers that name the same service are duplicates of a
-      // card the user can already act on, so we suppress them below rather
-      // than render a second, less-actionable row pointing at the same thing.
-      const seenServices = new Set();
 
       for (const p of (this.workplacePending || [])) {
         // Build a "Review →" / "Confirm" two-step flow when the row
@@ -3120,158 +3170,118 @@ function dashboard() {
         });
       }
 
-      for (const m of opChat) {
-        if (m.cancelled || m.completed || m.saved) continue;
-        if (m.role === 'credential_request') {
-          // Resolve IN PLACE. The card carries everything the save needs
-          // (``name`` = vault key, ``_from_agent`` = who unblocks), so the
-          // panel renders the same paste-and-save form the chat card does —
-          // no trip to the transcript. ``item.msg`` is the live chat message
-          // object; setting ``saved=true`` on success both removes this row
-          // (the filter above skips saved cards) and syncs the chat copy.
-          const who = this.agentDisplayName ? this.agentDisplayName(m._from_agent || '') : (m._from_agent || 'an agent');
-          if (m.service || m.name) seenServices.add('credential:' + String(m.service || m.name).toLowerCase());
+      // Credential / browser-login / captcha asks, straight from the
+      // authoritative open-requests feed (NOT scraped from chat — that's why
+      // they no longer vanish on reload). Each record carries request_id,
+      // agent_id, service/name, and description.
+      for (const req of (this.needsYouRequests || [])) {
+        const who = this.agentDisplayName ? this.agentDisplayName(req.agent_id || '') : (req.agent_id || 'an agent');
+        if (req.kind === 'credential_request') {
+          // Resolve IN PLACE: the panel renders the same paste-and-save form
+          // the chat card uses (POST /credentials/agent), passing request_id
+          // so the mesh atomically pops the record + steers the agent. The
+          // vault KEY is ``name``; ``service`` is the human label.
           items.push({
-            id: 'cred-' + (m.request_id || m.name) + '-' + (m.ts || 0),
+            id: 'help-' + req.request_id,
             kind: 'credential',
-            title: `Add the ${m.service || m.name} key`,
+            title: `Add the ${req.service || req.name} key`,
             subtitle: this._needsYouSubtitle({
-              actor: m._from_agent || 'agent',
-              text: `Paste it below — saved straight to your vault, ${who} continues automatically.`,
+              actor: req.agent_id,
+              text: req.description
+                ? req.description
+                : `Paste it below — saved to your vault, ${who} continues automatically.`,
             }),
-            inlineCredential: { service: m.name, agentId: m._from_agent || '', display: m.service || m.name },
-            msg: m,
-            // No primary button — the inline form owns Save. Offer a
-            // dismiss only when the request is cancellable (has request_id).
-            actions: m.request_id
-              ? [{ label: 'Not now', style: 'gray', handler: () => this._cancelCredentialRequest(m) }]
-              : [],
+            inlineCredential: {
+              service: req.name || req.service,
+              agentId: req.agent_id || '',
+              display: req.service || req.name,
+              requestId: req.request_id,
+            },
+            actions: [
+              { label: 'Not now', style: 'gray', handler: () => this._cancelHelpRequest(req, 'credential') },
+            ],
           });
-        } else if (m.role === 'browser_login_request') {
-          // Browser login needs the live VNC viewer, which only fits in the
-          // chat surface — so we DON'T fake it inline. Instead the button
-          // slides the operator messenger in over the current tab and flashes
-          // THIS exact card (via _jumpToNeedsYouCard → msg._flash), instead of
-          // dumping the user at the bottom of the transcript.
-          const who = this.agentDisplayName ? this.agentDisplayName(m._from_agent || '') : (m._from_agent || 'an agent');
-          if (m.service) seenServices.add('browser_login:' + String(m.service).toLowerCase());
+        } else if (req.kind === 'browser_login_request') {
+          // Login needs the live VNC viewer (which lives in the chat card),
+          // so the action ensures that card exists — reconstructing it from
+          // this authoritative record if the transcript was refreshed away —
+          // then flashes it. No more dead-end "open chat at the bottom".
           items.push({
-            id: 'login-' + (m.request_id || m.service) + '-' + (m.ts || 0),
+            id: 'help-' + req.request_id,
             kind: 'browser_login',
-            title: `Sign in to ${m.service || 'a site'} for ${who}`,
+            title: `Sign in to ${req.service || 'a site'} for ${who}`,
             subtitle: this._needsYouSubtitle({
-              actor: m._from_agent || 'agent',
-              text: 'Opens a live browser here — sign in, then press Complete login.',
+              actor: req.agent_id,
+              text: req.description || 'Opens a live browser here — sign in, then press Complete login.',
             }),
             actions: [
-              { label: 'Sign in', style: 'indigo', handler: () => this._jumpToNeedsYouCard(m) },
-              m.request_id
-                ? { label: 'Not now', style: 'gray', handler: () => this._cancelBrowserLogin(m, m._from_agent) }
-                : null,
-            ].filter(Boolean),
+              { label: 'Sign in', style: 'indigo', handler: () => this._openHelpRequestCard(req) },
+              { label: 'Not now', style: 'gray', handler: () => this._cancelHelpRequest(req, 'browser-login') },
+            ],
           });
-        } else if (m.role === 'browser_captcha_help_request') {
-          const who = this.agentDisplayName ? this.agentDisplayName(m._from_agent || '') : (m._from_agent || 'an agent');
+        } else if (req.kind === 'browser_captcha_help_request') {
           items.push({
-            id: 'captcha-' + (m.request_id || m.service) + '-' + (m.ts || 0),
+            id: 'help-' + req.request_id,
             kind: 'captcha',
-            title: `Solve a CAPTCHA on ${m.service || 'a site'} for ${who}`,
+            title: `Solve a CAPTCHA on ${req.service || 'a site'} for ${who}`,
             subtitle: this._needsYouSubtitle({
-              actor: m._from_agent || 'agent',
-              text: 'Opens a live browser here — clear the check, then press Done.',
+              actor: req.agent_id,
+              text: req.description || 'Opens a live browser here — clear the check, then press Done.',
             }),
             actions: [
-              { label: 'Solve it', style: 'indigo', handler: () => this._jumpToNeedsYouCard(m) },
-              m.request_id
-                ? { label: 'Not now', style: 'gray', handler: () => this._cancelBrowserCaptchaHelp(m, m._from_agent) }
-                : null,
-            ].filter(Boolean),
+              { label: 'Solve it', style: 'indigo', handler: () => this._openHelpRequestCard(req) },
+              { label: 'Not now', style: 'gray', handler: () => this._cancelHelpRequest(req, 'browser-captcha-help') },
+            ],
           });
         }
       }
 
-      // Worker DM unread → Needs-You. Workers can DM the user via
-      // ``notify_user``; before this the only surface was an amber dot
-      // on the side-panel toggle plus the worker list inside the panel,
-      // which is hidden on the Chat tab. Lifting unread workers into
-      // Needs-You makes the signal a first-class citizen alongside
-      // pending actions / credentials / browser-login / blockers.
-      // Operator is excluded — it has its own pending-action entries
-      // sourced from the operator chat above.
-      for (const [agentId, count] of Object.entries(this.chatUnread || {})) {
-        if (!agentId || agentId === 'operator') continue;
-        const n = Number(count) || 0;
-        if (n <= 0) continue;
-        items.push({
-          id: 'worker_dm:' + agentId,
-          kind: 'worker_dm',
-          title: `${this.agentDisplayName(agentId)} messaged you`,
-          subtitle: this._needsYouSubtitle({
-            actor: agentId,
-            text: (n === 1 ? '1 unread' : `${n} unread`) + ' · read and reply here',
-          }),
-          actions: [
-            {
-              label: 'Read',
-              style: 'indigo',
-              // Slide the messenger in over the current tab (it shows
-              // whenever activeTab !== 'chat'); no full tab-yank needed.
-              handler: () => {
-                if (this.openChat) this.openChat(agentId);
-              },
-            },
-          ],
-        });
-      }
-
-      for (const b of (this.workplaceBlockers || [])) {
-        // Surface ONLY blockers with a user-actionable resolution: credential
-        // + browser-login. ``_humanizeBlocker`` decodes the note to a kind.
-        //
-        // IMPORTANT (verified 2026-06): the real credential / browser-login
-        // asks DON'T travel as blocker notes — they ride their own
-        // ``credential_request`` / ``browser_login_request`` events, surfaced
-        // above with genuine inline-save / flash-to-card actions. The
-        // ``cred:`` / ``no_credentials`` / ``needs_browser_login`` codes
-        // ``_humanizeBlocker`` matches have NO backend producer today, so this
-        // branch is a forward-compatible fallback, not the primary path. We do
-        // NOT try to reconstruct a vault key from the note (it isn't one) — if
-        // such a blocker ever appears, we send the user to the operator chat
-        // where the agent can re-state the need through the proper channel.
-        const classification = this._humanizeBlocker(b.blocker_note || '');
-        if (classification.kind !== 'credential' && classification.kind !== 'browser_login') continue;
-        // Dedupe: if a request CARD for this service is already surfaced
-        // above, that row is strictly more actionable — skip the blocker so
-        // the user doesn't see the same need twice.
-        const svc = String(classification.service || '').toLowerCase();
-        if (svc && seenServices.has(classification.kind + ':' + svc)) continue;
-
-        const who = this.agentDisplayName ? this.agentDisplayName(b.assignee || '') : (b.assignee || 'an agent');
-        const isLogin = classification.kind === 'browser_login';
-        items.push({
-          id: 'blocker-' + b.id,
-          kind: classification.kind,
-          title: isLogin ? `Sign in for ${who}` : `${who} needs a credential`,
-          subtitle: this._needsYouSubtitle({
-            actor: b.assignee || '',
-            project: b.project_id || '',
-            text: `Blocked on "${b.title || 'a task'}" — open the chat to help.`,
-          }),
-          actions: [
-            {
-              label: isLogin ? 'Sign in' : 'Open chat',
-              style: 'indigo',
-              handler: () => { if (this.openChat) this.openChat('operator'); },
-            },
-          ],
-        });
-      }
-
-      // PR 2 of Work tab rewrite — the legacy "N deliveries need
-      // your rating" synthetic Needs You item was removed along with
-      // the per-task rating UI. The operator now rates programmatically
-      // via ``rate_delivery`` on each heartbeat.
       return items;
+    },
+
+    // Cancel an open help request from the panel (feed-driven, no chat msg).
+    // Hits the request_id-scoped cancel proxy (which steers the agent that
+    // the ask won't be answered) then re-pulls the authoritative feed.
+    async _cancelHelpRequest(req, slug) {
+      try {
+        await fetch(
+          `${window.__config.apiBase}/${slug}-request/${encodeURIComponent(req.request_id)}/cancel`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+            body: JSON.stringify({ reason: 'user_cancelled' }),
+          },
+        );
+      } catch (_) {
+        if (typeof this.showToast === 'function') this.showToast('Cancel failed — please try again');
+      }
+      this._refreshHelpRequestsSoon();
+    },
+
+    // Open (and if necessary RECONSTRUCT) the operator-chat card for a
+    // login/captcha request, then flash it. The live VNC viewer + Complete
+    // button live in that card; since the feed — not the transcript — is now
+    // the source of truth, the card may have been dropped on a refresh, so we
+    // re-synthesize it from the authoritative record. Carries request_id so
+    // its Complete/Cancel resolve the registry record.
+    _openHelpRequestCard(req) {
+      if (!this.chatHistories['operator']) this.chatHistories['operator'] = [];
+      let card = this.chatHistories['operator'].find(
+        m => m.role === req.kind && m.request_id === req.request_id,
+      );
+      if (!card) {
+        card = {
+          role: req.kind,
+          service: req.service || '',
+          url: req.url || '',
+          content: req.description || '',
+          request_id: req.request_id,
+          _from_agent: req.agent_id || '',
+          ts: req.created_at ? req.created_at * 1000 : Date.now(),
+        };
+        this.chatHistories['operator'].push(card);
+      }
+      this._jumpToNeedsYouCard(card);
     },
 
     // Plain-English label for a pending action card. The server
@@ -4376,6 +4386,20 @@ function dashboard() {
           // summaries view doesn't update live.
           evt.type === 'work_summary_created' || evt.type === 'work_summary_rated') {
         this.handleWorkplaceEvent(evt);
+      }
+
+      // Keep the "Needs you" help-request feed live. Any
+      // request/resolve/cancel for the three user-actionable kinds re-pulls
+      // the authoritative feed (debounced) — the chat-card handlers below
+      // still render the in-chat copy; this just keeps the panel in sync
+      // without scraping that volatile chat state.
+      if (evt.type === 'credential_request' || evt.type === 'credential_stored' ||
+          evt.type === 'credential_request_cancelled' ||
+          evt.type === 'browser_login_request' || evt.type === 'browser_login_completed' ||
+          evt.type === 'browser_login_cancelled' ||
+          evt.type === 'browser_captcha_help_request' || evt.type === 'browser_captcha_help_completed' ||
+          evt.type === 'browser_captcha_help_cancelled') {
+        this._refreshHelpRequestsSoon();
       }
 
       // Live task-artifact attach. The orchestration layer emits
@@ -9173,11 +9197,15 @@ function dashboard() {
         const resp = await fetch(window.__config.apiBase + '/browser-login/complete', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-          body: JSON.stringify({ agent_id: agentId || '', service: msg.service }),
+          // request_id lets the mesh atomically resolve the registry record
+          // (pop + steer once), which clears the matching "Needs you" row.
+          body: JSON.stringify({ agent_id: agentId || '', service: msg.service, request_id: msg.request_id || '' }),
         });
         if (!resp.ok) {
           msg.completed = prev.completed;
           this.showToast('Failed to notify agent — please try again');
+        } else {
+          this._refreshHelpRequestsSoon();
         }
       } catch (_) {
         msg.completed = prev.completed;
@@ -9259,11 +9287,13 @@ function dashboard() {
         const resp = await fetch(window.__config.apiBase + '/browser-captcha-help/complete', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-          body: JSON.stringify({ agent_id: agentId || '', service: msg.service }),
+          body: JSON.stringify({ agent_id: agentId || '', service: msg.service, request_id: msg.request_id || '' }),
         });
         if (!resp.ok) {
           msg.completed = prev.completed;
           this.showToast('Failed to notify agent — please try again');
+        } else {
+          this._refreshHelpRequestsSoon();
         }
       } catch (_) {
         msg.completed = prev.completed;
