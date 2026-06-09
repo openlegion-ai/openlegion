@@ -190,6 +190,13 @@ class ContextManager:
     ):
         self.model = model
         self.max_tokens = max_tokens or get_context_window(model)
+        # Surface the resolved budget so a silent fallthrough (model missing
+        # from litellm's registry → 128K default) is visible in agent logs
+        # rather than only showing up as surprisingly-early compaction.
+        logger.info(
+            "context budget resolved: model=%s max_tokens=%d",
+            model or "(unset)", self.max_tokens,
+        )
         self.llm = llm
         self.workspace = workspace
         self.memory = memory

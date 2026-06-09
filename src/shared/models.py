@@ -110,6 +110,7 @@ _FALLBACK_CONTEXT: dict[str, int] = {
     "openai/o3-mini": 200_000,
     "openai/o4-mini": 200_000,
     "anthropic/claude-opus-4-6": 200_000,
+    "anthropic/claude-opus-4-8": 1_000_000,
     "anthropic/claude-sonnet-4-6": 200_000,
     "anthropic/claude-sonnet-4-5-20250929": 200_000,
     "anthropic/claude-haiku-4-5-20251001": 200_000,
