@@ -151,9 +151,9 @@ Per-hop origin is deliberately **downgraded** for worker-originated calls (`_val
 **Acceptance:** user sees milestone pings as stages complete; fast chains don't flood the channel.
 
 ### Phase 3 — Polish: stall watchdog + live pipeline card
-- **Stall watchdog:** if a watched chain has no progress for N minutes, notify the user with a nudge and offer operator intervention (this is the legitimate, system-driven use of the `chain_breaks`/stale-task signal — via the new watcher, not the pull-only metrics path).
-- **Work-tab live pipeline card:** at-a-glance status of in-flight user-originated chains.
-**Acceptance:** a stuck chain pings the user within N minutes; the Work tab shows live pipeline state.
+- **Stall watchdog — DONE.** The `ChainWatcher` now nudges the user once when a chain is *parked*: non-terminal but with nothing `working` (stuck in `blocked`/`pending`/`accepted`) and no progress for `stall_after_s` (default 600s). This precisely covers the lane-watchdog blind spot — the lane watchdog only times out *actively-dispatched* (`working`) tasks into `failed`; a chain parked in a waiting state was the silent hole. Store: `chain_stall_state(root)` (last-progress ts iff parked) + `claim_chain_stall(root)` (separate `chain_stall_notices` ledger — a chain can get a stall nudge AND, later, a terminal delivery). Delivery: `_deliver_chain_outcome` `kind="stall"` → an `alert` bell ("⏳ Taking longer than expected … want me to check in?"). Advisory claim-then-deliver (the terminal delivery is the real guarantee). The "stall" promise was restored to the operator prompt + `await_task_event` description now that it's backed. `working`-but-slow chains are NOT nudged (they're progressing; a genuinely hung one is the lane watchdog's job).
+- **Work-tab live pipeline card — remaining.** At-a-glance status of in-flight user-originated chains (dashboard UI work).
+**Acceptance:** a parked chain pings the user within ~N minutes (✅ tested); the Work tab shows live pipeline state (pending).
 
 ---
 

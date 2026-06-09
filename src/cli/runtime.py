@@ -964,12 +964,22 @@ class RuntimeContext:
         # the bell row or the channel message. (Display surfaces are
         # autoescaped; this is a size guard, not a safety one.)
         summary = (summary or "").strip()[:1500]
+        root_title = (root.get("title") or "your request").strip()[:80]
         if kind == "done":
             title = "✅ Task complete"
             body = summary or "Your request finished."
+            bell_kind = "delivered"
+        elif kind == "stall":
+            title = "⏳ Taking longer than expected"
+            body = (
+                f"No progress on '{root_title}' for a while — it may be stuck. "
+                "Want me to check in?"
+            )
+            bell_kind = "alert"
         else:
             title = "⚠️ Task failed"
             body = summary or "Your request hit a failure and stopped."
+            bell_kind = "delivered"
         payload = {
             "root_task_id": root_id,
             "outcome": kind,
@@ -981,7 +991,7 @@ class RuntimeContext:
             return False
         try:
             nid = self._notification_store.add(
-                kind="delivered", title=title, body=body,
+                kind=bell_kind, title=title, body=body,
                 agent_id=assignee or None, payload=payload,
             )
         except Exception as e:
@@ -994,7 +1004,7 @@ class RuntimeContext:
                 self.event_bus.emit(
                     "notification_added", agent=assignee or "",
                     data={
-                        "id": nid, "kind": "delivered", "title": title,
+                        "id": nid, "kind": bell_kind, "title": title,
                         "body": body, "agent_id": assignee, "payload": payload,
                     },
                 )

@@ -8,6 +8,8 @@ deliver-then-claim retry, cancelled handling, and human-origin gating).
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from src.host.chain_watcher import ChainWatcher
@@ -240,3 +242,111 @@ async def test_non_human_root_never_delivered():
     await w.sweep_once()
     await w.sweep_once()
     assert d.calls == []
+
+
+# ── Store: stall state + claim (Phase 3a) ────────────────────────
+
+
+def test_chain_stall_state_none_when_terminal():
+    s = _store()
+    r = _human_root(s)
+    _finish(s, r["id"], "done")
+    assert s.chain_stall_state(r["id"]) is None
+
+
+def test_chain_stall_state_none_when_working():
+    s = _store()
+    r = _human_root(s)
+    s.update_status(r["id"], "working", actor="x")
+    # Actively progressing — not a stall, the lane watchdog owns hung working.
+    assert s.chain_stall_state(r["id"]) is None
+
+
+def test_chain_stall_state_ts_when_blocked():
+    s = _store()
+    r = _human_root(s)
+    s.update_status(r["id"], "working", actor="x")
+    s.update_status(r["id"], "blocked", actor="x", blocker_note="need creds")
+    ts = s.chain_stall_state(r["id"])
+    assert ts is not None and ts > 0
+
+
+def test_chain_stall_state_ts_when_child_pending():
+    # root done, successor created but never dispatched — chain is parked.
+    s = _store()
+    r = _human_root(s)
+    _finish(s, r["id"], "done")
+    s.create(creator="scout", assignee="writer", title="next",
+             parent_task_id=r["id"])  # pending, nothing working
+    assert s.chain_stall_state(r["id"]) is not None
+
+
+def test_claim_chain_stall_exactly_once():
+    s = _store()
+    assert s.claim_chain_stall("root-x") is True
+    assert s.claim_chain_stall("root-x") is False
+
+
+# ── Watcher: stall nudge (Phase 3a) ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_watcher_nudges_parked_chain_once():
+    s = _store()
+    r = _human_root(s)
+    s.update_status(r["id"], "working", actor="x")
+    s.update_status(r["id"], "blocked", actor="x", blocker_note="stuck")
+    d = _Deliver()
+    # wall_clock far ahead so the parked chain reads as long-quiet.
+    w = ChainWatcher(s, d, stall_after_s=600,
+                     wall_clock=lambda: time.time() + 10_000)
+    await w.sweep_once()
+    assert [c[1] for c in d.calls] == ["stall"]
+    await w.sweep_once()           # claimed → no second nudge
+    assert len(d.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_watcher_no_nudge_while_working():
+    s = _store()
+    r = _human_root(s)
+    s.update_status(r["id"], "working", actor="x")
+    d = _Deliver()
+    w = ChainWatcher(s, d, stall_after_s=0,
+                     wall_clock=lambda: time.time() + 10_000)
+    await w.sweep_once()
+    assert d.calls == []           # working = progressing, never a stall
+
+
+@pytest.mark.asyncio
+async def test_watcher_no_nudge_before_threshold():
+    s = _store()
+    r = _human_root(s)
+    s.update_status(r["id"], "working", actor="x")
+    s.update_status(r["id"], "blocked", actor="x")
+    d = _Deliver()
+    # Parked, but only just — wall clock ≈ now, big threshold.
+    w = ChainWatcher(s, d, stall_after_s=10_000, wall_clock=time.time)
+    await w.sweep_once()
+    assert d.calls == []
+
+
+@pytest.mark.asyncio
+async def test_stall_then_terminal_both_delivered():
+    """A parked chain gets a stall nudge; when it later completes it still
+    gets its terminal delivery (independent ledgers)."""
+    s = _store()
+    r = _human_root(s)
+    s.update_status(r["id"], "working", actor="x")
+    s.update_status(r["id"], "blocked", actor="x")
+    d = _Deliver()
+    w = ChainWatcher(s, d, settle_s=0, stall_after_s=600,
+                     wall_clock=lambda: time.time() + 10_000)
+    await w.sweep_once()           # stall nudge
+    assert [c[1] for c in d.calls] == ["stall"]
+    # Chain unsticks and finishes.
+    s.update_status(r["id"], "working", actor="x")
+    s.update_status(r["id"], "done", actor="x", result_summary="done now")
+    await w.sweep_once()           # settle armed
+    await w.sweep_once()           # terminal delivery
+    assert [c[1] for c in d.calls] == ["stall", "done"]
