@@ -619,6 +619,9 @@ class MemoryFact(BaseModel):
     last_accessed: datetime | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     decay_score: float = 1.0
+    # Memory v2: provenance + recency for prefer-recent retrieval.
+    source_type: str = "conversation"
+    date: datetime | None = None
 
 
 class MemoryLog(BaseModel):

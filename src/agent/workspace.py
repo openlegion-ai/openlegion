@@ -27,6 +27,7 @@ from __future__ import annotations
 import contextlib
 import json
 import math
+import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -104,6 +105,18 @@ MEMORY_COMPILED_END = "<!-- compiled:end -->"
 _MEMORY_FILE_MAX = 64_000
 # Newest slice of the log injected alongside the compiled head.
 _MEMORY_RECENT_LOG_CHARS = 5_000
+
+
+def _inject_head_only() -> bool:
+    """Flag-gated (memory v2): when enabled, ``get_memory_injection`` injects
+    ONLY the compiled head and drops the ``## Recent`` log slice, per gbrain's
+    "inject only the head". Older log entries remain searchable via
+    memory_search. Read per-call so it can be toggled without a process
+    restart. Default OFF — it changes what is injected every turn.
+    """
+    return os.environ.get("OPENLEGION_INJECT_HEAD_ONLY", "").lower() in (
+        "1", "true", "yes", "on",
+    )
 
 # Public mapping for external consumers (tool response, dashboard).
 # Files not listed have no per-file bootstrap cap.
@@ -491,10 +504,16 @@ class WorkspaceManager:
         folds them into the head. Older log entries are recalled via
         memory_search. The head is capped so head + recent fits the per-file
         bootstrap cap.
+
+        When ``OPENLEGION_INJECT_HEAD_ONLY`` is set, the ``## Recent`` log slice
+        is dropped and ONLY the compiled head is injected (gbrain "inject only
+        the head"); the log stays on disk and searchable via memory_search.
         """
         raw = self._read_file(self.MEMORY_FILE) or ""
         head, log = self._split_memory(raw)
         head, log = head.strip(), log.strip()
+        if _inject_head_only():
+            return head
         recent = ""
         if log:
             recent = log[-_MEMORY_RECENT_LOG_CHARS:]
