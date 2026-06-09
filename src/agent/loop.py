@@ -3465,6 +3465,31 @@ class AgentLoop:
                 "output": result,
             })
 
+    def _emergency_prune(self, system: str, tools) -> bool:
+        """Emergency-prune ``self._chat_messages`` to ~0.75 of the window after
+        a context-overflow 400, and report whether it made progress.
+
+        Returns True if the prune reduced the estimated request size (the caller
+        may retry), False if we're already at the minimal kept set (retrying
+        would 400 identically — the caller should surface the failure). Progress
+        is measured in TOKENS, not message count: dropping a 1-message group
+        while the role-alternation bridge inserts 1 leaves the count unchanged
+        though tokens fell, so a count check would bail prematurely on
+        text-heavy (no-tool) operator chats. Callers guard ``context_manager``.
+        """
+        cm = self.context_manager
+        before_msgs = len(self._chat_messages)
+        before_tokens = cm.estimate_request_tokens(self._chat_messages, system, tools)
+        self._chat_messages = cm.prune_to_fit(
+            self._chat_messages, system_prompt=system, tools=tools, ceiling_frac=0.75,
+        )
+        after_tokens = cm.estimate_request_tokens(self._chat_messages, system, tools)
+        logger.warning(
+            "context overflow: emergency-pruned %d->%d messages (%d->%d est tokens)",
+            before_msgs, len(self._chat_messages), before_tokens, after_tokens,
+        )
+        return after_tokens < before_tokens
+
     async def _chat_call_self_healing(
         self, *, system: str, tools, **kwargs,
     ):
@@ -3493,34 +3518,15 @@ class AgentLoop:
                     **kwargs,
                 )
             except LLMContextOverflowError:
-                if attempt >= 2 or not self.context_manager:
-                    raise
-                before_msgs = len(self._chat_messages)
-                before_tokens = self.context_manager.estimate_request_tokens(
-                    self._chat_messages, system, tools,
-                )
-                self._chat_messages = self.context_manager.prune_to_fit(
-                    self._chat_messages,
-                    system_prompt=system,
-                    tools=tools,
-                    ceiling_frac=0.75,
-                )
-                after_tokens = self.context_manager.estimate_request_tokens(
-                    self._chat_messages, system, tools,
-                )
-                logger.warning(
-                    "chat call overflowed context window; emergency-pruned "
-                    "%d->%d messages (%d->%d est tokens), retrying (attempt %d/2)",
-                    before_msgs, len(self._chat_messages),
-                    before_tokens, after_tokens, attempt + 1,
-                )
-                if after_tokens >= before_tokens:
-                    # No TOKEN progress (already at the minimal kept set);
-                    # retrying would 400 identically. Surface the failure.
-                    # Token-based, not message-count: dropping a 1-message group
-                    # while the role-alternation bridge adds 1 leaves the count
-                    # unchanged though tokens fell — a count check would bail
-                    # prematurely on text-heavy (no-tool) operator chats.
+                # Last attempt, no context manager, or the prune can't shrink it
+                # any further → surface the failure instead of looping on the
+                # same 400. (``or`` short-circuits, so we don't prune on the
+                # final attempt.)
+                if (
+                    attempt >= 2
+                    or not self.context_manager
+                    or not self._emergency_prune(system, tools)
+                ):
                     raise
 
     async def _compact_chat_context(self, system: str) -> None:
@@ -4777,17 +4783,10 @@ class AgentLoop:
                 streamed = llm_response is not None
                 if llm_response is None:
                     if _overflowed and self.context_manager:
-                        before = len(self._chat_messages)
-                        self._chat_messages = self.context_manager.prune_to_fit(
-                            self._chat_messages,
-                            system_prompt=system,
-                            tools=tools,
-                            ceiling_frac=0.75,
-                        )
-                        logger.warning(
-                            "emergency-pruned %d->%d messages after stream overflow",
-                            before, len(self._chat_messages),
-                        )
+                        # First prune before falling back to non-streaming; the
+                        # fallback loop below self-heals further if it overflows
+                        # again. (Progress bool ignored — this is the 1st pass.)
+                        self._emergency_prune(system, tools)
                         _msgs = self._messages_with_volatile(self._chat_messages)
                     elif used_streaming:
                         logger.warning("LLM stream ended without done event, falling back")
@@ -4802,30 +4801,13 @@ class AgentLoop:
                             )
                             break
                         except LLMContextOverflowError:
-                            if _heal_attempt >= 2 or not self.context_manager:
+                            if (
+                                _heal_attempt >= 2
+                                or not self.context_manager
+                                or not self._emergency_prune(system, tools)
+                            ):
                                 raise
-                            before_msgs = len(self._chat_messages)
-                            before_tokens = self.context_manager.estimate_request_tokens(
-                                self._chat_messages, system, tools,
-                            )
-                            self._chat_messages = self.context_manager.prune_to_fit(
-                                self._chat_messages,
-                                system_prompt=system,
-                                tools=tools,
-                                ceiling_frac=0.75,
-                            )
-                            after_tokens = self.context_manager.estimate_request_tokens(
-                                self._chat_messages, system, tools,
-                            )
-                            if after_tokens >= before_tokens:
-                                raise  # no token progress — surface the failure
                             _msgs = self._messages_with_volatile(self._chat_messages)
-                            logger.warning(
-                                "non-streaming fallback overflowed; pruned "
-                                "%d->%d messages (%d->%d est tokens), retrying (attempt %d/2)",
-                                before_msgs, len(self._chat_messages),
-                                before_tokens, after_tokens, _heal_attempt + 1,
-                            )
 
                 # Bug 1 (codex P2 r2): tick after the LLM call returns —
                 # a single deep-research call can run >5 min, and bumping
