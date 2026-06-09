@@ -59,6 +59,18 @@ async def test_source_type_default_and_override(memory):
 
 
 @pytest.mark.asyncio
+async def test_exact_key_restore_preserves_source_type(memory):
+    """Provenance guard: an exact-key re-store must NOT overwrite the original
+    source_type. A fact first recorded as "context_flush" and later re-asserted
+    by the conversation loop (default source_type) keeps its origin."""
+    fid = await memory.store_fact("k", "v1", source_type="context_flush")
+    await memory.store_fact("k", "v2")  # default source_type="conversation"
+    fact = memory._get_fact(fid)
+    assert fact.value == "v2"                  # value updated
+    assert fact.source_type == "context_flush"  # provenance preserved
+
+
+@pytest.mark.asyncio
 async def test_batch_store_tags_context_flush_source_type(memory):
     await memory.store_facts_batch([{"key": "bk", "value": "bv"}])
     fact = memory._get_fact_by_key("bk")

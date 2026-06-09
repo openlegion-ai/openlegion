@@ -301,14 +301,16 @@ class MemoryStore:
             new_count = existing[1] + 1
             boost = self._compute_boost(new_count)
             # Re-stamp `date` so a re-asserted fact counts as recent for
-            # prefer-recent retrieval; keep the original source_type unless a
-            # caller overrides it.
+            # prefer-recent retrieval. PRESERVE the original `source_type`
+            # (provenance): a re-store via the conversation loop must not
+            # overwrite a fact first recorded as e.g. "context_flush" with the
+            # caller's default. Only a fresh insert sets source_type.
             self.db.execute(
                 "UPDATE facts SET value = ?, confidence = ?, "
                 "access_count = ?, last_accessed = datetime('now'), "
-                "decay_score = MIN(?, 10.0), source_type = ?, "
+                "decay_score = MIN(?, 10.0), "
                 "date = datetime('now') WHERE id = ?",
-                (value, confidence, new_count, boost, source_type, fact_id),
+                (value, confidence, new_count, boost, fact_id),
             )
             self.db.execute("DELETE FROM facts_fts WHERE fact_id = ?", (fact_id,))
             self.db.execute(
