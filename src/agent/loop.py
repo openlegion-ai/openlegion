@@ -166,6 +166,13 @@ _RUNTIME_GATE_TOOLS: dict[str, frozenset[str]] = {
 # without it (marketplace tools load at container start, not via runtime reload).
 _TOOL_AUTHORING_TOOLS = frozenset({"create_tool", "reload_tools"})
 
+# Grouped Tool Search (B2) bridge tool. Auto-registers via @tool discovery, but
+# is only meaningful when OPENLEGION_GROUPED_TOOLS is on. Hidden from the worker
+# surface when the flag is off so flag-off == main exactly (the operator path is
+# gated separately in cli/config.py's allowlist). This is also the SOLE tool the
+# registry is permitted to hand the AgentLoop to — see ``_AGENT_LOOP_TOOLS``.
+_GROUPED_TOOLS_BRIDGE = frozenset({"load_tools"})
+
 # Read-only tools allowed during operator heartbeat (unsupervised execution).
 # The full operator allowlist is restricted to this subset so heartbeats
 # cannot mutate fleet state without user approval. ``check_inbox`` is
@@ -428,6 +435,10 @@ class AgentLoop:
             from src.agent.builtins.tool_authoring import tool_authoring_enabled
             if not tool_authoring_enabled():
                 excluded |= _TOOL_AUTHORING_TOOLS
+            # Grouped Tool Search bridge is dead weight when the feature is off;
+            # hide it so the worker surface matches main exactly (flag-off parity).
+            if not grouped_tools_enabled():
+                excluded |= _GROUPED_TOOLS_BRIDGE
             # Operator-only orchestration tools (edit_agent, create_team,
             # manage_*, apply_template, install_skill, …) self-reject for
             # worker callers at call time. Drop their schemas from the worker
@@ -542,14 +553,18 @@ class AgentLoop:
         return kw
 
     # ── Grouped Tool Search (B2) ───────────────────────────────────────────
-    def _refresh_grouped_plan(self) -> str:
-        """Promote pending loads, recompute the grouped-tools plan, return index.
+    def _refresh_grouped_plan(self, *, promote_pending: bool = False) -> str:
+        """Recompute the grouped-tools plan, return the capability-index text.
 
-        Called at each system-prompt build — the TURN BOUNDARY. This is where a
-        ``load_tools`` request made during the previous turn actually takes
-        effect (pending → loaded), so the toolset never changes mid-turn (which
-        would bust the prompt cache; mirrors hermes' "don't change toolsets
-        mid-conversation" invariant).
+        ``promote_pending`` is the turn-boundary switch. A ``load_tools`` request
+        made during a turn is queued in ``_pending_tool_groups``; it only takes
+        effect (pending → loaded) at the start of a NEW external turn, where the
+        caller passes ``promote_pending=True``. MID-turn rebuilds (operator
+        playbook change, tool hot-reload, streaming rebuilds) pass the default
+        ``False`` so the loaded set — and therefore the emitted tool schemas —
+        stay identical to what the turn started with. Promoting mid-turn would
+        flip the toolset and bust the #1073 prompt cache, which is exactly the
+        invariant this feature defers to the next turn boundary.
 
         Returns the capability-index text to append to the system prompt (""
         when the feature is off or the budget gate didn't trip).
@@ -557,8 +572,8 @@ class AgentLoop:
         if not grouped_tools_enabled():
             self._grouped_plan = None
             return ""
-        # Apply deferred loads requested last turn.
-        if self._pending_tool_groups:
+        # Apply deferred loads requested last turn — ONLY at a turn boundary.
+        if promote_pending and self._pending_tool_groups:
             self._loaded_tool_groups |= self._pending_tool_groups
             self._pending_tool_groups.clear()
         # Available = what this agent can actually call this turn, BEFORE the
@@ -955,7 +970,11 @@ class AgentLoop:
                 await self.memory.decay_all()
 
         introspect_data = await self._fetch_introspect_cached()
-        system_prompt = self._build_system_prompt(assignment, introspect_data=introspect_data)
+        # Turn boundary: a new task execution promotes any load_tools requested
+        # on the prior turn (mid-turn rebuilds below pass the default False).
+        system_prompt = self._build_system_prompt(
+            assignment, introspect_data=introspect_data, promote_pending=True,
+        )
 
         # Bug F (codex r4): seed the tool-call counter from messages so a
         # checkpoint-resumed task picks up where it left off; thereafter
@@ -1810,7 +1829,11 @@ class AgentLoop:
         return "## Recent Tool History\n\n" + "\n".join(lines)
 
     def _build_system_prompt(
-        self, assignment: TaskAssignment, introspect_data: dict | None = None,
+        self,
+        assignment: TaskAssignment,
+        introspect_data: dict | None = None,
+        *,
+        promote_pending: bool = False,
     ) -> str:
         parts = []
 
@@ -1865,7 +1888,7 @@ class AgentLoop:
             if runtime_ctx:
                 parts.append(runtime_ctx)
 
-        index_text = self._refresh_grouped_plan()
+        index_text = self._refresh_grouped_plan(promote_pending=promote_pending)
         if index_text:
             parts.append(index_text)
 
@@ -2163,7 +2186,8 @@ class AgentLoop:
                     if runtime_ctx:
                         parts.append(runtime_ctx)
 
-                index_text = self._refresh_grouped_plan()
+                # A heartbeat is a fresh external turn — promote pending loads.
+                index_text = self._refresh_grouped_plan(promote_pending=True)
                 if index_text:
                     parts.append(index_text)
 
@@ -3161,8 +3185,11 @@ class AgentLoop:
                 self._fetch_goals(), self._fetch_fleet_roster(),
                 self._fetch_introspect_cached(),
             )
+        # Turn boundary: a new chat turn promotes any load_tools requested on
+        # the prior turn (the mid-turn rebuilds in the chat loop pass False).
         system = self._build_chat_system_prompt(
             goals=goals, fleet_roster=roster, introspect_data=introspect_data,
+            promote_pending=True,
         )
         return user_message, system
 
@@ -4275,6 +4302,8 @@ class AgentLoop:
         goals: dict | None = None,
         fleet_roster: list[dict] | None = None,
         introspect_data: dict | None = None,
+        *,
+        promote_pending: bool = False,
     ) -> str:
         parts = []
 
@@ -4386,7 +4415,7 @@ class AgentLoop:
                 f"Consider saving important context to memory if you haven't already."
             )
 
-        index_text = self._refresh_grouped_plan()
+        index_text = self._refresh_grouped_plan(promote_pending=promote_pending)
         if index_text:
             parts.append(index_text)
 

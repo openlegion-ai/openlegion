@@ -323,7 +323,7 @@ def test_loop_flag_off_no_index_no_defer(monkeypatch):
 
 def test_load_tools_defers_to_next_turn(grouped_on):
     loop = _make_grouped_loop()
-    loop._refresh_grouped_plan()  # turn 1 build
+    loop._refresh_grouped_plan(promote_pending=True)  # turn 1 build
     # set_cron is deferred at first.
     assert "set_cron" in loop._grouped_plan.defer
 
@@ -336,10 +336,37 @@ def test_load_tools_defers_to_next_turn(grouped_on):
     assert "set_cron" in loop._grouped_plan.defer
 
     # Next turn boundary: the build promotes pending → loaded.
-    loop._refresh_grouped_plan()
+    loop._refresh_grouped_plan(promote_pending=True)
     assert loop._loaded_tool_groups == {"scheduling"}
     assert loop._pending_tool_groups == set()
     # set_cron's schema is now loaded (no longer deferred).
+    assert "set_cron" not in loop._grouped_plan.defer
+
+
+def test_mid_turn_rebuild_does_not_promote(grouped_on):
+    """A MID-turn rebuild (promote_pending=False) must leave pending untouched.
+
+    Promoting mid-turn would flip the toolset and bust the prompt cache — the
+    whole point of deferring to the next turn boundary.
+    """
+    loop = _make_grouped_loop()
+    loop._refresh_grouped_plan(promote_pending=True)  # turn-entry build
+    assert "set_cron" in loop._grouped_plan.defer
+
+    loop.request_load_tools(group="scheduling", tool=None)
+    assert loop._pending_tool_groups == {"scheduling"}
+
+    # Mid-turn rebuilds (hot reload, playbook change, streaming rebuild) default
+    # to promote_pending=False — pending stays queued, loaded set unchanged.
+    loop._refresh_grouped_plan()
+    assert loop._loaded_tool_groups == set()
+    assert loop._pending_tool_groups == {"scheduling"}
+    # The toolset the turn started with is preserved (set_cron still deferred).
+    assert "set_cron" in loop._grouped_plan.defer
+
+    # Only the next turn boundary actually promotes.
+    loop._refresh_grouped_plan(promote_pending=True)
+    assert loop._loaded_tool_groups == {"scheduling"}
     assert "set_cron" not in loop._grouped_plan.defer
 
 
@@ -349,3 +376,122 @@ def test_load_tools_noop_when_flag_off(monkeypatch):
     res = loop.request_load_tools(group="scheduling", tool=None)
     assert res["loaded"] == []
     assert loop._pending_tool_groups == set()
+
+
+# ── Fix 3b: defer=None uses the LEGACY 2-tuple cache key ────────────────────
+def test_defer_none_uses_legacy_two_tuple_cache_key():
+    """With no defer set, the memo key must be the legacy ``(exclude, allowed)``
+    2-tuple so flag-off cache behaviour is byte-identical to main."""
+    reg = _registry_with("alpha", "beta")
+    reg.get_tool_definitions(exclude=frozenset({"beta"}))
+    # The cache must be keyed by the 2-tuple, NOT a 3-tuple with a trailing None.
+    assert (frozenset({"beta"}), None) in reg._tool_defs_cache
+    assert (frozenset({"beta"}), None, None) not in reg._tool_defs_cache
+
+
+def test_defer_set_uses_three_tuple_cache_key():
+    """A real defer set widens the key to the 3-tuple (separate cache entry)."""
+    reg = _registry_with("alpha", "beta")
+    reg.get_tool_definitions(defer=frozenset({"beta"}))
+    assert (None, None, frozenset({"beta"})) in reg._tool_defs_cache
+
+
+# ── Fix 1: agent_loop injection is gated by tool NAME, not signature ────────
+def _registry_with_agent_loop_tool(name: str) -> ToolRegistry:
+    @tool(name=name, description=f"desc {name}", parameters={})
+    async def _fn(*, agent_loop=None):
+        return {"got_loop": agent_loop is not None}
+
+    reg = ToolRegistry.__new__(ToolRegistry)
+    reg.tools = dict(_tool_staging)
+    reg._mcp_client = None
+    reg._tool_defs_cache = {}
+    reg._descriptions_cache = {}
+    return reg
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_injected_only_for_allowlisted_tool():
+    from src.agent.tools import _AGENT_LOOP_TOOLS
+
+    # The allowlist must be exactly the trusted bridge tool.
+    assert _AGENT_LOOP_TOOLS == frozenset({"load_tools"})
+
+    sentinel = object()
+    reg = _registry_with_agent_loop_tool("load_tools")
+    result = await reg.execute("load_tools", {}, agent_loop=sentinel)
+    assert result == {"got_loop": True}
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_not_injected_for_untrusted_tool():
+    """A non-allowlisted tool declaring ``agent_loop`` must NOT receive it —
+    the loop is the whole sandbox runtime; custom/self-authored tools can't
+    capture it just by naming the param."""
+    sentinel = object()
+    reg = _registry_with_agent_loop_tool("evil_custom_tool")
+    result = await reg.execute("evil_custom_tool", {}, agent_loop=sentinel)
+    assert result == {"got_loop": False}
+
+
+# ── Fix 3a: flag-off → load_tools is NOT in the worker tool surface ─────────
+def test_load_tools_absent_from_worker_surface_when_flag_off(monkeypatch):
+    from src.agent.loop import _GROUPED_TOOLS_BRIDGE
+
+    monkeypatch.delenv(tool_groups.GROUPED_TOOLS_ENV, raising=False)
+    loop = _make_worker_loop()
+    # The worker's effective exclude set hides the bridge entirely.
+    excluded = loop._excluded_tools or frozenset()
+    assert _GROUPED_TOOLS_BRIDGE <= excluded
+    assert "load_tools" not in loop.tools.list_tools(**loop._tool_filter_kw)
+
+
+def test_load_tools_present_in_worker_surface_when_flag_on(grouped_on):
+    loop = _make_worker_loop()
+    excluded = loop._excluded_tools or frozenset()
+    assert "load_tools" not in excluded
+    assert "load_tools" in loop.tools.list_tools(**loop._tool_filter_kw)
+
+
+def _make_worker_loop():
+    """A worker AgentLoop (exclude-based surface) with load_tools registered."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from src.agent.loop import AgentLoop
+
+    surface = {"notify_user", "load_tools", "read_file"}
+
+    tools = MagicMock()
+
+    def _list_tools(exclude=None, allowed=None, defer=None):
+        names = list(surface)
+        if exclude:
+            names = [n for n in names if n not in exclude]
+        return names
+
+    tools.list_tools = MagicMock(side_effect=_list_tools)
+    tools.get_tool_definitions = MagicMock(return_value=[])
+    tools.get_descriptions = MagicMock(return_value="")
+    tools.is_parallel_safe = MagicMock(return_value=True)
+    tools.get_loop_exempt_tools = MagicMock(return_value=frozenset())
+    tools.operator_only_tools = MagicMock(return_value=frozenset())
+    tools.tools = {n: {} for n in surface}
+
+    memory = MagicMock()
+    memory.get_high_salience_facts = AsyncMock(return_value=[])
+    memory.search = AsyncMock(return_value=[])
+
+    llm = MagicMock()
+    llm.default_model = "test-model"
+
+    mesh_client = MagicMock()
+    mesh_client.is_standalone = False
+
+    return AgentLoop(
+        agent_id="worker",
+        role="worker",
+        memory=memory,
+        tools=tools,
+        llm=llm,
+        mesh_client=mesh_client,
+    )

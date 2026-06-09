@@ -1684,10 +1684,6 @@ def _setup_agent_wizard(model: str) -> str:
 _OPERATOR_AGENT_ID = "operator"
 
 _OPERATOR_ALLOWED_TOOLS: list[str] = [
-    # Grouped Tool Search (B2) bridge — pulls a deferred capability group's
-    # full schemas into context for the next turn. Always-available core tool;
-    # a no-op when OPENLEGION_GROUPED_TOOLS is off (the default).
-    "load_tools",
     # Monitoring + heartbeat
     "get_system_status", "notify_user",
     "inspect_agents", "inspect_teams",
@@ -1783,6 +1779,15 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "browser_detect_captcha", "browser_upload_file", "browser_solve_captcha",
     "browser_download",
 ]
+
+# Grouped Tool Search (B2) bridge — pulls a deferred capability group's full
+# schemas into context for the next turn. Granted ONLY when the feature is
+# opted in via OPENLEGION_GROUPED_TOOLS; with the flag off the operator's tool
+# surface stays byte-identical to main (the bridge would be a dead no-op).
+from src.agent.tool_groups import grouped_tools_enabled as _grouped_tools_enabled  # noqa: E402
+
+if _grouped_tools_enabled():
+    _OPERATOR_ALLOWED_TOOLS.append("load_tools")
 
 # Reference list documenting the tools operator uses on heartbeat. The
 # loop's actual gate is ``_HEARTBEAT_TOOLS`` in ``src/agent/loop.py`` —
