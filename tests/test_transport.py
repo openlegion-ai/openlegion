@@ -177,3 +177,64 @@ class TestHttpTransportClientLifecycle:
         await t._get_client()
         await t.close()
         await t.close()  # should not raise
+
+
+class _FakeStreamCtx:
+    """Async-context-manager stand-in for ``client.stream(...)``.
+
+    Yields a response whose ``aiter_lines()`` replays a fixed list of raw
+    SSE lines (data lines and ``:`` comment/keepalive lines).
+    """
+
+    def __init__(self, lines: list[str]):
+        self._lines = lines
+
+    async def __aenter__(self):
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        lines = self._lines
+
+        async def _aiter():
+            for ln in lines:
+                yield ln
+
+        resp.aiter_lines = lambda: _aiter()
+        return resp
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+class TestHttpTransportStreamKeepalive:
+    @pytest.mark.asyncio
+    async def test_stream_request_forwards_keepalive_comments(self):
+        """Agent ``: keepalive`` SSE comments are forwarded as
+        ``{"type": "keepalive"}`` sentinels.
+
+        Regression: the comment used to be dropped, so a long silent tool
+        call produced zero bytes on the dashboard->browser leg and the
+        browser's 120s idle-abort cancelled the whole turn. Forwarding the
+        agent's own keepalive lets each downstream hop reset its idle timer.
+        """
+        t = HttpTransport()
+        t.register("a1", "http://agent")
+        lines = [
+            ": keepalive",
+            "",  # blank line that follows an SSE comment — must be ignored
+            'data: {"type": "text_delta", "content": "hi"}',
+            ": keepalive",
+            'data: {"type": "done", "response": "hi"}',
+        ]
+        fake_client = MagicMock()
+        fake_client.stream = MagicMock(return_value=_FakeStreamCtx(lines))
+        with patch.object(t, "_get_client", AsyncMock(return_value=fake_client)):
+            out = [
+                ev
+                async for ev in t.stream_request("a1", "POST", "/chat/stream")
+            ]
+
+        assert out.count({"type": "keepalive"}) == 2
+        assert {"type": "text_delta", "content": "hi"} in out
+        assert out[-1] == {"type": "done", "response": "hi"}
+        # The trailing blank line must NOT have produced a spurious event.
+        assert {"raw": ""} not in out

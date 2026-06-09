@@ -1385,6 +1385,10 @@ class RuntimeContext:
                 agent_name, "POST", "/chat/stream",
                 json={"message": message}, timeout=120,
             ):
+                # Liveness sentinel from the transport keepalive-forwarding —
+                # drop it so it never lands in a channel's assembled response.
+                if isinstance(event, dict) and event.get("type") == "keepalive":
+                    continue
                 if self.event_bus and isinstance(event, dict):
                     etype = event.get("type", "")
                     if etype in ("tool_start", "tool_result"):

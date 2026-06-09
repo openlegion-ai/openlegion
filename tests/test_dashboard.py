@@ -3145,6 +3145,50 @@ class TestDashboardBroadcastStream:
         delta_agents = {e["agent"] for e in deltas}
         assert delta_agents == {"alpha", "beta"}
 
+    def test_broadcast_stream_forwards_keepalive_as_comment(self):
+        """A keepalive sentinel from the transport is re-emitted as an SSE
+        comment (resets the browser idle timer) — never as a data event and
+        never counted toward agent completion."""
+        async def _mock_stream(aid, method, path, **kwargs):
+            yield {"type": "keepalive"}
+            yield {"type": "text_delta", "content": f"hi {aid}"}
+
+        self.components["transport"].stream_request = _mock_stream
+
+        resp = self.client.post(
+            "/dashboard/api/broadcast/stream",
+            json={"message": "Hello all"},
+        )
+        assert resp.status_code == 200
+        # Emitted on the wire as a comment...
+        assert ": keepalive" in resp.text
+        # ...and NOT as a parsed data event.
+        events = _parse_sse(resp.text)
+        assert all(e.get("type") != "keepalive" for e in events)
+        # Completion accounting is unaffected.
+        types = [e["type"] for e in events]
+        assert types.count("agent_done") == 2
+        assert types[-1] == "all_done"
+
+    def test_chat_stream_forwards_keepalive_as_comment(self):
+        """The single-agent chat stream re-emits a keepalive sentinel as an
+        SSE comment rather than a data event."""
+        async def _mock_stream(agent_id, method, path, **kwargs):
+            yield {"type": "keepalive"}
+            yield {"type": "done", "response": "done"}
+
+        self.components["transport"].stream_request = _mock_stream
+
+        resp = self.client.post(
+            "/dashboard/api/agents/alpha/chat/stream",
+            json={"message": "hi"},
+        )
+        assert resp.status_code == 200
+        assert ": keepalive" in resp.text
+        events = _parse_sse(resp.text)
+        assert all(e.get("type") != "keepalive" for e in events)
+        assert any(e.get("type") == "done" for e in events)
+
     def test_broadcast_stream_empty_message_rejected(self):
         resp = self.client.post(
             "/dashboard/api/broadcast/stream",
