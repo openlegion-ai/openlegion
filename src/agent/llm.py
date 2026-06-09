@@ -200,8 +200,12 @@ class LLMClient:
         # proxy-set ``error_type`` — the mesh proxy masks the raw 400 detail
         # across the trust boundary ("Upstream service call failed (HTTP 400)."),
         # so the agent can't substring-match it; the proxy tags the type from the
-        # detail it can see. ``is_context_overflow(error_msg)`` is a backstop for
-        # any path that does forward the raw text (e.g. local/non-masked).
+        # detail it can see. ``is_context_overflow(error_msg)`` is a LIVE
+        # backstop (not dead code): the STREAMING path's SSE error frames
+        # currently forward the raw provider text un-masked, so the substring
+        # match is what fires the self-heal there. Do NOT remove it without
+        # first tagging ``error_type="context_overflow"`` on the proxy's
+        # streaming emit sites (see PR follow-up).
         from src.shared.errors import is_context_overflow
         if error_type == "context_overflow" or is_context_overflow(error_msg):
             raise LLMContextOverflowError(f"{prefix}: {error_msg}")
