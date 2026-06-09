@@ -19,6 +19,11 @@ import httpx
 
 from src.agent.attachments import enrich_message_with_attachments
 from src.agent.loop_detector import ToolLoopDetector
+from src.agent.tool_groups import (
+    GroupedPlan,
+    plan_grouped_tools,
+    resolve_load_request,
+)
 from src.agent.workspace import INTROSPECT_PERM_KEYS
 from src.shared import limits
 from src.shared.errors import LLMAuthError, LLMConfigError
@@ -42,6 +47,13 @@ _RETRYABLE_STATUS_CODES = {429, 502, 503, 504, 529}  # 529 = Anthropic overloade
 _MAX_RETRIES = 3
 _BACKOFF_BASE = 1  # seconds: 1, 2, 4
 _TOOL_TIMEOUT = int(os.environ.get("OPENLEGION_TOOL_TIMEOUT", "900"))  # seconds — hard ceiling per tool
+# C3 — cache-prefix stabilization (Phase 2 of the operator memory/context
+# overhaul). When ON, per-turn-volatile prompt fragments (context/round
+# warnings, operator playbooks, 5-min runtime context, the ``## Recent``
+# memory slice) are relocated OUT of the cached system block and appended
+# AFTER the mesh-side cache breakpoint (into the last message) so the stable
+# system prefix stays byte-identical turn-to-turn and #1073's prompt cache
+# actually hits. Volatile fragments are relocated below the cache breakpoint.
 _FLEET_ROSTER_TTL = 600  # seconds — cache TTL for fleet roster
 _GOALS_TTL = 300  # seconds — cache TTL for goals fetch
 _FALLBACK_MAX_TOKENS = 100_000  # context trim fallback when no context manager
@@ -159,6 +171,11 @@ _RUNTIME_GATE_TOOLS: dict[str, frozenset[str]] = {
 # extension path now). reload_tools is paired with create_tool and vestigial
 # without it (marketplace tools load at container start, not via runtime reload).
 _TOOL_AUTHORING_TOOLS = frozenset({"create_tool", "reload_tools"})
+
+# Grouped Tool Search bridge tool. Auto-registers via @tool discovery. This is
+# the SOLE tool the registry is permitted to hand the AgentLoop to — see
+# ``_AGENT_LOOP_TOOLS``.
+_GROUPED_TOOLS_BRIDGE = frozenset({"load_tools"})
 
 # Read-only tools allowed during operator heartbeat (unsupervised execution).
 # The full operator allowlist is restricted to this subset so heartbeats
@@ -320,6 +337,11 @@ class AgentLoop:
 
     MAX_ITERATIONS = 20
 
+    # Class-level default so ``_tool_filter_kw`` is safe even when ``__init__``
+    # is bypassed (e.g. ``AgentLoop.__new__`` in tests). None = grouped tool
+    # search inactive (the default); the instance value is set in ``__init__``.
+    _grouped_plan: "GroupedPlan | None" = None
+
     def __init__(
         self,
         agent_id: str,
@@ -381,6 +403,10 @@ class AgentLoop:
         self._current_task_handle: asyncio.Task | None = None
         self._last_result: TaskResult | None = None
         self._chat_messages: list[dict] = []
+        # C3 — per-turn-volatile prompt fragments relocated out of the cached
+        # system block by ``_build_*_system_prompt``. Re-injected after the cache
+        # breakpoint via ``_messages_with_volatile`` at the LLM call site.
+        self._volatile_prompt_suffix: str = ""
         self._chat_lock = asyncio.Lock()
         self._chat_total_rounds: int = 0
         self._chat_auto_continues: int = 0
@@ -452,6 +478,17 @@ class AgentLoop:
             self._disabled_gates.add("browser")
         self._runtime_disabled_tools: frozenset[str] = frozenset()
         self._recompute_runtime_disabled()
+        # ── Grouped Tool Search (budget-gated capability index + lazy schemas) ──
+        # ``_loaded_tool_groups`` are groups whose full schemas are present in
+        # context. ``_pending_tool_groups`` are groups requested via
+        # ``load_tools`` this turn — promoted into ``_loaded_tool_groups`` at the
+        # NEXT system-prompt build (turn boundary) so the toolset never mutates
+        # mid-conversation (which would bust the prompt cache). The currently
+        # planned defer set is cached so ``_tool_filter_kw`` and the system
+        # prompt stay consistent within a single turn.
+        self._loaded_tool_groups: set[str] = set()
+        self._pending_tool_groups: set[str] = set()
+        self._grouped_plan: GroupedPlan | None = None
         self._tools_reloaded: bool = False
         self._is_operator: bool = allowed_tools is not None
         self._operator_playbook_state: dict[str, int] = {}  # playbook -> turns since trigger
@@ -508,7 +545,85 @@ class AgentLoop:
                 if runtime_disabled
                 else self._allowed_tools
             )
+        # Grouped Tool Search (B2): omit deferred tool schemas for this turn.
+        # The plan is recomputed at each system-prompt build (turn boundary) so
+        # the defer set here stays consistent with the capability index that was
+        # injected into the same turn's system prompt. ``defer`` folds into the
+        # ``get_tool_definitions`` memo cache key, so a different loaded-groups
+        # set yields different definitions (and a fresh cache entry).
+        plan = self._grouped_plan
+        if plan is not None and plan.active and plan.defer:
+            kw["defer"] = plan.defer
         return kw
+
+    # ── Grouped Tool Search (B2) ───────────────────────────────────────────
+    def _refresh_grouped_plan(self, *, promote_pending: bool = False) -> str:
+        """Recompute the grouped-tools plan, return the capability-index text.
+
+        ``promote_pending`` is the turn-boundary switch. A ``load_tools`` request
+        made during a turn is queued in ``_pending_tool_groups``; it only takes
+        effect (pending → loaded) at the start of a NEW external turn, where the
+        caller passes ``promote_pending=True``. MID-turn rebuilds (operator
+        playbook change, tool hot-reload, streaming rebuilds) pass the default
+        ``False`` so the loaded set — and therefore the emitted tool schemas —
+        stay identical to what the turn started with. Promoting mid-turn would
+        flip the toolset and bust the #1073 prompt cache, which is exactly the
+        invariant this feature defers to the next turn boundary.
+
+        Returns the capability-index text to append to the system prompt (""
+        when the budget gate didn't trip).
+        """
+        # Apply deferred loads requested last turn — ONLY at a turn boundary.
+        if promote_pending and self._pending_tool_groups:
+            self._loaded_tool_groups |= self._pending_tool_groups
+            self._pending_tool_groups.clear()
+        # Available = what this agent can actually call this turn, BEFORE the
+        # grouped defer (so the index reflects every callable capability).
+        base_kw = {
+            k: v for k, v in self._tool_filter_kw.items() if k != "defer"
+        }
+        available = set(self.tools.list_tools(**base_kw))
+        # Degrade to an inactive plan (full surface) if the context window is
+        # unavailable — the capability index is an optimization and must never
+        # hard-fail a turn.
+        context_window = getattr(self.context_manager, "max_tokens", 0) or 0
+        self._grouped_plan = plan_grouped_tools(
+            available=available,
+            loaded_groups=self._loaded_tool_groups,
+            operator=(self._allowed_tools is not None),
+            context_window=context_window,
+        )
+        return self._grouped_plan.index_text if self._grouped_plan.active else ""
+
+    def request_load_tools(self, *, group: str | None, tool: str | None) -> dict:
+        """Bridge for the ``load_tools`` builtin — queue a group for next turn.
+
+        Does NOT mutate the loaded set immediately: the actual schema change is
+        deferred to the next system-prompt build (``_refresh_grouped_plan``) so
+        the toolset stays stable for the remainder of the current turn.
+        """
+        if self._grouped_plan is None or not self._grouped_plan.active:
+            return {
+                "loaded": [],
+                "note": "All tools are already loaded; no deferral is active.",
+            }
+        base_kw = {
+            k: v for k, v in self._tool_filter_kw.items() if k != "defer"
+        }
+        available = set(self.tools.list_tools(**base_kw))
+        keys, error = resolve_load_request(
+            group=group, tool=tool, available=available,
+        )
+        if error:
+            return {"loaded": [], "error": error}
+        self._pending_tool_groups |= keys
+        return {
+            "loaded": sorted(keys),
+            "note": (
+                "Full schemas for these group(s) will be available on your "
+                "NEXT turn. Call the tool then."
+            ),
+        }
 
     def _recompute_runtime_disabled(self) -> None:
         """Rebuild ``_runtime_disabled_tools`` from the active gate set."""
@@ -810,6 +925,8 @@ class AgentLoop:
                 messages = await self._build_initial_context(assignment)
                 if self.memory:
                     await self.memory.decay_all()
+                    if self.workspace:
+                        self.workspace.mark_decayed()
             else:
                 # Reconcile TokenBudget mutable state
                 if assignment.token_budget:
@@ -852,12 +969,20 @@ class AgentLoop:
             start_iteration = 0
             assignment_json = assignment.model_dump_json()
             messages = await self._build_initial_context(assignment)
-            # Decay salience scores only on fresh start (not resume, to avoid double-decay)
+            # Decay salience scores only on fresh start (not resume, to avoid double-decay).
+            # Stamp the shared decay sentinel so the background maintenance pass
+            # (ContextManager._maybe_decay_salience) won't double-decay a busy agent.
             if self.memory:
                 await self.memory.decay_all()
+                if self.workspace:
+                    self.workspace.mark_decayed()
 
         introspect_data = await self._fetch_introspect_cached()
-        system_prompt = self._build_system_prompt(assignment, introspect_data=introspect_data)
+        # Turn boundary: a new task execution promotes any load_tools requested
+        # on the prior turn (mid-turn rebuilds below pass the default False).
+        system_prompt = self._build_system_prompt(
+            assignment, introspect_data=introspect_data, promote_pending=True,
+        )
 
         # Bug F (codex r4): seed the tool-call counter from messages so a
         # checkpoint-resumed task picks up where it left off; thereafter
@@ -939,18 +1064,27 @@ class AgentLoop:
                     return result
 
                 # === DECIDE (LLM call) ===
-                # Refresh system prompt with context warning if applicable
+                # Refresh system prompt with context warning if applicable.
+                # Stable-prefix path: keep ``system_prompt`` byte-stable and
+                # relocate the per-iteration warning below the cache breakpoint
+                # alongside the suffix stashed by ``_build_system_prompt``. The
+                # warning is folded into a LOCAL suffix (not the stashed one) so
+                # it doesn't leak into a later iteration that has no warning.
                 effective_system = system_prompt
-                if self.context_manager:
-                    warning = self.context_manager.context_warning(messages)
-                    if warning:
-                        effective_system = system_prompt + f"\n\n## {warning}"
+                warning = (
+                    self.context_manager.context_warning(messages)
+                    if self.context_manager else None
+                )
+                iter_suffix = "\n\n".join(
+                    p for p in (self._volatile_prompt_suffix, f"## {warning}" if warning else "") if p
+                )
+                eff_messages = self._append_volatile_to_messages(messages, iter_suffix)
 
                 available_tools = self.tools.get_tool_definitions(**self._tool_filter_kw) or None
                 llm_response = await _llm_call_with_retry(
                     self.llm.chat_collect,
                     system=effective_system,
-                    messages=messages,
+                    messages=eff_messages,
                     tools=available_tools,
                 )
                 # Bug 1 (codex P2 r2): tick after the LLM call returns —
@@ -1712,13 +1846,22 @@ class AgentLoop:
         return "## Recent Tool History\n\n" + "\n".join(lines)
 
     def _build_system_prompt(
-        self, assignment: TaskAssignment, introspect_data: dict | None = None,
+        self,
+        assignment: TaskAssignment,
+        introspect_data: dict | None = None,
+        *,
+        promote_pending: bool = False,
     ) -> str:
         parts = []
+        # C3 — see _build_chat_system_prompt. Volatile fragments are stashed on
+        # self._volatile_prompt_suffix and re-injected after the cache breakpoint
+        # so the cached system prefix stays byte-identical turn-to-turn.
+        volatile: list[str] = []
 
-        # Load workspace identity + project files into system prompt
+        # Load workspace identity + project files into system prompt. The head is
+        # stable (cached); the ## Recent slice is relocated below the breakpoint.
         if self.workspace:
-            bootstrap = self.workspace.get_bootstrap_content()
+            bootstrap = self.workspace.get_bootstrap_content(include_recent=False)
             if bootstrap:
                 parts.append(bootstrap)  # pre-sanitized by workspace cache
 
@@ -1762,11 +1905,29 @@ class AgentLoop:
         if tool_history:
             parts.append(sanitize_for_prompt(tool_history))
 
+        # ── Volatile fragments (relocated below the cache breakpoint). ──
+        sink = volatile
+
+        # Relocated ``## Recent`` memory slice (the stable head above is
+        # head-only; the recent slice rides after the cache breakpoint).
+        if self.workspace:
+            recent = self.workspace.get_recent_memory_slice()
+            if recent:
+                sink.append(sanitize_for_prompt(recent))
+
         if introspect_data:
             runtime_ctx = self._format_runtime_context(introspect_data)
             if runtime_ctx:
-                parts.append(runtime_ctx)
+                sink.append(runtime_ctx)
 
+        # Capability index (grouped tool search) lives in the STABLE block —
+        # it only changes when a load_tools promotion fires at a turn boundary,
+        # so it doesn't churn the cache prefix per turn.
+        index_text = self._refresh_grouped_plan(promote_pending=promote_pending)
+        if index_text:
+            parts.append(index_text)
+
+        self._volatile_prompt_suffix = "\n\n".join(volatile)
         return "\n\n".join(parts)
 
     # Round-4 structural fix: hand_off failures are now enforced from
@@ -1928,6 +2089,34 @@ class AgentLoop:
         except (json.JSONDecodeError, AttributeError):
             return {"raw": content}, {}
 
+    # ── Background memory maintenance ─────────────────────────
+
+    async def run_maintenance(self) -> None:
+        """Run the off-live-path memory maintenance pass (consolidation +
+        salience decay), driven by the agent's periodic background task.
+
+        Skips while a turn is in flight — same idle/lock guard the heartbeat
+        uses — so it never races a turn's memory writes (``_flush_to_memory``
+        + salience updates) or adds latency to a user-facing turn. The work
+        itself is internally time-gated (>=6h), so a frequent tick is cheap
+        when nothing is due. Best-effort: never raises.
+        """
+        if not self.context_manager:
+            return
+        if self.state != "idle" or self._chat_lock.locked():
+            return
+        async with self._chat_lock:
+            # Re-check under the lock, then mark busy so a concurrent POST
+            # /task (which gates on ``state``, not the chat lock) can't start
+            # and race the consolidation's memory writes. Restored in finally.
+            if self.state != "idle":
+                return
+            self.state = "working"
+            try:
+                await self.context_manager.run_maintenance()
+            finally:
+                self.state = "idle"
+
     # ── Heartbeat mode ────────────────────────────────────────
 
     async def execute_heartbeat(self, message: str, *, force_llm: bool = False) -> dict:
@@ -2003,6 +2192,10 @@ class AgentLoop:
                     )
 
                 parts: list[str] = []
+                # Heartbeat builds its own system prompt (not via
+                # _build_*_system_prompt); clear any suffix stashed by a prior
+                # chat/task build so stale volatile content can't leak in.
+                self._volatile_prompt_suffix = ""
 
                 # 1. Goals — the agent's north star
                 if goals:
@@ -2060,6 +2253,11 @@ class AgentLoop:
                     )
                     if runtime_ctx:
                         parts.append(runtime_ctx)
+
+                # A heartbeat is a fresh external turn — promote pending loads.
+                index_text = self._refresh_grouped_plan(promote_pending=True)
+                if index_text:
+                    parts.append(index_text)
 
                 system_prompt = "\n\n".join(parts)
 
@@ -3055,8 +3253,11 @@ class AgentLoop:
                 self._fetch_goals(), self._fetch_fleet_roster(),
                 self._fetch_introspect_cached(),
             )
+        # Turn boundary: a new chat turn promotes any load_tools requested on
+        # the prior turn (the mid-turn rebuilds in the chat loop pass False).
         system = self._build_chat_system_prompt(
             goals=goals, fleet_roster=roster, introspect_data=introspect_data,
+            promote_pending=True,
         )
         return user_message, system
 
@@ -3110,6 +3311,7 @@ class AgentLoop:
                     workspace_manager=self.workspace,
                     memory_store=self.memory,
                     _messages=self._current_messages,
+                    agent_loop=self,
                 ),
                 timeout=_TOOL_TIMEOUT,
             )
@@ -3361,7 +3563,7 @@ class AgentLoop:
             llm_response = await _llm_call_with_retry(
                 self.llm.chat_collect,
                 system=system,
-                messages=self._chat_messages,
+                messages=self._messages_with_volatile(self._chat_messages),
                 tools=None,
             )
         except (LLMAuthError, LLMConfigError):
@@ -3496,7 +3698,7 @@ class AgentLoop:
                 llm_response = await _llm_call_with_retry(
                     self.llm.chat_collect,
                     system=_round_system,
-                    messages=self._chat_messages,
+                    messages=self._messages_with_volatile(self._chat_messages),
                     tools=_iter_tools,
                 )
                 # Bug 1 (codex P2 r2): tick after the LLM call returns —
@@ -3807,7 +4009,7 @@ class AgentLoop:
             llm_response = await _llm_call_with_retry(
                 self.llm.chat_collect,
                 system=system,
-                messages=self._chat_messages,
+                messages=self._messages_with_volatile(self._chat_messages),
                 tools=None,
             )
             total_tokens += llm_response.tokens_used
@@ -4168,14 +4370,24 @@ class AgentLoop:
         goals: dict | None = None,
         fleet_roster: list[dict] | None = None,
         introspect_data: dict | None = None,
+        *,
+        promote_pending: bool = False,
     ) -> str:
         parts = []
+        # C3 cache-prefix stabilization: per-turn-volatile fragments are
+        # collected in ``volatile`` instead of appended to ``parts``, so the
+        # returned system block stays byte-identical across turns (the cacheable
+        # prefix). They are re-injected after the cache breakpoint via
+        # ``_messages_with_volatile``.
+        volatile: list[str] = []
 
         if goals:
             parts.append(f"## Your Current Goals\n\n{sanitize_for_prompt(format_dict(goals))}")
 
         if self.workspace:
-            bootstrap = self.workspace.get_bootstrap_content()
+            # Head-only bootstrap (cached); the volatile ``## Recent`` memory
+            # slice is relocated below the cache breakpoint.
+            bootstrap = self.workspace.get_bootstrap_content(include_recent=False)
             if bootstrap:
                 parts.append(bootstrap)  # pre-sanitized by workspace cache
 
@@ -4246,6 +4458,16 @@ class AgentLoop:
         if tool_history:
             parts.append(sanitize_for_prompt(tool_history))
 
+        # ── Volatile fragments (relocated below the cache breakpoint). ──
+        sink = volatile
+
+        # Relocated ``## Recent`` memory slice (the stable head above is
+        # head-only; the recent slice rides after the cache breakpoint).
+        if self.workspace:
+            recent = self.workspace.get_recent_memory_slice()
+            if recent:
+                sink.append(sanitize_for_prompt(recent))
+
         # Inject operator playbooks based on tool-call patterns
         if self._is_operator:
             active_playbooks = self._update_operator_playbooks()
@@ -4254,32 +4476,77 @@ class AgentLoop:
 
                 playbook_text = get_playbook_content(active_playbooks)
                 if playbook_text:
-                    parts.append(playbook_text)
+                    sink.append(playbook_text)
 
         if introspect_data:
             runtime_ctx = self._format_runtime_context(
                 introspect_data, exclude_fleet=has_fleet_ctx,
             )
             if runtime_ctx:
-                parts.append(runtime_ctx)
+                sink.append(runtime_ctx)
 
         # Context usage warning at 80%+
         if self.context_manager and self._chat_messages:
             warning = self.context_manager.context_warning(self._chat_messages)
             if warning:
-                parts.append(f"## {warning}")
+                sink.append(f"## {warning}")
 
         # Round-count warning at 80% of checkpoint interval
         if self._chat_total_rounds >= self._CHAT_ROUND_WARNING:
             remaining = self.CHAT_MAX_TOTAL_ROUNDS - self._chat_total_rounds
-            parts.append(
+            sink.append(
                 f"## Session Note\n"
                 f"This session has been running for {self._chat_total_rounds} tool rounds. "
                 f"Context will be auto-refreshed in ~{remaining} rounds. "
                 f"Consider saving important context to memory if you haven't already."
             )
 
+        # Capability index lives in the STABLE block (see _build_system_prompt).
+        index_text = self._refresh_grouped_plan(promote_pending=promote_pending)
+        if index_text:
+            parts.append(index_text)
+
+        # Stash the relocated volatile content for re-injection after the cache
+        # breakpoint. Empty string when nothing volatile.
+        self._volatile_prompt_suffix = "\n\n".join(volatile)
+
         return "\n\n".join(parts)
+
+    def _messages_with_volatile(self, messages: list[dict]) -> list[dict]:
+        """Return ``messages`` for the LLM call, re-injecting the relocated
+        volatile prompt suffix (stashed by ``_build_*_system_prompt``) AFTER
+        the cache breakpoint. No-op when the flag is off / nothing relocated.
+        """
+        return self._append_volatile_to_messages(messages, self._volatile_prompt_suffix)
+
+    def _append_volatile_to_messages(
+        self, messages: list[dict], suffix: str,
+    ) -> list[dict]:
+        """Append ``suffix`` after the cache breakpoint by folding it into a
+        COPY of the last message's content.
+
+        No-op (returns the same list) when there is nothing to relocate. When
+        active, the persistent ``messages``/``_chat_messages`` list is never
+        mutated and NO new message is added — whatever the last message's role
+        is stays the last message's role, so role-alternation (Constraint #7)
+        holds.
+        """
+        if not suffix or not messages:
+            return messages
+        out = list(messages)
+        last = dict(out[-1])
+        block = f"\n\n[Live context — re-read every turn]\n\n{suffix}"
+        content = last.get("content")
+        if isinstance(content, str):
+            last["content"] = content + block
+        elif isinstance(content, list):
+            # Multimodal/structured content — append a trailing text block.
+            last["content"] = [*content, {"type": "text", "text": block.strip()}]
+        else:
+            # Unexpected shape — leave untouched rather than risk a bad request.
+            return messages
+        out[-1] = last
+        return out
 
     def get_status(self) -> AgentStatus:
         """Return current agent status."""
@@ -4391,9 +4658,10 @@ class AgentLoop:
                 used_streaming = False
                 any_text_streamed = False
                 tools = self.tools.get_tool_definitions(**self._tool_filter_kw) or None
+                _msgs = self._messages_with_volatile(self._chat_messages)
                 try:
                     async for event in self.llm.chat_stream(
-                        system=system, messages=self._chat_messages, tools=tools,
+                        system=system, messages=_msgs, tools=tools,
                     ):
                         etype = event.get("type", "")
                         if etype == "text_delta":
@@ -4411,7 +4679,7 @@ class AgentLoop:
                     if used_streaming:
                         logger.warning("LLM stream ended without done event, falling back")
                     llm_response = await _llm_call_with_retry(
-                        self.llm.chat, system=system, messages=self._chat_messages, tools=tools,
+                        self.llm.chat, system=system, messages=_msgs, tools=tools,
                     )
 
                 # Bug 1 (codex P2 r2): tick after the LLM call returns —
@@ -4623,7 +4891,7 @@ class AgentLoop:
             llm_response = await _llm_call_with_retry(
                 self.llm.chat,
                 system=system,
-                messages=self._chat_messages,
+                messages=self._messages_with_volatile(self._chat_messages),
                 tools=None,
             )
             total_tokens += llm_response.tokens_used

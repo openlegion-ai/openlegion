@@ -1780,6 +1780,13 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "browser_download",
 ]
 
+# Grouped Tool Search bridge — pulls a deferred capability group's full schemas
+# into context for the next turn. ``execute_code`` runs a Python snippet in the
+# agent container (code-as-action speed lever). Both are part of the operator's
+# standard surface.
+_OPERATOR_ALLOWED_TOOLS.append("load_tools")
+_OPERATOR_ALLOWED_TOOLS.append("execute_code")
+
 # Reference list documenting the tools operator uses on heartbeat. The
 # loop's actual gate is ``_HEARTBEAT_TOOLS`` in ``src/agent/loop.py`` —
 # this list is kept in sync as documentation but is not itself consulted

@@ -72,6 +72,22 @@ async def test_update_existing_fact(memory):
 
 
 @pytest.mark.asyncio
+async def test_exact_key_restore_preserves_category_and_source(memory):
+    """Flag-off byte-identical guard: an exact-key re-store updates the value
+    (and salience) but must NOT overwrite the stored category/source — matching
+    the pre-dedup write path. Only a semantic MERGE adopts the newer
+    key/category/source; the exact-key path never does."""
+    fid = await memory.store_fact("k", "v1", category="preference", source="user")
+    await memory.store_fact("k", "v2", category="general", source="agent")
+    row = memory.db.execute(
+        "SELECT value, category, source FROM facts WHERE id = ?", (fid,),
+    ).fetchone()
+    assert row[0] == "v2"            # value updated
+    assert row[1] == "preference"   # category preserved (not clobbered)
+    assert row[2] == "user"         # source preserved
+
+
+@pytest.mark.asyncio
 async def test_keyword_search_returns_results(memory):
     await memory.store_fact("company_name", "Acme Corporation")
     await memory.store_fact("company_size", "500 employees")
@@ -410,3 +426,178 @@ class TestToolOutcomes:
         ).fetchall()]
         assert "tool_outcomes" in tables
         store.close()
+
+
+class TestSemanticDedup:
+    """Vector-similarity dedup on the write path (always-on).
+
+    Uses a controllable stub embedder so near-duplicate vs distinct facts are
+    deterministic and independent of any real embedding provider.
+    """
+
+    @staticmethod
+    def _grouped_embedder(groups):
+        """Return an async embed_fn that maps each key (the part before ': ') to a
+        deterministic vector per ``groups`` membership. Keys in the same group get
+        an identical vector (similarity 1.0); keys in different groups get near-
+        orthogonal vectors (similarity well below the dedup threshold)."""
+        # group_index -> base vector
+        async def _embed(text: str) -> list[float]:
+            key = text.split(":", 1)[0].strip()
+            for gi, members in enumerate(groups):
+                if key in members:
+                    vec = [0.0] * 1536
+                    vec[gi] = 1.0
+                    return vec
+            # Unknown key: unique-ish vector far from the named groups.
+            vec = [0.0] * 1536
+            vec[1535] = 1.0
+            return vec
+        return _embed
+
+    def _make_store(self, tmp_path, name, groups):
+        embed = self._grouped_embedder(groups)
+        return MemoryStore(db_path=str(tmp_path / name), embed_fn=embed)
+
+    @staticmethod
+    def _count_facts(store) -> int:
+        return store.db.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
+
+    @pytest.mark.asyncio
+    async def test_near_duplicate_keys_merge_into_one_row(self, tmp_path):
+        groups = [{"preferred_language", "user_language_preference"}]
+        store = self._make_store(tmp_path, "merge.db", groups)
+        try:
+            await store.store_fact("preferred_language", "Python")
+            await store.store_fact("user_language_preference", "Rust")
+            # Both near-synonym keys collapse to a single surviving row.
+            assert self._count_facts(store) == 1
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_distinct_facts_stay_separate(self, tmp_path):
+        groups = [{"user_name"}, {"user_email"}]
+        store = self._make_store(tmp_path, "distinct.db", groups)
+        try:
+            await store.store_fact("user_name", "Alice")
+            await store.store_fact("user_email", "alice@example.com")
+            # Clearly-distinct facts (orthogonal vectors) are never collapsed.
+            assert self._count_facts(store) == 2
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_merge_prefers_newer_value(self, tmp_path):
+        groups = [{"preferred_language", "user_language_preference"}]
+        store = self._make_store(tmp_path, "newer.db", groups)
+        try:
+            await store.store_fact("preferred_language", "Python")
+            await store.store_fact("user_language_preference", "Rust")
+            assert self._count_facts(store) == 1
+            # Surviving row reflects the newer value + key.
+            fact = store._get_fact_by_key("user_language_preference")
+            assert fact is not None
+            assert fact.value == "Rust"
+            # Old key no longer resolves (the single row was rewritten).
+            assert store._get_fact_by_key("preferred_language") is None
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_merge_bumps_salience(self, tmp_path):
+        groups = [{"preferred_language", "user_language_preference"}]
+        store = self._make_store(tmp_path, "salience.db", groups)
+        try:
+            await store.store_fact("preferred_language", "Python")
+            first = store._get_fact_by_key("preferred_language")
+            assert first is not None
+            await store.store_fact("user_language_preference", "Rust")
+            merged = store._get_fact_by_key("user_language_preference")
+            assert merged is not None
+            assert merged.access_count > first.access_count
+            assert merged.decay_score > first.decay_score
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_merge_restamps_date_and_preserves_source_type(self, tmp_path):
+        # Issue-1 regression (#1077 + #1080 reconciliation): a semantic merge must
+        # re-stamp `date` so the re-asserted fact ranks as recent under
+        # prefer-recent, AND preserve the surviving row's original source_type
+        # (provenance) rather than overwriting it with the caller's default.
+        groups = [{"preferred_language", "user_language_preference"}]
+        store = self._make_store(tmp_path, "datestamp.db", groups)
+        try:
+            await store.store_fact(
+                "preferred_language", "Python", source_type="context_flush",
+            )
+            # Backdate the stored row so a successful re-stamp is observable.
+            store.db.execute(
+                "UPDATE facts SET date = '2000-01-01 00:00:00' WHERE key = ?",
+                ("preferred_language",),
+            )
+            store.db.commit()
+            # Near-duplicate key → semantic merge into the same row.
+            await store.store_fact("user_language_preference", "Rust")
+            assert self._count_facts(store) == 1
+            date, source_type = store.db.execute(
+                "SELECT date, source_type FROM facts WHERE key = ?",
+                ("user_language_preference",),
+            ).fetchone()
+            # date re-stamped away from the backdated value (counts as recent).
+            assert date is not None and date != "2000-01-01 00:00:00"
+            # source_type provenance preserved from the original row, NOT the
+            # default "conversation" the second store_fact would have applied.
+            assert source_type == "context_flush"
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_no_duplicate_key_orphans_after_semantic_merge(self, tmp_path):
+        # BLOCKER regression: a semantic merge must never rewrite one row's key
+        # onto another row's key (which would leave two rows sharing a key — the
+        # exact-key dedup path becomes ambiguous and one row is an unreachable
+        # orphan). lang_a and lang_b share an embedding group (near-duplicates).
+        groups = [{"lang_a", "lang_b"}]
+        store = self._make_store(tmp_path, "orphan.db", groups)
+        try:
+            await store.store_fact("lang_a", "X")
+            # Near-duplicate embedding → merges into the lang_a row, flipping its
+            # key to lang_b. Now a single row, keyed lang_b.
+            await store.store_fact("lang_b", "Y")
+            assert self._count_facts(store) == 1
+            # Re-store lang_a (exact-key path: no row holds lang_a, but its
+            # embedding still matches the lang_b row — must NOT clobber lang_b's
+            # key) and lang_b again (genuine exact-key update).
+            await store.store_fact("lang_a", "Z")
+            await store.store_fact("lang_b", "W")
+            # Invariant: no two rows share a key.
+            dupes = store.db.execute(
+                "SELECT key, COUNT(*) FROM facts GROUP BY key HAVING COUNT(*) > 1",
+            ).fetchall()
+            assert dupes == []
+            # The surviving values are reachable by exact key.
+            for key in ("lang_a", "lang_b"):
+                fact = store._get_fact_by_key(key)
+                if fact is not None:
+                    # Every key that resolves resolves to exactly one row.
+                    assert fact.key == key
+        finally:
+            store.close()
+
+    @pytest.mark.asyncio
+    async def test_no_embedder_falls_back_to_exact_key(self, tmp_path):
+        # embed_fn is None → no embedding, so the semantic probe is skipped
+        # entirely and the write path falls back to exact-key behavior: near-dup
+        # keys stay as two rows; an exact-key re-store still collapses.
+        store = MemoryStore(db_path=str(tmp_path / "noembed.db"))
+        try:
+            await store.store_fact("preferred_language", "Python")
+            await store.store_fact("user_language_preference", "Rust")
+            assert self._count_facts(store) == 2
+            await store.store_fact("preferred_language", "Go")
+            assert self._count_facts(store) == 2
+            assert store._get_fact_by_key("preferred_language").value == "Go"
+        finally:
+            store.close()

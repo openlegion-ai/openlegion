@@ -328,14 +328,19 @@ class TestAutoContinueSession:
         assert loop._chat_total_rounds == 0
 
     @pytest.mark.asyncio
-    async def test_round_warning_in_system_prompt(self):
-        """System prompt includes session note at 80% of round limit."""
+    async def test_round_warning_relocated_to_volatile(self):
+        """Session note at 80% of round limit is emitted as a volatile fragment
+        (relocated below the cache breakpoint), not baked into the cached
+        system prefix."""
         loop = _make_loop()
         loop._chat_total_rounds = loop._CHAT_ROUND_WARNING
 
         prompt = loop._build_chat_system_prompt()
-        assert "Session Note" in prompt
-        assert "auto-refreshed" in prompt
+        # Volatile — kept OUT of the stable/cached system prompt...
+        assert "Session Note" not in prompt
+        # ...and stashed for re-injection after the cache breakpoint.
+        assert "Session Note" in loop._volatile_prompt_suffix
+        assert "auto-refreshed" in loop._volatile_prompt_suffix
 
     @pytest.mark.asyncio
     async def test_no_warning_below_threshold(self):

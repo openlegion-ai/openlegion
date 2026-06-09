@@ -144,6 +144,14 @@ _MAX_HISTORY_MEMORY_CHARS = 5000
 _MAX_HISTORY_LOGS_CHARS = 16000
 _MAX_HISTORY_LEARNINGS_CHARS = 8000
 
+# Background memory-maintenance pass cadence. The first run is delayed so boot
+# and the first user turn settle; thereafter it ticks periodically. The actual
+# work (consolidation + decay) is internally 6h-gated, so the short delay also
+# gives a frequently-restarted agent (e.g. the operator) a maintenance attempt
+# soon after each boot rather than never reaching a long interval.
+_MAINTENANCE_INITIAL_DELAY_S = 180
+_MAINTENANCE_TICK_S = 30 * 60
+
 
 def _origin_from_mesh_request(request: Request):
     """Parse origin from a host-to-agent request.
@@ -299,6 +307,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
                 mesh_client=loop.mesh_client,
                 workspace_manager=loop.workspace,
                 memory_store=loop.memory,
+                agent_loop=loop,
             )
             return {"result": result}
         except ValueError as e:
@@ -1053,3 +1062,23 @@ def _log_task_exception(task: asyncio.Task) -> None:
     exc = task.exception()
     if exc:
         logger.error(f"Background task failed: {exc}", exc_info=exc)
+
+
+async def run_maintenance_loop(loop: AgentLoop) -> None:
+    """Periodic background memory-maintenance pass for an agent's lifetime.
+
+    Launched from the agent process lifespan (``__main__``). The first run is
+    delayed so boot + the first user turn settle; thereafter it ticks
+    periodically. ``loop.run_maintenance`` is internally idle-guarded and
+    6h-gated, so a frequent tick is cheap and never races a live turn.
+    """
+    delay = _MAINTENANCE_INITIAL_DELAY_S
+    while True:
+        await asyncio.sleep(delay)
+        delay = _MAINTENANCE_TICK_S
+        try:
+            await loop.run_maintenance()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("maintenance pass failed: %s", e)

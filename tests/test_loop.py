@@ -8,6 +8,7 @@ Uses mock LLM to verify:
 - Final output parsing
 """
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
@@ -1036,7 +1037,8 @@ async def test_steer_interrupt_limit():
 
 
 def test_context_warning_in_chat_system_prompt():
-    """When context >= 80%, _build_chat_system_prompt includes CONTEXT WARNING."""
+    """When context >= 80%, the CONTEXT WARNING is emitted as a VOLATILE fragment
+    (relocated out of the cached system prefix, onto _volatile_prompt_suffix)."""
     from src.agent.context import ContextManager
 
     loop = _make_loop()
@@ -1048,7 +1050,9 @@ def test_context_warning_in_chat_system_prompt():
         {"role": "assistant", "content": "y" * 500},
     ]
     prompt = loop._build_chat_system_prompt()
-    assert "CONTEXT WARNING" in prompt
+    # Volatile fragments live below the cache breakpoint, not in the system prompt.
+    assert "CONTEXT WARNING" not in prompt
+    assert "CONTEXT WARNING" in loop._volatile_prompt_suffix
 
 
 def test_context_warning_absent_below_threshold():
@@ -1785,7 +1789,8 @@ class TestRuntimeContextInjection:
     }
 
     def test_task_mode_includes_runtime_context(self):
-        """_build_system_prompt includes ## Runtime Context with introspect data."""
+        """The ## Runtime Context block is emitted as a VOLATILE fragment
+        (relocated below the cache breakpoint, onto _volatile_prompt_suffix)."""
         from src.shared.types import TaskAssignment
 
         loop = _make_loop()
@@ -1794,17 +1799,22 @@ class TestRuntimeContextInjection:
             input_data={"instruction": "do stuff"},
         )
         prompt = loop._build_system_prompt(assignment, introspect_data=self._INTROSPECT_DATA)
-        assert "## Runtime Context" in prompt
-        assert "Budget: daily $0.50/$5.00" in prompt
-        assert "allowed_credentials: brightdata_*" in prompt
+        # Runtime context lives below the cache breakpoint, not in the prompt.
+        assert "## Runtime Context" not in prompt
+        suffix = loop._volatile_prompt_suffix
+        assert "## Runtime Context" in suffix
+        assert "Budget: daily $0.50/$5.00" in suffix
+        assert "allowed_credentials: brightdata_*" in suffix
 
     def test_chat_mode_includes_runtime_context(self):
-        """_build_chat_system_prompt includes ## Runtime Context."""
+        """The ## Runtime Context block is relocated onto _volatile_prompt_suffix."""
         loop = _make_loop()
         prompt = loop._build_chat_system_prompt(introspect_data=self._INTROSPECT_DATA)
-        assert "## Runtime Context" in prompt
-        assert "Budget: daily $0.50/$5.00" in prompt
-        assert "allowed_credentials: brightdata_*" in prompt
+        assert "## Runtime Context" not in prompt
+        suffix = loop._volatile_prompt_suffix
+        assert "## Runtime Context" in suffix
+        assert "Budget: daily $0.50/$5.00" in suffix
+        assert "allowed_credentials: brightdata_*" in suffix
 
     def test_chat_mode_excludes_fleet_from_runtime_when_fleet_ctx_present(self):
         """When fleet_roster is provided, fleet line is excluded from runtime context."""
@@ -1814,15 +1824,19 @@ class TestRuntimeContextInjection:
             fleet_roster=roster,
             introspect_data=self._INTROSPECT_DATA,
         )
-        # Detailed fleet block should be present
+        # Detailed fleet block should be present in the stable system prompt.
         assert "Your Team" in prompt
-        # Runtime context should NOT duplicate fleet
-        # Split on "## Runtime Context" to check just that section
-        runtime_section = prompt.split("## Runtime Context")[1] if "## Runtime Context" in prompt else ""
+        # The relocated runtime context (now volatile) must NOT duplicate fleet.
+        suffix = loop._volatile_prompt_suffix
+        runtime_section = (
+            suffix.split("## Runtime Context")[1]
+            if "## Runtime Context" in suffix else ""
+        )
         assert "Fleet:" not in runtime_section
 
     def test_task_mode_includes_fleet_in_runtime(self):
-        """Task mode has no detailed fleet block, so fleet shows in runtime context."""
+        """Task mode has no detailed fleet block, so fleet shows in the runtime
+        context — which is now relocated onto _volatile_prompt_suffix."""
         from src.shared.types import TaskAssignment
 
         loop = _make_loop()
@@ -1830,8 +1844,8 @@ class TestRuntimeContextInjection:
             workflow_id="wf1", step_id="s1", task_type="test",
             input_data={"instruction": "do stuff"},
         )
-        prompt = loop._build_system_prompt(assignment, introspect_data=self._INTROSPECT_DATA)
-        assert "Fleet: [test_agent, bob]" in prompt
+        loop._build_system_prompt(assignment, introspect_data=self._INTROSPECT_DATA)
+        assert "Fleet: [test_agent, bob]" in loop._volatile_prompt_suffix
 
     def test_no_introspect_data_no_runtime_context(self):
         """Without introspect data, no runtime context block."""
@@ -2266,6 +2280,58 @@ async def test_heartbeat_skips_when_chat_locked():
         assert result["reason"] == "agent_busy"
     finally:
         loop._chat_lock.release()
+
+
+@pytest.mark.asyncio
+async def test_run_maintenance_skips_when_busy_else_runs_under_lock():
+    """The background maintenance pass must skip while a turn is in flight
+    (same idle/lock guard the heartbeat uses) and otherwise run the
+    ContextManager pass under the chat lock."""
+    loop = _make_loop()
+    loop.context_manager = MagicMock()
+    loop.context_manager.run_maintenance = AsyncMock()
+
+    # Busy with a task → skip.
+    loop.state = "working"
+    await loop.run_maintenance()
+    loop.context_manager.run_maintenance.assert_not_awaited()
+
+    # Idle but a chat turn holds the lock → skip.
+    loop.state = "idle"
+    await loop._chat_lock.acquire()
+    try:
+        await loop.run_maintenance()
+    finally:
+        loop._chat_lock.release()
+    loop.context_manager.run_maintenance.assert_not_awaited()
+
+    # Idle and unlocked → runs, then restores idle state (so it doesn't
+    # leave the agent stuck "working").
+    await loop.run_maintenance()
+    loop.context_manager.run_maintenance.assert_awaited_once()
+    assert loop.state == "idle"
+
+
+@pytest.mark.asyncio
+async def test_run_maintenance_loop_invokes_then_cancels(monkeypatch):
+    """The production launch path (server.run_maintenance_loop) ticks
+    loop.run_maintenance and stops cleanly on cancellation."""
+    from src.agent import server
+
+    loop = _make_loop()
+    loop.run_maintenance = AsyncMock()
+    monkeypatch.setattr(server, "_MAINTENANCE_INITIAL_DELAY_S", 0)
+    monkeypatch.setattr(server, "_MAINTENANCE_TICK_S", 0.01)
+
+    task = asyncio.create_task(server.run_maintenance_loop(loop))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert loop.run_maintenance.await_count >= 1
 
 
 @pytest.mark.asyncio

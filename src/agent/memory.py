@@ -18,7 +18,6 @@ import hashlib
 import json
 import math
 import re
-import sqlite3
 import struct
 import threading
 from collections.abc import Callable, Coroutine
@@ -51,6 +50,15 @@ _TASK_CHECKPOINT_VERSION = 1
 _CATEGORY_SIM_THRESHOLD = 0.7
 # Recompute category embedding every N new members
 _CATEGORY_RECOMPUTE_INTERVAL = 10
+# Semantic dedup: when storing a fact, an existing fact whose embedding is at or
+# above this similarity (and category-compatible) is treated as the SAME fact and
+# updated in place instead of inserting a near-duplicate row. Deliberately high so
+# distinct facts ("user_name" vs "user_email") are never collapsed — only genuine
+# near-synonym keys ("preferred_language" vs "user_language_preference") merge.
+# Similarity uses the same 1/(1+L2_distance) convention as search/categorization.
+# NOTE: the metric is 1/(1+L2), so 0.93 ≈ ~0.997 cosine for unit-normalized
+# vectors — tune with care; this value is wrong for unnormalized providers.
+_SEMANTIC_DEDUP_SIM_THRESHOLD = 0.93
 
 _T = TypeVar("_T")
 
@@ -172,7 +180,9 @@ class MemoryStore:
                 access_count INTEGER DEFAULT 0,
                 last_accessed TEXT,
                 created_at TEXT DEFAULT (datetime('now')),
-                decay_score REAL DEFAULT 1.0
+                decay_score REAL DEFAULT 1.0,
+                source_type TEXT DEFAULT 'conversation',
+                date TEXT DEFAULT (datetime('now'))
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS facts_vec USING vec0(
                 id TEXT PRIMARY KEY,
@@ -241,11 +251,35 @@ class MemoryStore:
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
         """)
-        # Lazy migration: add category_id FK to facts if not present
-        try:
-            self.db.execute("ALTER TABLE facts ADD COLUMN category_id INTEGER REFERENCES categories(id)")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
+        # Lazy migrations: ADD COLUMN on pre-existing on-disk DBs so a redeploy
+        # against an older schema doesn't crash. Each is idempotent — we only run
+        # the ALTER when the column is genuinely absent (checked via
+        # PRAGMA table_info), so a real OperationalError (locked db, disk error,
+        # constraint failure) propagates instead of being silently swallowed.
+        existing_cols = {
+            row[1] for row in self.db.execute("PRAGMA table_info(facts)")
+        }
+        # (column_name, ALTER statement)
+        migrations = (
+            (
+                "category_id",
+                "ALTER TABLE facts ADD COLUMN category_id INTEGER REFERENCES categories(id)",
+            ),
+            # Memory v2: dated + sourced facts (enables prefer-recent retrieval).
+            (
+                "source_type",
+                "ALTER TABLE facts ADD COLUMN source_type TEXT DEFAULT 'conversation'",
+            ),
+            # NOTE: ADD COLUMN cannot carry a non-constant default on a
+            # non-empty table (SQLite "Cannot add a column with non-constant
+            # default"), so `date` is added WITHOUT a default here — pre-existing
+            # rows backfill to NULL (sort last under prefer-recent, acceptable),
+            # and `_store_fact_sync` stamps `date` explicitly on every write.
+            ("date", "ALTER TABLE facts ADD COLUMN date TEXT"),
+        )
+        for column, ddl in migrations:
+            if column not in existing_cols:
+                self.db.execute(ddl)
         self.db.commit()
         # Reconcile the dimension the vec0 tables were built at against the
         # configured dimension (rebuilds on an embedding-provider switch).
@@ -263,23 +297,98 @@ class MemoryStore:
         recency_factor = max(0.1, 1.0 - days_since_last_access * 0.05)
         return 1.0 + math.log(1 + access_count) * recency_factor
 
+    def _find_semantic_duplicate(
+        self, embedding: list[float], category: str,
+    ) -> str | None:
+        """Return the id of an existing fact that is a near-duplicate of the one
+        being stored (cosine-equivalent similarity at/above the dedup threshold and
+        category-compatible), or None. Conservative by design — only collapses
+        genuine near-synonyms. Used on the write path when the flag is enabled.
+        """
+        blob = serialize_float32(embedding)
+        rows = self.db.execute(
+            "SELECT id, distance FROM facts_vec WHERE embedding MATCH ? "
+            "ORDER BY distance LIMIT ?",
+            (blob, 5),
+        ).fetchall()
+        for fact_id, distance in rows:
+            similarity = 1.0 / (1.0 + distance)
+            if similarity < _SEMANTIC_DEDUP_SIM_THRESHOLD:
+                break  # rows are distance-ordered; first miss ends the scan
+            row = self.db.execute(
+                "SELECT category FROM facts WHERE id = ?", (fact_id,),
+            ).fetchone()
+            if row is None:
+                continue
+            existing_category = row[0] or "general"
+            # Category-compatible = identical, or one side is the catch-all
+            # "general" (so an uncategorized near-dup still merges).
+            if existing_category == category or "general" in (existing_category, category):
+                return fact_id
+        return None
+
     def _store_fact_sync(
         self, key: str, value: str, category: str, source: str,
         confidence: float, embedding: list[float] | None,
+        source_type: str = "conversation",
     ) -> str:
-        """Sync DB portion of store_fact. Returns the fact ID."""
-        existing = self.db.execute("SELECT id, access_count FROM facts WHERE key = ?", (key,)).fetchone()
+        """Sync DB portion of store_fact. Returns the fact ID.
+
+        Probe + conflict-check + write happen in ONE executor call / SQLite
+        transaction (no await gap) so a concurrent store can't mutate the target
+        between the dedup probe and the write.
+
+        When an ``embedding`` is available, an in-transaction near-duplicate
+        probe runs (semantic dedup). The EXACT-key row always wins: a semantic
+        merge only fires when no row already holds ``key``, which guarantees the
+        merge can never rewrite one row's key onto another's and create a
+        duplicate-key orphan. A merge re-stamps ``date`` (so the row counts as
+        recent) and adopts the newer key/category/source, but preserves the
+        original ``source_type``.
+        """
+        existing = self.db.execute(
+            "SELECT id, access_count FROM facts WHERE key = ?", (key,),
+        ).fetchone()
+        # Only consider a semantic merge for a genuinely-new key — otherwise the
+        # in-place UPDATE below would rewrite this row's key to equal an existing
+        # row's key, leaving two rows sharing a key (an unreachable orphan).
+        merged = False
+        if existing is None and embedding is not None:
+            merge_id = self._find_semantic_duplicate(embedding, category)
+            if merge_id is not None:
+                existing = self.db.execute(
+                    "SELECT id, access_count FROM facts WHERE id = ?", (merge_id,),
+                ).fetchone()
+                merged = existing is not None
 
         if existing:
             fact_id = existing[0]
             new_count = existing[1] + 1
             boost = self._compute_boost(new_count)
-            self.db.execute(
-                "UPDATE facts SET value = ?, confidence = ?, "
-                "access_count = ?, last_accessed = datetime('now'), "
-                "decay_score = MIN(?, 10.0) WHERE id = ?",
-                (value, confidence, new_count, boost, fact_id),
-            )
+            # Re-stamp `date` on every re-store so a re-asserted fact counts as
+            # recent for prefer-recent retrieval. PRESERVE the original
+            # `source_type` (provenance) in both branches — a re-store must not
+            # overwrite a fact first recorded as e.g. "context_flush" with the
+            # caller's default. Only a fresh insert sets source_type.
+            if merged:
+                # Semantic merge: adopt the newer key/category/source so the
+                # surviving row reflects the latest phrasing (the matched row may
+                # have been stored under a different key/category).
+                self.db.execute(
+                    "UPDATE facts SET key = ?, value = ?, category = ?, source = ?, "
+                    "confidence = ?, access_count = ?, last_accessed = datetime('now'), "
+                    "decay_score = MIN(?, 10.0), date = datetime('now') WHERE id = ?",
+                    (key, value, category, source, confidence, new_count, boost, fact_id),
+                )
+            else:
+                # Exact-key re-store: update value/confidence/salience + date;
+                # never overwrite the stored key/category/source.
+                self.db.execute(
+                    "UPDATE facts SET value = ?, confidence = ?, "
+                    "access_count = ?, last_accessed = datetime('now'), "
+                    "decay_score = MIN(?, 10.0), date = datetime('now') WHERE id = ?",
+                    (value, confidence, new_count, boost, fact_id),
+                )
             self.db.execute("DELETE FROM facts_fts WHERE fact_id = ?", (fact_id,))
             self.db.execute(
                 "INSERT INTO facts_fts (fact_id, key, value, category) VALUES (?, ?, ?, ?)",
@@ -288,8 +397,10 @@ class MemoryStore:
         else:
             fact_id = generate_id("fact")
             self.db.execute(
-                "INSERT INTO facts (id, key, value, category, source, confidence) VALUES (?, ?, ?, ?, ?, ?)",
-                (fact_id, key, value, category, source, confidence),
+                "INSERT INTO facts "
+                "(id, key, value, category, source, confidence, source_type, date) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+                (fact_id, key, value, category, source, confidence, source_type),
             )
             self.db.execute(
                 "INSERT INTO facts_fts (fact_id, key, value, category) VALUES (?, ?, ?, ?)",
@@ -309,8 +420,14 @@ class MemoryStore:
         category: str = "general",
         source: str = "agent",
         confidence: float = 1.0,
+        source_type: str = "conversation",
     ) -> str:
-        """Store or update a fact. Returns the fact ID."""
+        """Store or update a fact. Returns the fact ID.
+
+        ``source_type`` records WHERE the fact came from (e.g. "conversation",
+        "context_flush", "consolidation") and is paired with a ``date`` column
+        stamped at write time, enabling prefer-recent retrieval (memory v2).
+        """
         # Compute embedding BEFORE starting DB transaction to avoid
         # yielding control (await) with uncommitted writes.
         embedding = None
@@ -332,9 +449,14 @@ class MemoryStore:
             )
             embedding = None
 
+        # Semantic dedup: the near-duplicate probe runs INSIDE _store_fact_sync
+        # (same executor call / SQLite transaction as the write) so the probe +
+        # exact-key conflict check + write are atomic. Active whenever an
+        # embedding is available.
         # Run all DB writes in executor to avoid blocking the event loop
         fact_id = await self._run_db(
-            self._store_fact_sync, key, value, category, source, confidence, embedding,
+            self._store_fact_sync, key, value, category, source, confidence,
+            embedding, source_type,
         )
 
         if embedding is not None:
@@ -445,7 +567,7 @@ class MemoryStore:
         row = self.db.execute(
             "SELECT f.id, f.key, f.value, f.category, f.source, f.confidence, "
             "f.access_count, f.last_accessed, f.created_at, f.decay_score, "
-            "c.name "
+            "f.source_type, f.date, c.name "
             "FROM facts f LEFT JOIN categories c ON f.category_id = c.id "
             "WHERE f.id = ?",
             (fact_id,),
@@ -453,7 +575,7 @@ class MemoryStore:
         if not row:
             return None
         # Use category name from categories table if assigned, else text field
-        category = row[10] if row[10] else row[3]
+        category = row[12] if row[12] else row[3]
         return MemoryFact(
             id=row[0],
             key=row[1],
@@ -465,6 +587,8 @@ class MemoryStore:
             last_accessed=row[7],
             created_at=row[8],
             decay_score=row[9],
+            source_type=row[10],
+            date=row[11],
         )
 
     def _get_facts_batch(self, fact_ids: list[str]) -> dict[str, MemoryFact]:
@@ -475,18 +599,19 @@ class MemoryStore:
         rows = self.db.execute(
             f"SELECT f.id, f.key, f.value, f.category, f.source, f.confidence, "
             f"f.access_count, f.last_accessed, f.created_at, f.decay_score, "
-            f"c.name "
+            f"f.source_type, f.date, c.name "
             f"FROM facts f LEFT JOIN categories c ON f.category_id = c.id "
             f"WHERE f.id IN ({placeholders})",
             fact_ids,
         ).fetchall()
         result = {}
         for row in rows:
-            category = row[10] if row[10] else row[3]
+            category = row[12] if row[12] else row[3]
             result[row[0]] = MemoryFact(
                 id=row[0], key=row[1], value=row[2], category=category,
                 source=row[4], confidence=row[5], access_count=row[6],
                 last_accessed=row[7], created_at=row[8], decay_score=row[9],
+                source_type=row[10], date=row[11],
             )
         return result
 
@@ -529,7 +654,13 @@ class MemoryStore:
         await self._run_db(self._decay_all_sync)
 
     def _get_high_salience_facts_sync(self, top_k: int) -> list[MemoryFact]:
-        rows = self.db.execute("SELECT id FROM facts ORDER BY decay_score DESC LIMIT ?", (top_k,)).fetchall()
+        # Prefer-recent (memory v2): salience is the primary signal; `date`
+        # breaks ties toward the newest fact so re-asserted/recent knowledge
+        # ranks above equally-salient stale rows.
+        rows = self.db.execute(
+            "SELECT id FROM facts ORDER BY decay_score DESC, date DESC LIMIT ?",
+            (top_k,),
+        ).fetchall()
         fact_ids = [r[0] for r in rows]
         facts_map = self._get_facts_batch(fact_ids)
         return [facts_map[fid] for fid in fact_ids if fid in facts_map]
@@ -552,7 +683,10 @@ class MemoryStore:
                 continue
             category = fact.get("category", "general")
             try:
-                await self.store_fact(key=key, value=value, category=category, source="context_flush")
+                await self.store_fact(
+                    key=key, value=value, category=category,
+                    source="context_flush", source_type="context_flush",
+                )
                 stored += 1
             except Exception as e:
                 logger.warning(f"Failed to store fact '{key}': {e}")

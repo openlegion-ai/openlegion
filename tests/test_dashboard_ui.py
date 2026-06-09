@@ -1906,6 +1906,9 @@ _VERB_FOR_TOOL_FALLBACK_OK = frozenset({
     "create_tool",
     "reload_tools",
     "update_workspace",
+    # Grouped Tool Search bridge — agent-side meta-tool, not a user-facing
+    # activity verb; the generic "using load tools" fallback reads fine.
+    "load_tools",
     # Misc / external integrations.
     "post_tweet",
     "save_artifact",
