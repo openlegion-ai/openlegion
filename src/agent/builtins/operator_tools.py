@@ -1116,7 +1116,8 @@ _AWAIT_TASK_EVENT_DEFAULT_TIMEOUT_S = 45
         "\n\nDO NOT use this to watch a multi-hop pipeline to completion. "
         "After handing user work to the team, acknowledge and RELEASE the "
         "turn — the system automatically delivers the final outcome (done or "
-        "failed) to the user. On 'timed_out', do NOT keep re-calling to "
+        "failed) to the user, plus a nudge if the chain gets stuck. On "
+        "'timed_out', do NOT keep re-calling to "
         "babysit; tell the user it's running and end your turn. For a "
         "one-shot read of chain state, use workflow_snapshot (non-blocking)."
     ),

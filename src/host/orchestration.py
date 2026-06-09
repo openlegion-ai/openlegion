@@ -350,6 +350,11 @@ class Tasks:
                     terminal_kind TEXT NOT NULL,
                     delivered_at REAL NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS chain_stall_notices (
+                    root_task_id TEXT PRIMARY KEY,
+                    notified_at REAL NOT NULL
+                );
             """)
             # Resolve the active column name. ``team_id`` is canonical;
             # ``project_id`` is the pre-rename column kept readable so
@@ -544,6 +549,62 @@ class Tasks:
         done_leaves.sort(key=lambda r: r[4] or r[5] or 0.0)
         summary = (done_leaves[-1][2] or "").strip() if done_leaves else ""
         return "done", summary
+
+    def chain_stall_state(self, root_task_id: str) -> float | None:
+        """Last-progress timestamp iff the chain is a STALL candidate, else None.
+
+        A chain is a stall candidate when it is non-terminal but nothing is
+        actively progressing it — every task is terminal or *waiting*
+        (``pending`` / ``accepted`` / ``blocked``) and none is ``working``.
+        Returns the most recent ``updated_at`` across the chain (the last time
+        anything moved) so the caller can decide whether it has been quiet
+        long enough to nudge the user.
+
+        Returns ``None`` when the chain doesn't exist, is wholly terminal (the
+        :meth:`chain_terminal_verdict` path handles that), or has a ``working``
+        task — a ``working`` task is making progress, and a genuinely *hung*
+        one is the lane watchdog's job to time out into ``failed`` (which then
+        flows through the terminal path). This watcher only covers the
+        watchdog's blind spot: chains parked in a waiting state.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "WITH RECURSIVE chain(id, depth) AS ("
+                "  SELECT id, 0 FROM tasks WHERE id = ?"
+                "  UNION ALL"
+                "  SELECT t.id, c.depth + 1 FROM tasks t "
+                "    JOIN chain c ON (t.parent_task_id = c.id "
+                "                  OR t.previous_task_id = c.id) "
+                "    WHERE c.depth < ?"
+                ") "
+                "SELECT t.status, t.updated_at "
+                "FROM tasks t "
+                "WHERE t.id IN (SELECT DISTINCT id FROM chain)",
+                (root_task_id, MAX_WORKFLOW_CHAIN_DEPTH),
+            ).fetchall()
+        if not rows:
+            return None
+        statuses = {r[0] for r in rows}
+        if all(s in TERMINAL_STATUSES for s in statuses):
+            return None  # wholly terminal — not a stall
+        if "working" in statuses:
+            return None  # something is actively progressing
+        return max((r[1] or 0.0) for r in rows)
+
+    def claim_chain_stall(self, root_task_id: str) -> bool:
+        """Atomically claim the one stall nudge for a chain (at-most-once).
+
+        Separate ledger from :meth:`claim_chain_delivery`: a chain can get a
+        stall nudge while parked AND, later, a terminal delivery when it
+        finally resolves. One nudge per chain (no re-nudging on a re-stall).
+        """
+        with self._conn() as conn:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO chain_stall_notices "
+                "(root_task_id, notified_at) VALUES (?, ?)",
+                (root_task_id, time.time()),
+            )
+            return cur.rowcount == 1
 
     def claim_chain_delivery(self, root_task_id: str, terminal_kind: str) -> bool:
         """Atomically claim the one terminal notification for a chain.
