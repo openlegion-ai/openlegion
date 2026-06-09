@@ -18,7 +18,6 @@ import hashlib
 import json
 import math
 import re
-import sqlite3
 import struct
 import threading
 from collections.abc import Callable, Coroutine
@@ -244,23 +243,34 @@ class MemoryStore:
             );
         """)
         # Lazy migrations: ADD COLUMN on pre-existing on-disk DBs so a redeploy
-        # against an older schema doesn't crash. Each is idempotent — a
-        # duplicate-column OperationalError on an already-migrated DB is a no-op.
-        for ddl in (
-            "ALTER TABLE facts ADD COLUMN category_id INTEGER REFERENCES categories(id)",
+        # against an older schema doesn't crash. Each is idempotent — we only run
+        # the ALTER when the column is genuinely absent (checked via
+        # PRAGMA table_info), so a real OperationalError (locked db, disk error,
+        # constraint failure) propagates instead of being silently swallowed.
+        existing_cols = {
+            row[1] for row in self.db.execute("PRAGMA table_info(facts)")
+        }
+        # (column_name, ALTER statement)
+        migrations = (
+            (
+                "category_id",
+                "ALTER TABLE facts ADD COLUMN category_id INTEGER REFERENCES categories(id)",
+            ),
             # Memory v2: dated + sourced facts (enables prefer-recent retrieval).
+            (
+                "source_type",
+                "ALTER TABLE facts ADD COLUMN source_type TEXT DEFAULT 'conversation'",
+            ),
             # NOTE: ADD COLUMN cannot carry a non-constant default on a
             # non-empty table (SQLite "Cannot add a column with non-constant
             # default"), so `date` is added WITHOUT a default here — pre-existing
             # rows backfill to NULL (sort last under prefer-recent, acceptable),
             # and `_store_fact_sync` stamps `date` explicitly on every write.
-            "ALTER TABLE facts ADD COLUMN source_type TEXT DEFAULT 'conversation'",
-            "ALTER TABLE facts ADD COLUMN date TEXT",
-        ):
-            try:
+            ("date", "ALTER TABLE facts ADD COLUMN date TEXT"),
+        )
+        for column, ddl in migrations:
+            if column not in existing_cols:
                 self.db.execute(ddl)
-            except sqlite3.OperationalError:
-                pass  # Column already exists
         self.db.commit()
         # Reconcile the dimension the vec0 tables were built at against the
         # configured dimension (rebuilds on an embedding-provider switch).

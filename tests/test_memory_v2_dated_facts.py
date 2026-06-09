@@ -139,6 +139,40 @@ async def test_migration_is_idempotent_on_reopen(tmp_path):
         s2.close()
 
 
+@pytest.mark.asyncio
+async def test_migration_propagates_real_operational_error(tmp_path, monkeypatch):
+    """A genuine OperationalError during an ALTER (not a duplicate column) must
+    surface, not be silently swallowed — guards against half-applied schemas."""
+    db_path = str(tmp_path / "broken.db")
+    _create_legacy_facts_db(db_path)
+
+    from src.agent import memory as memory_mod
+
+    real_open_db = memory_mod.open_db
+
+    class _FaultyConn:
+        """Wraps a real connection but fails any ALTER TABLE facts statement
+        with a non-duplicate OperationalError (e.g. a locked db)."""
+
+        def __init__(self, conn):
+            self._conn = conn
+
+        def execute(self, sql, *args, **kwargs):
+            if isinstance(sql, str) and sql.startswith("ALTER TABLE facts"):
+                raise sqlite3.OperationalError("database is locked")
+            return self._conn.execute(sql, *args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+    monkeypatch.setattr(
+        memory_mod, "open_db", lambda *a, **k: _FaultyConn(real_open_db(*a, **k))
+    )
+
+    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        MemoryStore(db_path=db_path)
+
+
 # --- Prefer-recent tie-break -------------------------------------------------
 
 @pytest.mark.asyncio
