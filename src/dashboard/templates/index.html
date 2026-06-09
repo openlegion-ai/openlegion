@@ -942,7 +942,7 @@
                                 :placeholder="'Paste your ' + msg.name.replace(/[_.\-]/g, ' ').replace(/^\w/, c => c.toUpperCase())">
                               <div x-show="saveError" class="text-[11px] text-red-400 mb-1.5" x-text="saveError"></div>
                               <div class="flex gap-2">
-                                <button @click="if (credValue.trim()) { saving = true; saveError = ''; fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({service: msg.name, key: credValue.trim(), agent_id: msg._from_agent || ''}) }).then(r => { if (r.ok) { msg.saved = true; credValue = ''; } else { saveError = 'Failed to save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
+                                <button @click="if (credValue.trim()) { saving = true; saveError = ''; fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({service: msg.name, key: credValue.trim(), agent_id: msg._from_agent || '', request_id: msg.request_id || ''}) }).then(r => { if (r.ok) { msg.saved = true; credValue = ''; } else { saveError = 'Failed to save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
                                   :disabled="!credValue.trim() || saving"
                                   class="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
                                   :class="credValue.trim() && !saving ? 'bg-indigo-600 hover:bg-indigo-500 text-white' : 'bg-gray-700 text-gray-400 cursor-not-allowed'">
@@ -1031,7 +1031,9 @@
                     </template>
                     <!-- Browser login request card -->
                     <template x-if="msg.role === 'browser_login_request'">
-                      <div class="flex justify-start gap-2.5">
+                      <div class="flex justify-start gap-2.5"
+                        x-effect="if (msg._flash) { $el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }"
+                        :class="msg._flash ? 'ring-2 ring-amber-400/70 rounded-2xl transition-shadow duration-300' : ''">
                         <div class="shrink-0 mt-1">
                           <img src="/dashboard/static/avatars/operator.png" alt="Operator" class="w-6 h-6 rounded-full">
                         </div>
@@ -1071,7 +1073,7 @@
                                         <span class="text-xs text-gray-400">Connecting to browser...</span>
                                       </div>
                                       <iframe
-                                        :src="focusDone ? _getVncUrl() : ''"
+                                        :src="focusDone ? _getVncUrl(msg._from_agent || activeChatId) : ''"
                                         class="w-full h-full border-0"
                                         allow="clipboard-read; clipboard-write"
                                         @load="if (focusDone) vncLoaded = true"
@@ -1082,7 +1084,7 @@
                                 <!-- Action buttons -->
                                 <div class="flex gap-2">
                                   <template x-if="!browserOpen">
-                                    <button @click="if (!focusing && msg._from_agent) { if (!_getVncUrl()) { showToast('Browser service not available', 5000); return; } focusing = true; browserOpen = true; focusDone = false; vncLoaded = false; focusBrowser(msg._from_agent).then(ok => { if (ok) { focusDone = true; } else { browserOpen = false; } focusing = false; }); }"
+                                    <button @click="if (!focusing && msg._from_agent) { if (!_getVncUrl(msg._from_agent || activeChatId)) { showToast('Browser service not available', 5000); return; } focusing = true; browserOpen = true; focusDone = false; vncLoaded = false; focusBrowser(msg._from_agent).then(ok => { if (ok) { focusDone = true; } else { browserOpen = false; } focusing = false; }); }"
                                       class="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-violet-600 hover:bg-violet-500 text-white transition-colors flex items-center justify-center gap-1.5">
                                       <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
                                       Open Browser
@@ -1126,7 +1128,9 @@
                     </template>
                     <!-- Browser CAPTCHA help request card (Phase 8 §11.14) -->
                     <template x-if="msg.role === 'browser_captcha_help_request'">
-                      <div class="flex justify-start gap-2.5">
+                      <div class="flex justify-start gap-2.5"
+                        x-effect="if (msg._flash) { $el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }"
+                        :class="msg._flash ? 'ring-2 ring-amber-400/70 rounded-2xl transition-shadow duration-300' : ''">
                         <div class="shrink-0 mt-1">
                           <img src="/dashboard/static/avatars/operator.png" alt="Operator" class="w-6 h-6 rounded-full">
                         </div>
@@ -1163,7 +1167,7 @@
                                         <span class="text-xs text-gray-400">Connecting to browser...</span>
                                       </div>
                                       <iframe
-                                        :src="focusDone ? _getVncUrl() : ''"
+                                        :src="focusDone ? _getVncUrl(msg._from_agent || activeChatId) : ''"
                                         class="w-full h-full border-0"
                                         allow="clipboard-read; clipboard-write"
                                         @load="if (focusDone) vncLoaded = true"
@@ -1174,7 +1178,7 @@
                                 <!-- Action buttons -->
                                 <div class="flex gap-2">
                                   <template x-if="!browserOpen">
-                                    <button @click="if (!focusing && msg._from_agent) { if (!_getVncUrl()) { showToast('Browser service not available', 5000); return; } focusing = true; browserOpen = true; focusDone = false; vncLoaded = false; focusBrowser(msg._from_agent).then(ok => { if (ok) { focusDone = true; } else { browserOpen = false; } focusing = false; }); }"
+                                    <button @click="if (!focusing && msg._from_agent) { if (!_getVncUrl(msg._from_agent || activeChatId)) { showToast('Browser service not available', 5000); return; } focusing = true; browserOpen = true; focusDone = false; vncLoaded = false; focusBrowser(msg._from_agent).then(ok => { if (ok) { focusDone = true; } else { browserOpen = false; } focusing = false; }); }"
                                       class="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-600 hover:bg-amber-500 text-white transition-colors flex items-center justify-center gap-1.5">
                                       <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
                                       Open Browser
@@ -4085,7 +4089,7 @@
              cards still render in chat too; this is an additional
              surface, not a replacement. Rendered only when there's at
              least one item so an idle Board has no extra chrome. -->
-        <section x-show="needsYouItems.length > 0" x-cloak
+        <section x-show="needsYouItems.length > 0 || workplaceErrors.help" x-cloak
           x-data="{ needsYouExpanded: false, needsYouCollapsedCap: 5 }"
           role="region" aria-label="Pending items that need you"
           class="mb-4 bg-amber-900/15 border border-amber-700/30 rounded-xl p-3 sm:p-4 sticky top-0 z-10 backdrop-blur-sm">
@@ -4098,6 +4102,17 @@
               class="text-[11px] font-medium px-2 py-0.5 rounded-full bg-amber-700/50 text-amber-100"
               x-text="needsYouItems.length"></span>
           </div>
+          <!-- Error state — distinguishes a backend outage from "nothing
+               needs you". Without this, a failed /api/help-requests would
+               silently read as an empty panel. Retry re-pulls the feed. -->
+          <template x-if="workplaceErrors.help">
+            <div class="bg-red-900/20 border border-red-800/40 rounded-lg p-2.5 mb-2 flex flex-wrap items-center gap-2"
+                 role="alert" data-testid="needs-you-help-error">
+              <span class="text-[11px] text-red-200 flex-1" x-text="workplaceErrors.help"></span>
+              <button type="button" @click="retryWorkplaceSection('help')"
+                class="text-[11px] font-medium px-2.5 py-1 rounded bg-red-800/40 hover:bg-red-700/50 text-red-100 transition-colors">Retry</button>
+            </div>
+          </template>
           <!-- Cap the visible items at ~40vh and scroll inside the panel
                so a long pending queue can never push the sub-tab bar off
                the viewport on mobile. The "Show N more" disclosure below
@@ -4109,8 +4124,23 @@
               <div class="bg-gray-900/50 border border-gray-700/50 rounded-lg p-2.5 sm:p-3">
                 <div class="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
                   <div class="flex items-start gap-2.5 min-w-0 flex-1">
-                    <span class="shrink-0 w-6 h-6 rounded-full bg-amber-700/30 text-amber-200 text-[11px] font-bold flex items-center justify-center"
-                      x-text="item.icon"></span>
+                    <!-- Per-kind glyph — mirrors the icon on the matching
+                         chat card so the two surfaces read as the same thing.
+                         Replaces the old cryptic single letters (K/W/C/M/B/!). -->
+                    <span class="shrink-0 w-6 h-6 rounded-full bg-amber-700/30 text-amber-200 flex items-center justify-center" aria-hidden="true">
+                      <template x-if="item.kind === 'credential'">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                      </template>
+                      <template x-if="item.kind === 'browser_login'">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                      </template>
+                      <template x-if="item.kind === 'captcha'">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v2m0 4h.01M5 19h14a2 2 0 001.84-2.75L13.74 4a2 2 0 00-3.48 0L3.16 16.25A2 2 0 005 19z"/></svg>
+                      </template>
+                      <template x-if="item.kind === 'pending'">
+                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                      </template>
+                    </span>
                     <div class="min-w-0 flex-1">
                       <div class="text-sm text-gray-200 break-words" x-text="item.title"></div>
                       <div x-show="item.subtitle" class="text-[11px] text-gray-400 mt-0.5 break-words" x-text="item.subtitle"></div>
@@ -4128,6 +4158,42 @@
                     </template>
                   </div>
                 </div>
+                <!-- Inline credential resolution. Credential items (from the
+                     authoritative help-requests feed — they carry the vault key,
+                     the awaiting agent, and the request_id) get an
+                     ``inlineCredential`` descriptor so the user pastes the key
+                     and saves it to the vault WITHOUT a trip to the chat
+                     transcript — the same POST the operator-chat credential card
+                     makes, with request_id so the mesh atomically pops the
+                     record + steers the agent. On success we re-pull the feed
+                     (``loadWorkplaceHelpRequests``), which drops the row. -->
+                <template x-if="item.inlineCredential">
+                  <div class="mt-2.5 sm:pl-8" x-data="{ credValue: '', saving: false, saved: false, saveError: '' }">
+                    <template x-if="!saved">
+                      <div>
+                        <input type="password" x-model="credValue" autocomplete="off"
+                          @keydown.enter.stop.prevent="if (credValue.trim() && !saving) { saving = true; saveError = ''; track('needs_you_click', { item_count: needsYouItems.length, item_kind: 'credential', action_label: 'Save to Vault' }); fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({ service: item.inlineCredential.service, key: credValue.trim(), agent_id: item.inlineCredential.agentId, request_id: item.inlineCredential.requestId }) }).then(r => { if (r.ok) { saved = true; credValue = ''; loadWorkplaceHelpRequests(); showToast('Saved to your vault — the agent can continue.'); } else { saveError = 'Couldn\'t save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
+                          class="w-full px-3 py-1.5 rounded-lg bg-gray-900 border border-gray-700 text-xs text-white placeholder-gray-500 focus:border-indigo-500 focus:outline-none mb-2"
+                          :placeholder="'Paste your ' + item.inlineCredential.display + ' key'">
+                        <div x-show="saveError" class="text-[11px] text-red-400 mb-1.5" x-text="saveError"></div>
+                        <button type="button"
+                          @click="if (credValue.trim() && !saving) { saving = true; saveError = ''; track('needs_you_click', { item_count: needsYouItems.length, item_kind: 'credential', action_label: 'Save to Vault' }); fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({ service: item.inlineCredential.service, key: credValue.trim(), agent_id: item.inlineCredential.agentId, request_id: item.inlineCredential.requestId }) }).then(r => { if (r.ok) { saved = true; credValue = ''; loadWorkplaceHelpRequests(); showToast('Saved to your vault — the agent can continue.'); } else { saveError = 'Couldn\'t save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
+                          :disabled="!credValue.trim() || saving"
+                          class="text-[11px] font-medium px-2.5 py-1 rounded transition-colors"
+                          :class="credValue.trim() && !saving ? 'bg-emerald-700 hover:bg-emerald-600 text-emerald-50' : 'bg-gray-700 text-gray-400 cursor-not-allowed'">
+                          <span x-show="!saving">Save to Vault</span>
+                          <span x-show="saving">Saving…</span>
+                        </button>
+                      </div>
+                    </template>
+                    <template x-if="saved">
+                      <div class="flex items-center gap-1.5 text-xs text-emerald-400">
+                        <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/></svg>
+                        <span>Saved securely.</span>
+                      </div>
+                    </template>
+                  </div>
+                </template>
                 <!-- Preview disclosure for pending actions that carry
                      a server-side diff. Hidden by default; clicking
                      "Review" in the action row flips item.previewExpanded
@@ -8371,7 +8437,7 @@
                           :placeholder="'Paste your ' + msg.name.replace(/[_.\-]/g, ' ').replace(/^\w/, c => c.toUpperCase())">
                         <div x-show="saveError" class="text-[11px] text-red-400 mb-1.5" x-text="saveError"></div>
                         <div class="flex gap-2">
-                          <button @click="if (credValue.trim()) { saving = true; saveError = ''; fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({service: msg.name, key: credValue.trim(), agent_id: activeChatId || ''}) }).then(r => { if (r.ok) { msg.saved = true; credValue = ''; } else { saveError = 'Failed to save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
+                          <button @click="if (credValue.trim()) { saving = true; saveError = ''; fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({service: msg.name, key: credValue.trim(), agent_id: activeChatId || '', request_id: msg.request_id || ''}) }).then(r => { if (r.ok) { msg.saved = true; credValue = ''; } else { saveError = 'Failed to save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
                             :disabled="!credValue.trim() || saving"
                             class="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
                             :class="credValue.trim() && !saving ? 'bg-indigo-600 hover:bg-indigo-500 text-white' : 'bg-gray-700 text-gray-400 cursor-not-allowed'">
@@ -8453,7 +8519,9 @@
               </template>
               <!-- Browser login request card -->
               <template x-if="msg.role === 'browser_login_request'">
-                <div class="flex justify-start">
+                <div class="flex justify-start"
+                  x-effect="if (msg._flash) { $el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }"
+                  :class="msg._flash ? 'ring-2 ring-amber-400/70 rounded-2xl transition-shadow duration-300' : ''">
                   <div class="min-w-0" :class="msg._browserExpanded ? 'max-w-[95%]' : 'max-w-[80%]'">
                     <div class="px-4 py-3 rounded-2xl rounded-bl-md bg-gray-800 border border-violet-600/30"
                       x-data="{ browserOpen: false, focusDone: false, focusing: false, vncLoaded: false }">
@@ -8490,7 +8558,7 @@
                                   <span class="text-xs text-gray-400">Connecting to browser...</span>
                                 </div>
                                 <iframe
-                                  :src="focusDone ? _getVncUrl() : ''"
+                                  :src="focusDone ? _getVncUrl(msg._from_agent || activeChatId) : ''"
                                   class="w-full h-full border-0"
                                   allow="clipboard-read; clipboard-write"
                                   @load="if (focusDone) vncLoaded = true"
@@ -8501,7 +8569,7 @@
                           <!-- Action buttons -->
                           <div class="flex gap-2">
                             <template x-if="!browserOpen">
-                              <button @click="if (!focusing && (msg._from_agent || activeChatId)) { if (!_getVncUrl()) { showToast('Browser service not available', 5000); return; } focusing = true; browserOpen = true; focusDone = false; vncLoaded = false; focusBrowser(msg._from_agent || activeChatId).then(ok => { if (ok) { focusDone = true; } else { browserOpen = false; } focusing = false; }); }"
+                              <button @click="if (!focusing && (msg._from_agent || activeChatId)) { if (!_getVncUrl(msg._from_agent || activeChatId)) { showToast('Browser service not available', 5000); return; } focusing = true; browserOpen = true; focusDone = false; vncLoaded = false; focusBrowser(msg._from_agent || activeChatId).then(ok => { if (ok) { focusDone = true; } else { browserOpen = false; } focusing = false; }); }"
                                 class="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-violet-600 hover:bg-violet-500 text-white transition-colors flex items-center justify-center gap-1.5">
                                 <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
                                 Open Browser
@@ -8545,7 +8613,9 @@
               </template>
               <!-- Browser CAPTCHA help request card (Phase 8 §11.14) -->
               <template x-if="msg.role === 'browser_captcha_help_request'">
-                <div class="flex justify-start">
+                <div class="flex justify-start"
+                  x-effect="if (msg._flash) { $el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }"
+                  :class="msg._flash ? 'ring-2 ring-amber-400/70 rounded-2xl transition-shadow duration-300' : ''">
                   <div class="min-w-0" :class="msg._browserExpanded ? 'max-w-[95%]' : 'max-w-[80%]'">
                     <div class="px-4 py-3 rounded-2xl rounded-bl-md bg-gray-800 border border-amber-600/30"
                       x-data="{ browserOpen: false, focusDone: false, focusing: false, vncLoaded: false }">
@@ -8579,7 +8649,7 @@
                                   <span class="text-xs text-gray-400">Connecting to browser...</span>
                                 </div>
                                 <iframe
-                                  :src="focusDone ? _getVncUrl() : ''"
+                                  :src="focusDone ? _getVncUrl(msg._from_agent || activeChatId) : ''"
                                   class="w-full h-full border-0"
                                   allow="clipboard-read; clipboard-write"
                                   @load="if (focusDone) vncLoaded = true"
@@ -8590,7 +8660,7 @@
                           <!-- Action buttons -->
                           <div class="flex gap-2">
                             <template x-if="!browserOpen">
-                              <button @click="if (!focusing && (msg._from_agent || activeChatId)) { if (!_getVncUrl()) { showToast('Browser service not available', 5000); return; } focusing = true; browserOpen = true; focusDone = false; vncLoaded = false; focusBrowser(msg._from_agent || activeChatId).then(ok => { if (ok) { focusDone = true; } else { browserOpen = false; } focusing = false; }); }"
+                              <button @click="if (!focusing && (msg._from_agent || activeChatId)) { if (!_getVncUrl(msg._from_agent || activeChatId)) { showToast('Browser service not available', 5000); return; } focusing = true; browserOpen = true; focusDone = false; vncLoaded = false; focusBrowser(msg._from_agent || activeChatId).then(ok => { if (ok) { focusDone = true; } else { browserOpen = false; } focusing = false; }); }"
                                 class="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-600 hover:bg-amber-500 text-white transition-colors flex items-center justify-center gap-1.5">
                                 <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
                                 Open Browser

@@ -1057,6 +1057,7 @@ class RuntimeContext:
             api_key_manager=self._api_key_manager,
             pending_actions=getattr(app, "pending_actions", None),
             tasks_store=getattr(app, "tasks_store", None),
+            help_requests_store=getattr(app, "help_requests_store", None),
             summaries_store=getattr(app, "summaries_store", None),
             notification_store=self._notification_store,
         )

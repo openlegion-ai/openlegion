@@ -49,6 +49,7 @@ def _build_mesh(tmp_path, *, lane_manager=None):
         trace_store=traces,
         event_bus=event_bus,
         lane_manager=lane_manager,
+        help_requests_db=str(tmp_path / "help_requests.db"),
     )
     return app, event_bus
 
@@ -73,9 +74,9 @@ async def test_request_returns_request_id(tmp_path):
     assert resp.status_code == 200
     data = resp.json()
     assert data["request_id"]
-    # Recorded in the in-memory registry exposed for tests
-    assert data["request_id"] in app.help_requests
-    rec = app.help_requests[data["request_id"]]
+    # Recorded in the persistent registry exposed for tests
+    rec = app.help_requests_store.get(data["request_id"])
+    assert rec is not None
     assert rec["kind"] == "credential_request"
     assert rec["agent_id"] == "agent-1"
     assert rec["status"] == "open"
@@ -133,7 +134,7 @@ async def test_cancel_happy_path_emits_and_steers(tmp_path):
     assert "stripe_key" in enqueue_call[0][1]
 
     # Record popped from the registry — second cancel must 404
-    assert request_id not in app.help_requests
+    assert app.help_requests_store.get(request_id) is None
 
 
 @pytest.mark.asyncio
@@ -207,7 +208,7 @@ async def test_cancel_blocked_for_non_operator(tmp_path):
         )
     assert forbid.status_code == 403
     # The record is still open (not popped on auth failure)
-    assert rid in app.help_requests
+    assert app.help_requests_store.get(rid) is not None
 
 
 @pytest.mark.asyncio

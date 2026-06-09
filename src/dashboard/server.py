@@ -682,6 +682,11 @@ def create_dashboard_router(
     # the relevant store is absent.
     pending_actions: Any = None,
     tasks_store: Any = None,
+    # Open help-requests registry (credential / browser-login / captcha asks)
+    # backing the "Needs you" feed. Optional so existing tests keep working;
+    # when absent the credential-save / complete paths fall back to their
+    # legacy direct steer+emit without an in-process registry pop.
+    help_requests_store: Any = None,
     # PR-A — Work summaries backing the new Work-tab default landing.
     # Optional so existing dashboard tests that don't construct one keep
     # working; the endpoints return ``{enabled: False}`` when absent.
@@ -4225,32 +4230,51 @@ def create_dashboard_router(
                 detail=f"Cannot store system credential via chat card: {service}",
             )
         credential_vault.add_credential(service, key)
-        # Notify the requesting agent that the credential is now available.
         agent_id = body.get("agent_id", "").strip()
-        if agent_id and lane_manager is not None and agent_id in agent_registry:
-            from src.shared.trace import new_trace_id
-            try:
-                await lane_manager.enqueue(
-                    agent_id,
-                    f"The user just saved credential '{service}' to the vault. "
-                    f"You can now use $CRED{{{service}}} in your requests.",
-                    mode="steer",
-                    trace_id=new_trace_id(),
-                )
-            except Exception:
-                pass  # Best effort — credential is already stored
-        if event_bus:
-            request_id = body.get("request_id", "") or ""
-            event_bus.emit(
-                "credential_stored",
-                agent=agent_id or "",
-                data={
-                    "name": service,
-                    "service": service,
-                    "request_id": request_id,
-                    "agent_id": agent_id or None,
-                },
+        request_id = (body.get("request_id", "") or "").strip()
+        # Gate the steer + cross-client emit on an ATOMIC claim of the open
+        # request, so a save racing a cancel resolves exactly once and the
+        # agent never gets contradictory "use it" + "cancelled" steers. The
+        # claim also POPS the registry record, clearing the "Needs you" row.
+        # With no request_id (manual add) or no registry wired, there's nothing
+        # to race — proceed (legacy direct path). Done in-process (the
+        # dashboard is mounted on the mesh app): a loopback hop would add a
+        # socket dependency and isn't needed since we hold the store ref.
+        claimed = True
+        if request_id and help_requests_store is not None:
+            record = help_requests_store.resolve(
+                request_id, expected_kind="credential_request", status="resolved",
             )
+            claimed = record is not None
+            # Prefer the registry's agent_id (authoritative) over the body's:
+            # some card surfaces post the active chat id ('operator'), not the
+            # requesting worker, so the steer would otherwise hit the wrong agent.
+            if record and record.get("agent_id"):
+                agent_id = record["agent_id"]
+        if claimed:
+            if agent_id and lane_manager is not None and agent_id in agent_registry:
+                from src.shared.trace import new_trace_id
+                try:
+                    await lane_manager.enqueue(
+                        agent_id,
+                        f"The user just saved credential '{service}' to the vault. "
+                        f"You can now use $CRED{{{service}}} in your requests.",
+                        mode="steer",
+                        trace_id=new_trace_id(),
+                    )
+                except Exception:
+                    pass  # Best effort — credential is already stored
+            if event_bus:
+                event_bus.emit(
+                    "credential_stored",
+                    agent=agent_id or "",
+                    data={
+                        "name": service,
+                        "service": service,
+                        "request_id": request_id,
+                        "agent_id": agent_id or None,
+                    },
+                )
         return {"stored": True, "service": service, "tier": "agent"}
 
     @api_router.post("/api/browser-login/complete")
@@ -4259,9 +4283,18 @@ def create_dashboard_router(
         body = await request.json()
         agent_id = body.get("agent_id", "").strip()
         service = body.get("service", "").strip()[:128]
+        request_id = (body.get("request_id", "") or "").strip()
         if not agent_id or not service:
             raise HTTPException(status_code=400, detail="agent_id and service are required")
-        # Notify the agent that login is complete
+        # Atomic claim gates the steer/emit (no save/cancel double-fire) and
+        # pops the registry record so the "Needs you" row clears.
+        claimed = True
+        if request_id and help_requests_store is not None:
+            claimed = help_requests_store.resolve(
+                request_id, expected_kind="browser_login_request", status="resolved",
+            ) is not None
+        if not claimed:
+            return {"completed": True, "agent_id": agent_id, "service": service}
         if agent_id in agent_registry and lane_manager is not None:
             from src.shared.trace import new_trace_id
             from src.shared.utils import sanitize_for_prompt
@@ -4277,7 +4310,10 @@ def create_dashboard_router(
             except Exception:
                 pass
         if event_bus:
-            event_bus.emit("browser_login_completed", agent=agent_id, data={"service": service})
+            event_bus.emit(
+                "browser_login_completed", agent=agent_id,
+                data={"service": service, "request_id": request_id},
+            )
         return {"completed": True, "agent_id": agent_id, "service": service}
 
     @api_router.post("/api/browser-captcha-help/complete")
@@ -4286,11 +4322,19 @@ def create_dashboard_router(
         body = await request.json()
         agent_id = body.get("agent_id", "").strip()
         service = body.get("service", "").strip()[:128]
+        request_id = (body.get("request_id", "") or "").strip()
         if not agent_id or not service:
             raise HTTPException(
                 status_code=400,
                 detail="agent_id and service are required",
             )
+        claimed = True
+        if request_id and help_requests_store is not None:
+            claimed = help_requests_store.resolve(
+                request_id, expected_kind="browser_captcha_help_request", status="resolved",
+            ) is not None
+        if not claimed:
+            return {"completed": True, "agent_id": agent_id, "service": service}
         if agent_id in agent_registry and lane_manager is not None:
             from src.shared.trace import new_trace_id
             from src.shared.utils import sanitize_for_prompt
@@ -4308,7 +4352,7 @@ def create_dashboard_router(
         if event_bus:
             event_bus.emit(
                 "browser_captcha_help_completed",
-                agent=agent_id, data={"service": service},
+                agent=agent_id, data={"service": service, "request_id": request_id},
             )
         return {"completed": True, "agent_id": agent_id, "service": service}
 
@@ -8080,6 +8124,28 @@ def create_dashboard_router(
             return resp.json()
         except Exception:
             return {"ok": True}
+
+    @api_router.get("/api/help-requests")
+    async def api_help_requests(request: Request) -> dict:
+        """Open help requests for the "Needs you" panel — proxied from the
+        authoritative mesh registry.
+
+        Distinguishes a backend error (502) from "nothing open" ({items: []})
+        so an outage never reads to the user as "nothing needs you". The
+        frontend renders an explicit error state on non-200.
+        """
+        import httpx
+        url = f"http://127.0.0.1:{mesh_port}/mesh/help-requests"
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                resp = await client.get(
+                    url, headers={"x-mesh-internal": "1", "X-Agent-ID": "operator"},
+                )
+        except Exception as e:
+            raise HTTPException(502, f"mesh help-requests proxy failed: {e}")
+        if resp.status_code >= 400:
+            raise HTTPException(resp.status_code, resp.text)
+        return resp.json()
 
     @api_router.post("/api/credential-request/{request_id}/cancel")
     async def api_credential_request_cancel(

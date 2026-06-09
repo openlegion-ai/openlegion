@@ -1458,32 +1458,142 @@ class TestUndoReceiptCountdown:
 # assert about its icon.
 
 
-class TestWorkerDmInNeedsYou:
-    """Worker DMs (chatUnread > 0 for non-operator agents) must show up
-    in the Needs-You aggregator — not just as a small amber dot on the
-    side-panel toggle."""
+class TestNeedsYouIsBlockingAndResolvableOnly:
+    """The panel shows ONLY blocking + user-resolvable items. Worker DMs
+    (a notification, not a blocker) and free-form blocked tasks (operator-
+    handled, not user-resolvable) are deliberately NOT surfaced — showing
+    something the user can't act on is the dead-end we're removing."""
 
-    def test_worker_dm_branch_in_needs_you_items(self):
-        # Source-level: the getter walks ``chatUnread`` and emits a
-        # ``worker_dm`` kind when count > 0 for non-operator agents.
-        assert "kind: 'worker_dm'" in _APP_JS_TEXT
-        # The branch skips operator (that surface lands via the
-        # operator-chat sweep above).
-        assert "agentId === 'operator'" in _APP_JS_TEXT
+    def test_worker_dm_not_in_needs_you(self):
+        # Worker DMs were removed from the panel — the bell/unread dot owns
+        # them. The getter must not emit a worker_dm kind.
+        assert "kind: 'worker_dm'" not in _APP_JS_TEXT
+        # chatUnread is still maintained (for the bell), just not paneled.
+        assert "chatUnread" in _APP_JS_TEXT
 
-    def test_worker_dm_uses_open_chat_handler(self):
-        # The Read button must jump to the chat tab and open the
-        # specific agent's chat panel.
-        # We grep for the structural hint rather than full markup so
-        # comments / whitespace don't make the test brittle.
-        assert "this.openChat(agentId)" in _APP_JS_TEXT
-        assert "label: 'Read'" in _APP_JS_TEXT
+    def test_blocker_branch_removed(self):
+        # The dead credential/browser-login blocker branch (matched codes no
+        # backend ever produces) is gone, along with its dedupe scaffolding.
+        assert "kind: 'blocker'" not in _APP_JS_TEXT
+        assert "seenServices" not in _APP_JS_TEXT
+        # The getter no longer reads volatile chat / blocker state for items.
+        assert "workplaceBlockers || []" not in _APP_JS_TEXT
 
-    def test_worker_dm_pluralises_unread_count(self):
-        # 1 vs N copy variants must both exist so the subtitle reads
-        # naturally for either case.
-        assert "'1 unread'" in _APP_JS_TEXT
-        assert "${n} unread" in _APP_JS_TEXT
+
+class TestNeedsYouServerAuthoritative:
+    """The credential/login/captcha rows come from the authoritative
+    open-requests feed (GET /api/help-requests), not a scrape of
+    chatHistories['operator'] — so they can't silently vanish on reload."""
+
+    def test_items_sourced_from_feed_not_chat(self):
+        # The getter iterates the feed, not operator chat history.
+        assert "for (const req of (this.needsYouRequests || []))" in _APP_JS_TEXT
+        # And no longer scrapes the operator transcript for these items.
+        assert "const opChat = (this.chatHistories" not in _APP_JS_TEXT
+
+    def test_feed_loader_and_proxy_exist(self):
+        assert "async loadWorkplaceHelpRequests()" in _APP_JS_TEXT
+        assert "/help-requests" in _APP_JS_TEXT
+        # Loaded at startup (badge correct on every tab) + on reconnect.
+        assert "this.loadWorkplaceHelpRequests()" in _APP_JS_TEXT
+
+    def test_panel_shows_error_state_not_silent_empty(self):
+        # A backend failure must surface, not read as "nothing needs you".
+        assert 'data-testid="needs-you-help-error"' in _INDEX_HTML
+        assert "workplaceErrors.help" in _INDEX_HTML
+        assert 'needsYouItems.length > 0 || workplaceErrors.help' in _INDEX_HTML
+
+    def test_no_cryptic_letter_icons(self):
+        # The old single-letter badges (K/W/C/M/B) are gone — per-kind SVGs.
+        for bad in ("icon: 'K'", "icon: 'W'", "icon: 'C'", "icon: 'M'", "icon: 'B'"):
+            assert bad not in _APP_JS_TEXT, f"cryptic icon {bad!r} should be removed"
+        assert 'x-text="item.icon"' not in _INDEX_HTML
+        # Glyphs exist for the kinds the panel actually emits.
+        for kind in ("credential", "browser_login", "captcha", "pending"):
+            assert f"item.kind === '{kind}'" in _INDEX_HTML, f"missing icon branch for {kind}"
+
+    def test_credential_resolves_inline_with_request_id(self):
+        # Credential rows carry an inlineCredential descriptor (with the
+        # request_id so the mesh atomically resolves + steers) and the panel
+        # posts to the vault endpoint, then refreshes the authoritative feed.
+        assert "inlineCredential:" in _APP_JS_TEXT
+        assert "requestId: req.request_id" in _APP_JS_TEXT
+        assert 'x-if="item.inlineCredential"' in _INDEX_HTML
+        assert "'/credentials/agent'" in _INDEX_HTML
+        assert "request_id: item.inlineCredential.requestId" in _INDEX_HTML
+        assert "loadWorkplaceHelpRequests()" in _INDEX_HTML
+        # Regression guard: credentials are never reconstructed from a blocker
+        # note (no backend emits cred:<name>; the parsed string isn't a key).
+        assert "inlineCredential: { service: classification.service" not in _APP_JS_TEXT
+
+    def test_login_captcha_resolution_reconstructs_card_from_feed(self):
+        # The action ensures the chat card exists (rebuilding it from the
+        # authoritative record if the transcript dropped it) then flashes it —
+        # no dead-end "open chat at the bottom".
+        assert "_openHelpRequestCard(req)" in _APP_JS_TEXT
+        assert "label: 'Open in chat'" not in _APP_JS_TEXT
+        assert "msg._flash" in _APP_JS_TEXT
+
+    def test_jump_helper_flags_message_for_flash(self):
+        m = re.search(
+            r"_jumpToNeedsYouCard\(msg\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "_jumpToNeedsYouCard body missing"
+        body = m.group(1)
+        assert "openChat('operator')" in body
+        assert "msg._flash = (msg._flash || 0) + 1" in body
+
+    def test_request_cards_carry_flash_anchor(self):
+        # Both chat surfaces scroll the flagged card into view and ring it.
+        assert _INDEX_HTML.count("$el.scrollIntoView({ behavior: 'smooth', block: 'center' })") == 4
+        assert _INDEX_HTML.count("ring-2 ring-amber-400/70 rounded-2xl") == 4
+
+    def test_complete_sends_request_id_for_atomic_resolve(self):
+        # Browser login/captcha complete must thread request_id so the mesh
+        # pops the registry record (clearing the panel row) and steers once.
+        assert _APP_JS_TEXT.count("request_id: msg.request_id || ''") >= 2
+
+    def test_vnc_url_is_agent_scoped(self):
+        # _getVncUrl must resolve the CARD's target agent, not just the first
+        # agent with any browser — otherwise, with 2+ browser agents, the
+        # operator is shown the wrong framebuffer while focusing another.
+        m = re.search(
+            r"_getVncUrl\(agentId\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "_getVncUrl(agentId) signature missing"
+        body = m.group(1)
+        assert "ag.id === agentId" in body
+        # The chat cards must pass their target agent into the lookup (both
+        # the iframe src and the open-browser guard), on both chat surfaces.
+        assert _INDEX_HTML.count("_getVncUrl(msg._from_agent || activeChatId)") == 8
+
+    def test_completion_sync_prefers_request_id(self):
+        # Two open requests for the same (agent, service) must resolve
+        # independently: completing one must mark ONLY its card done, not the
+        # sibling's. The WS sync therefore prefers request_id, falling back to
+        # service only for legacy events that lack one. Four blocks: login +
+        # captcha, each completed + cancelled.
+        assert _APP_JS_TEXT.count("m.request_id === evt.data.request_id") == 4
+
+    def test_chat_card_credential_save_sends_request_id(self):
+        # Saving a credential from the CHAT CARD (not just the panel) must send
+        # request_id so the registry record is popped and the panel row clears
+        # — otherwise the feed shows a permanent ghost row.
+        assert _INDEX_HTML.count("request_id: msg.request_id || ''") >= 2
+
+    def test_help_timers_cleaned_up_on_teardown(self):
+        # No stale 60s fetch loop / debounce after Alpine teardown.
+        m = re.search(r"destroy\(\)\s*\{(.*?)\n    \},", _APP_JS_TEXT, re.DOTALL)
+        assert m, "destroy() body missing"
+        body = m.group(1)
+        assert "_helpRequestsInterval" in body
+        assert "_helpRefreshTimer" in body
+
+
 # ── Browser notification + activity rollup + connect-channel ────
 
 
@@ -2433,7 +2543,10 @@ class TestOnWsEventHandlersForLiveCoverage:
         assert "evt.type === 'credential_stored'" in _APP_JS_TEXT
         # And it actually flips the card.
         # The handler iterates chatHistories and sets ``saved=true``.
-        block_start = _APP_JS_TEXT.index("evt.type === 'credential_stored'")
+        # Target the HANDLER block specifically (``if (evt.type === ...) {``),
+        # not the feed-refresh trigger that also names the event in an ``||``
+        # chain earlier in the dispatch.
+        block_start = _APP_JS_TEXT.index("if (evt.type === 'credential_stored') {")
         block = _APP_JS_TEXT[block_start:block_start + 1500]
         assert "m.saved = true" in block
         assert "m.cancelled = false" in block
