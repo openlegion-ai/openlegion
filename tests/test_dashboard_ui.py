@@ -1510,10 +1510,14 @@ class TestNeedsYouInlineResolution:
         # the operator-chat credential card uses.
         assert 'x-if="item.inlineCredential"' in _INDEX_HTML
         assert "'/credentials/agent'" in _INDEX_HTML
-        # Success path drops the row: marks the backing chat message saved
-        # and/or fires the item's onResolved (card-less blocker rows).
+        # Success path drops the row by marking the backing chat message
+        # saved (the getter skips saved cards).
         assert "item.msg.saved = true" in _INDEX_HTML
-        assert "item.onResolved" in _INDEX_HTML
+        # Inline credential items come ONLY from real credential_request
+        # cards (which carry a vault key + agent). They are NOT reconstructed
+        # from blocker notes — no backend emits a cred:<name> note, and the
+        # parsed string is not a vault key. Guard against that regression.
+        assert "inlineCredential: { service: classification.service" not in _APP_JS_TEXT
 
     def test_browser_login_and_captcha_deeplink_not_deadend(self):
         # The dead-end "Open chat"/"Open in chat" buttons that dumped the
@@ -1550,8 +1554,22 @@ class TestNeedsYouInlineResolution:
         # duplicate of a more-actionable row, so it's suppressed.
         assert "seenServices" in _APP_JS_TEXT
         assert "seenServices.has(" in _APP_JS_TEXT
-        # Credential blockers resolve inline too (vault key from the note).
-        assert "_needsYouResolvedBlockers" in _APP_JS_TEXT
+
+    def test_vnc_url_is_agent_scoped(self):
+        # _getVncUrl must resolve the CARD's target agent, not just the first
+        # agent with any browser — otherwise, with 2+ browser agents, the
+        # operator is shown the wrong framebuffer while focusing another.
+        m = re.search(
+            r"_getVncUrl\(agentId\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "_getVncUrl(agentId) signature missing"
+        body = m.group(1)
+        assert "ag.id === agentId" in body
+        # The chat cards must pass their target agent into the lookup (both
+        # the iframe src and the open-browser guard), on both chat surfaces.
+        assert _INDEX_HTML.count("_getVncUrl(msg._from_agent || activeChatId)") == 8
 
 
 # ── Browser notification + activity rollup + connect-channel ────

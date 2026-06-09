@@ -1073,7 +1073,7 @@
                                         <span class="text-xs text-gray-400">Connecting to browser...</span>
                                       </div>
                                       <iframe
-                                        :src="focusDone ? _getVncUrl() : ''"
+                                        :src="focusDone ? _getVncUrl(msg._from_agent || activeChatId) : ''"
                                         class="w-full h-full border-0"
                                         allow="clipboard-read; clipboard-write"
                                         @load="if (focusDone) vncLoaded = true"
@@ -1084,7 +1084,7 @@
                                 <!-- Action buttons -->
                                 <div class="flex gap-2">
                                   <template x-if="!browserOpen">
-                                    <button @click="if (!focusing && msg._from_agent) { if (!_getVncUrl()) { showToast('Browser service not available', 5000); return; } focusing = true; browserOpen = true; focusDone = false; vncLoaded = false; focusBrowser(msg._from_agent).then(ok => { if (ok) { focusDone = true; } else { browserOpen = false; } focusing = false; }); }"
+                                    <button @click="if (!focusing && msg._from_agent) { if (!_getVncUrl(msg._from_agent || activeChatId)) { showToast('Browser service not available', 5000); return; } focusing = true; browserOpen = true; focusDone = false; vncLoaded = false; focusBrowser(msg._from_agent).then(ok => { if (ok) { focusDone = true; } else { browserOpen = false; } focusing = false; }); }"
                                       class="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-violet-600 hover:bg-violet-500 text-white transition-colors flex items-center justify-center gap-1.5">
                                       <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
                                       Open Browser
@@ -1167,7 +1167,7 @@
                                         <span class="text-xs text-gray-400">Connecting to browser...</span>
                                       </div>
                                       <iframe
-                                        :src="focusDone ? _getVncUrl() : ''"
+                                        :src="focusDone ? _getVncUrl(msg._from_agent || activeChatId) : ''"
                                         class="w-full h-full border-0"
                                         allow="clipboard-read; clipboard-write"
                                         @load="if (focusDone) vncLoaded = true"
@@ -1178,7 +1178,7 @@
                                 <!-- Action buttons -->
                                 <div class="flex gap-2">
                                   <template x-if="!browserOpen">
-                                    <button @click="if (!focusing && msg._from_agent) { if (!_getVncUrl()) { showToast('Browser service not available', 5000); return; } focusing = true; browserOpen = true; focusDone = false; vncLoaded = false; focusBrowser(msg._from_agent).then(ok => { if (ok) { focusDone = true; } else { browserOpen = false; } focusing = false; }); }"
+                                    <button @click="if (!focusing && msg._from_agent) { if (!_getVncUrl(msg._from_agent || activeChatId)) { showToast('Browser service not available', 5000); return; } focusing = true; browserOpen = true; focusDone = false; vncLoaded = false; focusBrowser(msg._from_agent).then(ok => { if (ok) { focusDone = true; } else { browserOpen = false; } focusing = false; }); }"
                                       class="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-600 hover:bg-amber-500 text-white transition-colors flex items-center justify-center gap-1.5">
                                       <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
                                       Open Browser
@@ -4153,25 +4153,26 @@
                     </template>
                   </div>
                 </div>
-                <!-- Inline credential resolution. Credential items carry an
-                     ``inlineCredential`` descriptor so the user pastes the key
-                     and saves it to the vault WITHOUT a trip to the chat
-                     transcript — same POST the operator-chat credential card
-                     makes. On success we mark the backing chat message saved
-                     (``item.msg``, which drops the row on the next getter pass)
-                     and/or fire ``item.onResolved`` (card-less blocker rows),
-                     so the row clears itself the instant the key lands. -->
+                <!-- Inline credential resolution. Credential items (sourced
+                     ONLY from real credential_request cards — they carry the
+                     vault key and the awaiting agent) get an ``inlineCredential``
+                     descriptor so the user pastes the key and saves it to the
+                     vault WITHOUT a trip to the chat transcript — the same POST
+                     the operator-chat credential card makes, which also steers
+                     the waiting agent so it actually unblocks. On success we
+                     mark the backing chat message saved (``item.msg``), which
+                     drops the row on the next getter pass. -->
                 <template x-if="item.inlineCredential">
                   <div class="mt-2.5 sm:pl-8" x-data="{ credValue: '', saving: false, saved: false, saveError: '' }">
                     <template x-if="!saved">
                       <div>
                         <input type="password" x-model="credValue" autocomplete="off"
-                          @keydown.enter.stop.prevent="if (credValue.trim() && !saving) { saving = true; saveError = ''; track('needs_you_click', { item_count: needsYouItems.length, item_kind: 'credential', action_label: 'Save to Vault' }); fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({ service: item.inlineCredential.service, key: credValue.trim(), agent_id: item.inlineCredential.agentId }) }).then(r => { if (r.ok) { saved = true; credValue = ''; if (item.msg) item.msg.saved = true; if (item.onResolved) item.onResolved(); showToast('Saved to your vault — the agent can continue.'); } else { saveError = 'Couldn\'t save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
+                          @keydown.enter.stop.prevent="if (credValue.trim() && !saving) { saving = true; saveError = ''; track('needs_you_click', { item_count: needsYouItems.length, item_kind: 'credential', action_label: 'Save to Vault' }); fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({ service: item.inlineCredential.service, key: credValue.trim(), agent_id: item.inlineCredential.agentId }) }).then(r => { if (r.ok) { saved = true; credValue = ''; if (item.msg) item.msg.saved = true; showToast('Saved to your vault — the agent can continue.'); } else { saveError = 'Couldn\'t save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
                           class="w-full px-3 py-1.5 rounded-lg bg-gray-900 border border-gray-700 text-xs text-white placeholder-gray-500 focus:border-indigo-500 focus:outline-none mb-2"
                           :placeholder="'Paste your ' + item.inlineCredential.display + ' key'">
                         <div x-show="saveError" class="text-[11px] text-red-400 mb-1.5" x-text="saveError"></div>
                         <button type="button"
-                          @click="if (credValue.trim() && !saving) { saving = true; saveError = ''; track('needs_you_click', { item_count: needsYouItems.length, item_kind: 'credential', action_label: 'Save to Vault' }); fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({ service: item.inlineCredential.service, key: credValue.trim(), agent_id: item.inlineCredential.agentId }) }).then(r => { if (r.ok) { saved = true; credValue = ''; if (item.msg) item.msg.saved = true; if (item.onResolved) item.onResolved(); showToast('Saved to your vault — the agent can continue.'); } else { saveError = 'Couldn\'t save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
+                          @click="if (credValue.trim() && !saving) { saving = true; saveError = ''; track('needs_you_click', { item_count: needsYouItems.length, item_kind: 'credential', action_label: 'Save to Vault' }); fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json','X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({ service: item.inlineCredential.service, key: credValue.trim(), agent_id: item.inlineCredential.agentId }) }).then(r => { if (r.ok) { saved = true; credValue = ''; if (item.msg) item.msg.saved = true; showToast('Saved to your vault — the agent can continue.'); } else { saveError = 'Couldn\'t save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
                           :disabled="!credValue.trim() || saving"
                           class="text-[11px] font-medium px-2.5 py-1 rounded transition-colors"
                           :class="credValue.trim() && !saving ? 'bg-emerald-700 hover:bg-emerald-600 text-emerald-50' : 'bg-gray-700 text-gray-400 cursor-not-allowed'">
@@ -8552,7 +8553,7 @@
                                   <span class="text-xs text-gray-400">Connecting to browser...</span>
                                 </div>
                                 <iframe
-                                  :src="focusDone ? _getVncUrl() : ''"
+                                  :src="focusDone ? _getVncUrl(msg._from_agent || activeChatId) : ''"
                                   class="w-full h-full border-0"
                                   allow="clipboard-read; clipboard-write"
                                   @load="if (focusDone) vncLoaded = true"
@@ -8563,7 +8564,7 @@
                           <!-- Action buttons -->
                           <div class="flex gap-2">
                             <template x-if="!browserOpen">
-                              <button @click="if (!focusing && (msg._from_agent || activeChatId)) { if (!_getVncUrl()) { showToast('Browser service not available', 5000); return; } focusing = true; browserOpen = true; focusDone = false; vncLoaded = false; focusBrowser(msg._from_agent || activeChatId).then(ok => { if (ok) { focusDone = true; } else { browserOpen = false; } focusing = false; }); }"
+                              <button @click="if (!focusing && (msg._from_agent || activeChatId)) { if (!_getVncUrl(msg._from_agent || activeChatId)) { showToast('Browser service not available', 5000); return; } focusing = true; browserOpen = true; focusDone = false; vncLoaded = false; focusBrowser(msg._from_agent || activeChatId).then(ok => { if (ok) { focusDone = true; } else { browserOpen = false; } focusing = false; }); }"
                                 class="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-violet-600 hover:bg-violet-500 text-white transition-colors flex items-center justify-center gap-1.5">
                                 <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
                                 Open Browser
@@ -8643,7 +8644,7 @@
                                   <span class="text-xs text-gray-400">Connecting to browser...</span>
                                 </div>
                                 <iframe
-                                  :src="focusDone ? _getVncUrl() : ''"
+                                  :src="focusDone ? _getVncUrl(msg._from_agent || activeChatId) : ''"
                                   class="w-full h-full border-0"
                                   allow="clipboard-read; clipboard-write"
                                   @load="if (focusDone) vncLoaded = true"
@@ -8654,7 +8655,7 @@
                           <!-- Action buttons -->
                           <div class="flex gap-2">
                             <template x-if="!browserOpen">
-                              <button @click="if (!focusing && (msg._from_agent || activeChatId)) { if (!_getVncUrl()) { showToast('Browser service not available', 5000); return; } focusing = true; browserOpen = true; focusDone = false; vncLoaded = false; focusBrowser(msg._from_agent || activeChatId).then(ok => { if (ok) { focusDone = true; } else { browserOpen = false; } focusing = false; }); }"
+                              <button @click="if (!focusing && (msg._from_agent || activeChatId)) { if (!_getVncUrl(msg._from_agent || activeChatId)) { showToast('Browser service not available', 5000); return; } focusing = true; browserOpen = true; focusDone = false; vncLoaded = false; focusBrowser(msg._from_agent || activeChatId).then(ok => { if (ok) { focusDone = true; } else { browserOpen = false; } focusing = false; }); }"
                                 class="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-600 hover:bg-amber-500 text-white transition-colors flex items-center justify-center gap-1.5">
                                 <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
                                 Open Browser

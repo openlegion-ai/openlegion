@@ -3225,16 +3225,21 @@ function dashboard() {
       }
 
       for (const b of (this.workplaceBlockers || [])) {
-        // Surface ONLY blockers with a real, working resolution for the user:
-        // credential + browser-login. Every other blocked/failed task is
-        // operator-handled (and narrated in the team's Work summary).
-        // ``_humanizeBlocker`` decodes the machine code to plain English.
+        // Surface ONLY blockers with a user-actionable resolution: credential
+        // + browser-login. ``_humanizeBlocker`` decodes the note to a kind.
+        //
+        // IMPORTANT (verified 2026-06): the real credential / browser-login
+        // asks DON'T travel as blocker notes — they ride their own
+        // ``credential_request`` / ``browser_login_request`` events, surfaced
+        // above with genuine inline-save / flash-to-card actions. The
+        // ``cred:`` / ``no_credentials`` / ``needs_browser_login`` codes
+        // ``_humanizeBlocker`` matches have NO backend producer today, so this
+        // branch is a forward-compatible fallback, not the primary path. We do
+        // NOT try to reconstruct a vault key from the note (it isn't one) — if
+        // such a blocker ever appears, we send the user to the operator chat
+        // where the agent can re-state the need through the proper channel.
         const classification = this._humanizeBlocker(b.blocker_note || '');
         if (classification.kind !== 'credential' && classification.kind !== 'browser_login') continue;
-        // Dismissed locally after an inline save (the server-side blocker
-        // clears on the next poll; this hides the row immediately so the
-        // form doesn't flash back as "unsaved").
-        if (this._needsYouResolvedBlockers && this._needsYouResolvedBlockers[b.id]) continue;
         // Dedupe: if a request CARD for this service is already surfaced
         // above, that row is strictly more actionable — skip the blocker so
         // the user doesn't see the same need twice.
@@ -3242,46 +3247,19 @@ function dashboard() {
         if (svc && seenServices.has(classification.kind + ':' + svc)) continue;
 
         const who = this.agentDisplayName ? this.agentDisplayName(b.assignee || '') : (b.assignee || 'an agent');
-        // Credential blockers carry the vault key name in the note
-        // (``cred:<name>``) — authoritative — so we can resolve in place
-        // with the same paste-and-save form, no chat trip. Without a known
-        // key name there's nothing to save inline, so fall back to opening
-        // the operator chat where the agent can re-state what it needs.
-        if (classification.kind === 'credential' && classification.service) {
-          items.push({
-            id: 'blocker-' + b.id,
-            kind: 'credential',
-            title: `Add the ${classification.service} key`,
-            subtitle: this._needsYouSubtitle({
-              actor: b.assignee || '',
-              text: `${who} is blocked on "${b.title || 'a task'}" — paste it below to unblock.`,
-            }),
-            inlineCredential: { service: classification.service, agentId: b.assignee || '', display: classification.service },
-            // No live chat message backs a blocker; mark it resolved
-            // client-side so the row disappears the moment we save.
-            onResolved: () => { this._needsYouResolvedBlockers = { ...this._needsYouResolvedBlockers, [b.id]: true }; },
-            actions: [],
-          });
-          continue;
-        }
-        // Browser-login blocker with no surfaced card: the live VNC only
-        // exists in the chat surface, so slide the messenger in there.
+        const isLogin = classification.kind === 'browser_login';
         items.push({
           id: 'blocker-' + b.id,
-          kind: classification.kind === 'browser_login' ? 'browser_login' : 'blocker',
-          title: classification.kind === 'browser_login'
-            ? `Sign in for ${who}`
-            : (b.title || '(untitled blocked task)'),
+          kind: classification.kind,
+          title: isLogin ? `Sign in for ${who}` : `${who} needs a credential`,
           subtitle: this._needsYouSubtitle({
             actor: b.assignee || '',
             project: b.project_id || '',
-            text: classification.kind === 'browser_login'
-              ? `Blocked on "${b.title || 'a task'}" — open the chat to sign in.`
-              : classification.label,
+            text: `Blocked on "${b.title || 'a task'}" — open the chat to help.`,
           }),
           actions: [
             {
-              label: classification.kind === 'browser_login' ? 'Sign in' : 'Open chat',
+              label: isLogin ? 'Sign in' : 'Open chat',
               style: 'indigo',
               handler: () => { if (this.openChat) this.openChat('operator'); },
             },
@@ -3408,12 +3386,6 @@ function dashboard() {
     // needsYouItems read; we keep it on the component instance so
     // toggling stays sticky as the list re-renders.
     _needsYouPreviewExpanded: {},
-
-    // Blocker ids resolved inline (credential saved) but not yet cleared
-    // server-side. Keyed by blocker id → true; the getter skips these so
-    // the row vanishes immediately instead of flashing back as unsaved
-    // until the next workplaceBlockers poll.
-    _needsYouResolvedBlockers: {},
 
     // Jump-to-card: slide the operator messenger in over the current tab
     // (it renders whenever activeTab !== 'chat') and flag THIS message so
@@ -9176,9 +9148,22 @@ function dashboard() {
       }
     },
 
-    _getVncUrl() {
-      const match = this.agents.find(ag => ag.vnc_url);
-      return match ? match.vnc_url : '';
+    _getVncUrl(agentId) {
+      // Each agent's vnc_url bakes its OWN agent_id into the reverse-proxy
+      // path, so a card MUST pass its target agent — otherwise, with 2+
+      // agents holding browsers, the operator gets shown a DIFFERENT agent's
+      // framebuffer than the one they're focusing / completing the login on.
+      const withVnc = this.agents.filter(ag => ag.vnc_url);
+      if (agentId) {
+        const exact = withVnc.find(ag => ag.id === agentId);
+        if (exact) return exact.vnc_url;
+        // No URL for this agent yet (e.g. /api/agents not repolled since the
+        // browser came up). Only fall back to the sole browser when it's
+        // unambiguous — never show a different agent when several exist.
+        return withVnc.length === 1 ? withVnc[0].vnc_url : '';
+      }
+      // Bare call (back-compat probe): first available browser.
+      return withVnc.length ? withVnc[0].vnc_url : '';
     },
 
     async _completeBrowserLogin(msg, agentId) {
