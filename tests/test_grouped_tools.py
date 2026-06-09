@@ -4,11 +4,12 @@ Covers:
 - the budget gate (small toolset → unchanged; large → index+defer),
 - the capability index renders ALL grouped capabilities (names never hidden),
 - ``load_tools`` defers the schema change to the NEXT build (not mid-turn),
-- the loaded-groups state folds into the ``get_tool_definitions`` cache key,
-- flag-off → identical behaviour to today.
+- the loaded-groups state folds into the ``get_tool_definitions`` cache key.
 
-The whole feature is default-OFF behind ``OPENLEGION_GROUPED_TOOLS``, so each
-test that exercises the active path sets the env flag explicitly.
+Grouped Tool Search is always-on; the SOLE activation control is the budget
+gate — ``plan_grouped_tools`` returns ``active=False`` when the deferrable
+schemas fall under ``BUDGET_FRACTION`` of the context window (small toolset or
+tiny window).
 """
 
 import pytest
@@ -16,7 +17,6 @@ import pytest
 from src.agent import tool_groups
 from src.agent.tool_groups import (
     TOOL_GROUPS,
-    grouped_tools_enabled,
     plan_grouped_tools,
     resolve_load_request,
 )
@@ -27,40 +27,13 @@ def setup_function():
     _tool_staging.clear()
 
 
-@pytest.fixture
-def grouped_on(monkeypatch):
-    monkeypatch.setenv(tool_groups.GROUPED_TOOLS_ENV, "1")
-    yield
-
-
-# ── Flag plumbing ───────────────────────────────────────────────────────────
-def test_flag_off_by_default(monkeypatch):
-    monkeypatch.delenv(tool_groups.GROUPED_TOOLS_ENV, raising=False)
-    assert grouped_tools_enabled() is False
-
-
-def test_flag_on(monkeypatch):
-    monkeypatch.setenv(tool_groups.GROUPED_TOOLS_ENV, "true")
-    assert grouped_tools_enabled() is True
-
-
-def test_plan_inactive_when_flag_off(monkeypatch):
-    monkeypatch.delenv(tool_groups.GROUPED_TOOLS_ENV, raising=False)
-    available = {t for g in TOOL_GROUPS for t in g.tools}
-    plan = plan_grouped_tools(
-        available=available,
-        loaded_groups=set(),
-        operator=True,
-        context_window=1000,  # tiny window → would trip the gate if flag were on
-    )
-    assert plan.active is False
-    assert plan.defer == frozenset()
-    assert plan.index_text == ""
-
-
 # ── Budget gate ─────────────────────────────────────────────────────────────
-def test_budget_gate_small_toolset_unchanged(grouped_on):
-    """A small grouped surface stays under the budget → plan inactive."""
+def test_budget_gate_small_toolset_unchanged():
+    """A small grouped surface stays under the budget → plan inactive.
+
+    This is the only "inactive" path now that the feature is always-on: a tiny
+    deferrable surface against an opus-class window stays under the budget gate.
+    """
     available = {"create_agent", "set_cron"}  # only 2 grouped tools
     plan = plan_grouped_tools(
         available=available,
@@ -70,9 +43,10 @@ def test_budget_gate_small_toolset_unchanged(grouped_on):
     )
     assert plan.active is False
     assert plan.defer == frozenset()
+    assert plan.index_text == ""
 
 
-def test_budget_gate_large_toolset_activates(grouped_on):
+def test_budget_gate_large_toolset_activates():
     """A large grouped surface exceeding ~10% of the window → index+defer."""
     available = {t for g in TOOL_GROUPS for t in g.tools}
     # Pick a window small enough that the grouped tools exceed 10%.
@@ -89,7 +63,7 @@ def test_budget_gate_large_toolset_activates(grouped_on):
     assert plan.index_text
 
 
-def test_budget_gate_zero_window_inactive(grouped_on):
+def test_budget_gate_zero_window_inactive():
     available = {t for g in TOOL_GROUPS for t in g.tools}
     plan = plan_grouped_tools(
         available=available, loaded_groups=set(), operator=True, context_window=0,
@@ -98,7 +72,7 @@ def test_budget_gate_zero_window_inactive(grouped_on):
 
 
 # ── Capability index renders ALL capabilities (names never hidden) ──────────
-def test_index_lists_every_available_grouped_tool(grouped_on):
+def test_index_lists_every_available_grouped_tool():
     available = {t for g in TOOL_GROUPS for t in g.tools}
     window = int(
         (len(available) * tool_groups.SCHEMA_TOKENS_PER_TOOL)
@@ -114,7 +88,7 @@ def test_index_lists_every_available_grouped_tool(grouped_on):
         assert name in plan.index_text, f"{name} missing from capability index"
 
 
-def test_index_marks_loaded_groups(grouped_on):
+def test_index_marks_loaded_groups():
     available = {t for g in TOOL_GROUPS for t in g.tools}
     window = int(
         (len(available) * tool_groups.SCHEMA_TOKENS_PER_TOOL)
@@ -131,7 +105,7 @@ def test_index_marks_loaded_groups(grouped_on):
     assert "set_cron" not in plan.defer
 
 
-def test_worker_never_sees_operator_only_group(grouped_on):
+def test_worker_never_sees_operator_only_group():
     available = {t for g in TOOL_GROUPS for t in g.tools}
     # Size the window against the WORKER-eligible deferrable set (operator-only
     # groups are excluded), else the gate wouldn't trip for a worker.
@@ -303,7 +277,7 @@ def _make_grouped_loop():
     return loop
 
 
-def test_loop_refresh_builds_index_and_defer(grouped_on):
+def test_loop_refresh_builds_index_and_defer():
     loop = _make_grouped_loop()
     index = loop._refresh_grouped_plan()
     assert index  # capability index present
@@ -312,16 +286,21 @@ def test_loop_refresh_builds_index_and_defer(grouped_on):
     assert "defer" in loop._tool_filter_kw
 
 
-def test_loop_flag_off_no_index_no_defer(monkeypatch):
-    monkeypatch.delenv(tool_groups.GROUPED_TOOLS_ENV, raising=False)
+def test_loop_under_budget_no_index_no_defer():
+    """When the agent's deferrable surface is under the budget gate, the plan is
+    inactive: no index, no ``defer`` in the tool-filter kwargs."""
     loop = _make_grouped_loop()
+    # Roomy enough that the grouped tools fall under BUDGET_FRACTION → inactive.
+    cm = loop.context_manager
+    cm.max_tokens = 10_000_000
     index = loop._refresh_grouped_plan()
     assert index == ""
-    assert loop._grouped_plan is None
+    assert loop._grouped_plan is not None
+    assert loop._grouped_plan.active is False
     assert "defer" not in loop._tool_filter_kw
 
 
-def test_load_tools_defers_to_next_turn(grouped_on):
+def test_load_tools_defers_to_next_turn():
     loop = _make_grouped_loop()
     loop._refresh_grouped_plan(promote_pending=True)  # turn 1 build
     # set_cron is deferred at first.
@@ -343,7 +322,7 @@ def test_load_tools_defers_to_next_turn(grouped_on):
     assert "set_cron" not in loop._grouped_plan.defer
 
 
-def test_mid_turn_rebuild_does_not_promote(grouped_on):
+def test_mid_turn_rebuild_does_not_promote():
     """A MID-turn rebuild (promote_pending=False) must leave pending untouched.
 
     Promoting mid-turn would flip the toolset and bust the prompt cache — the
@@ -370,9 +349,14 @@ def test_mid_turn_rebuild_does_not_promote(grouped_on):
     assert "set_cron" not in loop._grouped_plan.defer
 
 
-def test_load_tools_noop_when_flag_off(monkeypatch):
-    monkeypatch.delenv(tool_groups.GROUPED_TOOLS_ENV, raising=False)
+def test_load_tools_noop_when_plan_inactive():
+    """When the budget gate hasn't tripped (plan inactive), a load_tools request
+    is a no-op — there is nothing deferred to load."""
     loop = _make_grouped_loop()
+    # Roomy window → grouped tools under budget → plan inactive.
+    loop.context_manager.max_tokens = 10_000_000
+    loop._refresh_grouped_plan()
+    assert loop._grouped_plan is not None and loop._grouped_plan.active is False
     res = loop.request_load_tools(group="scheduling", tool=None)
     assert res["loaded"] == []
     assert loop._pending_tool_groups == set()
@@ -434,19 +418,10 @@ async def test_agent_loop_not_injected_for_untrusted_tool():
     assert result == {"got_loop": False}
 
 
-# ── Fix 3a: flag-off → load_tools is NOT in the worker tool surface ─────────
-def test_load_tools_absent_from_worker_surface_when_flag_off(monkeypatch):
-    from src.agent.loop import _GROUPED_TOOLS_BRIDGE
-
-    monkeypatch.delenv(tool_groups.GROUPED_TOOLS_ENV, raising=False)
-    loop = _make_worker_loop()
-    # The worker's effective exclude set hides the bridge entirely.
-    excluded = loop._excluded_tools or frozenset()
-    assert _GROUPED_TOOLS_BRIDGE <= excluded
-    assert "load_tools" not in loop.tools.list_tools(**loop._tool_filter_kw)
-
-
-def test_load_tools_present_in_worker_surface_when_flag_on(grouped_on):
+# ── load_tools is always in the worker tool surface (always-on) ─────────────
+def test_load_tools_present_in_worker_surface():
+    """The grouped-tools bridge is always available to a worker now that the
+    feature is always-on — it's never hidden from the effective surface."""
     loop = _make_worker_loop()
     excluded = loop._excluded_tools or frozenset()
     assert "load_tools" not in excluded

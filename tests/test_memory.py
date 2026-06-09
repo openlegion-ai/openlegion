@@ -429,7 +429,7 @@ class TestToolOutcomes:
 
 
 class TestSemanticDedup:
-    """Vector-similarity dedup on the write path (OPENLEGION_SEMANTIC_DEDUP).
+    """Vector-similarity dedup on the write path (always-on).
 
     Uses a controllable stub embedder so near-duplicate vs distinct facts are
     deterministic and independent of any real embedding provider.
@@ -455,14 +455,6 @@ class TestSemanticDedup:
             return vec
         return _embed
 
-    @pytest.fixture
-    def dedup_on(self, monkeypatch):
-        monkeypatch.setenv("OPENLEGION_SEMANTIC_DEDUP", "1")
-
-    @pytest.fixture
-    def dedup_off(self, monkeypatch):
-        monkeypatch.delenv("OPENLEGION_SEMANTIC_DEDUP", raising=False)
-
     def _make_store(self, tmp_path, name, groups):
         embed = self._grouped_embedder(groups)
         return MemoryStore(db_path=str(tmp_path / name), embed_fn=embed)
@@ -472,7 +464,7 @@ class TestSemanticDedup:
         return store.db.execute("SELECT COUNT(*) FROM facts").fetchone()[0]
 
     @pytest.mark.asyncio
-    async def test_near_duplicate_keys_merge_into_one_row(self, tmp_path, dedup_on):
+    async def test_near_duplicate_keys_merge_into_one_row(self, tmp_path):
         groups = [{"preferred_language", "user_language_preference"}]
         store = self._make_store(tmp_path, "merge.db", groups)
         try:
@@ -484,7 +476,7 @@ class TestSemanticDedup:
             store.close()
 
     @pytest.mark.asyncio
-    async def test_distinct_facts_stay_separate(self, tmp_path, dedup_on):
+    async def test_distinct_facts_stay_separate(self, tmp_path):
         groups = [{"user_name"}, {"user_email"}]
         store = self._make_store(tmp_path, "distinct.db", groups)
         try:
@@ -496,7 +488,7 @@ class TestSemanticDedup:
             store.close()
 
     @pytest.mark.asyncio
-    async def test_merge_prefers_newer_value(self, tmp_path, dedup_on):
+    async def test_merge_prefers_newer_value(self, tmp_path):
         groups = [{"preferred_language", "user_language_preference"}]
         store = self._make_store(tmp_path, "newer.db", groups)
         try:
@@ -513,7 +505,7 @@ class TestSemanticDedup:
             store.close()
 
     @pytest.mark.asyncio
-    async def test_merge_bumps_salience(self, tmp_path, dedup_on):
+    async def test_merge_bumps_salience(self, tmp_path):
         groups = [{"preferred_language", "user_language_preference"}]
         store = self._make_store(tmp_path, "salience.db", groups)
         try:
@@ -529,34 +521,40 @@ class TestSemanticDedup:
             store.close()
 
     @pytest.mark.asyncio
-    async def test_flag_off_keeps_exact_key_behavior(self, tmp_path, dedup_off):
+    async def test_merge_restamps_date_and_preserves_source_type(self, tmp_path):
+        # Issue-1 regression (#1077 + #1080 reconciliation): a semantic merge must
+        # re-stamp `date` so the re-asserted fact ranks as recent under
+        # prefer-recent, AND preserve the surviving row's original source_type
+        # (provenance) rather than overwriting it with the caller's default.
         groups = [{"preferred_language", "user_language_preference"}]
-        store = self._make_store(tmp_path, "flagoff.db", groups)
+        store = self._make_store(tmp_path, "datestamp.db", groups)
         try:
-            await store.store_fact("preferred_language", "Python")
+            await store.store_fact(
+                "preferred_language", "Python", source_type="context_flush",
+            )
+            # Backdate the stored row so a successful re-stamp is observable.
+            store.db.execute(
+                "UPDATE facts SET date = '2000-01-01 00:00:00' WHERE key = ?",
+                ("preferred_language",),
+            )
+            store.db.commit()
+            # Near-duplicate key → semantic merge into the same row.
             await store.store_fact("user_language_preference", "Rust")
-            # Flag off: near-dup keys are NOT merged — two rows, today's behavior.
-            assert self._count_facts(store) == 2
-            # Exact-key update still collapses (unchanged behavior).
-            await store.store_fact("preferred_language", "Go")
-            assert self._count_facts(store) == 2
-            assert store._get_fact_by_key("preferred_language").value == "Go"
+            assert self._count_facts(store) == 1
+            date, source_type = store.db.execute(
+                "SELECT date, source_type FROM facts WHERE key = ?",
+                ("user_language_preference",),
+            ).fetchone()
+            # date re-stamped away from the backdated value (counts as recent).
+            assert date is not None and date != "2000-01-01 00:00:00"
+            # source_type provenance preserved from the original row, NOT the
+            # default "conversation" the second store_fact would have applied.
+            assert source_type == "context_flush"
         finally:
             store.close()
 
     @pytest.mark.asyncio
-    async def test_flag_off_no_embedder_unchanged(self, tmp_path, dedup_off):
-        # No embed_fn at all → write path identical to today regardless of flag.
-        store = MemoryStore(db_path=str(tmp_path / "noembed.db"))
-        try:
-            await store.store_fact("preferred_language", "Python")
-            await store.store_fact("user_language_preference", "Rust")
-            assert self._count_facts(store) == 2
-        finally:
-            store.close()
-
-    @pytest.mark.asyncio
-    async def test_no_duplicate_key_orphans_after_semantic_merge(self, tmp_path, dedup_on):
+    async def test_no_duplicate_key_orphans_after_semantic_merge(self, tmp_path):
         # BLOCKER regression: a semantic merge must never rewrite one row's key
         # onto another row's key (which would leave two rows sharing a key — the
         # exact-key dedup path becomes ambiguous and one row is an unreachable
@@ -589,10 +587,11 @@ class TestSemanticDedup:
             store.close()
 
     @pytest.mark.asyncio
-    async def test_dedup_on_no_embedder_graceful(self, tmp_path, dedup_on):
-        # Flag ON but embed_fn is None → no embedding, so the semantic probe is
-        # skipped entirely and the write path falls back to exact-key behavior.
-        store = MemoryStore(db_path=str(tmp_path / "ondnoembed.db"))
+    async def test_no_embedder_falls_back_to_exact_key(self, tmp_path):
+        # embed_fn is None → no embedding, so the semantic probe is skipped
+        # entirely and the write path falls back to exact-key behavior: near-dup
+        # keys stay as two rows; an exact-key re-store still collapses.
+        store = MemoryStore(db_path=str(tmp_path / "noembed.db"))
         try:
             await store.store_fact("preferred_language", "Python")
             await store.store_fact("user_language_preference", "Rust")

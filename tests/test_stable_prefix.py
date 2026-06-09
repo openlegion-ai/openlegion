@@ -1,20 +1,18 @@
-"""Tests for C3 — cache-prefix stabilization (OPENLEGION_STABLE_PREFIX).
+"""Tests for C3 — cache-prefix stabilization.
 
-The flag relocates per-turn-VOLATILE prompt fragments (context/round warnings,
-operator playbooks, 5-min runtime context, the ``## Recent`` memory slice) OUT
-of the cached system block and re-injects them AFTER the mesh-side cache
+Always-on: per-turn-VOLATILE prompt fragments (context/round warnings, operator
+playbooks, 5-min runtime context, the ``## Recent`` memory slice) are relocated
+OUT of the cached system block and re-injected AFTER the mesh-side cache
 breakpoint (into the last message). Goals:
 
-  * flag OFF  → the built system prompt is byte-identical to today's.
-  * flag ON   → volatile fragments are NOT in the system prompt but ARE present
-                later in the message list; role-alternation stays valid.
+  * volatile fragments are NOT in the system prompt but ARE present later in the
+    message list; role-alternation stays valid.
   * the STABLE prefix is byte-identical across two builds that differ ONLY in
-                volatile content (the whole point — prove the prefix is stable).
+    volatile content (the whole point — prove the prefix is stable).
 
 These exercise the prompt BUILDERS directly (no LLM round-trip needed).
 """
 
-import src.agent.loop as loop_mod
 from src.agent.context import ContextManager
 from src.agent.workspace import WorkspaceManager
 from src.shared.types import TaskAssignment
@@ -43,9 +41,8 @@ _RECENT_MARKER = "## Recent"
 _RECENT_BODY = "the user is named Jeff and wants SEO work"
 
 
-def _operator_loop(tmp_path, monkeypatch, *, stable: bool):
+def _operator_loop(tmp_path):
     """A loop with a real workspace + context manager, operator role."""
-    monkeypatch.setattr(loop_mod, "_STABLE_PREFIX", stable)
     ws = WorkspaceManager(workspace_dir=str(tmp_path / "ws"))
     (ws.root / "SOUL.md").write_text("# Identity\n\nI am the operator.\n")
     (ws.root / "INSTRUCTIONS.md").write_text("# Instructions\n\nDo the thing.\n")
@@ -66,50 +63,11 @@ def _chat_prompt(loop, **kw):
     return loop._build_chat_system_prompt(introspect_data=introspect, **kw)
 
 
-# ── Flag OFF: byte-identical to legacy ────────────────────────────────
+# ── Volatile moves out, lands in the message list ─────────────────────
 
 
-def test_flag_off_chat_prompt_byte_identical(tmp_path, monkeypatch):
-    """Flag OFF must rebuild the EXACT legacy prompt (no reordering).
-
-    We assert the two known-volatile fragments (the ``## Recent`` slice and the
-    CONTEXT WARNING) are INLINE in the system prompt, exactly as before, and
-    that no relocation suffix is stashed.
-    """
-    loop = _operator_loop(tmp_path, monkeypatch, stable=False)
-    # Force a CONTEXT WARNING by stuffing the chat history past 80% of 200 tok.
-    loop._chat_messages = [{"role": "user", "content": "x " * 400}]
-
-    prompt = _chat_prompt(loop)
-
-    assert _RECENT_MARKER in prompt
-    assert _RECENT_BODY in prompt
-    assert "CONTEXT WARNING" in prompt
-    # Nothing relocated when the flag is off.
-    assert loop._volatile_prompt_suffix == ""
-    # And the message list is returned untouched (same object).
-    msgs = loop._chat_messages
-    assert loop._messages_with_volatile(msgs) is msgs
-
-
-def test_flag_off_matches_head_inclusive_bootstrap(tmp_path, monkeypatch):
-    """The flag-off system prompt is exactly the legacy one: the bootstrap is
-    head+recent-inclusive and the prompt equals a freshly rebuilt copy."""
-    loop = _operator_loop(tmp_path, monkeypatch, stable=False)
-    p1 = _chat_prompt(loop)
-    # Rebuild again — deterministic, byte-identical.
-    p2 = _chat_prompt(loop)
-    assert p1 == p2
-    # The recent slice lives inside the (head-inclusive) bootstrap block.
-    assert loop.workspace.get_bootstrap_content(include_recent=True) ==  \
-        loop.workspace.get_bootstrap_content()
-
-
-# ── Flag ON: volatile moves out, lands in the message list ────────────
-
-
-def test_flag_on_recent_slice_leaves_system_prompt(tmp_path, monkeypatch):
-    loop = _operator_loop(tmp_path, monkeypatch, stable=True)
+def test_recent_slice_leaves_system_prompt(tmp_path):
+    loop = _operator_loop(tmp_path)
     prompt = _chat_prompt(loop)
 
     # The volatile ``## Recent`` slice is NO LONGER in the system prompt …
@@ -121,8 +79,8 @@ def test_flag_on_recent_slice_leaves_system_prompt(tmp_path, monkeypatch):
     assert _RECENT_BODY in loop._volatile_prompt_suffix
 
 
-def test_flag_on_context_warning_leaves_system_prompt(tmp_path, monkeypatch):
-    loop = _operator_loop(tmp_path, monkeypatch, stable=True)
+def test_context_warning_leaves_system_prompt(tmp_path):
+    loop = _operator_loop(tmp_path)
     loop._chat_messages = [{"role": "user", "content": "x " * 400}]
 
     prompt = _chat_prompt(loop)
@@ -131,10 +89,10 @@ def test_flag_on_context_warning_leaves_system_prompt(tmp_path, monkeypatch):
     assert "CONTEXT WARNING" in loop._volatile_prompt_suffix
 
 
-def test_flag_on_volatile_reinjected_into_last_message(tmp_path, monkeypatch):
+def test_volatile_reinjected_into_last_message(tmp_path):
     """Relocated content must still REACH the model — appended to the last
     message, after the cache breakpoint, without adding a message."""
-    loop = _operator_loop(tmp_path, monkeypatch, stable=True)
+    loop = _operator_loop(tmp_path)
     loop._chat_messages = [{"role": "user", "content": "Hello operator " * 60}]
     _chat_prompt(loop)
 
@@ -149,10 +107,10 @@ def test_flag_on_volatile_reinjected_into_last_message(tmp_path, monkeypatch):
     assert "CONTEXT WARNING" in out[-1]["content"]
 
 
-def test_flag_on_reinjection_handles_multimodal_last_message(tmp_path, monkeypatch):
+def test_reinjection_handles_multimodal_last_message(tmp_path):
     """A list-content (multimodal) last message gets a trailing text block, not
     a clobbered string — and no extra message."""
-    loop = _operator_loop(tmp_path, monkeypatch, stable=True)
+    loop = _operator_loop(tmp_path)
     loop._chat_messages = [
         {"role": "user", "content": [{"type": "text", "text": "pic " * 30}]},
     ]
@@ -172,15 +130,15 @@ def test_flag_on_reinjection_handles_multimodal_last_message(tmp_path, monkeypat
 # ── The whole point: the STABLE prefix is stable ──────────────────────
 
 
-def test_stable_prefix_identical_across_volatile_change(tmp_path, monkeypatch):
+def test_stable_prefix_identical_across_volatile_change(tmp_path):
     """Two builds that differ ONLY in volatile content must yield a
-    byte-identical system prefix when the flag is ON.
+    byte-identical system prefix.
 
     Build A: low context (no warning). Build B: high context (CONTEXT WARNING
-    fires) AND the recent log grows. With the flag ON both must produce the
-    SAME system prompt — that's what makes #1073's cached prefix hit.
+    fires) AND the recent log grows. Both must produce the SAME system prompt —
+    that's what makes #1073's cached prefix hit.
     """
-    loop = _operator_loop(tmp_path, monkeypatch, stable=True)
+    loop = _operator_loop(tmp_path)
 
     # Build A — minimal volatile content.
     loop._chat_messages = [{"role": "user", "content": "hi"}]
@@ -199,36 +157,11 @@ def test_stable_prefix_identical_across_volatile_change(tmp_path, monkeypatch):
     assert "CONTEXT WARNING" in loop._volatile_prompt_suffix  # B had a warning
 
 
-def test_stable_prefix_control_flag_off_prefix_changes(tmp_path, monkeypatch):
-    """Control: with the flag OFF the SAME two builds DO differ (volatile is
-    inline) — proving the stability above is the flag's doing, not a no-op."""
-    loop = _operator_loop(tmp_path, monkeypatch, stable=False)
-
-    loop._chat_messages = [{"role": "user", "content": "hi"}]
-    a = _chat_prompt(loop)
-    loop._chat_messages = [{"role": "user", "content": "x " * 400}]
-    b = _chat_prompt(loop)
-
-    assert a != b  # warning is inline → prompt changes turn-to-turn
-
-
 # ── Task-path builder ─────────────────────────────────────────────────
 
 
-def test_task_builder_flag_off_byte_identical(tmp_path, monkeypatch):
-    loop = _operator_loop(tmp_path, monkeypatch, stable=False)
-    assignment = TaskAssignment(
-        workflow_id="wf", step_id="s", task_type="research", input_data={},
-    )
-    introspect = {"permissions": {}, "budget": None, "fleet": [{"id": "a"}]}
-    prompt = loop._build_system_prompt(assignment, introspect_data=introspect)
-    assert _RECENT_MARKER in prompt
-    assert "## Runtime Context" in prompt
-    assert loop._volatile_prompt_suffix == ""
-
-
-def test_task_builder_flag_on_relocates_runtime_and_recent(tmp_path, monkeypatch):
-    loop = _operator_loop(tmp_path, monkeypatch, stable=True)
+def test_task_builder_relocates_runtime_and_recent(tmp_path):
+    loop = _operator_loop(tmp_path)
     assignment = TaskAssignment(
         workflow_id="wf", step_id="s", task_type="research", input_data={},
     )
@@ -313,10 +246,9 @@ def test_bootstrap_cache_both_slots_detect_external_mtime_change(tmp_path):
     assert _HEAD not in ws.get_bootstrap_content(include_recent=False)
 
 
-def test_no_recent_slice_when_log_empty(tmp_path, monkeypatch):
-    """Flag ON with a head-only MEMORY (no log) stashes nothing extra for the
-    recent slice and the head is still present in the system prompt."""
-    monkeypatch.setattr(loop_mod, "_STABLE_PREFIX", True)
+def test_no_recent_slice_when_log_empty(tmp_path):
+    """A head-only MEMORY (no log) stashes nothing extra for the recent slice
+    and the head is still present in the system prompt."""
     ws = WorkspaceManager(workspace_dir=str(tmp_path / "ws"))
     (ws.root / "MEMORY.md").write_text(_MEMORY_HEAD_ONLY)
     assert ws.get_recent_memory_slice() == ""

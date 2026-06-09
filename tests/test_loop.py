@@ -1037,7 +1037,8 @@ async def test_steer_interrupt_limit():
 
 
 def test_context_warning_in_chat_system_prompt():
-    """When context >= 80%, _build_chat_system_prompt includes CONTEXT WARNING."""
+    """When context >= 80%, the CONTEXT WARNING is emitted as a VOLATILE fragment
+    (relocated out of the cached system prefix, onto _volatile_prompt_suffix)."""
     from src.agent.context import ContextManager
 
     loop = _make_loop()
@@ -1049,7 +1050,9 @@ def test_context_warning_in_chat_system_prompt():
         {"role": "assistant", "content": "y" * 500},
     ]
     prompt = loop._build_chat_system_prompt()
-    assert "CONTEXT WARNING" in prompt
+    # Volatile fragments live below the cache breakpoint, not in the system prompt.
+    assert "CONTEXT WARNING" not in prompt
+    assert "CONTEXT WARNING" in loop._volatile_prompt_suffix
 
 
 def test_context_warning_absent_below_threshold():
@@ -1786,7 +1789,8 @@ class TestRuntimeContextInjection:
     }
 
     def test_task_mode_includes_runtime_context(self):
-        """_build_system_prompt includes ## Runtime Context with introspect data."""
+        """The ## Runtime Context block is emitted as a VOLATILE fragment
+        (relocated below the cache breakpoint, onto _volatile_prompt_suffix)."""
         from src.shared.types import TaskAssignment
 
         loop = _make_loop()
@@ -1795,17 +1799,22 @@ class TestRuntimeContextInjection:
             input_data={"instruction": "do stuff"},
         )
         prompt = loop._build_system_prompt(assignment, introspect_data=self._INTROSPECT_DATA)
-        assert "## Runtime Context" in prompt
-        assert "Budget: daily $0.50/$5.00" in prompt
-        assert "allowed_credentials: brightdata_*" in prompt
+        # Runtime context lives below the cache breakpoint, not in the prompt.
+        assert "## Runtime Context" not in prompt
+        suffix = loop._volatile_prompt_suffix
+        assert "## Runtime Context" in suffix
+        assert "Budget: daily $0.50/$5.00" in suffix
+        assert "allowed_credentials: brightdata_*" in suffix
 
     def test_chat_mode_includes_runtime_context(self):
-        """_build_chat_system_prompt includes ## Runtime Context."""
+        """The ## Runtime Context block is relocated onto _volatile_prompt_suffix."""
         loop = _make_loop()
         prompt = loop._build_chat_system_prompt(introspect_data=self._INTROSPECT_DATA)
-        assert "## Runtime Context" in prompt
-        assert "Budget: daily $0.50/$5.00" in prompt
-        assert "allowed_credentials: brightdata_*" in prompt
+        assert "## Runtime Context" not in prompt
+        suffix = loop._volatile_prompt_suffix
+        assert "## Runtime Context" in suffix
+        assert "Budget: daily $0.50/$5.00" in suffix
+        assert "allowed_credentials: brightdata_*" in suffix
 
     def test_chat_mode_excludes_fleet_from_runtime_when_fleet_ctx_present(self):
         """When fleet_roster is provided, fleet line is excluded from runtime context."""
@@ -1815,15 +1824,19 @@ class TestRuntimeContextInjection:
             fleet_roster=roster,
             introspect_data=self._INTROSPECT_DATA,
         )
-        # Detailed fleet block should be present
+        # Detailed fleet block should be present in the stable system prompt.
         assert "Your Team" in prompt
-        # Runtime context should NOT duplicate fleet
-        # Split on "## Runtime Context" to check just that section
-        runtime_section = prompt.split("## Runtime Context")[1] if "## Runtime Context" in prompt else ""
+        # The relocated runtime context (now volatile) must NOT duplicate fleet.
+        suffix = loop._volatile_prompt_suffix
+        runtime_section = (
+            suffix.split("## Runtime Context")[1]
+            if "## Runtime Context" in suffix else ""
+        )
         assert "Fleet:" not in runtime_section
 
     def test_task_mode_includes_fleet_in_runtime(self):
-        """Task mode has no detailed fleet block, so fleet shows in runtime context."""
+        """Task mode has no detailed fleet block, so fleet shows in the runtime
+        context — which is now relocated onto _volatile_prompt_suffix."""
         from src.shared.types import TaskAssignment
 
         loop = _make_loop()
@@ -1831,8 +1844,8 @@ class TestRuntimeContextInjection:
             workflow_id="wf1", step_id="s1", task_type="test",
             input_data={"instruction": "do stuff"},
         )
-        prompt = loop._build_system_prompt(assignment, introspect_data=self._INTROSPECT_DATA)
-        assert "Fleet: [test_agent, bob]" in prompt
+        loop._build_system_prompt(assignment, introspect_data=self._INTROSPECT_DATA)
+        assert "Fleet: [test_agent, bob]" in loop._volatile_prompt_suffix
 
     def test_no_introspect_data_no_runtime_context(self):
         """Without introspect data, no runtime context block."""

@@ -205,6 +205,11 @@ async def test_high_salience_prefers_recent_on_tie(memory):
 # --- inject-head-only flag ---------------------------------------------------
 
 class TestInjectHeadOnly:
+    """The head-only split is a builder-layer option (``include_recent=``), not
+    an env flag. The default injection still carries the recent slice; the
+    head-only variant drops it while the log stays on disk + searchable.
+    """
+
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()
         self.ws = WorkspaceManager(workspace_dir=self._tmpdir)
@@ -214,24 +219,27 @@ class TestInjectHeadOnly:
     def teardown_method(self):
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def test_flag_off_injects_head_and_recent(self, monkeypatch):
-        monkeypatch.delenv("OPENLEGION_INJECT_HEAD_ONLY", raising=False)
+    def test_default_injects_head_and_recent(self):
+        # Default (include_recent=True) carries both the head and recent slice.
         injected = self.ws.get_memory_injection()
         assert "COMPILED_HEAD_MARKER" in injected
         assert "RECENT_LOG_MARKER" in injected
         assert "## Recent" in injected
+        # Explicit include_recent=True matches the default.
+        assert self.ws.get_memory_injection(include_recent=True) == injected
 
-    def test_flag_on_drops_recent_keeps_head(self, monkeypatch):
-        monkeypatch.setenv("OPENLEGION_INJECT_HEAD_ONLY", "1")
-        injected = self.ws.get_memory_injection()
+    def test_head_only_drops_recent_keeps_head(self):
+        # include_recent=False returns the stable head WITHOUT the recent slice.
+        injected = self.ws.get_memory_injection(include_recent=False)
         assert "COMPILED_HEAD_MARKER" in injected
         assert "RECENT_LOG_MARKER" not in injected
         assert "## Recent" not in injected
 
-    def test_flag_on_log_stays_searchable(self, monkeypatch):
-        monkeypatch.setenv("OPENLEGION_INJECT_HEAD_ONLY", "1")
-        # Dropped from injection, but still on disk + searchable.
-        assert "RECENT_LOG_MARKER" not in self.ws.get_memory_injection()
+    def test_head_only_log_stays_searchable(self):
+        # Dropped from the head-only injection, but still on disk + searchable.
+        assert "RECENT_LOG_MARKER" not in self.ws.get_memory_injection(
+            include_recent=False,
+        )
         assert "RECENT_LOG_MARKER" in self.ws.load_memory_log()
         files = {r["file"] for r in self.ws.search("RECENT_LOG_MARKER")}
         assert "MEMORY.md" in files
