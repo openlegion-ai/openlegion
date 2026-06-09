@@ -1093,25 +1093,32 @@ async def workflow_snapshot(
 # attempts) can't push our wall-clock past the ceiling — the per-poll
 # budget bounds each iteration to a known maximum.
 _AWAIT_TASK_EVENT_POLL_BUDGET_S = 15
-_AWAIT_TASK_EVENT_MAX_TIMEOUT_S = 270
-_AWAIT_TASK_EVENT_DEFAULT_TIMEOUT_S = 240
+# Demoted (delegate-and-subscribe, Phase 1d): await_task_event is now a SHORT
+# in-turn pickup-confirmation primitive, NOT an end-to-end pipeline watch. The
+# durable chain watcher delivers the guaranteed terminal outcome, so the
+# operator hands off and releases the turn. The cap is kept well under the
+# 120s streaming idle / non-streaming transport timeout so a single call always
+# returns cleanly on every path (no turn teardown).
+_AWAIT_TASK_EVENT_MAX_TIMEOUT_S = 90
+_AWAIT_TASK_EVENT_DEFAULT_TIMEOUT_S = 45
 
 
 @tool(
     name="await_task_event",
     operator_only=True,
     description=(
-        "Block until a specific task reaches a terminal status (done / "
-        "failed / blocked / cancelled) or the timeout elapses. Polls "
-        "the task's durable status (the authoritative tasks-store "
-        "record) with exponential backoff. Use "
-        "this when you need to wait for one specific child task to "
-        "finish before proceeding (e.g. confirming a setup handoff). "
-        "For multi-stage chains, prefer workflow_snapshot — this tool "
-        "is a single-task blocking primitive. Max timeout is 270s so "
-        "the call can return cleanly before the agent loop's tool "
-        "execution ceiling cancels it. Returns the terminal event or "
-        "{'timed_out': true, 'last_status_seen': '...'} on timeout."
+        "Briefly confirm that ONE specific task was picked up before you "
+        "continue in the SAME turn (e.g. verifying a setup handoff landed). "
+        "Polls the task's durable status with exponential backoff and "
+        "returns its terminal event if it finishes quickly, else "
+        "{'timed_out': true, 'last_status_seen': '...'}. Max ~90s. "
+        "\n\nDO NOT use this to watch a multi-hop pipeline to completion. "
+        "After handing user work to the team, acknowledge and RELEASE the "
+        "turn — the system delivers a guaranteed final outcome (done / "
+        "failed / stalled) to the user automatically. On 'timed_out', do "
+        "NOT keep re-calling to babysit; tell the user it's running and "
+        "end your turn. For a one-shot read of chain state, use "
+        "workflow_snapshot (non-blocking)."
     ),
     parameters={
         "task_id": {
@@ -1121,8 +1128,9 @@ _AWAIT_TASK_EVENT_DEFAULT_TIMEOUT_S = 240
         "timeout_s": {
             "type": "integer",
             "description": (
-                "Max seconds to wait (default 240; capped at 270 "
-                "below the 300s tool execution ceiling)"
+                "Max seconds to wait for a quick pickup confirmation "
+                "(default 45; capped at 90, kept under the streaming idle "
+                "timeout so the call always returns cleanly)"
             ),
             "default": _AWAIT_TASK_EVENT_DEFAULT_TIMEOUT_S,
         },
