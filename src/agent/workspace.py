@@ -518,10 +518,9 @@ class WorkspaceManager:
         slice), or "" if there's nothing recent.
 
         This is the per-turn-volatile fragment that the cache-prefix
-        stabilization path (loop._STABLE_PREFIX) relocates OUT of the cached
-        system prompt and re-injects after the cache breakpoint. The stable
-        head stays in the system prompt via ``get_memory_injection(
-        include_recent=False)``.
+        stabilization path relocates OUT of the cached system prompt and
+        re-injects after the cache breakpoint. The stable head stays in the
+        system prompt via ``get_memory_injection(include_recent=False)``.
         """
         recent = self._recent_log_slice()
         return f"## Recent\n\n{recent}".strip() if recent else ""

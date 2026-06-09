@@ -1,7 +1,7 @@
 """Grouped Tool Search bridge — the ``load_tools`` builtin (Phase 2 / B2).
 
-When grouped tool search is active (``OPENLEGION_GROUPED_TOOLS`` on AND the
-budget gate trips), most non-core tools are advertised cheaply in the system
+When grouped tool search is active (the budget gate trips on a large enough
+tool surface), most non-core tools are advertised cheaply in the system
 prompt's capability index but their full schemas are deferred. ``load_tools``
 is the explicit, always-available bridge that pulls a group's (or a single
 tool's owning group's) full schemas into context for the agent's NEXT turn —

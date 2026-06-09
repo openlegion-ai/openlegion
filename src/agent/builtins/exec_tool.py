@@ -25,12 +25,6 @@ _MAX_TIMEOUT = 300
 # capture tool — the hermes-style "call agent tools from inside the code" bridge
 # is OUT of scope (see _DEFERRED note below). No recursion into execute_code or
 # delegate.
-#
-# Ships dormant: gated behind OPENLEGION_EXECUTE_CODE (default off). When off
-# the schema is hidden from the worker surface (see _EXECUTE_CODE_TOOLS in
-# loop.py) AND the handler self-rejects (defense-in-depth for the operator
-# allowlist path).
-EXECUTE_CODE_ENABLED_ENV = "OPENLEGION_EXECUTE_CODE"
 
 # Tighter cap than run_command's 100 KB: this is "what the model printed",
 # meant to flow straight back into context, so keep it lean.
@@ -53,13 +47,6 @@ _SAFE_ENV_KEYS = (
     "PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TERM",
     "PYTHONIOENCODING", "PYTHONHASHSEED",
 )
-
-
-def execute_code_enabled() -> bool:
-    """True iff the code-as-action ``execute_code`` tool is opted in."""
-    return os.environ.get(EXECUTE_CODE_ENABLED_ENV, "").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
 
 
 def _is_sensitive_env_name(name: str) -> bool:
@@ -200,18 +187,6 @@ async def execute_code(code: str, timeout: int = 30) -> dict:
     ``_scrubbed_env``). Intermediate values stay out of context: only what the
     snippet print()s is returned.
     """
-    # Ships dormant. The worker surface hides the schema when the flag is off
-    # (see _EXECUTE_CODE_TOOLS in loop.py); this self-reject also covers the
-    # operator allowlist path, which doesn't go through that exclusion.
-    if not execute_code_enabled():
-        return {
-            "exit_code": -1,
-            "stdout": "",
-            "stderr": (
-                "execute_code is disabled. Set OPENLEGION_EXECUTE_CODE=1 to enable "
-                "it, or use run_command instead."
-            ),
-        }
     if not isinstance(code, str) or not code.strip():
         return {"exit_code": -1, "stdout": "", "stderr": "code must be a non-empty string"}
 

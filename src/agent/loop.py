@@ -21,7 +21,6 @@ from src.agent.attachments import enrich_message_with_attachments
 from src.agent.loop_detector import ToolLoopDetector
 from src.agent.tool_groups import (
     GroupedPlan,
-    grouped_tools_enabled,
     plan_grouped_tools,
     resolve_load_request,
 )
@@ -54,9 +53,7 @@ _TOOL_TIMEOUT = int(os.environ.get("OPENLEGION_TOOL_TIMEOUT", "900"))  # seconds
 # memory slice) are relocated OUT of the cached system block and appended
 # AFTER the mesh-side cache breakpoint (into the last message) so the stable
 # system prefix stays byte-identical turn-to-turn and #1073's prompt cache
-# actually hits. Default OFF: flag-off rebuilds the exact legacy prompt, so
-# behavior (instruction ordering is weighting-sensitive) is unchanged.
-_STABLE_PREFIX = os.environ.get("OPENLEGION_STABLE_PREFIX", "false").lower() == "true"
+# actually hits. Volatile fragments are relocated below the cache breakpoint.
 _FLEET_ROSTER_TTL = 600  # seconds — cache TTL for fleet roster
 _GOALS_TTL = 300  # seconds — cache TTL for goals fetch
 _FALLBACK_MAX_TOKENS = 100_000  # context trim fallback when no context manager
@@ -407,10 +404,8 @@ class AgentLoop:
         self._last_result: TaskResult | None = None
         self._chat_messages: list[dict] = []
         # C3 — per-turn-volatile prompt fragments relocated out of the cached
-        # system block by ``_build_*_system_prompt`` when ``_STABLE_PREFIX`` is
-        # ON. Re-injected after the cache breakpoint via
-        # ``_messages_with_volatile`` at the LLM call site. Always "" when the
-        # flag is OFF (legacy path leaves these IN the system prompt).
+        # system block by ``_build_*_system_prompt``. Re-injected after the cache
+        # breakpoint via ``_messages_with_volatile`` at the LLM call site.
         self._volatile_prompt_suffix: str = ""
         self._chat_lock = asyncio.Lock()
         self._chat_total_rounds: int = 0
@@ -483,7 +478,7 @@ class AgentLoop:
             self._disabled_gates.add("browser")
         self._runtime_disabled_tools: frozenset[str] = frozenset()
         self._recompute_runtime_disabled()
-        # ── Grouped Tool Search (B2, default-OFF via OPENLEGION_GROUPED_TOOLS) ──
+        # ── Grouped Tool Search (budget-gated capability index + lazy schemas) ──
         # ``_loaded_tool_groups`` are groups whose full schemas are present in
         # context. ``_pending_tool_groups`` are groups requested via
         # ``load_tools`` this turn — promoted into ``_loaded_tool_groups`` at the
@@ -576,11 +571,8 @@ class AgentLoop:
         invariant this feature defers to the next turn boundary.
 
         Returns the capability-index text to append to the system prompt (""
-        when the feature is off or the budget gate didn't trip).
+        when the budget gate didn't trip).
         """
-        if not grouped_tools_enabled():
-            self._grouped_plan = None
-            return ""
         # Apply deferred loads requested last turn — ONLY at a turn boundary.
         if promote_pending and self._pending_tool_groups:
             self._loaded_tool_groups |= self._pending_tool_groups
@@ -609,10 +601,10 @@ class AgentLoop:
         deferred to the next system-prompt build (``_refresh_grouped_plan``) so
         the toolset stays stable for the remainder of the current turn.
         """
-        if not grouped_tools_enabled():
+        if self._grouped_plan is None or not self._grouped_plan.active:
             return {
                 "loaded": [],
-                "note": "Grouped tool search is disabled; all tools already loaded.",
+                "note": "All tools are already loaded; no deferral is active.",
             }
         base_kw = {
             k: v for k, v in self._tool_filter_kw.items() if k != "defer"
@@ -1082,15 +1074,10 @@ class AgentLoop:
                     self.context_manager.context_warning(messages)
                     if self.context_manager else None
                 )
-                if _STABLE_PREFIX:
-                    iter_suffix = "\n\n".join(
-                        p for p in (self._volatile_prompt_suffix, f"## {warning}" if warning else "") if p
-                    )
-                    eff_messages = self._append_volatile_to_messages(messages, iter_suffix)
-                else:
-                    if warning:
-                        effective_system = system_prompt + f"\n\n## {warning}"
-                    eff_messages = messages
+                iter_suffix = "\n\n".join(
+                    p for p in (self._volatile_prompt_suffix, f"## {warning}" if warning else "") if p
+                )
+                eff_messages = self._append_volatile_to_messages(messages, iter_suffix)
 
                 available_tools = self.tools.get_tool_definitions(**self._tool_filter_kw) or None
                 llm_response = await _llm_call_with_retry(
@@ -1866,14 +1853,14 @@ class AgentLoop:
     ) -> str:
         parts = []
         # C3 — see _build_chat_system_prompt. Volatile fragments are stashed on
-        # self._volatile_prompt_suffix and re-injected after the cache
-        # breakpoint when _STABLE_PREFIX is ON; inline (legacy) otherwise.
+        # self._volatile_prompt_suffix and re-injected after the cache breakpoint
+        # so the cached system prefix stays byte-identical turn-to-turn.
         volatile: list[str] = []
-        stable = _STABLE_PREFIX
 
-        # Load workspace identity + project files into system prompt
+        # Load workspace identity + project files into system prompt. The head is
+        # stable (cached); the ## Recent slice is relocated below the breakpoint.
         if self.workspace:
-            bootstrap = self.workspace.get_bootstrap_content(include_recent=not stable)
+            bootstrap = self.workspace.get_bootstrap_content(include_recent=False)
             if bootstrap:
                 parts.append(bootstrap)  # pre-sanitized by workspace cache
 
@@ -1917,12 +1904,12 @@ class AgentLoop:
         if tool_history:
             parts.append(sanitize_for_prompt(tool_history))
 
-        # ── Volatile fragments (relocated below the cache breakpoint when ON). ──
-        sink = volatile if stable else parts
+        # ── Volatile fragments (relocated below the cache breakpoint). ──
+        sink = volatile
 
-        # Relocated ``## Recent`` memory slice (only when stable — otherwise it
-        # is already embedded in the head-inclusive bootstrap above).
-        if stable and self.workspace:
+        # Relocated ``## Recent`` memory slice (the stable head above is
+        # head-only; the recent slice rides after the cache breakpoint).
+        if self.workspace:
             recent = self.workspace.get_recent_memory_slice()
             if recent:
                 sink.append(sanitize_for_prompt(recent))
@@ -4386,22 +4373,20 @@ class AgentLoop:
         promote_pending: bool = False,
     ) -> str:
         parts = []
-        # C3 cache-prefix stabilization: when ON, per-turn-volatile fragments
-        # are collected here instead of appended to ``parts``, so the returned
-        # system block stays byte-identical across turns (the cacheable prefix).
-        # They are re-injected after the cache breakpoint via
-        # ``_messages_with_volatile``. When OFF, ``volatile`` is unused and the
-        # fragments stay inline in ``parts`` exactly as before — byte-identical.
+        # C3 cache-prefix stabilization: per-turn-volatile fragments are
+        # collected in ``volatile`` instead of appended to ``parts``, so the
+        # returned system block stays byte-identical across turns (the cacheable
+        # prefix). They are re-injected after the cache breakpoint via
+        # ``_messages_with_volatile``.
         volatile: list[str] = []
-        stable = _STABLE_PREFIX
 
         if goals:
             parts.append(f"## Your Current Goals\n\n{sanitize_for_prompt(format_dict(goals))}")
 
         if self.workspace:
-            # Stable path drops the volatile ``## Recent`` memory slice from the
-            # cached bootstrap (head-only) and relocates it below.
-            bootstrap = self.workspace.get_bootstrap_content(include_recent=not stable)
+            # Head-only bootstrap (cached); the volatile ``## Recent`` memory
+            # slice is relocated below the cache breakpoint.
+            bootstrap = self.workspace.get_bootstrap_content(include_recent=False)
             if bootstrap:
                 parts.append(bootstrap)  # pre-sanitized by workspace cache
 
@@ -4472,13 +4457,12 @@ class AgentLoop:
         if tool_history:
             parts.append(sanitize_for_prompt(tool_history))
 
-        # ── Volatile fragments (relocated below the cache breakpoint when the
-        # stable-prefix flag is ON; inline otherwise — byte-identical legacy). ──
-        sink = volatile if stable else parts
+        # ── Volatile fragments (relocated below the cache breakpoint). ──
+        sink = volatile
 
-        # Relocated ``## Recent`` memory slice (only when stable — otherwise it
-        # is already embedded in the head-inclusive bootstrap above).
-        if stable and self.workspace:
+        # Relocated ``## Recent`` memory slice (the stable head above is
+        # head-only; the recent slice rides after the cache breakpoint).
+        if self.workspace:
             recent = self.workspace.get_recent_memory_slice()
             if recent:
                 sink.append(sanitize_for_prompt(recent))
@@ -4540,13 +4524,13 @@ class AgentLoop:
         """Append ``suffix`` after the cache breakpoint by folding it into a
         COPY of the last message's content.
 
-        No-op (returns the same list) when ``_STABLE_PREFIX`` is off or there
-        is nothing to relocate — so the legacy path is untouched. When active,
-        the persistent ``messages``/``_chat_messages`` list is never mutated
-        and NO new message is added — whatever the last message's role is stays
-        the last message's role, so role-alternation (Constraint #7) holds.
+        No-op (returns the same list) when there is nothing to relocate. When
+        active, the persistent ``messages``/``_chat_messages`` list is never
+        mutated and NO new message is added — whatever the last message's role
+        is stays the last message's role, so role-alternation (Constraint #7)
+        holds.
         """
-        if not _STABLE_PREFIX or not suffix or not messages:
+        if not suffix or not messages:
             return messages
         out = list(messages)
         last = dict(out[-1])

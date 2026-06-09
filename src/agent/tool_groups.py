@@ -12,9 +12,8 @@ awareness of a capability ("it knows exactly what to do"). Three layers:
 
 This is **budget-gated**: the index + deferral only activate when an agent's
 deferrable schemas exceed a fraction of the context window. Small-toolset
-agents present everything unchanged (no behaviour change). The whole feature
-is **default-OFF** behind ``OPENLEGION_GROUPED_TOOLS`` — see
-``grouped_tools_enabled()``.
+agents present everything unchanged (no behaviour change) — the budget gate is
+the sole activation control.
 
 Groups are defined here as DATA (a registry mapping group → tool names +
 one-line intent + role-eligibility). Applies to BOTH operator and worker
@@ -24,11 +23,7 @@ allowed/exclude surface, so the index naturally renders only what it can call.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
-
-# Env flag — the entire grouped-tool path is dormant unless this is set.
-GROUPED_TOOLS_ENV = "OPENLEGION_GROUPED_TOOLS"
 
 # Budget gate: only activate index+defer when the deferrable tools' estimated
 # schema cost exceeds this fraction of the model's context window. Mirrors
@@ -40,17 +35,6 @@ BUDGET_FRACTION = 0.10
 # 120-180 tokens; we use a conservative midpoint so the gate trips on genuinely
 # large surfaces, not marginal ones. Only used for the gate, never for billing.
 SCHEMA_TOKENS_PER_TOOL = 150
-
-
-def grouped_tools_enabled() -> bool:
-    """True iff the grouped-tool-search path is opted in via env flag.
-
-    Default OFF — the feature ships dormant. When false, every code path in
-    this module no-ops and the agent presents its full tool surface unchanged.
-    """
-    return os.environ.get(GROUPED_TOOLS_ENV, "").strip().lower() in (
-        "1", "true", "yes", "on",
-    )
 
 
 @dataclass(frozen=True)
@@ -246,9 +230,6 @@ def plan_grouped_tools(
     pulled in via ``load_tools`` (their schemas stay present). *operator* —
     role eligibility for operator-only groups.
     """
-    if not grouped_tools_enabled():
-        return GroupedPlan(active=False)
-
     groups = _available_for_role(available, operator=operator)
     # Deferrable universe = grouped tools present in this agent's surface.
     deferrable = {t for g in groups for t in g.tools if t in available}
