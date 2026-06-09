@@ -276,6 +276,43 @@ def test_bootstrap_cache_slots_independent(tmp_path):
     assert ws.get_bootstrap_content(include_recent=False) == head_only
 
 
+def test_bootstrap_cache_both_slots_detect_external_mtime_change(tmp_path):
+    """Regression: an mtime-triggered rebuild of ONE variant must not mark the
+    OTHER variant fresh. Each slot owns its own mtime snapshot, so an external
+    write to MEMORY.md (one that does NOT explicitly clear the caches) is picked
+    up by BOTH variants on their next call — neither serves stale content."""
+    import os
+
+    ws = WorkspaceManager(workspace_dir=str(tmp_path / "ws"))
+    memory = ws.root / "MEMORY.md"
+    memory.write_text(_MEMORY_WITH_RECENT)
+
+    # Warm BOTH cache slots against the original content.
+    assert _HEAD in ws.get_bootstrap_content(include_recent=True)
+    assert _HEAD in ws.get_bootstrap_content(include_recent=False)
+
+    # Simulate an EXTERNAL change: write directly to the file and bump its
+    # mtime, bypassing append_memory/write_compiled_memory/update_file (the
+    # paths that explicitly clear the caches). Only the lazy mtime check applies.
+    new_head = "The user now prefers verbose answers. The live fleet is sales."
+    memory.write_text(
+        "# Long-Term Memory\n\n"
+        "<!-- compiled:begin -->\n"
+        f"{new_head}\n"
+        "<!-- compiled:end -->\n\n"
+        "## 2026-06-09T11:00 flush\n\n"
+        "- learned: the user switched preferences\n"
+    )
+    future = memory.stat().st_mtime + 10
+    os.utime(memory, (future, future))
+
+    # BOTH variants must observe the new content (no stale slot).
+    assert new_head in ws.get_bootstrap_content(include_recent=True)
+    assert new_head in ws.get_bootstrap_content(include_recent=False)
+    assert _HEAD not in ws.get_bootstrap_content(include_recent=True)
+    assert _HEAD not in ws.get_bootstrap_content(include_recent=False)
+
+
 def test_no_recent_slice_when_log_empty(tmp_path, monkeypatch):
     """Flag ON with a head-only MEMORY (no log) stashes nothing extra for the
     recent slice and the head is still present in the system prompt."""

@@ -282,7 +282,12 @@ class WorkspaceManager:
         # cache-prefix-stabilization path (MEMORY.md injected WITHOUT the
         # volatile ``## Recent`` slice so the system prefix stays stable).
         self._bootstrap_cache_stable: str | None = None
+        # Each cache slot owns its OWN mtime snapshot. They must NOT be shared:
+        # the lazy mtime-triggered rebuild path only rebuilds the requested
+        # variant, so a shared snapshot would mark the OTHER slot fresh and
+        # serve stale content for the rest of the process lifetime.
         self._bootstrap_mtimes: dict[str, float] = {}
+        self._bootstrap_mtimes_stable: dict[str, float] = {}
         self._learnings_cache: str | None = None
         self._learnings_mtimes: dict[str, float] = {}
 
@@ -599,10 +604,13 @@ class WorkspaceManager:
         and is memoized in a separate cache slot so it can't be conflated with
         the default (recent-included) variant.
         """
-        cache_attr = "_bootstrap_cache" if include_recent else "_bootstrap_cache_stable"
+        if include_recent:
+            cache_attr, mtimes = "_bootstrap_cache", self._bootstrap_mtimes
+        else:
+            cache_attr, mtimes = "_bootstrap_cache_stable", self._bootstrap_mtimes_stable
         cached = getattr(self, cache_attr)
         if cached is not None and not self._check_mtimes(
-            self._BOOTSTRAP_FILES, self._bootstrap_mtimes,
+            self._BOOTSTRAP_FILES, mtimes,
         ):
             return cached
 
@@ -657,7 +665,7 @@ class WorkspaceManager:
         # Pre-sanitize so callers never need to re-sanitize unchanged content
         combined = sanitize_for_prompt(combined)
 
-        self._snapshot_mtimes(self._BOOTSTRAP_FILES, self._bootstrap_mtimes)
+        self._snapshot_mtimes(self._BOOTSTRAP_FILES, mtimes)
         setattr(self, cache_attr, combined)
         return combined
 
