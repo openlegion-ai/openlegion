@@ -260,8 +260,8 @@ All file operations are scoped to the container's `/data` volume.
 Workspace files (the agent's own `SOUL.md` / `INSTRUCTIONS.md` / `MEMORY.md` / etc.) are managed through a dedicated `/workspace/{filename}` endpoint on the **agent's own** FastAPI server, not via the general `/data` file tools. Three protections:
 
 - **`_WORKSPACE_ALLOWLIST` frozenset** (`src/agent/server.py`) — 9 entries: `SOUL.md`, `HEARTBEAT.md`, `USER.md`, `INSTRUCTIONS.md`, `AGENTS.md`, `MEMORY.md`, `INTERFACE.md`, `GOALS.md`, `GOALS.json`. Reads / writes to anything outside this list return HTTP 400.
-- **`_FILE_CAPS`** (`src/agent/server.py:332-340`) — char-count caps per file, enforced on `PUT` with HTTP 413 on overflow: `SOUL.md=4000`, `INSTRUCTIONS.md=12000`, `AGENTS.md=12000`, `USER.md=4000`, `MEMORY.md=16000`, `INTERFACE.md=4000`, `HEARTBEAT.md=None` (uncapped).
-- **`x-mesh-internal` gate on `PUT /workspace/{filename}`** (`src/agent/server.py:397-402`) — the agent cannot call its own workspace endpoint via `http_tool` or `exec+curl`. Writes must originate from the mesh on loopback with the internal header set. Reads from the agent's own loop are allowed without the gate.
+- **`_FILE_CAPS`** (`src/agent/server.py:480-492`) — char-count caps per file, enforced on `PUT` with HTTP 413 on overflow: `SOUL.md=4000`, `INSTRUCTIONS.md=12000`, `AGENTS.md=12000`, `USER.md=4000`, `MEMORY.md=16000`, `INTERFACE.md=4000`, `HEARTBEAT.md=None` (uncapped).
+- **`x-mesh-internal` gate on `PUT /workspace/{filename}`** (`src/agent/server.py:550-555`) — the agent cannot call its own workspace endpoint via `http_tool` or `exec+curl`. Writes must originate from the mesh on loopback with the internal header set. Reads from the agent's own loop are allowed without the gate.
 
 ### Tool Self-Authoring
 
@@ -283,7 +283,7 @@ See `docs/security-remediation-review-2026-05-29.md` (M1, H15) for the full find
 - Task mode: 20 iterations maximum (`AgentLoop.MAX_ITERATIONS`)
 - Chat mode: 30 tool rounds maximum per turn (`CHAT_MAX_TOOL_ROUNDS`), auto-compaction every 200 rounds (`CHAT_MAX_TOTAL_ROUNDS`) with session continuation (up to 5 auto-continues)
 - Per-agent token budgets enforced at the vault layer
-- CAPTCHA solver activity is bounded by a per-agent rate limit (default 20/hr), per-agent and per-tenant monthly cost caps, and pacing jitter (3000–12000 ms between solves) — see CAPTCHA Solver Controls below
+- CAPTCHA solver activity is bounded by a per-agent rate limit (default 5000/hr), per-agent and per-tenant monthly cost caps, and pacing jitter (3000–12000 ms between solves) — see CAPTCHA Solver Controls below
 - Prevents runaway loops and unbounded spend
 
 ### Rate Limiting
@@ -310,7 +310,7 @@ Per-agent rate limits on mesh endpoints prevent abuse and resource exhaustion:
 | `upload_apply` | 3000 requests | 60 seconds |
 | `auth_failure` | 60 requests | 60 seconds |
 
-`_RATE_LIMITS` declares 17 entries statically in `src/host/server.py:788-815`; `ext_credentials` and `ext_status` are registered dynamically when external-API support initializes. All other endpoints fall through to the default `(10000, 60)` — i.e. 10000 requests per 60 seconds. These ceilings exist to catch a genuinely runaway loop in a single-tenant deployment; cost budgets (`costs.py`) and per-tx wallet caps are the real spend guardrails.
+`_RATE_LIMITS` declares 17 entries statically in `src/host/server.py:1033-1072`; `ext_credentials` and `ext_status` are registered dynamically when external-API support initializes. All other endpoints fall through to the default `(10000, 60)` — i.e. 10000 requests per 60 seconds. These ceilings exist to catch a genuinely runaway loop in a single-tenant deployment; cost budgets (`costs.py`) and per-tx wallet caps are the real spend guardrails.
 
 Exceeding a rate limit returns HTTP 429. Rate-limit buckets are automatically cleaned up when agents are deregistered.
 
@@ -387,9 +387,9 @@ The mesh distinguishes three caller tiers, but only **two** identification mecha
 
 | Tier | How identified | Used by |
 |------|----------------|---------|
-| **Agent** | `Authorization: Bearer <token>` matched via `hmac.compare_digest` against the per-agent token issued at startup (`_extract_verified_agent_id`, `src/host/server.py:830-862`). | Normal `/mesh/*` calls from agent containers |
+| **Agent** | `Authorization: Bearer <token>` matched via `hmac.compare_digest` against the per-agent token issued at startup (`_extract_verified_agent_id`, `src/host/server.py:1180-1220`). | Normal `/mesh/*` calls from agent containers |
 | **Operator** | Same Bearer mechanism as Agent, but the token matches `_auth_tokens["operator"]` (`server.py:864-873`). There is no separate operator-session header on the mesh; the dashboard's `ol_session` cookie is a distinct surface that protects the dashboard UI itself (and the VNC proxy), not `/mesh/*` calls. | Dashboard-originated mutations, fleet-management routes, operator-as-agent calls |
-| **Internal** | `x-mesh-internal: 1` header **AND** loopback `request.client.host` (`_is_internal_caller`, `server.py:314-337`). Either alone is insufficient. | Same-host startup glue, browser-service ↔ mesh polling |
+| **Internal** | `x-mesh-internal: 1` header **AND** loopback `request.client.host` (`_is_internal_caller`, `server.py:432-455`). Either alone is insufficient. | Same-host startup glue, browser-service ↔ mesh polling |
 
 When `_auth_tokens` is empty (dev/unconfigured), `_extract_verified_agent_id` returns `"unknown"` and authentication is effectively off — operators running in that mode should know auth is fully disabled.
 
@@ -423,7 +423,7 @@ In other words: any guarantee about token replay / single-use lives outside engi
 ### Dashboard XSS / CSRF Posture
 
 - **Primary XSS defense is Jinja `autoescape=True`** on dashboard templates. CSP is set on the dashboard index (`script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; …`) but the `'unsafe-inline'` + `'unsafe-eval'` allowances are required for Alpine.js's `Function()` constructor and the Tailwind CDN. Be honest: those allowances materially weaken CSP's XSS-mitigation value — treat CSP here as defense-in-depth around the source-origin guarantees (`default-src 'self'`, `object-src 'none'`), not as XSS protection in its own right.
-- **CSRF**: state-changing dashboard endpoints require the `X-Requested-With` header (`_csrf_check`, `src/dashboard/server.py:716-726`), wired as a global router dependency on `/dashboard/*`. Relies on browsers' CORS preflight blocking custom headers from cross-origin scripts.
+- **CSRF**: state-changing dashboard endpoints require the `X-Requested-With` header (`_csrf_check`, `src/dashboard/server.py:784-794`), wired as a global router dependency on `/dashboard/*`. Relies on browsers' CORS preflight blocking custom headers from cross-origin scripts.
 
 ### VNC Reverse Proxy
 
@@ -438,7 +438,7 @@ The proxy then attaches a service-tier Bearer for the upstream browser-service c
 
 Several browser-related dashboard endpoints are operator-only because they let a human inject state into agent sessions:
 
-- `POST /api/agents/{agent_id}/browser/import_cookies` — operator imports cookie / session data into the named agent's browser. 256 KB body cap, 10 imports / hour rate limit, audit-logged. Agent-tier callers cannot use this — only operator session.
+- `POST /api/agents/{agent_id}/browser/import_cookies` — operator imports cookie / session data into the named agent's browser. 256 KB body cap, 60 imports / hour rate limit, audit-logged. Agent-tier callers cannot use this — only operator session.
 - `POST /api/agents/{agent_id}/fingerprint-health/reset` — clears the rolling rejection window after the operator rotates the agent's stealth profile (see Fingerprint Burn Detection below). CSRF-guarded by router.
 - `POST /api/browser-captcha-help/complete` and `/cancel` — operator-side resolution of an agent's CAPTCHA help request.
 
