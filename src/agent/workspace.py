@@ -27,7 +27,6 @@ from __future__ import annotations
 import contextlib
 import json
 import math
-import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -106,17 +105,6 @@ _MEMORY_FILE_MAX = 64_000
 # Newest slice of the log injected alongside the compiled head.
 _MEMORY_RECENT_LOG_CHARS = 5_000
 
-
-def _inject_head_only() -> bool:
-    """Flag-gated (memory v2): when enabled, ``get_memory_injection`` injects
-    ONLY the compiled head and drops the ``## Recent`` log slice, per gbrain's
-    "inject only the head". Older log entries remain searchable via
-    memory_search. Read per-call so it can be toggled without a process
-    restart. Default OFF — it changes what is injected every turn.
-    """
-    return os.environ.get("OPENLEGION_INJECT_HEAD_ONLY", "").lower() in (
-        "1", "true", "yes", "on",
-    )
 
 # Public mapping for external consumers (tool response, dashboard).
 # Files not listed have no per-file bootstrap cap.
@@ -291,7 +279,16 @@ class WorkspaceManager:
 
         # Caches — invalidated by mtime changes or explicit writes
         self._bootstrap_cache: str | None = None
+        # Separate cache slot for the head-only bootstrap variant used by the
+        # cache-prefix-stabilization path (MEMORY.md injected WITHOUT the
+        # volatile ``## Recent`` slice so the system prefix stays stable).
+        self._bootstrap_cache_stable: str | None = None
+        # Each cache slot owns its OWN mtime snapshot. They must NOT be shared:
+        # the lazy mtime-triggered rebuild path only rebuilds the requested
+        # variant, so a shared snapshot would mark the OTHER slot fresh and
+        # serve stale content for the rest of the process lifetime.
         self._bootstrap_mtimes: dict[str, float] = {}
+        self._bootstrap_mtimes_stable: dict[str, float] = {}
         self._learnings_cache: str | None = None
         self._learnings_mtimes: dict[str, float] = {}
 
@@ -497,7 +494,38 @@ class WorkspaceManager:
         """Return only the append-only MEMORY.md log tail (BM25-searchable)."""
         return self._split_memory(self._read_file(self.MEMORY_FILE) or "")[1]
 
-    def get_memory_injection(self) -> str:
+    def _recent_log_slice(self) -> str:
+        """Return the bounded NEWEST-log slice (without the ``## Recent``
+        header), or "" if there is no log. Single source of truth for the
+        recent slice shared by ``get_memory_injection`` and
+        ``get_recent_memory_slice``.
+        """
+        raw = self._read_file(self.MEMORY_FILE) or ""
+        _, log = self._split_memory(raw)
+        log = log.strip()
+        if not log:
+            return ""
+        recent = log[-_MEMORY_RECENT_LOG_CHARS:]
+        # Begin at an entry boundary so we never start mid-entry.
+        idx = recent.find("\n## ")
+        if idx != -1:
+            recent = recent[idx + 1:]
+        return recent.strip()
+
+    def get_recent_memory_slice(self) -> str:
+        """Return the volatile ``## Recent`` memory block (header + newest-log
+        slice), or "" if there's nothing recent.
+
+        This is the per-turn-volatile fragment that the cache-prefix
+        stabilization path (loop._STABLE_PREFIX) relocates OUT of the cached
+        system prompt and re-injects after the cache breakpoint. The stable
+        head stays in the system prompt via ``get_memory_injection(
+        include_recent=False)``.
+        """
+        recent = self._recent_log_slice()
+        return f"## Recent\n\n{recent}".strip() if recent else ""
+
+    def get_memory_injection(self, *, include_recent: bool = True) -> str:
         """Compose the MEMORY.md content injected into the system prompt: the
         consolidated compiled head PLUS a bounded slice of the NEWEST log
         entries, so recently-learned facts auto-surface before consolidation
@@ -505,23 +533,17 @@ class WorkspaceManager:
         memory_search. The head is capped so head + recent fits the per-file
         bootstrap cap.
 
-        When ``OPENLEGION_INJECT_HEAD_ONLY`` is set, the ``## Recent`` log slice
-        is dropped and ONLY the compiled head is injected (gbrain "inject only
-        the head"); the log stays on disk and searchable via memory_search.
+        ``include_recent=False`` returns the STABLE head only — the
+        cache-prefix-stabilization path uses it so the volatile ``## Recent``
+        slice can be relocated out of the cached system block (it is re-injected
+        after the cache breakpoint via ``get_recent_memory_slice``).
         """
         raw = self._read_file(self.MEMORY_FILE) or ""
-        head, log = self._split_memory(raw)
-        head, log = head.strip(), log.strip()
-        if _inject_head_only():
+        head, _ = self._split_memory(raw)
+        head = head.strip()
+        if not include_recent:
             return head
-        recent = ""
-        if log:
-            recent = log[-_MEMORY_RECENT_LOG_CHARS:]
-            # Begin at an entry boundary so we never start mid-entry.
-            idx = recent.find("\n## ")
-            if idx != -1:
-                recent = recent[idx + 1:]
-            recent = recent.strip()
+        recent = self._recent_log_slice()
         if not recent:
             return head
         # Reserve room for the recent slice so a large head can't crowd it out
@@ -567,7 +589,7 @@ class WorkspaceManager:
         for filename in filenames:
             target[filename] = self._get_mtime(self.root / filename)
 
-    def get_bootstrap_content(self) -> str:
+    def get_bootstrap_content(self, *, include_recent: bool = True) -> str:
         """Load workspace files for system prompt with per-file and total caps.
 
         Loads INSTRUCTIONS.md, SOUL.md, USER.md, MEMORY.md with individual
@@ -577,11 +599,21 @@ class WorkspaceManager:
         Daily logs are NOT included — agents access them via memory_search.
 
         Results are cached with mtime-based invalidation and pre-sanitized.
+
+        ``include_recent=False`` injects MEMORY.md head-only (drops the
+        volatile ``## Recent`` slice) for the cache-prefix-stabilization path,
+        and is memoized in a separate cache slot so it can't be conflated with
+        the default (recent-included) variant.
         """
-        if self._bootstrap_cache is not None and not self._check_mtimes(
-            self._BOOTSTRAP_FILES, self._bootstrap_mtimes,
+        if include_recent:
+            cache_attr, mtimes = "_bootstrap_cache", self._bootstrap_mtimes
+        else:
+            cache_attr, mtimes = "_bootstrap_cache_stable", self._bootstrap_mtimes_stable
+        cached = getattr(self, cache_attr)
+        if cached is not None and not self._check_mtimes(
+            self._BOOTSTRAP_FILES, mtimes,
         ):
-            return self._bootstrap_cache
+            return cached
 
         caps = {
             "INSTRUCTIONS.md": _MAX_INSTRUCTIONS,
@@ -612,8 +644,9 @@ class WorkspaceManager:
             if filename == "MEMORY.md":
                 # Inject the consolidated head + a bounded slice of the NEWEST
                 # log entries (recent facts auto-surface); older log entries
-                # are recalled via memory_search/BM25.
-                content = self.get_memory_injection()
+                # are recalled via memory_search/BM25. ``include_recent=False``
+                # drops the volatile slice for the stable-prefix path.
+                content = self.get_memory_injection(include_recent=include_recent)
             else:
                 content = self._read_file(filename)
             if not content or not content.strip():
@@ -633,8 +666,8 @@ class WorkspaceManager:
         # Pre-sanitize so callers never need to re-sanitize unchanged content
         combined = sanitize_for_prompt(combined)
 
-        self._snapshot_mtimes(self._BOOTSTRAP_FILES, self._bootstrap_mtimes)
-        self._bootstrap_cache = combined
+        self._snapshot_mtimes(self._BOOTSTRAP_FILES, mtimes)
+        setattr(self, cache_attr, combined)
         return combined
 
     def _read_file(self, relative_path: str) -> str | None:
@@ -676,6 +709,7 @@ class WorkspaceManager:
         new_log = self._trim_memory_log(new_log)
         path.write_text(self._render_memory(head, new_log))
         self._bootstrap_cache = None  # MEMORY.md is part of bootstrap
+        self._bootstrap_cache_stable = None
 
     def write_compiled_memory(self, head: str) -> None:
         """Replace the compiled head (consolidation), preserving the log."""
@@ -686,6 +720,7 @@ class WorkspaceManager:
         _, log = self._split_memory(raw)
         path.write_text(self._render_memory(head, log))
         self._bootstrap_cache = None
+        self._bootstrap_cache_stable = None
 
     # ── Consolidation stamp (mirrors seed_bootstrap_greeting's sentinel) ──
 
@@ -742,6 +777,7 @@ class WorkspaceManager:
 
         path.write_text(content)
         self._bootstrap_cache = None  # invalidate — file changed
+        self._bootstrap_cache_stable = None
         self.append_daily_log(f"Updated workspace file: {filename}")
         return {
             "filename": filename,
