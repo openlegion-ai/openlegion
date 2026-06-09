@@ -131,6 +131,9 @@ Per-hop origin is deliberately **downgraded** for worker-originated calls (`_val
 ### Phase 1 — The guarantee: delegate-and-release + durable terminal outcome
 **Goal:** every user-initiated pipeline ALWAYS produces a final user-facing message (done/failed/stalled), exactly once; the operator stops block-watching.
 
+> **Status: 1a–1c IMPLEMENTED (the guarantee net). 1d (operator behavior) deferred to its own PR — net before trapeze.**
+> The net ships as: a `chain_deliveries` exactly-once ledger + `Tasks.{list_watchable_human_roots, chain_terminal_verdict, claim_chain_delivery}` (`src/host/orchestration.py`); a periodic, restart-safe `ChainWatcher` with settle/debounce against the in-flight-handoff race (`src/host/chain_watcher.py`); and runtime wiring that delivers a guaranteed terminal outcome to the dashboard bell (durable, deliver-then-claim) plus a best-effort paired-channel push — targeting **only** the root's first-party human origin (`src/cli/runtime.py`). The operator still block-watches for now; the net is purely additive so it cannot regress current behavior. 1d removes block-watching once this is proven on cake.
+
 - **1a (gate — design + schema, tests first):**
   - Decide the root-origin trust model per §4 security constraint: `chain_watch` row carries the trusted root origin set at chain creation; delivery never trusts per-hop origin and never re-opens the back-edge skip.
   - Define **"chain terminal"** for fan-out: no non-terminal task remains under `root_task_id` (not merely "a `done` leaf with no child" — that's `chain_breaks`'s weaker per-leaf notion).

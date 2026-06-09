@@ -344,6 +344,12 @@ class Tasks:
                 );
                 CREATE INDEX IF NOT EXISTS idx_task_events_task
                     ON task_events (task_id, created_at);
+
+                CREATE TABLE IF NOT EXISTS chain_deliveries (
+                    root_task_id TEXT PRIMARY KEY,
+                    terminal_kind TEXT NOT NULL,
+                    delivered_at REAL NOT NULL
+                );
             """)
             # Resolve the active column name. ``team_id`` is canonical;
             # ``project_id`` is the pre-rename column kept readable so
@@ -446,6 +452,100 @@ class Tasks:
         )
 
     # ── Helpers ─────────────────────────────────────────────────
+
+    # ── Chain-watch support (delegate-and-subscribe) ─────────────
+    #
+    # A "chain" is the parent_task_id-linked tree rooted at the FIRST
+    # task of a user request (``parent_task_id IS NULL``). The operator's
+    # initial hand_off creates that root as a trusted caller, so its
+    # ``origin_kind == "human"`` is first-party; every later hop is
+    # created by an untrusted worker whose ``kind="human"`` claim is
+    # downgraded to ``agent`` by ``_validated_origin`` at the mesh edge.
+    # The chain watcher therefore delivers ONLY to the root's stored
+    # human origin (never a mid-chain, possibly-forged origin), which
+    # keeps the existing origin-trust boundary fully intact.
+
+    def list_watchable_human_roots(self, *, since: float) -> list[dict]:
+        """Root tasks of user-originated chains awaiting a terminal push.
+
+        A row qualifies when it is a chain root (``parent_task_id IS
+        NULL``), carries a first-party human origin, was created within
+        the watch window (``created_at >= since``), and has not already
+        had a terminal notification claimed in ``chain_deliveries``.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM tasks "
+                "WHERE parent_task_id IS NULL "
+                "  AND origin_kind = 'human' "
+                "  AND created_at >= ? "
+                "  AND id NOT IN (SELECT root_task_id FROM chain_deliveries) "
+                "ORDER BY created_at ASC",
+                (since,),
+            ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def chain_terminal_verdict(self, root_task_id: str) -> tuple[str, str] | None:
+        """Return ``(terminal_kind, summary)`` iff the WHOLE chain is terminal.
+
+        Walks the same ``parent_task_id``/``previous_task_id`` recursion
+        as :meth:`workflow_snapshot`. Returns ``None`` while ANY task in
+        the chain is non-terminal (including a still-being-created next
+        hop, which is why the watcher additionally debounces). When every
+        task is terminal, ``terminal_kind`` is ``failed`` if any task
+        failed, else ``cancelled`` if any was cancelled, else ``done``.
+        ``summary`` is a best-effort human string: the failed task's
+        blocker_note, or the most-recently-completed done leaf's
+        result_summary.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "WITH RECURSIVE chain(id, depth) AS ("
+                "  SELECT id, 0 FROM tasks WHERE id = ?"
+                "  UNION ALL"
+                "  SELECT t.id, c.depth + 1 FROM tasks t "
+                "    JOIN chain c ON (t.parent_task_id = c.id "
+                "                  OR t.previous_task_id = c.id) "
+                "    WHERE c.depth < ?"
+                ") "
+                "SELECT t.id, t.status, t.result_summary, t.blocker_note, "
+                "  t.completed_at, t.updated_at "
+                "FROM tasks t "
+                "WHERE t.id IN (SELECT DISTINCT id FROM chain)",
+                (root_task_id, MAX_WORKFLOW_CHAIN_DEPTH),
+            ).fetchall()
+        if not rows:
+            return None
+        if any(r[1] not in TERMINAL_STATUSES for r in rows):
+            return None
+        statuses = {r[1] for r in rows}
+        if "failed" in statuses:
+            failed = [r for r in rows if r[1] == "failed"]
+            failed.sort(key=lambda r: r[4] or r[5] or 0.0)
+            return "failed", (failed[-1][3] or "").strip()
+        if "cancelled" in statuses:
+            return "cancelled", ""
+        done_leaves = [r for r in rows if r[1] == "done"]
+        done_leaves.sort(key=lambda r: r[4] or r[5] or 0.0)
+        summary = (done_leaves[-1][2] or "").strip() if done_leaves else ""
+        return "done", summary
+
+    def claim_chain_delivery(self, root_task_id: str, terminal_kind: str) -> bool:
+        """Atomically claim the one terminal notification for a chain.
+
+        Returns ``True`` for the first caller and ``False`` forever after
+        (``INSERT OR IGNORE`` on the ``root_task_id`` primary key). This
+        is the exactly-once guard: it is safe against repeated terminal
+        transitions, a restart replay, and the startup re-scan all racing
+        to deliver the same chain.
+        """
+        with self._conn() as conn:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO chain_deliveries "
+                "(root_task_id, terminal_kind, delivered_at) VALUES (?, ?, ?)",
+                (root_task_id, terminal_kind, time.time()),
+            )
+            return cur.rowcount == 1
 
     @staticmethod
     def _row_to_dict(row: tuple) -> dict:
