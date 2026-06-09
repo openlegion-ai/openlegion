@@ -180,6 +180,39 @@ async def test_context_overflow_classified_distinctly(msg):
         await client.chat(system="s", messages=[{"role": "user", "content": "x"}])
 
 
+@pytest.mark.asyncio
+async def test_context_overflow_via_proxy_error_type():
+    """REAL prod path: the mesh proxy MASKS the raw 400 text across the trust
+    boundary ("Upstream service call failed (HTTP 400).") and tags
+    error_type='context_overflow'. The masked message contains none of the
+    substring markers, so classifying on the TYPE is the only signal that
+    works in production — the substring backstop alone would miss it and the
+    self-heal would never fire (the wedge would persist)."""
+    client = _make_llm_client()
+    mock_http = await client._get_client()
+    mock_http.post = AsyncMock(return_value=_make_mesh_response(
+        "Upstream service call failed (HTTP 400).",
+        error_type="context_overflow",
+    ))
+    with pytest.raises(LLMContextOverflowError):
+        await client.chat(system="s", messages=[{"role": "user", "content": "x"}])
+
+
+@pytest.mark.asyncio
+async def test_masked_generic_400_is_not_overflow():
+    """A generic masked 400 (no overflow type, no markers in the text) must NOT
+    be misclassified as overflow — it stays a plain RuntimeError so we don't
+    prune+retry on unrelated bad-request errors."""
+    client = _make_llm_client()
+    mock_http = await client._get_client()
+    mock_http.post = AsyncMock(return_value=_make_mesh_response(
+        "Upstream service call failed (HTTP 400).",
+    ))
+    with pytest.raises(RuntimeError) as exc_info:
+        await client.chat(system="s", messages=[{"role": "user", "content": "x"}])
+    assert not isinstance(exc_info.value, LLMContextOverflowError)
+
+
 # --------------------------------------------------------------------------
 # _parse_tool_calls — truncated-args retryable carve-out
 #

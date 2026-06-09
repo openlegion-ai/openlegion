@@ -849,30 +849,10 @@ class ContextManager:
         if len(groups) <= 5:
             return messages
 
-        # Keep first group + last 4 groups
-        kept = groups[:1] + groups[-4:]
-        pruned = [msg for group in kept for msg in group]
-
-        # Prevent consecutive same-role messages across pruning gaps
-        i = 0
-        while i < len(pruned) - 1:
-            role_a = pruned[i].get("role")
-            role_b = pruned[i + 1].get("role")
-            if role_a == role_b == "user":
-                pruned.insert(i + 1, {
-                    "role": "assistant",
-                    "content": "Understood, continuing from above.",
-                })
-                i += 2  # skip past the bridge
-            elif role_a == role_b == "assistant":
-                pruned.insert(i + 1, {
-                    "role": "user",
-                    "content": "Continue.",
-                })
-                i += 2
-            else:
-                i += 1
-
+        # Keep first group + last 4 groups, bridging role-alternation gaps so
+        # the dropped middle can't leave a user->user / assistant->assistant
+        # seam. Shared with ``prune_to_fit`` via ``_merge_groups_alternating``.
+        pruned = self._merge_groups_alternating(groups[:1] + groups[-4:])
         logger.warning(f"Hard-pruned {len(messages)} -> {len(pruned)} messages (group-aware)")
         return pruned
 

@@ -40,20 +40,6 @@ class LLMContextOverflowError(RuntimeError):
     pass
 
 
-# Substrings (matched case-insensitively against the error message) that
-# identify a context-length / "prompt is too long" 400 across providers
-# (Anthropic, OpenAI, OpenRouter passthrough). Used by ``_raise_classified_error``
-# to route to ``LLMContextOverflowError`` so the loop's prune-and-retry self-heal
-# fires instead of a generic turn abort.
-_CONTEXT_OVERFLOW_MARKERS = (
-    "prompt is too long",
-    "context length",
-    "context_length_exceeded",
-    "input length and max_tokens exceed",
-    "maximum context length",
-)
-
-
 class LLMClient:
     """LLM interface that routes all calls through the mesh API proxy."""
 
@@ -210,10 +196,14 @@ class LLMClient:
         # Context-overflow 400 ("prompt is too long" / "context length
         # exceeded"). Route to the distinct overflow type BEFORE the transient /
         # retryable checks so the chat loop's prune-and-retry self-heal fires
-        # rather than a generic, un-recoverable turn abort. Detected by
-        # substring because the mesh proxy does not yet tag a distinct
-        # ``error_type`` for it.
-        if any(kw in error_msg.lower() for kw in _CONTEXT_OVERFLOW_MARKERS):
+        # rather than a generic, un-recoverable turn abort. PRIMARY signal is the
+        # proxy-set ``error_type`` — the mesh proxy masks the raw 400 detail
+        # across the trust boundary ("Upstream service call failed (HTTP 400)."),
+        # so the agent can't substring-match it; the proxy tags the type from the
+        # detail it can see. ``is_context_overflow(error_msg)`` is a backstop for
+        # any path that does forward the raw text (e.g. local/non-masked).
+        from src.shared.errors import is_context_overflow
+        if error_type == "context_overflow" or is_context_overflow(error_msg):
             raise LLMContextOverflowError(f"{prefix}: {error_msg}")
         if error_type == "transient":
             # Mesh-tagged transient (Claude subscription throttle, stream

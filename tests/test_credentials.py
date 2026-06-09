@@ -261,6 +261,40 @@ async def test_handle_llm_no_failover_on_bad_request(monkeypatch):
     assert result.status_code == 400
 
 
+async def test_handle_llm_context_overflow_tagged(monkeypatch):
+    """A context-length 400 ("prompt is too long") is tagged
+    error_type='context_overflow' on the TRUSTED proxy side so the agent can
+    self-heal — while the raw provider text stays masked across the boundary.
+
+    This is the integration link the agent-side classifier depends on: the
+    agent only sees the masked message, so without this tag the substring
+    match never fires and the self-heal (prune + retry) is dead — the operator
+    re-wedges. See src/agent/llm.py:_raise_classified_error."""
+    monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant")
+    v = CredentialVault()
+
+    import litellm
+
+    async def mock_acompletion(model, messages, api_key, **kwargs):
+        raise litellm.BadRequestError(
+            message="prompt is too long: 1567410 tokens > 1000000 maximum",
+            model=model, llm_provider="anthropic",
+        )
+
+    with patch("litellm.acompletion", side_effect=mock_acompletion):
+        req = APIProxyRequest(
+            service="llm", action="chat",
+            params={"model": "anthropic/claude-haiku-4-5-20251001", "messages": []},
+        )
+        result = await v.execute_api_call(req)
+
+    assert not result.success
+    assert result.error_type == "context_overflow"
+    # Raw provider detail is still masked — only the TYPE crosses the boundary.
+    assert "prompt is too long" not in (result.error or "")
+    assert result.error == "Upstream service call failed (HTTP 400)."
+
+
 async def test_handle_llm_all_models_exhausted(monkeypatch):
     """All models fail → error returned."""
     monkeypatch.setenv("OPENLEGION_SYSTEM_ANTHROPIC_API_KEY", "sk-ant")
