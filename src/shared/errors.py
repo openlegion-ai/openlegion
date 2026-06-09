@@ -96,3 +96,33 @@ class LLMTransientError(RuntimeError):
         # field positions the agent loop to extend that to typed transient
         # errors in a follow-up without changing the exception shape.
         self.retry_after = retry_after
+
+
+# Substrings (matched case-insensitively) that identify a context-length /
+# "prompt is too long" 400 across providers (Anthropic, OpenAI, OpenRouter
+# passthrough). Lives in shared/ because BOTH sides of the trust boundary need
+# it: the mesh proxy (which has the raw provider detail) tags
+# ``error_type="context_overflow"`` on the masked envelope, and the agent's LLM
+# classifier uses it as a backstop. One list keeps the two copies from drifting.
+CONTEXT_OVERFLOW_MARKERS = (
+    "prompt is too long",
+    "context length exceeded",
+    "context_length_exceeded",
+    "input length and max_tokens exceed",
+    "maximum context length",
+)
+
+
+def is_context_overflow(text: str) -> bool:
+    """True when an error message indicates the request exceeded the model's
+    context window (a context-length 400).
+
+    Used by the mesh proxy to tag ``error_type="context_overflow"`` (the proxy
+    masks the raw message across the trust boundary, so the agent cannot
+    substring-match it itself) and by ``LLMClient._raise_classified_error`` as a
+    backstop for any path that does forward the raw text. Routing to
+    ``LLMContextOverflowError`` lets the chat loop self-heal (prune + retry)
+    instead of aborting the turn and re-wedging.
+    """
+    t = (text or "").lower()
+    return any(marker in t for marker in CONTEXT_OVERFLOW_MARKERS)

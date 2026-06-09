@@ -385,6 +385,10 @@ class TestAutoContinueSession:
         cm.force_compact = AsyncMock(side_effect=RuntimeError("LLM down"))
         cm.maybe_compact = AsyncMock(side_effect=lambda s, m: (m, False))
         cm.context_warning = MagicMock(return_value=None)
+        # prune_to_fit is a no-op pass-through here (small convo, under ceiling);
+        # spec'd mocks must model it or the pre-flight guard reassigns
+        # _chat_messages to a MagicMock.
+        cm.prune_to_fit = MagicMock(side_effect=lambda messages, *a, **k: messages)
         loop.context_manager = cm
 
         loop._chat_total_rounds = loop.CHAT_MAX_TOTAL_ROUNDS

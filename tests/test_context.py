@@ -1084,3 +1084,111 @@ class TestSummarizeCompactGroupAware:
             f"10-tool group split by compaction — missing tool ids: "
             f"{expected_ids - set(tool_ids_after)}"
         )
+
+
+def _tool_group_messages(num_groups: int, chars_each: int = 4000) -> list[dict]:
+    """Build a message list with ``num_groups`` tool-call groups.
+
+    Shape: an initial user message, then repeating
+    ``assistant(tool_calls) -> tool(result) -> assistant(text) -> user`` so the
+    grouping helper produces clearly-bounded groups that can be pruned at
+    boundaries without orphaning a tool result.
+    """
+    msgs: list[dict] = [{"role": "user", "content": "INITIAL " + "i" * chars_each}]
+    for g in range(num_groups):
+        msgs.append({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": f"c{g}", "function": {"name": "do", "arguments": "{}"}}],
+        })
+        msgs.append({"role": "tool", "tool_call_id": f"c{g}", "content": "R" + "r" * chars_each})
+        msgs.append({"role": "assistant", "content": "A" + "a" * chars_each})
+        msgs.append({"role": "user", "content": "U" + "u" * chars_each})
+    return msgs
+
+
+class TestEstimateRequestTokens:
+    def test_includes_system_and_tools(self):
+        cm = ContextManager(max_tokens=100_000, model="anthropic/claude")
+        msgs = _make_messages(4, chars_each=400)
+        msgs_only = cm.token_count(msgs)
+        with_sys = cm.estimate_request_tokens(msgs, system_prompt="S" * 4000)
+        tools = [{"type": "function", "function": {"name": "x", "description": "d" * 4000}}]
+        with_all = cm.estimate_request_tokens(msgs, system_prompt="S" * 4000, tools=tools)
+        assert with_sys > msgs_only, "system prompt must add to the estimate"
+        assert with_all > with_sys, "tool schema must add to the estimate"
+
+    def test_no_system_no_tools_equals_messages(self):
+        cm = ContextManager(max_tokens=100_000)
+        msgs = _make_messages(4, chars_each=400)
+        assert cm.estimate_request_tokens(msgs) == cm.token_count(msgs)
+
+
+class TestPruneToFit:
+    def test_reduces_over_limit_list_below_ceiling(self):
+        # Window small enough that several groups blow past 0.9 * max_tokens.
+        cm = ContextManager(max_tokens=8_000, model="anthropic/claude")
+        msgs = _tool_group_messages(8, chars_each=4000)
+        assert cm.estimate_request_tokens(msgs) > cm.max_tokens * 0.90
+        pruned = cm.prune_to_fit(msgs)
+        assert cm.estimate_request_tokens(pruned) <= cm.max_tokens * 0.90
+
+    def test_keeps_first_message(self):
+        cm = ContextManager(max_tokens=8_000, model="anthropic/claude")
+        msgs = _tool_group_messages(8, chars_each=4000)
+        pruned = cm.prune_to_fit(msgs)
+        assert pruned[0].get("content", "").startswith("INITIAL"), \
+            "first (initial-context) message must always be kept"
+
+    def test_preserves_role_alternation(self):
+        cm = ContextManager(max_tokens=8_000, model="anthropic/claude")
+        msgs = _tool_group_messages(8, chars_each=4000)
+        pruned = cm.prune_to_fit(msgs)
+        for a, b in zip(pruned, pruned[1:]):
+            ra, rb = a.get("role"), b.get("role")
+            assert not (ra == rb == "user"), "consecutive user messages"
+            assert not (ra == rb == "assistant"), "consecutive assistant messages"
+
+    def test_never_orphans_a_tool_group(self):
+        cm = ContextManager(max_tokens=8_000, model="anthropic/claude")
+        msgs = _tool_group_messages(8, chars_each=4000)
+        pruned = cm.prune_to_fit(msgs)
+        # Every tool message must be immediately preceded (within its group) by
+        # an assistant carrying tool_calls — i.e. no orphaned tool results.
+        groups = group_messages_by_tool_call(pruned)
+        for g in groups:
+            if any(m.get("role") == "tool" for m in g):
+                assert g[0].get("role") == "assistant" and g[0].get("tool_calls"), \
+                    "tool result orphaned from its parent assistant"
+
+    def test_noop_when_under_ceiling(self):
+        cm = ContextManager(max_tokens=1_000_000, model="anthropic/claude")
+        msgs = _make_messages(4, chars_each=400)
+        assert cm.prune_to_fit(msgs) is msgs
+
+    def test_aggressive_ceiling_prunes_more(self):
+        cm = ContextManager(max_tokens=8_000, model="anthropic/claude")
+        msgs = _tool_group_messages(8, chars_each=4000)
+        lenient = cm.prune_to_fit(msgs, ceiling_frac=0.90)
+        aggressive = cm.prune_to_fit(msgs, ceiling_frac=0.50)
+        assert len(aggressive) <= len(lenient)
+        assert cm.estimate_request_tokens(aggressive) <= cm.max_tokens * 0.50
+
+
+class TestSummarizeTailCap:
+    @pytest.mark.asyncio
+    async def test_tail_cap_drops_oversized_kept_groups(self):
+        # The retained recent tail (default keep_n up to 4 groups) is capped at
+        # ~0.5 * max_tokens. With huge groups, the tail must shed older kept
+        # groups so it stays under that cap.
+        llm = MagicMock()
+        llm.chat = AsyncMock(return_value=LLMResponse(content="SUMMARY", tokens_used=10))
+        cm = ContextManager(max_tokens=10_000, llm=llm, model="anthropic/claude")
+        # 6 standalone assistant/user groups, each ~big.
+        msgs = _tool_group_messages(6, chars_each=4000)
+        result = await cm._summarize_compact("system", msgs)
+        # Result = summary + retained tail; tail (excluding the summary msg)
+        # must be under 0.5 * max_tokens.
+        tail_tokens = estimate_tokens(result[1:], cm.model)
+        assert tail_tokens <= cm.max_tokens * 0.5 + 50, \
+            f"retained tail {tail_tokens} exceeds 0.5*max_tokens cap"

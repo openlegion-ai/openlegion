@@ -30,7 +30,12 @@ import httpx
 from src.agent.attachments import convert_openai_image_blocks
 from src.host.oauth_providers import get_provider
 from src.host.transcript import sanitize_for_provider
-from src.shared.errors import LLMAuthError, LLMConfigError, LLMTransientError
+from src.shared.errors import (
+    LLMAuthError,
+    LLMConfigError,
+    LLMTransientError,
+    is_context_overflow,
+)
 from src.shared.models import KEYLESS_PROVIDERS, get_known_provider_names
 from src.shared.types import CRED_HANDLE_RE, APIProxyRequest, APIProxyResponse
 from src.shared.utils import friendly_streaming_error, setup_logging
@@ -1233,10 +1238,22 @@ class CredentialVault:
                 _masked = "Upstream service call failed."
                 if _status:
                     _masked = f"Upstream service call failed (HTTP {_status})."
+                # Tag context-length 400s ("prompt is too long" / "context
+                # length exceeded") on the TRUSTED side: the agent only sees the
+                # masked message above (raw provider text is withheld across the
+                # trust boundary, L15), so it cannot substring-match the overflow
+                # itself. error_type lets the agent's classifier raise
+                # LLMContextOverflowError and self-heal (prune + retry) instead
+                # of aborting the turn and re-wedging. The message stays masked —
+                # only the type leaks, no provider text. Note: OAuth errors are
+                # RuntimeErrors with no ``status_code``, so detect on str(e),
+                # not on the (possibly-None) status.
+                _overflow = is_context_overflow(str(e))
                 return APIProxyResponse(
                     success=False,
                     error=_masked,
                     status_code=_status,
+                    error_type="context_overflow" if _overflow else None,
                 )
 
         if lock is not None:

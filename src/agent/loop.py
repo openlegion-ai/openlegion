@@ -2710,6 +2710,15 @@ class AgentLoop:
         self._chat_auto_continues = cp["auto_continues"]
         if self.context_manager:
             self.context_manager._flush_triggered = cp["flush_triggered"]
+            # Restore guard: a fat checkpoint reloaded VERBATIM would re-wedge
+            # the agent on the first call after restart (it was likely saved
+            # at/over the window that caused the wedge). Prune on
+            # messages+max_tokens alone here (system/tools aren't known at
+            # restore time) as a floor — the pre-flight guard re-checks against
+            # the true request size before the first send.
+            self._chat_messages = self.context_manager.prune_to_fit(
+                self._chat_messages,
+            )
         logger.info(
             "chat-session-restored messages=%d rounds=%d continues=%d",
             len(self._chat_messages),
@@ -3456,6 +3465,70 @@ class AgentLoop:
                 "output": result,
             })
 
+    def _emergency_prune(self, system: str, tools) -> bool:
+        """Emergency-prune ``self._chat_messages`` to ~0.75 of the window after
+        a context-overflow 400, and report whether it made progress.
+
+        Returns True if the prune reduced the estimated request size (the caller
+        may retry), False if we're already at the minimal kept set (retrying
+        would 400 identically — the caller should surface the failure). Progress
+        is measured in TOKENS, not message count: dropping a 1-message group
+        while the role-alternation bridge inserts 1 leaves the count unchanged
+        though tokens fell, so a count check would bail prematurely on
+        text-heavy (no-tool) operator chats. Callers guard ``context_manager``.
+        """
+        cm = self.context_manager
+        before_msgs = len(self._chat_messages)
+        before_tokens = cm.estimate_request_tokens(self._chat_messages, system, tools)
+        self._chat_messages = cm.prune_to_fit(
+            self._chat_messages, system_prompt=system, tools=tools, ceiling_frac=0.75,
+        )
+        after_tokens = cm.estimate_request_tokens(self._chat_messages, system, tools)
+        logger.warning(
+            "context overflow: emergency-pruned %d->%d messages (%d->%d est tokens)",
+            before_msgs, len(self._chat_messages), before_tokens, after_tokens,
+        )
+        return after_tokens < before_tokens
+
+    async def _chat_call_self_healing(
+        self, *, system: str, tools, **kwargs,
+    ):
+        """Run the FIRST (non-streaming) chat call of a round with context-
+        overflow self-heal.
+
+        If the assembled request still overflows the model window (the
+        pre-flight ``prune_to_fit`` undershot, or the volatile suffix pushed it
+        over), emergency-prune ``self._chat_messages`` more aggressively
+        (``ceiling_frac=0.75``) and retry — up to twice — instead of letting the
+        turn abort and re-wedge. Re-raises if it still overflows at the minimal
+        kept set so the user sees a clear failure rather than a silent hang.
+
+        Other error types (retryable / auth / config / generic) flow through
+        ``_llm_call_with_retry`` untouched — this only wraps the overflow case.
+        """
+        from src.agent.llm import LLMContextOverflowError
+
+        for attempt in range(3):  # initial + up to 2 prune-and-retry passes
+            try:
+                return await _llm_call_with_retry(
+                    self.llm.chat_collect,
+                    system=system,
+                    messages=self._messages_with_volatile(self._chat_messages),
+                    tools=tools,
+                    **kwargs,
+                )
+            except LLMContextOverflowError:
+                # Last attempt, no context manager, or the prune can't shrink it
+                # any further → surface the failure instead of looping on the
+                # same 400. (``or`` short-circuits, so we don't prune on the
+                # final attempt.)
+                if (
+                    attempt >= 2
+                    or not self.context_manager
+                    or not self._emergency_prune(system, tools)
+                ):
+                    raise
+
     async def _compact_chat_context(self, system: str) -> None:
         """Run context compaction and drain any pending steer messages."""
         if self.context_manager:
@@ -3607,6 +3680,20 @@ class AgentLoop:
         try:
             user_message, system = await self._prepare_chat_turn(user_message)
 
+            # Pre-flight wedge guard (defense-in-depth). Reactive compaction
+            # only runs at the BOTTOM of the round loop, so a turn that STARTS
+            # over the model limit (inherited fat context / restored fat
+            # checkpoint) would 400 on the FIRST call and abort before
+            # compaction ever ran — permanently wedged. Shrink the inherited
+            # context to fit the TRUE request size (messages + system + tools)
+            # before the first send. Threshold-independent hard safety net.
+            if self.context_manager:
+                self._chat_messages = self.context_manager.prune_to_fit(
+                    self._chat_messages,
+                    system_prompt=system,
+                    tools=self.tools.get_tool_definitions(**self._tool_filter_kw) or None,
+                )
+
             if self._chat_total_rounds >= self.CHAT_MAX_TOTAL_ROUNDS:
                 if self._chat_auto_continues >= self._MAX_SESSION_CONTINUES:
                     self.state = "idle"
@@ -3695,10 +3782,8 @@ class AgentLoop:
                 _iter_tools = (
                     self.tools.get_tool_definitions(**self._tool_filter_kw) or None
                 )
-                llm_response = await _llm_call_with_retry(
-                    self.llm.chat_collect,
+                llm_response = await self._chat_call_self_healing(
                     system=_round_system,
-                    messages=self._messages_with_volatile(self._chat_messages),
                     tools=_iter_tools,
                 )
                 # Bug 1 (codex P2 r2): tick after the LLM call returns —
@@ -4621,6 +4706,7 @@ class AgentLoop:
             current_origin.reset(origin_token)
 
     async def _chat_stream_inner(self, user_message: str):
+        from src.agent.llm import LLMContextOverflowError
         self.state = "working"
         total_tokens = 0
         tool_outputs: list[dict] = []
@@ -4634,6 +4720,17 @@ class AgentLoop:
 
         try:
             user_message, system = await self._prepare_chat_turn(user_message)
+
+            # Pre-flight wedge guard — see ``_chat_inner`` for rationale.
+            # Shrink an inherited over-limit context to the TRUE request size
+            # (messages + system + tools) before the first stream so it can't
+            # 400 "prompt is too long" and abort the turn before compaction.
+            if self.context_manager:
+                self._chat_messages = self.context_manager.prune_to_fit(
+                    self._chat_messages,
+                    system_prompt=system,
+                    tools=self.tools.get_tool_definitions(**self._tool_filter_kw) or None,
+                )
 
             if self._chat_total_rounds >= self.CHAT_MAX_TOTAL_ROUNDS:
                 if self._chat_auto_continues >= self._MAX_SESSION_CONTINUES:
@@ -4659,6 +4756,7 @@ class AgentLoop:
                 any_text_streamed = False
                 tools = self.tools.get_tool_definitions(**self._tool_filter_kw) or None
                 _msgs = self._messages_with_volatile(self._chat_messages)
+                _overflowed = False
                 try:
                     async for event in self.llm.chat_stream(
                         system=system, messages=_msgs, tools=tools,
@@ -4671,16 +4769,45 @@ class AgentLoop:
                         elif etype == "done":
                             llm_response = event["response"]
                     used_streaming = True
+                except LLMContextOverflowError:
+                    # Context-overflow self-heal: emergency-prune and retry
+                    # rather than re-wedge. Only meaningful when nothing was
+                    # streamed yet (overflow 400s before the first token).
+                    _overflowed = True
+                    logger.warning(
+                        "LLM stream overflowed context window; emergency-pruning",
+                    )
                 except Exception as e:
                     logger.warning(f"LLM streaming failed ({e}), falling back to non-streaming")
 
                 streamed = llm_response is not None
                 if llm_response is None:
-                    if used_streaming:
+                    if _overflowed and self.context_manager:
+                        # First prune before falling back to non-streaming; the
+                        # fallback loop below self-heals further if it overflows
+                        # again. (Progress bool ignored — this is the 1st pass.)
+                        self._emergency_prune(system, tools)
+                        _msgs = self._messages_with_volatile(self._chat_messages)
+                    elif used_streaming:
                         logger.warning("LLM stream ended without done event, falling back")
-                    llm_response = await _llm_call_with_retry(
-                        self.llm.chat, system=system, messages=_msgs, tools=tools,
-                    )
+                    # Non-streaming fallback with overflow self-heal: if it ALSO
+                    # overflows, prune harder and retry up to twice; re-raise at
+                    # the minimal kept set so the user sees a clear failure.
+                    for _heal_attempt in range(3):
+                        try:
+                            llm_response = await _llm_call_with_retry(
+                                self.llm.chat, system=system,
+                                messages=_msgs, tools=tools,
+                            )
+                            break
+                        except LLMContextOverflowError:
+                            if (
+                                _heal_attempt >= 2
+                                or not self.context_manager
+                                or not self._emergency_prune(system, tools)
+                            ):
+                                raise
+                            _msgs = self._messages_with_volatile(self._chat_messages)
 
                 # Bug 1 (codex P2 r2): tick after the LLM call returns —
                 # a single deep-research call can run >5 min, and bumping

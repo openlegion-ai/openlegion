@@ -236,6 +236,146 @@ class ContextManager:
     def should_compact(self, messages: list[dict]) -> bool:
         return self.usage(messages) >= _COMPACT_THRESHOLD
 
+    def estimate_request_tokens(
+        self,
+        messages: list[dict],
+        system_prompt: str = "",
+        tools: list[dict] | None = None,
+    ) -> int:
+        """Estimate the TRUE size of the request the LLM client will send.
+
+        ``usage()`` / ``should_compact()`` count only ``messages`` — they are
+        blind to the system prompt, the tool schemas, and the per-turn volatile
+        suffix that ``llm.py`` prepends/appends at the call site. On a model
+        with a large nominal window (e.g. Opus 4.8's 1M) a fat tool schema +
+        system prompt is a large fixed overhead; ignoring it lets the message
+        list grow until the assembled request exceeds the hard model limit and
+        every call 400s. This returns the conservative full-request estimate so
+        the pre-flight guard / emergency prune can act on the real number.
+
+        The tool-schema estimate intentionally errs slightly HIGH
+        (``len(json.dumps(tools)) // 3``, a tighter divisor than the 4-chars/tok
+        message default) — overshooting the budget is safe; undershooting
+        re-wedges.
+        """
+        total = estimate_tokens(messages, self.model)
+        if system_prompt:
+            total += estimate_tokens(
+                [{"role": "system", "content": system_prompt}], self.model,
+            )
+        if tools:
+            # Tool schemas come from @tool-decorated functions and are
+            # JSON-safe, but this runs on every turn's pre-flight path now, so
+            # fall back rather than crash the turn if a schema is ever not
+            # serializable.
+            try:
+                total += len(json.dumps(tools)) // 3
+            except (TypeError, ValueError):
+                total += len(str(tools)) // 4
+        return total
+
+    def prune_to_fit(
+        self,
+        messages: list[dict],
+        system_prompt: str = "",
+        tools: list[dict] | None = None,
+        *,
+        ceiling_frac: float = 0.90,
+    ) -> list[dict]:
+        """Emergency hard safety net: drop oldest tool-call groups until the
+        FULL request (messages + system + tools) fits under a fraction of the
+        model window.
+
+        This is NOT a threshold change — the 0.60/0.70/0.80 compaction
+        thresholds are untouched. This is a separate last-resort guard for the
+        case where a turn STARTS already over the model limit (inherited fat
+        context, restored fat checkpoint) so the first LLM call would 400 with
+        "prompt is too long" before reactive compaction ever runs.
+
+        Group-aware (via :func:`group_messages_by_tool_call`): always keeps the
+        FIRST group (initial user/context) and at least the most-recent group,
+        and prunes only at group boundaries so a tool result is never orphaned
+        from its parent assistant. Reuses the same role-alternation bridge logic
+        as :meth:`_hard_prune` / ``AgentLoop._trim_context`` so it never emits
+        consecutive same-role messages.
+
+        Returns the (possibly) pruned list; a no-op when already under ceiling.
+        """
+        if not messages:
+            return messages
+
+        ceiling = int(self.max_tokens * ceiling_frac)
+        before = self.estimate_request_tokens(messages, system_prompt, tools)
+        if before <= ceiling:
+            return messages
+
+        groups = group_messages_by_tool_call(messages)
+        # Keep first group + at least the most-recent group. We drop the OLDEST
+        # non-first group repeatedly: kept = [first] + groups[drop_start:].
+        # ``drop_start`` walks forward from index 2 (index 1 would re-test the
+        # full unmodified list — guaranteed over ceiling since ``before`` was).
+        drop_start = 2
+        while drop_start < len(groups):
+            # Candidate: first group + everything from drop_start onward.
+            kept_groups = groups[:1] + groups[drop_start:]
+            candidate = self._merge_groups_alternating(kept_groups)
+            if self.estimate_request_tokens(candidate, system_prompt, tools) <= ceiling:
+                after = self.estimate_request_tokens(candidate, system_prompt, tools)
+                logger.info(
+                    "prune_to_fit: dropped %d oldest group(s), %s->%s est tokens "
+                    "(ceiling=%s, frac=%.2f)",
+                    drop_start - 1, f"{before:,}", f"{after:,}",
+                    f"{ceiling:,}", ceiling_frac,
+                )
+                return candidate
+            # Don't shed past [first, last]: leave the most-recent group intact.
+            if drop_start >= len(groups) - 1:
+                break
+            drop_start += 1
+
+        # Couldn't get under the ceiling even at the minimal kept set
+        # (system + tools alone, or first+last group, already too big). Return
+        # the minimal kept set — the pre-flight guard re-checks and the LLM
+        # self-heal retry will still surface a clear failure if even this 400s.
+        minimal_groups = groups[:1] + groups[-1:] if len(groups) > 1 else groups
+        pruned = self._merge_groups_alternating(minimal_groups)
+        after = self.estimate_request_tokens(pruned, system_prompt, tools)
+        logger.warning(
+            "prune_to_fit: could not fit under ceiling=%s even at minimal kept "
+            "set (%s est tokens); system+tools overhead may exceed budget. "
+            "before=%s groups=%d kept=%d",
+            f"{ceiling:,}", f"{after:,}", f"{before:,}",
+            len(groups), len(minimal_groups),
+        )
+        return pruned
+
+    @staticmethod
+    def _merge_groups_alternating(groups: list[list[dict]]) -> list[dict]:
+        """Flatten tool-call groups into a message list, inserting bridge
+        messages so no two consecutive messages share a role (user/assistant).
+
+        Mirrors the bridge logic in :meth:`_hard_prune` so a prune that drops a
+        middle group can't create a ``user → user`` / ``assistant → assistant``
+        seam across the gap (which the LLM API rejects).
+        """
+        merged = [m for g in groups for m in g]
+        i = 0
+        while i < len(merged) - 1:
+            role_a = merged[i].get("role")
+            role_b = merged[i + 1].get("role")
+            if role_a == role_b == "user":
+                merged.insert(i + 1, {
+                    "role": "assistant",
+                    "content": "Understood, continuing from above.",
+                })
+                i += 2
+            elif role_a == role_b == "assistant":
+                merged.insert(i + 1, {"role": "user", "content": "Continue."})
+                i += 2
+            else:
+                i += 1
+        return merged
+
     async def maybe_compact(
         self, system_prompt: str, messages: list[dict],
     ) -> tuple[list[dict], bool]:
@@ -565,6 +705,22 @@ class ContextManager:
         older_groups = groups[:-keep_n]
         recent_groups = groups[-keep_n:]
 
+        # P4 tail cap: a few huge tool-result groups in the retained tail can
+        # defeat compaction (the summary shrinks the OLD context but the kept
+        # recent groups are still over budget). Drop the OLDEST of the kept
+        # groups (group-aware, keep >=1) until the retained tail is under
+        # ~0.5 * max_tokens. The dropped groups still feed the summary because
+        # ``older_groups`` is recomputed to include them.
+        _tail_cap = int(self.max_tokens * 0.5)
+        while (
+            len(recent_groups) > 1
+            and estimate_tokens(
+                [m for g in recent_groups for m in g], self.model,
+            ) > _tail_cap
+        ):
+            recent_groups = recent_groups[1:]
+        older_groups = groups[: len(groups) - len(recent_groups)]
+
         older_messages = [m for g in older_groups for m in g]
         conversation_text = self._messages_to_text(older_messages)
 
@@ -701,30 +857,10 @@ class ContextManager:
         if len(groups) <= 5:
             return messages
 
-        # Keep first group + last 4 groups
-        kept = groups[:1] + groups[-4:]
-        pruned = [msg for group in kept for msg in group]
-
-        # Prevent consecutive same-role messages across pruning gaps
-        i = 0
-        while i < len(pruned) - 1:
-            role_a = pruned[i].get("role")
-            role_b = pruned[i + 1].get("role")
-            if role_a == role_b == "user":
-                pruned.insert(i + 1, {
-                    "role": "assistant",
-                    "content": "Understood, continuing from above.",
-                })
-                i += 2  # skip past the bridge
-            elif role_a == role_b == "assistant":
-                pruned.insert(i + 1, {
-                    "role": "user",
-                    "content": "Continue.",
-                })
-                i += 2
-            else:
-                i += 1
-
+        # Keep first group + last 4 groups, bridging role-alternation gaps so
+        # the dropped middle can't leave a user->user / assistant->assistant
+        # seam. Shared with ``prune_to_fit`` via ``_merge_groups_alternating``.
+        pruned = self._merge_groups_alternating(groups[:1] + groups[-4:])
         logger.warning(f"Hard-pruned {len(messages)} -> {len(pruned)} messages (group-aware)")
         return pruned
 
