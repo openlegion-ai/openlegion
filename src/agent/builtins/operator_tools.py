@@ -1085,20 +1085,20 @@ async def workflow_snapshot(
     return result
 
 
-# Cap below the agent loop's 300s tool execution ceiling so an await
-# completes (and returns its ``timed_out`` shape) before the loop's own
-# timeout cancels the tool call. Each task-status poll is wrapped in
-# ``asyncio.wait_for(..., _AWAIT_TASK_EVENT_POLL_BUDGET_S)`` so a stuck
-# HTTP retry chain (``_get_with_retry`` worst-case ≈ 90s with 3×30s
-# attempts) can't push our wall-clock past the ceiling — the per-poll
-# budget bounds each iteration to a known maximum.
+# Each task-status poll is wrapped in
+# ``asyncio.wait_for(..., _AWAIT_TASK_EVENT_POLL_BUDGET_S)`` so a stuck HTTP
+# retry chain (``_get_with_retry`` worst-case ≈ 90s with 3×30s attempts)
+# can't blow a single iteration's wall-clock — the per-poll budget bounds
+# each loop pass to a known maximum.
 _AWAIT_TASK_EVENT_POLL_BUDGET_S = 15
 # Demoted (delegate-and-subscribe, Phase 1d): await_task_event is now a SHORT
 # in-turn pickup-confirmation primitive, NOT an end-to-end pipeline watch. The
 # durable chain watcher delivers the guaranteed terminal outcome, so the
 # operator hands off and releases the turn. The cap is kept well under the
-# 120s streaming idle / non-streaming transport timeout so a single call always
-# returns cleanly on every path (no turn teardown).
+# 120s streaming-idle / non-streaming transport timeout so a single call
+# always returns cleanly on every path (no turn teardown). The per-tool hard
+# ceiling (loop.py ``_TOOL_TIMEOUT`` = 900s) sits far above this and is not the
+# binding constraint.
 _AWAIT_TASK_EVENT_MAX_TIMEOUT_S = 90
 _AWAIT_TASK_EVENT_DEFAULT_TIMEOUT_S = 45
 
@@ -1107,18 +1107,18 @@ _AWAIT_TASK_EVENT_DEFAULT_TIMEOUT_S = 45
     name="await_task_event",
     operator_only=True,
     description=(
-        "Briefly confirm that ONE specific task was picked up before you "
-        "continue in the SAME turn (e.g. verifying a setup handoff landed). "
-        "Polls the task's durable status with exponential backoff and "
-        "returns its terminal event if it finishes quickly, else "
-        "{'timed_out': true, 'last_status_seen': '...'}. Max ~90s. "
+        "Briefly wait (<=90s) for ONE specific task to reach a terminal "
+        "status (done / failed / blocked / cancelled) and return that event, "
+        "else {'timed_out': true, 'last_status_seen': '...'} if it's still "
+        "running. Polls the task's durable status with exponential backoff. "
+        "Use only for a quick in-turn check that a handoff landed and is "
+        "progressing before you continue in the SAME turn (e.g. a setup step). "
         "\n\nDO NOT use this to watch a multi-hop pipeline to completion. "
         "After handing user work to the team, acknowledge and RELEASE the "
-        "turn — the system delivers a guaranteed final outcome (done / "
-        "failed / stalled) to the user automatically. On 'timed_out', do "
-        "NOT keep re-calling to babysit; tell the user it's running and "
-        "end your turn. For a one-shot read of chain state, use "
-        "workflow_snapshot (non-blocking)."
+        "turn — the system automatically delivers the final outcome (done or "
+        "failed) to the user. On 'timed_out', do NOT keep re-calling to "
+        "babysit; tell the user it's running and end your turn. For a "
+        "one-shot read of chain state, use workflow_snapshot (non-blocking)."
     ),
     parameters={
         "task_id": {
@@ -1208,8 +1208,8 @@ async def await_task_event(
         while True:
             # Don't start another poll if there isn't time for it to
             # finish cleanly. With ``_AWAIT_TASK_EVENT_POLL_BUDGET_S`` of
-            # slack we return ``timed_out`` rather than risk pushing
-            # wall-clock past the agent loop's 300s tool ceiling.
+            # slack we return ``timed_out`` cleanly rather than get cut off
+            # mid-poll at the deadline.
             remaining_before_poll = deadline - _time.monotonic()
             if remaining_before_poll <= _AWAIT_TASK_EVENT_POLL_BUDGET_S:
                 out = {
@@ -1293,8 +1293,9 @@ async def await_task_event(
             await asyncio.sleep(sleep_for)
             interval = min(interval * 2, 30)
     except asyncio.CancelledError:
-        # The agent loop's 300s tool-execution ceiling cancels the
-        # task while we were mid-sleep. ``CancelledError`` is
+        # A cancel (a client/transport disconnect, or the loop's
+        # ``_TOOL_TIMEOUT``) tears down the task while we were mid-sleep.
+        # ``CancelledError`` is
         # ``BaseException`` so the broad ``except Exception`` below
         # would have missed it and the function would have returned
         # an empty body to the LLM — operator's Round-5 repro of
