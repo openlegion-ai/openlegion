@@ -10,8 +10,6 @@ Covers the guarantees the "Needs you" panel depends on:
 
 from __future__ import annotations
 
-import pytest
-
 from src.host.help_requests import HelpRequests
 
 

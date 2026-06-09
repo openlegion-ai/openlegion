@@ -29,6 +29,7 @@ from fastapi.responses import StreamingResponse
 
 from src.host.change_history import ChangeHistory
 from src.host.credentials import is_system_credential
+from src.host.help_requests import HelpRequests
 from src.host.orchestration import (
     MAX_FEEDBACK_CHARS,
     VALID_OUTCOMES,
@@ -38,7 +39,6 @@ from src.host.orchestration import (
     TaskNotFound,
     Tasks,
 )
-from src.host.help_requests import HelpRequests
 from src.host.pending_actions import PendingActions
 from src.shared.paths import resolve_under_root
 from src.shared.redaction import redact_url
