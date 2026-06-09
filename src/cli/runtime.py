@@ -191,6 +191,8 @@ class RuntimeContext:
     def shutdown(self) -> None:
         """Tear down all components in reverse order."""
         click.echo("  Stopping OpenLegion...", nl=False)
+        if self.chain_watcher:
+            self.chain_watcher.stop()
         if self.channel_manager:
             self.channel_manager.stop_all()
         if self.health_monitor:
@@ -400,6 +402,11 @@ class RuntimeContext:
             self._notification_store = NotificationStore()
         except Exception as e:
             logger.warning("Failed to instantiate NotificationStore: %s", e)
+
+        # Chain watcher (delegate-and-subscribe terminal delivery). Wired in
+        # _start_background once the mesh app's tasks_store is available.
+        self.chain_watcher = None
+        self._tasks_store_ref = None
 
         self.health_monitor = HealthMonitor(
             runtime=self.runtime, transport=self.transport, router=self.router,
@@ -935,6 +942,77 @@ class RuntimeContext:
                 "send_to_user(%s, %s) failed: %s", channel_type, user, e,
             )
 
+    def _deliver_chain_outcome(self, root: dict, kind: str, summary: str) -> bool:
+        """Deliver one terminal outcome for a user chain to its originator.
+
+        The durable dashboard bell is the guarantee surface — the watcher
+        only claims the delivery when this returns True, so a failed write
+        is retried rather than silently lost. A paired chat channel
+        (telegram/discord/slack/whatsapp) additionally gets a best-effort
+        push so a non-dashboard originator hears back in their own channel.
+        Targeting uses ONLY the root's first-party human origin.
+        """
+        origin = root.get("origin") or {}
+        channel = origin.get("channel") or "dashboard"
+        user = origin.get("user") or ""
+        root_id = root.get("id") or ""
+        assignee = root.get("assignee") or ""
+        if kind == "done":
+            title = "✅ Task complete"
+            body = summary or "Your request finished."
+        else:
+            title = "⚠️ Task failed"
+            body = summary or "Your request hit a failure and stopped."
+        payload = {
+            "root_task_id": root_id,
+            "outcome": kind,
+            "origin_channel": channel,
+        }
+
+        # 1. Durable surface — the dashboard bell. This IS the guarantee.
+        if self._notification_store is None:
+            return False
+        try:
+            nid = self._notification_store.add(
+                kind="delivered", title=title, body=body,
+                agent_id=assignee or None, payload=payload,
+            )
+        except Exception as e:
+            logger.warning(
+                "chain outcome bell write failed for %s: %s", root_id, e,
+            )
+            return False
+        if self.event_bus is not None:
+            try:
+                self.event_bus.emit(
+                    "notification_added", agent=assignee or "",
+                    data={
+                        "id": nid, "kind": "delivered", "title": title,
+                        "body": body, "agent_id": assignee, "payload": payload,
+                    },
+                )
+            except Exception as e:
+                logger.debug("notification_added emit failed: %s", e)
+
+        # 2. Best-effort — push to a paired chat channel for non-dashboard
+        #    originators. Never blocks or fails the durable delivery.
+        if channel and channel != "dashboard" and user:
+            try:
+                from src.shared.types import MessageOrigin
+                origin_obj = MessageOrigin(
+                    kind="human", channel=channel, user=user,
+                )
+                asyncio.create_task(
+                    self._handle_notify_origin(
+                        origin_obj, f"{title}\n{body}", assignee,
+                    )
+                )
+            except Exception as e:
+                logger.debug(
+                    "chain outcome channel push schedule failed: %s", e,
+                )
+        return True
+
     def _start_mesh_server(self) -> None:
         import uvicorn
 
@@ -991,6 +1069,10 @@ class RuntimeContext:
         _tasks_store_ref = getattr(app, "tasks_store", None)
         if _tasks_store_ref is not None and self.lane_manager is not None:
             self.lane_manager.set_tasks_store(_tasks_store_ref)
+        # Hold the same store instance for the chain watcher (started in
+        # _start_background) so terminal-chain delivery reads/writes the
+        # very tasks DB the mesh transitions tasks in.
+        self._tasks_store_ref = _tasks_store_ref
         # Wire the mesh's back-edge writer into the lane watchdog so a
         # lane-timeout failure produces a ``task_failed`` inbox event for
         # the originator AND triggers the wake-on-event chain. Without
@@ -1348,6 +1430,22 @@ class RuntimeContext:
 
         health_thread = threading.Thread(target=run_health, daemon=True)
         health_thread.start()
+
+        # Start chain watcher — delivers a guaranteed terminal outcome for
+        # user-originated task chains so the operator can hand off and
+        # release instead of block-watching a multi-hop pipeline.
+        if self._tasks_store_ref is not None and self._notification_store is not None:
+            from src.host.chain_watcher import ChainWatcher
+            self.chain_watcher = ChainWatcher(
+                self._tasks_store_ref, self._deliver_chain_outcome,
+            )
+
+            def run_chain_watcher():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(self.chain_watcher.start())
+
+            threading.Thread(target=run_chain_watcher, daemon=True).start()
 
     def _init_channel_manager(self) -> None:
         """Create the ChannelManager with callbacks (but don't start channels yet)."""
