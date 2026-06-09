@@ -57,6 +57,20 @@ def test_list_watchable_only_human_roots():
     assert [r["id"] for r in roots] == [human["id"]]
 
 
+def test_list_watchable_maps_columns_correctly():
+    """The projected row must map back to the right fields (guards against a
+    SELECT * positional drift vs _row_to_dict / _SELECT_COLS)."""
+    s = _store()
+    r = _human_root(s)
+    _finish(s, r["id"], "done", result_summary="the deliverable")
+    [row] = s.list_watchable_human_roots(since=0.0)
+    assert row["id"] == r["id"]
+    assert row["origin"] == HUMAN
+    assert row["assignee"] == "scout"
+    assert row["result_summary"] == "the deliverable"
+    assert row["status"] == "done"
+
+
 def test_list_watchable_excludes_claimed_and_old():
     s = _store()
     r = _human_root(s)

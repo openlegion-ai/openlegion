@@ -171,6 +171,7 @@ Per-hop origin is deliberately **downgraded** for worker-originated calls (`_val
 - **Q2.** Progress cadence/throttle policy for Phase 2 (debounce window; templated copy).
 - **Q3.** Concurrency: multiple simultaneous pipelines per user/channel — threading/attribution so the user can tell them apart (`root_task_id` in the row + a human-readable chain label).
 - **Q4.** Backwards-compat: chains created without a captured root origin — fall back to a dashboard bell entry keyed by the originating session, and lean on the watcher's boot re-scan to close orphans.
+- **Q5 (DECISION — surfaced in the #1088 post-merge review).** The watcher covers **operator-rooted** chains only. A *direct* user→worker→sub-agent chat produces a root created by an untrusted worker, whose `kind="human"` origin is correctly downgraded to `agent` by `_validated_origin` — so it is not watched (delivering on it would trust a forgeable origin). Per CLAUDE.md Constraint #1 ("users talk to agents directly") this topology is common. Covering it **safely** needs a trusted server-side chain registration at the dashboard `/chat` entry (the mesh knows the inbound chat was human there) rather than loosening the downgrade. **Open question for the user: is operator-rooted coverage sufficient for v1, or do we want the trusted-registration follow-up (Phase 1.5)?** Until then, direct-worker chains keep today's behavior (no terminal push) — purely a non-regression gap.
 
 ---
 

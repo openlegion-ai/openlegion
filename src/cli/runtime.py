@@ -407,6 +407,9 @@ class RuntimeContext:
         # _start_background once the mesh app's tasks_store is available.
         self.chain_watcher = None
         self._tasks_store_ref = None
+        # Strong refs for best-effort channel pushes so the event loop
+        # doesn't GC an in-flight asyncio.Task before it sends.
+        self._pending_chain_pushes: set = set()
 
         self.health_monitor = HealthMonitor(
             runtime=self.runtime, transport=self.transport, router=self.router,
@@ -957,6 +960,10 @@ class RuntimeContext:
         user = origin.get("user") or ""
         root_id = root.get("id") or ""
         assignee = root.get("assignee") or ""
+        # Raw worker output — bound it so a large result_summary can't bloat
+        # the bell row or the channel message. (Display surfaces are
+        # autoescaped; this is a size guard, not a safety one.)
+        summary = (summary or "").strip()[:1500]
         if kind == "done":
             title = "✅ Task complete"
             body = summary or "Your request finished."
@@ -1002,11 +1009,15 @@ class RuntimeContext:
                 origin_obj = MessageOrigin(
                     kind="human", channel=channel, user=user,
                 )
-                asyncio.create_task(
+                push = asyncio.create_task(
                     self._handle_notify_origin(
                         origin_obj, f"{title}\n{body}", assignee,
                     )
                 )
+                # Retain a strong ref until the push completes (asyncio only
+                # holds a weak ref; without this the task can be GC'd mid-send).
+                self._pending_chain_pushes.add(push)
+                push.add_done_callback(self._pending_chain_pushes.discard)
             except Exception as e:
                 logger.debug(
                     "chain outcome channel push schedule failed: %s", e,
