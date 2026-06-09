@@ -120,6 +120,15 @@ class TestGetContextWindow:
             window = get_context_window("openai/gpt-4o")
             assert window == _FALLBACK_CONTEXT["openai/gpt-4o"]
 
+    def test_opus_4_8_resolves_to_1m_without_litellm(self):
+        """Opus 4.8 has a 1M window; when litellm's registry lacks the model
+        the fallback table must still resolve it, not collapse to the 128K
+        default (which would compact the operator absurdly early)."""
+        with patch("src.shared.models._resolve_litellm_key", return_value=None):
+            window = get_context_window("anthropic/claude-opus-4-8")
+            assert window == 1_000_000
+            assert window != _DEFAULT_CONTEXT_WINDOW
+
 
 class TestGetProviderModels:
     def test_featured_models_first(self):
