@@ -448,9 +448,11 @@ class ContextManager:
         """Decay fact salience at most once per window.
 
         Gated by the shared ``.memory_decayed`` sentinel that the task path
-        also stamps on every fresh-task decay (loop.py): a busy worker is thus
-        never double-decayed, while an idle agent (e.g. the operator, which
-        runs no tasks) still decays through this pass — the gap this closes.
+        also stamps on every fresh-task decay (loop.py). This gating only binds
+        the background maintenance pass: it won't pile an extra decay onto an
+        agent the task path recently decayed. The task path itself stays
+        ungated (it decays per fresh task), so this pass exists to cover an
+        idle agent (e.g. the operator, which runs no tasks) — the gap it closes.
         """
         ws, mem = self.workspace, self.memory
         if not ws or not mem:
