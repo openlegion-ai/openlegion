@@ -118,11 +118,19 @@ class TestPlaybookConstants:
     def test_core_has_sentinel(self):
         assert "<!-- playbook_v2 -->" in _OPERATOR_CORE
 
+    def test_core_has_delegate_and_release(self):
+        # Phase 1d: the operator must hand off and release the turn, not
+        # block-watch a pipeline (the chain watcher delivers the outcome).
+        assert "Delegate and release" in _OPERATOR_CORE
+        assert "await_task_event to babysit" in _OPERATOR_CORE
+
     def test_core_size_reasonable(self):
         # Core should be significantly smaller than old monolithic instructions (7800 chars).
         # Bumped 5200 → 6000 to accommodate the autonomous-by-default
-        # frame copy (immediate-apply edits, ratings-as-feedback guidance).
-        assert len(_OPERATOR_CORE) < 6000
+        # frame copy (immediate-apply edits, ratings-as-feedback guidance);
+        # 6000 → 6400 for the Phase-1d "delegate and release" routing rule
+        # (hand off → stop; the chain watcher delivers the terminal outcome).
+        assert len(_OPERATOR_CORE) < 6400
         assert len(_OPERATOR_CORE) > 1000
 
     def test_playbooks_have_numbered_steps(self):

@@ -1432,10 +1432,11 @@ class TestAwaitTaskEventTool:
         assert result["last_status_seen"] == "working"
 
     @pytest.mark.asyncio
-    async def test_timeout_capped_at_270(self):
-        """``timeout_s`` is clamped to 270 (under the 300s tool ceiling).
-        We pin the module-level cap constant and confirm a terminal
-        record returns immediately via the early-return path."""
+    async def test_timeout_capped_under_streaming_idle(self):
+        """``timeout_s`` is clamped to the demoted cap (kept under the 120s
+        streaming idle timeout — Phase 1d delegate-and-release). We pin the
+        module-level cap constant and confirm a terminal record returns
+        immediately via the early-return path."""
         from src.agent.builtins.operator_tools import (
             _AWAIT_TASK_EVENT_MAX_TIMEOUT_S,
             await_task_event,
@@ -1456,7 +1457,8 @@ class TestAwaitTaskEventTool:
         )
         # Immediate event → not timed out, but the cap is documented
         # via the module-level constant — pin the value too.
-        assert _AWAIT_TASK_EVENT_MAX_TIMEOUT_S == 270
+        assert _AWAIT_TASK_EVENT_MAX_TIMEOUT_S == 90
+        assert _AWAIT_TASK_EVENT_MAX_TIMEOUT_S < 120  # under streaming idle
         assert "event" in result
         assert result["event"]["kind"] == "task_failed"
 
