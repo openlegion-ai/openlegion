@@ -942,7 +942,7 @@
                                 :placeholder="'Paste your ' + msg.name.replace(/[_.\-]/g, ' ').replace(/^\w/, c => c.toUpperCase())">
                               <div x-show="saveError" class="text-[11px] text-red-400 mb-1.5" x-text="saveError"></div>
                               <div class="flex gap-2">
-                                <button @click="if (credValue.trim()) { saving = true; saveError = ''; fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({service: msg.name, key: credValue.trim(), agent_id: msg._from_agent || ''}) }).then(r => { if (r.ok) { msg.saved = true; credValue = ''; } else { saveError = 'Failed to save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
+                                <button @click="if (credValue.trim()) { saving = true; saveError = ''; fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({service: msg.name, key: credValue.trim(), agent_id: msg._from_agent || '', request_id: msg.request_id || ''}) }).then(r => { if (r.ok) { msg.saved = true; credValue = ''; } else { saveError = 'Failed to save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
                                   :disabled="!credValue.trim() || saving"
                                   class="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
                                   :class="credValue.trim() && !saving ? 'bg-indigo-600 hover:bg-indigo-500 text-white' : 'bg-gray-700 text-gray-400 cursor-not-allowed'">
@@ -4158,15 +4158,15 @@
                     </template>
                   </div>
                 </div>
-                <!-- Inline credential resolution. Credential items (sourced
-                     ONLY from real credential_request cards — they carry the
-                     vault key and the awaiting agent) get an ``inlineCredential``
-                     descriptor so the user pastes the key and saves it to the
-                     vault WITHOUT a trip to the chat transcript — the same POST
-                     the operator-chat credential card makes, which also steers
-                     the waiting agent so it actually unblocks. On success we
-                     mark the backing chat message saved (``item.msg``), which
-                     drops the row on the next getter pass. -->
+                <!-- Inline credential resolution. Credential items (from the
+                     authoritative help-requests feed — they carry the vault key,
+                     the awaiting agent, and the request_id) get an
+                     ``inlineCredential`` descriptor so the user pastes the key
+                     and saves it to the vault WITHOUT a trip to the chat
+                     transcript — the same POST the operator-chat credential card
+                     makes, with request_id so the mesh atomically pops the
+                     record + steers the agent. On success we re-pull the feed
+                     (``loadWorkplaceHelpRequests``), which drops the row. -->
                 <template x-if="item.inlineCredential">
                   <div class="mt-2.5 sm:pl-8" x-data="{ credValue: '', saving: false, saved: false, saveError: '' }">
                     <template x-if="!saved">
@@ -8437,7 +8437,7 @@
                           :placeholder="'Paste your ' + msg.name.replace(/[_.\-]/g, ' ').replace(/^\w/, c => c.toUpperCase())">
                         <div x-show="saveError" class="text-[11px] text-red-400 mb-1.5" x-text="saveError"></div>
                         <div class="flex gap-2">
-                          <button @click="if (credValue.trim()) { saving = true; saveError = ''; fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({service: msg.name, key: credValue.trim(), agent_id: activeChatId || ''}) }).then(r => { if (r.ok) { msg.saved = true; credValue = ''; } else { saveError = 'Failed to save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
+                          <button @click="if (credValue.trim()) { saving = true; saveError = ''; fetch(window.__config.apiBase + '/credentials/agent', { method: 'POST', headers: {'Content-Type':'application/json', 'X-Requested-With':'XMLHttpRequest'}, body: JSON.stringify({service: msg.name, key: credValue.trim(), agent_id: activeChatId || '', request_id: msg.request_id || ''}) }).then(r => { if (r.ok) { msg.saved = true; credValue = ''; } else { saveError = 'Failed to save. Please try again.'; } saving = false; }).catch(() => { saveError = 'Network error. Please try again.'; saving = false; }); }"
                             :disabled="!credValue.trim() || saving"
                             class="flex-1 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors"
                             :class="credValue.trim() && !saving ? 'bg-indigo-600 hover:bg-indigo-500 text-white' : 'bg-gray-700 text-gray-400 cursor-not-allowed'">

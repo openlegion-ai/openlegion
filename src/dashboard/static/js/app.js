@@ -1753,6 +1753,8 @@ function dashboard() {
       if (this._platformSuccessDebounce) clearTimeout(this._platformSuccessDebounce);
       if (this._cronDebounce) clearTimeout(this._cronDebounce);
       if (this._modelHealthInterval) clearInterval(this._modelHealthInterval);
+      if (this._helpRequestsInterval) clearInterval(this._helpRequestsInterval);
+      if (this._helpRefreshTimer) clearTimeout(this._helpRefreshTimer);
       if (this._cookieRenewalInterval) clearInterval(this._cookieRenewalInterval);
       if (this._visibilityHandler) document.removeEventListener('visibilitychange', this._visibilityHandler);
       if (this._costDebounce) clearTimeout(this._costDebounce);
@@ -3244,7 +3246,7 @@ function dashboard() {
     // the ask won't be answered) then re-pulls the authoritative feed.
     async _cancelHelpRequest(req, slug) {
       try {
-        await fetch(
+        const resp = await fetch(
           `${window.__config.apiBase}/${slug}-request/${encodeURIComponent(req.request_id)}/cancel`,
           {
             method: 'POST',
@@ -3252,6 +3254,11 @@ function dashboard() {
             body: JSON.stringify({ reason: 'user_cancelled' }),
           },
         );
+        // A 404 means it was already resolved/cancelled elsewhere — benign,
+        // the feed refresh below will drop the row. Surface only real errors.
+        if (!resp.ok && resp.status !== 404 && typeof this.showToast === 'function') {
+          this.showToast('Cancel failed — please try again');
+        }
       } catch (_) {
         if (typeof this.showToast === 'function') this.showToast('Cancel failed — please try again');
       }
@@ -5022,8 +5029,10 @@ function dashboard() {
           const hist = this.chatHistories[chatId];
           if (!hist) continue;
           for (const m of hist) {
-            if (m.role === 'browser_login_request' && m.service === evt.data.service
-                && (chatId === agent || m._from_agent === agent)) {
+            if (m.role === 'browser_login_request'
+                && (evt.data.request_id
+                    ? m.request_id === evt.data.request_id
+                    : (m.service === evt.data.service && (chatId === agent || m._from_agent === agent)))) {
               m.completed = true;
             }
           }
@@ -5034,8 +5043,10 @@ function dashboard() {
           const hist = this.chatHistories[chatId];
           if (!hist) continue;
           for (const m of hist) {
-            if (m.role === 'browser_login_request' && m.service === evt.data.service
-                && (chatId === agent || m._from_agent === agent)) {
+            if (m.role === 'browser_login_request'
+                && (evt.data.request_id
+                    ? m.request_id === evt.data.request_id
+                    : (m.service === evt.data.service && (chatId === agent || m._from_agent === agent)))) {
               m.cancelled = true;
             }
           }
@@ -5090,8 +5101,10 @@ function dashboard() {
           const hist = this.chatHistories[chatId];
           if (!hist) continue;
           for (const m of hist) {
-            if (m.role === 'browser_captcha_help_request' && m.service === evt.data.service
-                && (chatId === agent || m._from_agent === agent)) {
+            if (m.role === 'browser_captcha_help_request'
+                && (evt.data.request_id
+                    ? m.request_id === evt.data.request_id
+                    : (m.service === evt.data.service && (chatId === agent || m._from_agent === agent)))) {
               m.completed = true;
             }
           }
@@ -5102,8 +5115,10 @@ function dashboard() {
           const hist = this.chatHistories[chatId];
           if (!hist) continue;
           for (const m of hist) {
-            if (m.role === 'browser_captcha_help_request' && m.service === evt.data.service
-                && (chatId === agent || m._from_agent === agent)) {
+            if (m.role === 'browser_captcha_help_request'
+                && (evt.data.request_id
+                    ? m.request_id === evt.data.request_id
+                    : (m.service === evt.data.service && (chatId === agent || m._from_agent === agent)))) {
               m.cancelled = true;
             }
           }

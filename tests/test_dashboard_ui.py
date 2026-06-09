@@ -1571,6 +1571,28 @@ class TestNeedsYouServerAuthoritative:
         # the iframe src and the open-browser guard), on both chat surfaces.
         assert _INDEX_HTML.count("_getVncUrl(msg._from_agent || activeChatId)") == 8
 
+    def test_completion_sync_prefers_request_id(self):
+        # Two open requests for the same (agent, service) must resolve
+        # independently: completing one must mark ONLY its card done, not the
+        # sibling's. The WS sync therefore prefers request_id, falling back to
+        # service only for legacy events that lack one. Four blocks: login +
+        # captcha, each completed + cancelled.
+        assert _APP_JS_TEXT.count("m.request_id === evt.data.request_id") == 4
+
+    def test_chat_card_credential_save_sends_request_id(self):
+        # Saving a credential from the CHAT CARD (not just the panel) must send
+        # request_id so the registry record is popped and the panel row clears
+        # — otherwise the feed shows a permanent ghost row.
+        assert _INDEX_HTML.count("request_id: msg.request_id || ''") >= 2
+
+    def test_help_timers_cleaned_up_on_teardown(self):
+        # No stale 60s fetch loop / debounce after Alpine teardown.
+        m = re.search(r"destroy\(\)\s*\{(.*?)\n    \},", _APP_JS_TEXT, re.DOTALL)
+        assert m, "destroy() body missing"
+        body = m.group(1)
+        assert "_helpRequestsInterval" in body
+        assert "_helpRefreshTimer" in body
+
 
 # ── Browser notification + activity rollup + connect-channel ────
 

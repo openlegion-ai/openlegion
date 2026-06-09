@@ -4242,9 +4242,15 @@ def create_dashboard_router(
         # socket dependency and isn't needed since we hold the store ref.
         claimed = True
         if request_id and help_requests_store is not None:
-            claimed = help_requests_store.resolve(
+            record = help_requests_store.resolve(
                 request_id, expected_kind="credential_request", status="resolved",
-            ) is not None
+            )
+            claimed = record is not None
+            # Prefer the registry's agent_id (authoritative) over the body's:
+            # some card surfaces post the active chat id ('operator'), not the
+            # requesting worker, so the steer would otherwise hit the wrong agent.
+            if record and record.get("agent_id"):
+                agent_id = record["agent_id"]
         if claimed:
             if agent_id and lane_manager is not None and agent_id in agent_registry:
                 from src.shared.trace import new_trace_id
@@ -4304,7 +4310,10 @@ def create_dashboard_router(
             except Exception:
                 pass
         if event_bus:
-            event_bus.emit("browser_login_completed", agent=agent_id, data={"service": service})
+            event_bus.emit(
+                "browser_login_completed", agent=agent_id,
+                data={"service": service, "request_id": request_id},
+            )
         return {"completed": True, "agent_id": agent_id, "service": service}
 
     @api_router.post("/api/browser-captcha-help/complete")
@@ -4343,7 +4352,7 @@ def create_dashboard_router(
         if event_bus:
             event_bus.emit(
                 "browser_captcha_help_completed",
-                agent=agent_id, data={"service": service},
+                agent=agent_id, data={"service": service, "request_id": request_id},
             )
         return {"completed": True, "agent_id": agent_id, "service": service}
 
