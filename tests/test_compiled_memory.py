@@ -13,7 +13,11 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.agent.context import ContextManager
+from src.agent.context import (
+    _SUMMARIZATION_INPUT_LIMIT,
+    ContextManager,
+    _tail_on_boundary,
+)
 from src.agent.workspace import (
     _MEMORY_FILE_MAX,
     MEMORY_COMPILED_BEGIN,
@@ -164,6 +168,29 @@ class TestCompiledMemorySplit:
         # Zero interval → always due.
         assert self.ws.consolidation_due(0) is True
 
+    def test_decay_stamp_due_then_not_due(self):
+        # Mirrors the consolidation sentinel: never decayed → due; just
+        # stamped → not due; zero interval → always due.
+        assert self.ws.decay_due(10_000) is True
+        self.ws.mark_decayed()
+        assert self.ws.decay_due(10_000) is False
+        assert self.ws.decay_due(0) is True
+
+
+def test_tail_on_boundary_returns_newest_not_oldest():
+    """The slice-bug regression guard. The log is append-only (oldest first),
+    so consolidation must read the TAIL — the previous ``log[:N]`` read the
+    OLDEST entries and truncated everything recent."""
+    # Under the limit → returned whole.
+    assert _tail_on_boundary("short", 100) == "short"
+
+    entries = [f"## Entry {i}\n\nbody-{i} " + ("x" * 200) for i in range(20)]
+    log = "\n\n".join(entries)
+    out = _tail_on_boundary(log, 1_000)
+    assert "Entry 19" in out            # newest survives
+    assert "Entry 0\n" not in out       # oldest truncated
+    assert out.lstrip().startswith("## ")  # never starts mid-entry
+
 
 def _fake_fact(key: str, value: str):
     f = MagicMock()
@@ -226,3 +253,125 @@ class TestConsolidateMemory:
 
         llm.chat.assert_not_called()
         ws.write_compiled_memory.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_consolidation_feeds_newest_log_to_llm(self):
+        """End-to-end slice-bug guard: the consolidation prompt must contain
+        the NEWEST log entry and exclude the oldest when the log exceeds the
+        summarization limit (the bug fed ``log[:N]`` — the oldest)."""
+        oldest = "## OLDEST\n\nOLDEST_LOG_MARKER"
+        newest = "## NEWEST\n\nNEWEST_LOG_MARKER"
+        log = oldest + "\n\n" + ("filler " * 5_000) + "\n\n" + newest
+        assert len(log) > _SUMMARIZATION_INPUT_LIMIT  # forces a tail slice
+        ws = self._make_workspace(due=True, log=log)
+        llm = MagicMock()
+        llm.chat = AsyncMock(
+            return_value=LLMResponse(content="HEAD", tokens_used=10)
+        )
+        cm = ContextManager(max_tokens=1000, llm=llm, workspace=ws, memory=None)
+        await cm._maybe_consolidate_memory()
+
+        prompt = llm.chat.call_args.kwargs["messages"][0]["content"]
+        assert "NEWEST_LOG_MARKER" in prompt
+        assert "OLDEST_LOG_MARKER" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_failed_consolidation_backs_off_and_skips_next(self):
+        """A failed LLM call sets a backoff so the frequent maintenance tick
+        doesn't hammer the model; the next call skips before the LLM."""
+        ws = self._make_workspace(due=True, log="L" * 2_000)
+        llm = MagicMock()
+        llm.chat = AsyncMock(side_effect=RuntimeError("llm down"))
+
+        cm = ContextManager(max_tokens=1000, llm=llm, workspace=ws, memory=None)
+        await cm._maybe_consolidate_memory()
+        assert cm._consolidation_retry_after > 0
+        assert llm.chat.await_count == 1
+        ws.mark_consolidated.assert_not_called()
+
+        # Within the backoff window → no second LLM call.
+        await cm._maybe_consolidate_memory()
+        assert llm.chat.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_empty_consolidation_output_backs_off(self):
+        ws = self._make_workspace(due=True, log="L" * 2_000)
+        llm = MagicMock()
+        llm.chat = AsyncMock(
+            return_value=LLMResponse(content="   ", tokens_used=1)
+        )
+        cm = ContextManager(max_tokens=1000, llm=llm, workspace=ws, memory=None)
+        await cm._maybe_consolidate_memory()
+
+        assert cm._consolidation_retry_after > 0
+        ws.write_compiled_memory.assert_not_called()
+        ws.mark_consolidated.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_decay_runs_when_due_and_stamps(self):
+        ws = MagicMock()
+        ws.decay_due.return_value = True
+        mem = MagicMock()
+        mem.decay_all = AsyncMock()
+
+        cm = ContextManager(
+            max_tokens=1000, llm=MagicMock(), workspace=ws, memory=mem,
+        )
+        await cm._maybe_decay_salience()
+
+        mem.decay_all.assert_awaited_once()
+        ws.mark_decayed.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_decay_skips_when_not_due(self):
+        ws = MagicMock()
+        ws.decay_due.return_value = False
+        mem = MagicMock()
+        mem.decay_all = AsyncMock()
+
+        cm = ContextManager(
+            max_tokens=1000, llm=MagicMock(), workspace=ws, memory=mem,
+        )
+        await cm._maybe_decay_salience()
+
+        mem.decay_all.assert_not_awaited()
+        ws.mark_decayed.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_maintenance_decay_skips_after_task_path_stamp(self):
+        """Double-decay guard with a REAL workspace: the task path stamps the
+        shared ``.memory_decayed`` sentinel on every fresh-task decay, so the
+        maintenance pass must then treat decay as not-due."""
+        d = tempfile.mkdtemp()
+        try:
+            ws = WorkspaceManager(workspace_dir=d)
+            ws.mark_decayed()  # simulate a task-path decay
+            mem = MagicMock()
+            mem.decay_all = AsyncMock()
+            cm = ContextManager(
+                max_tokens=1000, llm=MagicMock(), workspace=ws, memory=mem,
+            )
+            await cm._maybe_decay_salience()
+            mem.decay_all.assert_not_awaited()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_run_maintenance_consolidates_then_decays(self):
+        ws = self._make_workspace(due=True, log="L" * 2_000)
+        ws.decay_due.return_value = True
+        llm = MagicMock()
+        llm.chat = AsyncMock(
+            return_value=LLMResponse(content="NEW HEAD", tokens_used=10)
+        )
+        mem = MagicMock()
+        mem.get_high_salience_facts = AsyncMock(return_value=[])
+        mem.decay_all = AsyncMock()
+
+        cm = ContextManager(max_tokens=1000, llm=llm, workspace=ws, memory=mem)
+        await cm.run_maintenance()
+
+        ws.write_compiled_memory.assert_called_once()
+        ws.mark_consolidated.assert_called_once()
+        mem.decay_all.assert_awaited_once()
+        ws.mark_decayed.assert_called_once()

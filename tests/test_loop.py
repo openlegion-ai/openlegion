@@ -8,6 +8,7 @@ Uses mock LLM to verify:
 - Final output parsing
 """
 
+import asyncio
 import json
 from unittest.mock import AsyncMock, MagicMock
 
@@ -2266,6 +2267,58 @@ async def test_heartbeat_skips_when_chat_locked():
         assert result["reason"] == "agent_busy"
     finally:
         loop._chat_lock.release()
+
+
+@pytest.mark.asyncio
+async def test_run_maintenance_skips_when_busy_else_runs_under_lock():
+    """The background maintenance pass must skip while a turn is in flight
+    (same idle/lock guard the heartbeat uses) and otherwise run the
+    ContextManager pass under the chat lock."""
+    loop = _make_loop()
+    loop.context_manager = MagicMock()
+    loop.context_manager.run_maintenance = AsyncMock()
+
+    # Busy with a task → skip.
+    loop.state = "working"
+    await loop.run_maintenance()
+    loop.context_manager.run_maintenance.assert_not_awaited()
+
+    # Idle but a chat turn holds the lock → skip.
+    loop.state = "idle"
+    await loop._chat_lock.acquire()
+    try:
+        await loop.run_maintenance()
+    finally:
+        loop._chat_lock.release()
+    loop.context_manager.run_maintenance.assert_not_awaited()
+
+    # Idle and unlocked → runs, then restores idle state (so it doesn't
+    # leave the agent stuck "working").
+    await loop.run_maintenance()
+    loop.context_manager.run_maintenance.assert_awaited_once()
+    assert loop.state == "idle"
+
+
+@pytest.mark.asyncio
+async def test_run_maintenance_loop_invokes_then_cancels(monkeypatch):
+    """The production launch path (server.run_maintenance_loop) ticks
+    loop.run_maintenance and stops cleanly on cancellation."""
+    from src.agent import server
+
+    loop = _make_loop()
+    loop.run_maintenance = AsyncMock()
+    monkeypatch.setattr(server, "_MAINTENANCE_INITIAL_DELAY_S", 0)
+    monkeypatch.setattr(server, "_MAINTENANCE_TICK_S", 0.01)
+
+    task = asyncio.create_task(server.run_maintenance_loop(loop))
+    await asyncio.sleep(0.05)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert loop.run_maintenance.await_count >= 1
 
 
 @pytest.mark.asyncio
