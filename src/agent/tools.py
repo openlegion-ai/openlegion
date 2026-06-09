@@ -39,6 +39,15 @@ _NON_TOOL_DIRS = frozenset({
 _tool_staging: dict[str, dict] = {}
 _tool_staging_lock = threading.Lock()
 
+# Trust-boundary allowlist for the ``agent_loop`` injection. The AgentLoop is
+# the whole sandboxed-agent runtime; handing it to a tool gives that tool full
+# control over the loop. Only these TRUSTED builtin bridge tools receive it —
+# gated by tool NAME, never by signature inspection alone. Custom / marketplace
+# / self-authored tools load into the SAME registry and could otherwise declare
+# an ``agent_loop`` param to capture the loop, breaking the sandbox model (tools
+# get only mesh_client / workspace_manager / memory_store). See CLAUDE.md.
+_AGENT_LOOP_TOOLS = frozenset({"load_tools"})
+
 
 def _normalize_params_dict(params: object) -> dict:
     """Normalize tool parameters to the canonical dict shape.
@@ -237,6 +246,7 @@ class ToolRegistry:
         workspace_manager: Any = None,
         memory_store: Any = None,
         _messages: list[dict] | None = None,
+        agent_loop: Any = None,
     ) -> Any:
         """Execute a tool by name with given arguments."""
         if self._mcp_client and self._mcp_client.has_tool(name):
@@ -310,6 +320,12 @@ class ToolRegistry:
             call_args["memory_store"] = memory_store
         if "_messages" in sig_params:
             call_args["_messages"] = _messages
+        # Trust-boundary gate: inject the AgentLoop ONLY into trusted builtin
+        # bridge tools (gated by NAME), never by signature alone. A custom or
+        # self-authored tool declaring an ``agent_loop`` param must NOT capture
+        # the loop. See ``_AGENT_LOOP_TOOLS``.
+        if name in _AGENT_LOOP_TOOLS and "agent_loop" in sig_params:
+            call_args["agent_loop"] = agent_loop
 
         # Filter out LLM-hallucinated parameters that the function doesn't
         # accept.  Without this, an LLM sending e.g. {"raw": ""} to a
@@ -346,7 +362,7 @@ class ToolRegistry:
                 req_parts = []
                 opt_parts = []
                 for k, v in param_schemas.items():
-                    if k in {"mesh_client", "workspace_manager", "memory_store", "_messages"}:
+                    if k in {"mesh_client", "workspace_manager", "memory_store", "_messages", "agent_loop"}:
                         continue
                     ptype = v.get("type", "any")
                     desc = v.get("description", "")
@@ -432,8 +448,15 @@ class ToolRegistry:
         self,
         exclude: frozenset[str] | None = None,
         allowed: frozenset[str] | None = None,
+        defer: frozenset[str] | None = None,
     ) -> list[str]:
-        """Return list of available tool names."""
+        """Return list of available tool names.
+
+        *defer* (Grouped Tool Search) is accepted for call-site symmetry with
+        ``get_tool_definitions`` but intentionally ignored: a deferred tool is
+        still *callable* (only its schema is lazy), so it must remain in the
+        capability/status listing.
+        """
         if allowed is not None:
             return [n for n in self.tools if n in allowed]
         if exclude:
@@ -478,12 +501,24 @@ class ToolRegistry:
         self,
         exclude: frozenset[str] | None = None,
         allowed: frozenset[str] | None = None,
+        defer: frozenset[str] | None = None,
     ) -> list[dict]:
-        """Return OpenAI-compatible tool definitions for LLM function calling (memoized)."""
+        """Return OpenAI-compatible tool definitions for LLM function calling (memoized).
+
+        *defer* — Grouped Tool Search (B2): tool names whose full schemas to
+        OMIT from this build (their capability is still advertised cheaply via
+        the always-present capability index in the system prompt; the schema is
+        pulled in later via ``load_tools``). Folded into the memo cache key so a
+        different loaded-groups set yields different definitions.
+        """
         if self._tool_defs_cache is None:
             self._tool_defs_cache = {}
         cache = self._tool_defs_cache
-        cache_key = (exclude, allowed)
+        # Flag-off parity: when no defer set is in play (Grouped Tool Search off),
+        # emit the LEGACY 2-tuple key so cache behaviour is byte-identical to main
+        # (no cold-miss against pre-existing entries). Only widen to the 3-tuple
+        # when a defer set is actually present.
+        cache_key = (exclude, allowed) if defer is None else (exclude, allowed, defer)
         cached = cache.get(cache_key)
         if cached is not None:
             return cached
@@ -494,6 +529,8 @@ class ToolRegistry:
                 if name not in allowed:
                     continue
             elif exclude and name in exclude:
+                continue
+            if defer and name in defer:
                 continue
             params = info["parameters"]
 

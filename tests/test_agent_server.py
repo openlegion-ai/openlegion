@@ -658,6 +658,7 @@ class TestInvokeTool:
             mesh_client=loop.mesh_client,
             workspace_manager=loop.workspace,
             memory_store=loop.memory,
+            agent_loop=loop,
         )
 
     @pytest.mark.asyncio
@@ -675,6 +676,7 @@ class TestInvokeTool:
             mesh_client=loop.mesh_client,
             workspace_manager=loop.workspace,
             memory_store=loop.memory,
+            agent_loop=loop,
         )
 
     @pytest.mark.asyncio

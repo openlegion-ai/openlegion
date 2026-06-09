@@ -1780,6 +1780,15 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "browser_download",
 ]
 
+# Grouped Tool Search (B2) bridge — pulls a deferred capability group's full
+# schemas into context for the next turn. Granted ONLY when the feature is
+# opted in via OPENLEGION_GROUPED_TOOLS; with the flag off the operator's tool
+# surface stays byte-identical to main (the bridge would be a dead no-op).
+from src.agent.tool_groups import grouped_tools_enabled as _grouped_tools_enabled  # noqa: E402
+
+if _grouped_tools_enabled():
+    _OPERATOR_ALLOWED_TOOLS.append("load_tools")
+
 # Reference list documenting the tools operator uses on heartbeat. The
 # loop's actual gate is ``_HEARTBEAT_TOOLS`` in ``src/agent/loop.py`` —
 # this list is kept in sync as documentation but is not itself consulted
