@@ -5011,3 +5011,102 @@ def test_trim_context_preserves_multimodal_first_message() -> None:
         and "Previous Actions" in b.get("text", "")
         for b in trimmed[0]["content"]
     )
+
+
+# === Context-window wedge guard (defense in depth) ===
+
+
+@pytest.mark.asyncio
+async def test_restore_session_prunes_oversized_checkpoint():
+    """A fat checkpoint reloaded by _maybe_restore_session must be pruned under
+    the window so the agent can't re-wedge on the first call after restart."""
+    from src.agent.context import ContextManager
+
+    loop = _make_loop()
+    loop.context_manager = ContextManager(max_tokens=8_000, model="anthropic/claude")
+    loop._chat_messages = []
+
+    # Build a checkpoint far over the window: many big tool-call groups.
+    fat: list[dict] = [{"role": "user", "content": "INITIAL " + "i" * 4000}]
+    for g in range(10):
+        fat.append({
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": f"c{g}", "function": {"name": "do", "arguments": "{}"}}],
+        })
+        fat.append({"role": "tool", "tool_call_id": f"c{g}", "content": "r" * 4000})
+        fat.append({"role": "assistant", "content": "a" * 4000})
+        fat.append({"role": "user", "content": "u" * 4000})
+
+    before = loop.context_manager.estimate_request_tokens(fat)
+    assert before > loop.context_manager.max_tokens
+
+    loop.memory._run_db = AsyncMock(return_value={
+        "messages": fat,
+        "total_rounds": 3,
+        "auto_continues": 0,
+        "flush_triggered": False,
+    })
+
+    await loop._maybe_restore_session()
+
+    after = loop.context_manager.estimate_request_tokens(loop._chat_messages)
+    assert after <= loop.context_manager.max_tokens * 0.90
+    # First (initial) message preserved.
+    assert loop._chat_messages[0]["content"].startswith("INITIAL")
+
+
+@pytest.mark.asyncio
+async def test_chat_self_heals_on_context_overflow():
+    """A context-overflow on the first chat call triggers an emergency prune +
+    successful retry rather than aborting the turn."""
+    from src.agent.context import ContextManager
+    from src.agent.llm import LLMContextOverflowError
+
+    final = LLMResponse(content="recovered answer", tokens_used=20)
+
+    loop = _make_loop()
+    loop.context_manager = ContextManager(max_tokens=8_000, model="anthropic/claude")
+
+    # Oversized inherited context so prune_to_fit has groups to shed.
+    seed: list[dict] = [{"role": "user", "content": "INITIAL " + "i" * 4000}]
+    for g in range(10):
+        seed.append({
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": f"c{g}", "function": {"name": "do", "arguments": "{}"}}],
+        })
+        seed.append({"role": "tool", "tool_call_id": f"c{g}", "content": "r" * 4000})
+        seed.append({"role": "assistant", "content": "a" * 4000})
+        seed.append({"role": "user", "content": "u" * 4000})
+    loop._chat_messages = list(seed)
+
+    # First call overflows, second returns a normal response.
+    loop.llm.chat_collect = AsyncMock(
+        side_effect=[LLMContextOverflowError("prompt is too long: 9000 > 8000"), final]
+    )
+    loop.tools.get_tool_definitions = MagicMock(return_value=[])
+
+    resp = await loop._chat_call_self_healing(system="sys", tools=None)
+    assert resp is final
+    assert loop.llm.chat_collect.call_count == 2
+    # The context was pruned in the process.
+    assert len(loop._chat_messages) < len(seed)
+
+
+@pytest.mark.asyncio
+async def test_chat_self_heal_reraises_when_prune_cannot_help():
+    """If pruning makes no progress (already minimal), the overflow is
+    re-raised so the user sees a clear failure rather than an infinite loop."""
+    from src.agent.context import ContextManager
+    from src.agent.llm import LLMContextOverflowError
+
+    loop = _make_loop()
+    loop.context_manager = ContextManager(max_tokens=8_000, model="anthropic/claude")
+    # Single small message: nothing to prune.
+    loop._chat_messages = [{"role": "user", "content": "hi"}]
+    loop.llm.chat_collect = AsyncMock(
+        side_effect=LLMContextOverflowError("prompt is too long")
+    )
+    loop.tools.get_tool_definitions = MagicMock(return_value=[])
+
+    with pytest.raises(LLMContextOverflowError):
+        await loop._chat_call_self_healing(system="sys", tools=None)

@@ -26,6 +26,34 @@ class LLMRetryableError(RuntimeError):
     pass
 
 
+class LLMContextOverflowError(RuntimeError):
+    """The assembled request exceeded the model's context window.
+
+    Distinct from the generic non-retryable ``RuntimeError`` so the chat loop
+    can SELF-HEAL: emergency-prune the conversation to fit and retry, instead of
+    aborting the turn (which would leave the over-limit context in place and
+    permanently wedge — every subsequent call 400s the same way). NOT a plain
+    retryable error: re-issuing the identical request would 400 again — the
+    caller MUST shrink the context before retrying.
+    """
+
+    pass
+
+
+# Substrings (matched case-insensitively against the error message) that
+# identify a context-length / "prompt is too long" 400 across providers
+# (Anthropic, OpenAI, OpenRouter passthrough). Used by ``_raise_classified_error``
+# to route to ``LLMContextOverflowError`` so the loop's prune-and-retry self-heal
+# fires instead of a generic turn abort.
+_CONTEXT_OVERFLOW_MARKERS = (
+    "prompt is too long",
+    "context length",
+    "context_length_exceeded",
+    "input length and max_tokens exceed",
+    "maximum context length",
+)
+
+
 class LLMClient:
     """LLM interface that routes all calls through the mesh API proxy."""
 
@@ -179,6 +207,14 @@ class LLMClient:
                 allowed_models=set(error_meta.get("allowed_models", [])),
                 http_status=error_meta.get("http_status"),
             )
+        # Context-overflow 400 ("prompt is too long" / "context length
+        # exceeded"). Route to the distinct overflow type BEFORE the transient /
+        # retryable checks so the chat loop's prune-and-retry self-heal fires
+        # rather than a generic, un-recoverable turn abort. Detected by
+        # substring because the mesh proxy does not yet tag a distinct
+        # ``error_type`` for it.
+        if any(kw in error_msg.lower() for kw in _CONTEXT_OVERFLOW_MARKERS):
+            raise LLMContextOverflowError(f"{prefix}: {error_msg}")
         if error_type == "transient":
             # Mesh-tagged transient (Claude subscription throttle, stream
             # interruption, empty-choices response). The mesh already
@@ -415,8 +451,8 @@ class LLMClient:
             async for chunk in self.chat_stream(system, messages, **_passthru):
                 if chunk.get("type") == "done":
                     final = chunk.get("response")
-        except (LLMRetryableError, LLMAuthError, LLMConfigError):
-            raise  # classified errors -> _llm_call_with_retry handles backoff
+        except (LLMRetryableError, LLMContextOverflowError, LLMAuthError, LLMConfigError):
+            raise  # classified errors -> caller (retry / prune-and-retry) handles them
         except httpx.HTTPError as e:
             # Only genuine transport/HTTP failures fall back to non-streaming.
             # Everything else propagates untouched: non-retryable application
