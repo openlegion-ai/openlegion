@@ -472,10 +472,25 @@ class Tasks:
         NULL``), carries a first-party human origin, was created within
         the watch window (``created_at >= since``), and has not already
         had a terminal notification claimed in ``chain_deliveries``.
+
+        **Coverage is intentionally limited to OPERATOR-rooted chains.**
+        ``origin_kind = 'human'`` is only first-party when a *trusted*
+        caller created the root: the operator's initial hand_off keeps
+        ``kind="human"``, but a non-operator worker's hand_off has its
+        claim downgraded to ``agent`` by ``_validated_origin`` (``dashboard``
+        is not a paired channel). A *direct* user→worker→sub-agent chat
+        therefore produces an ``agent``-origin root that is (correctly) NOT
+        watched — delivering on it would mean trusting a forgeable origin.
+        Covering that topology safely needs a trusted server-side chain
+        registration at the dashboard ``/chat`` entry (follow-up).
+
+        Projects ``_SELECT_COLS`` (never ``SELECT *``) so ``_row_to_dict``'s
+        positional mapping stays correct on DBs with differing ALTER-column
+        histories.
         """
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT * FROM tasks "
+                f"SELECT {self._SELECT_COLS} FROM tasks "
                 "WHERE parent_task_id IS NULL "
                 "  AND origin_kind = 'human' "
                 "  AND created_at >= ? "
