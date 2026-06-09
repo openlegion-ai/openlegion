@@ -106,7 +106,7 @@ class LLMTransientError(RuntimeError):
 # classifier uses it as a backstop. One list keeps the two copies from drifting.
 CONTEXT_OVERFLOW_MARKERS = (
     "prompt is too long",
-    "context length",
+    "context length exceeded",
     "context_length_exceeded",
     "input length and max_tokens exceed",
     "maximum context length",

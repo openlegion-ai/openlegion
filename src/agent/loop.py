@@ -3495,21 +3495,32 @@ class AgentLoop:
             except LLMContextOverflowError:
                 if attempt >= 2 or not self.context_manager:
                     raise
-                before = len(self._chat_messages)
+                before_msgs = len(self._chat_messages)
+                before_tokens = self.context_manager.estimate_request_tokens(
+                    self._chat_messages, system, tools,
+                )
                 self._chat_messages = self.context_manager.prune_to_fit(
                     self._chat_messages,
                     system_prompt=system,
                     tools=tools,
                     ceiling_frac=0.75,
                 )
+                after_tokens = self.context_manager.estimate_request_tokens(
+                    self._chat_messages, system, tools,
+                )
                 logger.warning(
                     "chat call overflowed context window; emergency-pruned "
-                    "%d->%d messages and retrying (attempt %d/2)",
-                    before, len(self._chat_messages), attempt + 1,
+                    "%d->%d messages (%d->%d est tokens), retrying (attempt %d/2)",
+                    before_msgs, len(self._chat_messages),
+                    before_tokens, after_tokens, attempt + 1,
                 )
-                if len(self._chat_messages) >= before:
-                    # Prune made no progress (already at the minimal kept set);
-                    # retrying would loop on the same 400. Surface the failure.
+                if after_tokens >= before_tokens:
+                    # No TOKEN progress (already at the minimal kept set);
+                    # retrying would 400 identically. Surface the failure.
+                    # Token-based, not message-count: dropping a 1-message group
+                    # while the role-alternation bridge adds 1 leaves the count
+                    # unchanged though tokens fell — a count check would bail
+                    # prematurely on text-heavy (no-tool) operator chats.
                     raise
 
     async def _compact_chat_context(self, system: str) -> None:
@@ -4793,20 +4804,27 @@ class AgentLoop:
                         except LLMContextOverflowError:
                             if _heal_attempt >= 2 or not self.context_manager:
                                 raise
-                            before = len(self._chat_messages)
+                            before_msgs = len(self._chat_messages)
+                            before_tokens = self.context_manager.estimate_request_tokens(
+                                self._chat_messages, system, tools,
+                            )
                             self._chat_messages = self.context_manager.prune_to_fit(
                                 self._chat_messages,
                                 system_prompt=system,
                                 tools=tools,
                                 ceiling_frac=0.75,
                             )
-                            if len(self._chat_messages) >= before:
-                                raise  # no progress — surface the failure
+                            after_tokens = self.context_manager.estimate_request_tokens(
+                                self._chat_messages, system, tools,
+                            )
+                            if after_tokens >= before_tokens:
+                                raise  # no token progress — surface the failure
                             _msgs = self._messages_with_volatile(self._chat_messages)
                             logger.warning(
                                 "non-streaming fallback overflowed; pruned "
-                                "%d->%d and retrying (attempt %d/2)",
-                                before, len(self._chat_messages), _heal_attempt + 1,
+                                "%d->%d messages (%d->%d est tokens), retrying (attempt %d/2)",
+                                before_msgs, len(self._chat_messages),
+                                before_tokens, after_tokens, _heal_attempt + 1,
                             )
 
                 # Bug 1 (codex P2 r2): tick after the LLM call returns —

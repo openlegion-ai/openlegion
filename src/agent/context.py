@@ -264,7 +264,14 @@ class ContextManager:
                 [{"role": "system", "content": system_prompt}], self.model,
             )
         if tools:
-            total += len(json.dumps(tools)) // 3
+            # Tool schemas come from @tool-decorated functions and are
+            # JSON-safe, but this runs on every turn's pre-flight path now, so
+            # fall back rather than crash the turn if a schema is ever not
+            # serializable.
+            try:
+                total += len(json.dumps(tools)) // 3
+            except (TypeError, ValueError):
+                total += len(str(tools)) // 4
         return total
 
     def prune_to_fit(
@@ -305,8 +312,9 @@ class ContextManager:
         groups = group_messages_by_tool_call(messages)
         # Keep first group + at least the most-recent group. We drop the OLDEST
         # non-first group repeatedly: kept = [first] + groups[drop_start:].
-        # ``drop_start`` walks forward from index 1 toward the tail.
-        drop_start = 1
+        # ``drop_start`` walks forward from index 2 (index 1 would re-test the
+        # full unmodified list — guaranteed over ceiling since ``before`` was).
+        drop_start = 2
         while drop_start < len(groups):
             # Candidate: first group + everything from drop_start onward.
             kept_groups = groups[:1] + groups[drop_start:]
