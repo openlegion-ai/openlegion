@@ -72,6 +72,22 @@ async def test_update_existing_fact(memory):
 
 
 @pytest.mark.asyncio
+async def test_exact_key_restore_preserves_category_and_source(memory):
+    """Flag-off byte-identical guard: an exact-key re-store updates the value
+    (and salience) but must NOT overwrite the stored category/source — matching
+    the pre-dedup write path. Only a semantic MERGE adopts the newer
+    key/category/source; the exact-key path never does."""
+    fid = await memory.store_fact("k", "v1", category="preference", source="user")
+    await memory.store_fact("k", "v2", category="general", source="agent")
+    row = memory.db.execute(
+        "SELECT value, category, source FROM facts WHERE id = ?", (fid,),
+    ).fetchone()
+    assert row[0] == "v2"            # value updated
+    assert row[1] == "preference"   # category preserved (not clobbered)
+    assert row[2] == "user"         # source preserved
+
+
+@pytest.mark.asyncio
 async def test_keyword_search_returns_results(memory):
     await memory.store_fact("company_name", "Acme Corporation")
     await memory.store_fact("company_size", "500 employees")

@@ -334,26 +334,39 @@ class MemoryStore:
         # Only consider a semantic merge for a genuinely-new key — otherwise the
         # in-place UPDATE below would rewrite this row's key to equal an existing
         # row's key, leaving two rows sharing a key (an unreachable orphan).
+        merged = False
         if existing is None and semantic_dedup and embedding is not None:
             merge_id = self._find_semantic_duplicate(embedding, category)
             if merge_id is not None:
                 existing = self.db.execute(
                     "SELECT id, access_count FROM facts WHERE id = ?", (merge_id,),
                 ).fetchone()
+                merged = existing is not None
 
         if existing:
             fact_id = existing[0]
             new_count = existing[1] + 1
             boost = self._compute_boost(new_count)
-            # Prefer the newer value AND adopt the newer key/category/source so the
-            # surviving row reflects the latest phrasing + provenance (a semantic
-            # merge may have matched a row stored under a different key).
-            self.db.execute(
-                "UPDATE facts SET key = ?, value = ?, category = ?, source = ?, "
-                "confidence = ?, access_count = ?, last_accessed = datetime('now'), "
-                "decay_score = MIN(?, 10.0) WHERE id = ?",
-                (key, value, category, source, confidence, new_count, boost, fact_id),
-            )
+            if merged:
+                # Semantic merge: adopt the newer key/category/source so the
+                # surviving row reflects the latest phrasing + provenance (the
+                # matched row may have been stored under a different key/category).
+                self.db.execute(
+                    "UPDATE facts SET key = ?, value = ?, category = ?, source = ?, "
+                    "confidence = ?, access_count = ?, last_accessed = datetime('now'), "
+                    "decay_score = MIN(?, 10.0) WHERE id = ?",
+                    (key, value, category, source, confidence, new_count, boost, fact_id),
+                )
+            else:
+                # Exact-key re-store: byte-identical to the pre-dedup write path
+                # (the flag-off path must match main) — update value/confidence/
+                # salience only; never overwrite the stored key/category/source.
+                self.db.execute(
+                    "UPDATE facts SET value = ?, confidence = ?, "
+                    "access_count = ?, last_accessed = datetime('now'), "
+                    "decay_score = MIN(?, 10.0) WHERE id = ?",
+                    (value, confidence, new_count, boost, fact_id),
+                )
             self.db.execute("DELETE FROM facts_fts WHERE fact_id = ?", (fact_id,))
             self.db.execute(
                 "INSERT INTO facts_fts (fact_id, key, value, category) VALUES (?, ?, ?, ?)",
