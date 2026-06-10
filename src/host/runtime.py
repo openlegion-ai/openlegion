@@ -28,6 +28,7 @@ from src.shared.types import CRED_HANDLE_RE
 from src.shared.utils import setup_logging
 
 if TYPE_CHECKING:
+    from src.host.connectors import ConnectorStore
     from src.host.credentials import CredentialVault
     from src.host.permissions import PermissionMatrix
 
@@ -60,15 +61,18 @@ def _mcp_servers_contain_cred_handles(mcp_servers: list[dict]) -> bool:
 class RuntimeBackend(abc.ABC):
     """Abstract backend for starting, stopping, and monitoring agents."""
 
-    # Class-level defaults for the mesh credential resolver. Wired by
-    # ``RuntimeContext`` via :meth:`set_credential_resolver` once the
-    # vault and permission matrix exist. Class-level placement means
-    # tests that bypass ``__init__`` via ``.__new__()`` still get safe
-    # ``None`` defaults — MCP configs with ``$CRED{...}`` handles will
-    # fail loudly at ``start_agent`` rather than silently shipping
-    # literal handles to subprocesses.
+    # Class-level defaults for the mesh credential resolver and the
+    # connector catalog. Wired post-construction via
+    # :meth:`set_credential_resolver` / :meth:`set_connector_store`
+    # once the vault, permission matrix, and catalog exist. Class-level
+    # placement means tests that bypass ``__init__`` via ``.__new__()``
+    # still get safe ``None`` defaults — MCP configs with ``$CRED{...}``
+    # handles will fail loudly at ``start_agent`` rather than silently
+    # shipping literal handles to subprocesses, and an unwired catalog
+    # simply means no MCP servers.
     _vault: CredentialVault | None = None
     _permissions: PermissionMatrix | None = None
+    _connectors: "ConnectorStore | None" = None
 
     def __init__(self, mesh_host_port: int = 8420, project_root: str | None = None):
         self.mesh_host_port = mesh_host_port
@@ -98,6 +102,29 @@ class RuntimeBackend(abc.ABC):
         """
         self._vault = vault
         self._permissions = permissions
+
+    def set_connector_store(self, store: "ConnectorStore | None") -> None:
+        """Wire the fleet MCP connector catalog. The catalog is the
+        single source of truth for which agents run which MCP servers;
+        until wired, agents start with no MCP servers."""
+        self._connectors = store
+
+    def _mcp_servers_for(self, agent_id: str) -> list[dict]:
+        """``MCP_SERVERS``-shaped dicts for every connector assigned to
+        this agent. A store read error degrades to no servers — a
+        corrupt catalog must never block an agent from starting.
+        Connector edits apply on the next (re)start; ``MCP_SERVERS`` is
+        startup-only by design."""
+        if self._connectors is None:
+            return []
+        try:
+            return self._connectors.stdio_for_agent(agent_id)
+        except Exception:
+            logger.exception(
+                "Connector catalog unreadable; starting %r without MCP "
+                "servers", agent_id,
+            )
+            return []
 
     def _build_mcp_servers_env(
         self,
@@ -175,15 +202,16 @@ class RuntimeBackend(abc.ABC):
         tools_dir: str,
         system_prompt: str = "",
         model: str = "",
-        mcp_servers: list[dict] | None = None,
         thinking: str = "",
         env_overrides: dict[str, str] | None = None,
     ) -> str:
         """Start an agent. Returns a URL or identifier for reaching it.
 
-        ``env_overrides`` are per-agent environment variables that are merged
-        on top of the shared ``extra_env`` dict for this call only, without
-        mutating ``extra_env``.
+        MCP servers come from the wired connector catalog
+        (:meth:`set_connector_store` → :meth:`_mcp_servers_for`), not
+        from the caller. ``env_overrides`` are per-agent environment
+        variables that are merged on top of the shared ``extra_env``
+        dict for this call only, without mutating ``extra_env``.
         """
 
     @abc.abstractmethod
@@ -209,7 +237,6 @@ class RuntimeBackend(abc.ABC):
         system_prompt: str = "",
         model: str = "",
         ttl: int = 3600,
-        mcp_servers: list[dict] | None = None,
         thinking: str = "",
         env_overrides: dict[str, str] | None = None,
     ) -> str:
@@ -217,7 +244,6 @@ class RuntimeBackend(abc.ABC):
         url = self.start_agent(
             agent_id=agent_id, role=role, tools_dir="",
             system_prompt=system_prompt, model=model,
-            mcp_servers=mcp_servers,
             thinking=thinking,
             env_overrides=env_overrides,
         )
@@ -351,7 +377,6 @@ class DockerBackend(RuntimeBackend):
         tools_dir: str,
         system_prompt: str = "",
         model: str = "",
-        mcp_servers: list[dict] | None = None,
         thinking: str = "",
         env_overrides: dict[str, str] | None = None,
     ) -> str:
@@ -381,7 +406,6 @@ class DockerBackend(RuntimeBackend):
                 auth_token=auth_token,
                 system_prompt=system_prompt,
                 model=model,
-                mcp_servers=mcp_servers,
                 thinking=thinking,
                 env_overrides=env_overrides,
             )
@@ -399,7 +423,6 @@ class DockerBackend(RuntimeBackend):
         auth_token: str,
         system_prompt: str,
         model: str,
-        mcp_servers: list[dict] | None,
         thinking: str,
         env_overrides: dict[str, str] | None,
     ) -> str:
@@ -420,6 +443,7 @@ class DockerBackend(RuntimeBackend):
             environment["INITIAL_INSTRUCTIONS"] = system_prompt
         if model:
             environment["LLM_MODEL"] = model
+        mcp_servers = self._mcp_servers_for(agent_id)
         if mcp_servers:
             environment["MCP_SERVERS"] = self._build_mcp_servers_env(
                 mcp_servers, agent_id=agent_id,
@@ -545,10 +569,12 @@ class DockerBackend(RuntimeBackend):
             "role": role,
             "tools_dir": tools_dir,
             "model": model,
-            "mcp_servers": mcp_servers,
             "thinking": thinking,
         }
         self.agents[agent_id] = agent_info
+        # The container now runs the current catalog state for this agent.
+        if self._connectors is not None:
+            self._connectors.mark_clean(agent_id)
         logger.info(f"Started agent '{agent_id}' (role={role}) at {url}")
         return url
 
@@ -1012,7 +1038,6 @@ class SandboxBackend(RuntimeBackend):
         tools_dir: str,
         system_prompt: str = "",
         model: str = "",
-        mcp_servers: list[dict] | None = None,
         thinking: str = "",
         env_overrides: dict[str, str] | None = None,
     ) -> Path:
@@ -1103,6 +1128,7 @@ class SandboxBackend(RuntimeBackend):
             env_cfg["INITIAL_INSTRUCTIONS"] = system_prompt
         if model:
             env_cfg["LLM_MODEL"] = model
+        mcp_servers = self._mcp_servers_for(agent_id)
         if mcp_servers:
             env_cfg["MCP_SERVERS"] = self._build_mcp_servers_env(
                 mcp_servers, agent_id=agent_id,
@@ -1136,14 +1162,13 @@ class SandboxBackend(RuntimeBackend):
         tools_dir: str,
         system_prompt: str = "",
         model: str = "",
-        mcp_servers: list[dict] | None = None,
         thinking: str = "",
         env_overrides: dict[str, str] | None = None,
     ) -> str:
         sandbox_name = f"openlegion_{_docker_safe_name(agent_id)}"
         ws = self._prepare_workspace(
             agent_id, role, tools_dir, system_prompt, model,
-            mcp_servers=mcp_servers, thinking=thinking,
+            thinking=thinking,
             env_overrides=env_overrides,
         )
 
@@ -1189,9 +1214,11 @@ class SandboxBackend(RuntimeBackend):
             "role": role,
             "tools_dir": tools_dir,
             "model": model,
-            "mcp_servers": mcp_servers,
             "thinking": thinking,
         }
+        # The sandbox now runs the current catalog state for this agent.
+        if self._connectors is not None:
+            self._connectors.mark_clean(agent_id)
         logger.info(f"Started agent '{agent_id}' in sandbox '{sandbox_name}'")
         return url
 

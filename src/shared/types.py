@@ -412,11 +412,14 @@ class AgentPermissions(BaseModel):
 
 
 class MCPServerConfig(BaseModel):
-    """Configuration for a single MCP (Model Context Protocol) server.
+    """Shape of a single stdio MCP (Model Context Protocol) server.
 
-    Each agent may declare zero or more servers via
-    :attr:`AgentConfig.mcp_servers`. The mesh launches each as a stdio
-    subprocess inside the agent container (see :mod:`src.agent.mcp_client`).
+    This is the ``MCP_SERVERS`` container-env contract: the mesh
+    serializes a list of these (with ``$CRED{...}`` handles resolved)
+    into each agent container, where :mod:`src.agent.mcp_client`
+    launches every entry as a stdio subprocess. Fleet-level definitions
+    live in the connector catalog as :class:`MCPConnector` (this model
+    plus assignment); there is no per-agent MCP config.
 
     Credential handles (``$CRED{name}``) may appear in ``env`` values
     and in ``args`` strings; the mesh resolves them against the
@@ -424,9 +427,7 @@ class MCPServerConfig(BaseModel):
     ``command`` — rejected here so users get a clear validation error
     instead of a confusing "executable not found" failure later.
 
-    The outer :class:`AgentConfig` keeps ``extra="allow"`` for forward
-    compatibility, but this nested model enforces ``extra="forbid"``
-    so typos like ``commnad`` fail loudly.
+    ``extra="forbid"`` so typos like ``commnad`` fail loudly.
     """
 
     model_config = {"extra": "forbid"}
@@ -477,6 +478,58 @@ class MCPServerConfig(BaseModel):
         return v
 
 
+CONNECTOR_ALL_AGENTS = "*"
+"""Sentinel in :attr:`MCPConnector.agents` meaning "assigned to every
+agent". Matches the glob convention used by
+:attr:`AgentPermissions.can_message`."""
+
+
+class MCPConnector(MCPServerConfig):
+    """A fleet-level MCP connector: a stdio server definition plus its
+    agent assignment. The single source of truth for which agents run
+    which MCP servers, persisted in ``config/connectors.json`` and
+    managed by :class:`src.host.connectors.ConnectorStore`.
+
+    ``agents`` is either ``["*"]`` (every agent) or an explicit list of
+    agent ids. An agent-specific server is simply a connector assigned
+    to one agent — there is no separate per-agent MCP config layer.
+    Inherits every :class:`MCPServerConfig` validator (name pattern, no
+    ``$CRED`` in ``command``, args/env caps) unchanged.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    agents: list[str] = Field(default_factory=list, max_length=128)
+
+    @field_validator("agents")
+    @classmethod
+    def _agents_shape(cls, v: list[str]) -> list[str]:
+        if CONNECTOR_ALL_AGENTS in v and len(v) > 1:
+            raise ValueError(
+                "agents: '*' (all agents) cannot be combined with explicit ids",
+            )
+        seen: set[str] = set()
+        out: list[str] = []
+        for a in v:
+            if a != CONNECTOR_ALL_AGENTS and not re.match(AGENT_ID_RE_PATTERN, a):
+                raise ValueError(f"agents: invalid agent id {a!r}")
+            if a not in seen:
+                seen.add(a)
+                out.append(a)
+        return out
+
+    def applies_to(self, agent_id: str) -> bool:
+        """True when this connector is assigned to ``agent_id``."""
+        return CONNECTOR_ALL_AGENTS in self.agents or agent_id in self.agents
+
+    def server_dict(self) -> dict:
+        """The ``MCP_SERVERS``-shaped dict for this connector — the
+        :class:`MCPServerConfig` fields only, assignment stripped."""
+        return MCPServerConfig(
+            name=self.name, command=self.command, args=self.args, env=self.env,
+        ).model_dump(exclude_none=False)
+
+
 class AgentConfig(BaseModel):
     """Structured fields for an agent entry in ``config/agents.yaml``.
 
@@ -519,12 +572,6 @@ class AgentConfig(BaseModel):
     escalation_to: str | None = None
     forbidden: list[str] = Field(default_factory=list)
 
-    # MCP server configurations. Validated strictly via MCPServerConfig
-    # despite the outer ``extra="allow"`` policy (Pydantic enforces the
-    # nested model's ``extra="forbid"`` independently of the parent).
-    # Credential handles in env/args resolved by the mesh at agent start.
-    mcp_servers: list[MCPServerConfig] | None = None
-
     # Per-agent override of the task-loop iteration cap (AgentLoop.MAX_ITERATIONS,
     # default 20). High-fan-out workers (e.g. a translator emitting one PR per
     # locale) need more headroom than the default. None = inherit the global
@@ -534,26 +581,6 @@ class AgentConfig(BaseModel):
     max_iterations: int | None = Field(default=None, ge=1, le=100)
 
     model_config = {"extra": "allow"}
-
-    @field_validator("mcp_servers")
-    @classmethod
-    def _no_duplicate_mcp_names(
-        cls, v: list[MCPServerConfig] | None,
-    ) -> list[MCPServerConfig] | None:
-        if not v:
-            return v
-        seen: set[str] = set()
-        dups: list[str] = []
-        for s in v:
-            lower = s.name.lower()
-            if lower in seen and lower not in dups:
-                dups.append(lower)
-            seen.add(lower)
-        if dups:
-            raise ValueError(
-                f"Duplicate MCP server names (case-insensitive): {dups}",
-            )
-        return v
 
 
 # === Teams ===

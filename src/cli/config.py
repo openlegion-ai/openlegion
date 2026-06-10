@@ -18,7 +18,7 @@ import click
 import yaml
 
 from src.shared.operator_playbooks import _OPERATOR_CORE
-from src.shared.types import RESERVED_AGENT_IDS, MCPServerConfig
+from src.shared.types import RESERVED_AGENT_IDS
 from src.shared.utils import truncate
 
 logger = logging.getLogger("cli")
@@ -215,33 +215,6 @@ def _load_config(mesh_path: Path | None = None) -> dict:
         with open(AGENTS_FILE) as f:
             agents_data = yaml.safe_load(f) or {}
             cfg.setdefault("agents", {}).update(agents_data.get("agents", {}))
-
-    # T7: validate ``mcp_servers`` entries via MCPServerConfig at the
-    # load boundary. Malformed entries (bad name regex, oversized
-    # strings, $CRED handles in command, unknown extra fields) are
-    # logged and dropped — DO NOT crash the whole agent load over one
-    # bad row. The dashboard PUT path enforces the same model for
-    # newly-saved configs; this is the safety net for legacy entries
-    # written before T2 landed.
-    for _agent_id, _agent_cfg in cfg.get("agents", {}).items():
-        if not isinstance(_agent_cfg, dict):
-            continue
-        _raw_servers = _agent_cfg.get("mcp_servers")
-        if not _raw_servers:
-            continue
-        _kept: list[dict] = []
-        for _entry in _raw_servers:
-            try:
-                _parsed = MCPServerConfig.model_validate(_entry)
-                _kept.append(_parsed.model_dump(exclude_none=False))
-            except Exception as _e:
-                _name = _entry.get("name") if isinstance(_entry, dict) else "<?>"
-                logger.warning(
-                    "Dropping malformed mcp_servers entry %r for agent %r: %s",
-                    _name, _agent_id, _e,
-                )
-        # Replace the raw list with the validated subset (may be empty).
-        _agent_cfg["mcp_servers"] = _kept if _kept else None
 
     # Load projects and build reverse map (agent → project)
     projects = _load_projects()
@@ -1524,9 +1497,10 @@ def _edit_agent_interactive(
     """Interactive property editor for an agent. Reads fresh config.
 
     Returns the field name that was changed (``"model"``, ``"role"``,
-    ``"budget"``, ``"thinking"``, ``"mcp_servers"``), or ``None``
-    if nothing changed.  Callers decide how to apply the change
-    (restart hint, live restart, cost-tracker update, etc.).
+    ``"budget"``, ``"thinking"``), or ``None`` if nothing changed.
+    Callers decide how to apply the change (restart hint, live
+    restart, cost-tracker update, etc.). MCP servers are managed on
+    the dashboard Connectors page, not here.
     """
     cfg = _load_config()
     agent_cfg = cfg.get("agents", {}).get(name, {})
@@ -1537,7 +1511,6 @@ def _edit_agent_interactive(
     budget_cfg = agent_cfg.get("budget", {})
     current_budget = budget_cfg.get("daily_usd") if budget_cfg else None
     current_thinking = agent_cfg.get("thinking", "off") or "off"
-    current_mcp = agent_cfg.get("mcp_servers") or []
 
     click.echo(f"\n  {name}")
     click.echo(f"  Model:       {current_model}")
@@ -1545,11 +1518,6 @@ def _edit_agent_interactive(
     if current_budget is not None:
         click.echo(f"  Budget:      ${current_budget:.2f}/day")
     click.echo(f"  Thinking:    {current_thinking}")
-    mcp_summary = f"{len(current_mcp)} server{'s' if len(current_mcp) != 1 else ''}" if current_mcp else "(none)"
-    if current_mcp:
-        mcp_names = ", ".join(s.get("name", "?") for s in current_mcp)
-        mcp_summary += f" ({mcp_names})"
-    click.echo(f"  MCP servers: {mcp_summary}")
     click.echo("\n  What to change?\n")
 
     options = [
@@ -1557,7 +1525,6 @@ def _edit_agent_interactive(
         ("description", truncate(current_desc, 50) or "(none)"),
         ("budget", f"${current_budget:.2f}/day" if current_budget is not None else "(none)"),
         ("thinking", current_thinking),
-        ("MCP servers", mcp_summary),
     ]
 
     for i, (label, val) in enumerate(options, 1):
@@ -1625,44 +1592,6 @@ def _edit_agent_interactive(
         _update_agent_field(name, "thinking", new_thinking)
         click.echo(f"Agent '{name}' thinking: {current_thinking} -> {new_thinking}")
         return "thinking"
-
-    elif choice == 5:  # MCP servers
-        servers = list(current_mcp)
-        changed = False
-        while True:
-            click.echo()
-            if servers:
-                for i, s in enumerate(servers, 1):
-                    click.echo(f"  {i}. {s.get('name', '?')} — {s.get('command', '?')}")
-            else:
-                click.echo("  (no servers)")
-            click.echo("\n  1. add server  2. remove server  3. done")
-            action = click.prompt("  Action", type=click.IntRange(1, 3), default=3)
-            if action == 3:
-                break
-            elif action == 1:
-                srv_name = click.prompt("  Server name")
-                srv_command = click.prompt("  Command (e.g. npx)")
-                srv_args_str = click.prompt("  Args (space-separated)", default="")
-                srv_args = srv_args_str.split() if srv_args_str.strip() else []
-                servers.append({"name": srv_name, "command": srv_command, "args": srv_args})
-                changed = True
-            elif action == 2:
-                if not servers:
-                    click.echo("  No servers to remove.")
-                    continue
-                for i, s in enumerate(servers, 1):
-                    click.echo(f"  {i}. {s.get('name', '?')}")
-                idx = click.prompt("  Remove", type=click.IntRange(1, len(servers)))
-                removed = servers.pop(idx - 1)
-                click.echo(f"  Removed '{removed.get('name', '?')}'")
-                changed = True
-        if changed:
-            _update_agent_field(name, "mcp_servers", servers if servers else None)
-            click.echo(f"Agent '{name}' MCP servers updated.")
-            return "mcp_servers"
-        click.echo("No change.")
-        return None
 
     return None
 
