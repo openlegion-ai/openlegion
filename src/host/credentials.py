@@ -58,24 +58,92 @@ _OPENAI_TOKEN_URL = "https://auth.openai.com/oauth/token"
 _OPENAI_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 _OPENAI_OAUTH_REDIRECT_URI = "http://localhost:1455/auth/callback"
 
+# ── OAuth connection refresh failure caching ─────────────────
+# When a third-party OAuth provider HARD-rejects a refresh (4xx, e.g.
+# ``invalid_grant`` after the user revokes access), re-hitting the token
+# endpoint on every agent resolve is pure waste — the grant is dead until
+# the operator reconnects. Cache the failure for this many seconds and
+# re-raise it immediately. Transient errors (network, 5xx) are NOT cached;
+# retrying those is correct.
+_CONNECTION_REFRESH_FAILURE_TTL = 60.0
+
+
+class ConnectionRefreshError(RuntimeError):
+    """Hard (4xx) OAuth connection-refresh failure.
+
+    Raised by :meth:`CredentialVault.ensure_connection_token` when the
+    provider rejects the refresh outright. Carries structure so the mesh
+    catch site (``/mesh/vault/resolve``) can emit a
+    ``connection_refresh_failed`` DashboardEvent without re-parsing the
+    message. ``first_failure`` is True only on the first hard failure of an
+    episode — it resets when a refresh succeeds or the connection is
+    removed/re-stored — so the operator is notified exactly once per episode.
+    Subclasses RuntimeError so existing "refresh failed" handling is
+    unaffected.
+    """
+
+    def __init__(
+        self, message: str, *, connection: str, provider: str,
+        provider_error: str, first_failure: bool,
+    ) -> None:
+        super().__init__(message)
+        self.connection = connection
+        self.provider = provider
+        self.provider_error = provider_error
+        self.first_failure = first_failure
+
+
 # ── Anthropic prompt caching (OAuth path) ────────────────────
 _PROMPT_CACHE_ENABLED = os.environ.get(
     "OPENLEGION_PROMPT_CACHING", "1"
 ).strip().lower() not in ("0", "false", "no", "off", "")
 
 
+def _tag_anthropic_message_block(msg: dict, cc: dict) -> bool:
+    """Tag *msg*'s last content block with ``cache_control`` if cacheable.
+
+    String content is converted to a single tagged text block. List content is
+    tagged only when its last block is a cacheable type — Anthropic rejects
+    cache_control on e.g. ``thinking`` blocks; normal agent history ends in
+    text/tool_use/tool_result, but guard defensively so a stray block can
+    never make the proxy emit a rejected request. Returns True iff a
+    breakpoint landed.
+    """
+    content = msg.get("content")
+    if isinstance(content, str) and content:
+        msg["content"] = [{"type": "text", "text": content, "cache_control": cc}]
+        return True
+    if isinstance(content, list) and content and isinstance(content[-1], dict):
+        if content[-1].get("type") in ("text", "tool_use", "tool_result"):
+            content[-1]["cache_control"] = cc
+            return True
+    return False
+
+
 def _mark_anthropic_cache_breakpoints(body: dict) -> None:
     """Tag the stable Anthropic request prefix with ephemeral prompt-cache
-    breakpoints so repeated within-turn re-sends are billed as cache reads
-    (~0.10x) instead of full input.
+    breakpoints so repeated re-sends are billed as cache reads (~0.10x)
+    instead of full input.
 
     Anthropic caches the request prefix up to and including each block marked
     with ``cache_control``. We mark, at most, three breakpoints (limit is 4):
       (a) the LAST tool definition  -> caches the whole tools array,
       (b) the LAST system content block -> caches tools + system,
-      (c) the LAST message's last content block -> caches the append-only
-          message history within a turn (rolling breakpoint).
-    Mutates ``body`` in place. Safe no-op on missing/empty fields; idempotent.
+      (c) the SECOND-TO-LAST message's last cacheable content block -> the
+          rolling history breakpoint. NOT the last message: the agent loop
+          folds a per-request volatile suffix (recent-memory slice, playbooks,
+          runtime context — see ``loop.py:_append_volatile_to_messages``) into
+          the final message of every request, so round N's last message never
+          reappears verbatim in round N+1 (where the history copy is resent
+          CLEAN). Tagging it would make every next round diverge from the
+          cached span right at that message and re-bill the whole history.
+          The second-to-last message is pure append-only history, resent
+          byte-identical next round, so the cache read covers nearly all of
+          it. We walk backward from ``messages[-2]`` to the nearest message
+          with a cacheable last block; single-message bodies get no message
+          breakpoint (nothing stable worth caching).
+    Mutates ``body`` in place. Safe no-op on missing/empty fields; idempotent
+    (a re-run walks to the already-tagged block and re-tags the same dict).
     """
     if not _PROMPT_CACHE_ENABLED:
         return
@@ -87,19 +155,11 @@ def _mark_anthropic_cache_breakpoints(body: dict) -> None:
     if isinstance(system, list) and system and isinstance(system[-1], dict):
         system[-1]["cache_control"] = cc
     messages = body.get("messages")
-    if isinstance(messages, list) and messages and isinstance(messages[-1], dict):
-        content = messages[-1].get("content")
-        if isinstance(content, str) and content:
-            messages[-1]["content"] = [
-                {"type": "text", "text": content, "cache_control": cc}
-            ]
-        elif isinstance(content, list) and content and isinstance(content[-1], dict):
-            # Only tag a cacheable block type. Anthropic rejects cache_control
-            # on e.g. ``thinking`` blocks; normal agent history ends in
-            # text/tool_use/tool_result, but guard defensively so a stray
-            # block can never make the proxy emit a rejected request.
-            if content[-1].get("type") in ("text", "tool_use", "tool_result"):
-                content[-1]["cache_control"] = cc
+    if isinstance(messages, list) and len(messages) >= 2:
+        for i in range(len(messages) - 2, -1, -1):
+            msg = messages[i]
+            if isinstance(msg, dict) and _tag_anthropic_message_block(msg, cc):
+                break
 
 
 def _mark_anthropic_cache_breakpoints_openai_fmt(llm_kwargs: dict) -> None:
@@ -109,8 +169,22 @@ def _mark_anthropic_cache_breakpoints_openai_fmt(llm_kwargs: dict) -> None:
     cache_control through to the Anthropic Messages API for native anthropic
     models. NO-OP unless the final model is native ``anthropic/...`` — the
     OpenAI-compatible rewrite (custom api_base / credit-proxy) drops
-    cache_control, so we must not tag there. Mutates ``llm_kwargs`` in place;
-    safe no-op on missing/empty fields; idempotent.
+    cache_control, so we must not tag there.
+
+    Rolling history breakpoint: the SECOND-TO-LAST qualifying message, not the
+    last. The agent loop folds a per-request volatile suffix into the final
+    message of every request (see ``loop.py:_append_volatile_to_messages``),
+    so the last message never reappears verbatim next round and tagging it
+    would defeat the history cache. We walk backward from ``messages[-2]``,
+    skipping ``system`` (tagged separately at the front — re-tagging the same
+    dict would be harmless but pointless) and ``tool`` roles (uncertain
+    whether litellm passes cache_control through on tool-role content;
+    tagging the nearest user/assistant text message still caches everything
+    before it).
+
+    Mutates ``llm_kwargs`` in place; safe no-op on missing/empty fields;
+    idempotent (a re-run walks to the already-tagged block and re-tags the
+    same dict).
     """
     if not _PROMPT_CACHE_ENABLED:
         return
@@ -125,24 +199,32 @@ def _mark_anthropic_cache_breakpoints_openai_fmt(llm_kwargs: dict) -> None:
     if not isinstance(messages, list) or not messages:
         return
 
-    def _tag_block(msg: dict) -> None:
+    def _tag_block(msg: dict) -> bool:
         c = msg.get("content")
         if isinstance(c, str) and c:
             msg["content"] = [{"type": "text", "text": c, "cache_control": cc}]
-        elif isinstance(c, list) and c and isinstance(c[-1], dict):
+            return True
+        if isinstance(c, list) and c and isinstance(c[-1], dict):
             if c[-1].get("type") == "text":
                 c[-1]["cache_control"] = cc
+                return True
+        return False
 
     # (a) system message (first one) — caches system + tools prefix
     for m in messages:
         if isinstance(m, dict) and m.get("role") == "system":
             _tag_block(m)
             break
-    # (b) last message (rolling breakpoint over append-only history),
-    #     unless it IS the system message already tagged above
-    last = messages[-1]
-    if isinstance(last, dict) and last.get("role") != "system":
-        _tag_block(last)
+    # (b) rolling history breakpoint: nearest qualifying message at or before
+    #     the second-to-last (the final message carries the volatile suffix —
+    #     see docstring). Skip system (already tagged) and tool roles.
+    if len(messages) >= 2:
+        for i in range(len(messages) - 2, -1, -1):
+            m = messages[i]
+            if not isinstance(m, dict) or m.get("role") in ("system", "tool"):
+                continue
+            if _tag_block(m):
+                break
 
 
 # ── Same-model transient retry (prod 503 incident) ───────────
@@ -208,6 +290,17 @@ def _extract_content(raw_content) -> tuple[str, str | None]:
     return "".join(text_parts), "".join(thinking_parts) if thinking_parts else None
 
 
+def _default_env_file() -> str:
+    """Default .env path (PROJECT_ROOT/.env) used when callers pass no env_file.
+
+    Module-level indirection (rather than inlining the path in
+    ``_persist_to_env`` / ``_remove_from_env``) so the test suite can
+    monkeypatch a single seam and redirect default-path writes away from
+    the developer's real .env.
+    """
+    return str(Path(__file__).resolve().parent.parent.parent / ".env")
+
+
 def _persist_to_env(env_key: str, value: str, env_file: str = "") -> None:
     """Persist an environment variable to .env and os.environ.
 
@@ -224,7 +317,7 @@ def _persist_to_env(env_key: str, value: str, env_file: str = "") -> None:
         raise ValueError(f"Invalid env key name: {env_key}")
 
     if not env_file:
-        env_file = str(Path(__file__).resolve().parent.parent.parent / ".env")
+        env_file = _default_env_file()
 
     # Quote to prevent python-dotenv from mangling values.
     # Single quotes: no interpolation, no escape processing — safest.
@@ -277,7 +370,7 @@ def _persist_to_env(env_key: str, value: str, env_file: str = "") -> None:
 def _remove_from_env(env_key: str, env_file: str = "") -> None:
     """Remove an environment variable from .env and os.environ."""
     if not env_file:
-        env_file = str(Path(__file__).resolve().parent.parent.parent / ".env")
+        env_file = _default_env_file()
 
     env_path = Path(env_file)
     if env_path.exists():
@@ -518,6 +611,14 @@ class CredentialVault:
         self.connections: dict[str, dict] = {}
         self._connection_locks: dict[str, asyncio.Lock] = {}
         self._connection_locks_guard = asyncio.Lock()
+        # Hard refresh-failure cache: ``name`` → {ts (monotonic), provider,
+        # error, message}. Within ``_CONNECTION_REFRESH_FAILURE_TTL`` of
+        # ``ts`` the cached ``ConnectionRefreshError`` is re-raised without
+        # touching the provider. The entry outlives the TTL on purpose — its
+        # PRESENCE marks an ongoing failure episode (notify-once dedup);
+        # only a successful refresh, removal, or re-store clears it.
+        # Mutated only under the per-name connection lock.
+        self._connection_refresh_failures: dict[str, dict] = {}
         # ``_auth_failure_recorder`` (Fix 4 in seam follow-up): optional
         # callback ``(agent_id, provider, model, http_status) -> None``
         # invoked when an LLM call raises ``LLMAuthError`` during
@@ -749,6 +850,7 @@ class CredentialVault:
         if cred_key in self.connections:
             self.connections.pop(cred_key, None)
             self._connection_locks.pop(cred_key, None)
+            self._connection_refresh_failures.pop(cred_key, None)
             _remove_from_env(f"{CONNECTION_PREFIX}{name.upper()}")
             logger.info("Connection removed: %s", cred_key)
             return True
@@ -900,6 +1002,9 @@ class CredentialVault:
         if not data.get("access_token"):
             raise ValueError("connection requires access_token")
         self.connections[name] = data
+        # A (re)connect supersedes any cached refresh failure — fresh tokens,
+        # fresh episode.
+        self._connection_refresh_failures.pop(name, None)
         _persist_to_env(f"{CONNECTION_PREFIX}{name.upper()}", json.dumps(data))
         logger.info("Connection stored: %s (%s)", name, data.get("provider", ""))
         return f"$CRED{{{name}}}"
@@ -912,6 +1017,28 @@ class CredentialVault:
                 self._connection_locks[name] = lock
             return lock
 
+    def _raise_if_refresh_recently_failed(self, name: str) -> None:
+        """Re-raise a cached hard refresh failure if it is still fresh.
+
+        Called under the per-name connection lock. Entries older than
+        ``_CONNECTION_REFRESH_FAILURE_TTL`` fall through so the provider is
+        re-tried (the operator may have restored access on the provider
+        side); the entry itself is kept so the failure episode — and its
+        notify-once dedup — survives until a refresh actually succeeds.
+        """
+        cached = self._connection_refresh_failures.get(name)
+        if cached is None:
+            return
+        if time.monotonic() - cached["ts"] >= _CONNECTION_REFRESH_FAILURE_TTL:
+            return
+        raise ConnectionRefreshError(
+            cached["message"],
+            connection=name,
+            provider=cached["provider"],
+            provider_error=cached["error"],
+            first_failure=False,
+        )
+
     async def ensure_connection_token(self, name: str) -> str:
         """Return a valid access token for a connection, refreshing if needed.
 
@@ -920,6 +1047,12 @@ class CredentialVault:
         token (offline access not granted, or a long-lived token), returns the
         current token — a 401 then surfaces naturally to the agent rather than
         failing the resolve.
+
+        Hard provider rejections (4xx) raise :class:`ConnectionRefreshError`
+        and are cached for ``_CONNECTION_REFRESH_FAILURE_TTL`` seconds so a
+        dead grant doesn't get hammered on every agent resolve. Transient
+        errors (network, 5xx) keep raising plain ``RuntimeError`` and are
+        never cached.
         """
         name = name.lower()
         conn = self.connections.get(name)
@@ -937,6 +1070,7 @@ class CredentialVault:
             now = int(time.time())
             if conn.get("expires_at", 0) > now + 300:
                 return conn["access_token"]
+            self._raise_if_refresh_recently_failed(name)
             refresh_token = conn.get("refresh_token", "")
             if not refresh_token:
                 return conn["access_token"]
@@ -965,14 +1099,41 @@ class CredentialVault:
                     f"{provider.key} token refresh request failed: {exc}",
                 ) from exc
             if not resp.is_success:
-                raise RuntimeError(
+                msg = (
                     f"{provider.key} token refresh failed "
                     f"(HTTP {resp.status_code}): {resp.text[:200]}"
                 )
+                if 400 <= resp.status_code < 500:
+                    # Hard provider rejection (e.g. ``invalid_grant`` after
+                    # the user revokes access): the grant is dead until the
+                    # operator reconnects. Cache the failure so resolves
+                    # within the TTL re-raise immediately instead of
+                    # hammering the token endpoint. ``first_failure`` is True
+                    # only when this starts a new episode — the mesh catch
+                    # site uses it to notify the operator exactly once.
+                    first = name not in self._connection_refresh_failures
+                    self._connection_refresh_failures[name] = {
+                        "ts": time.monotonic(),
+                        "provider": provider.key,
+                        "error": resp.text[:200],
+                        "message": msg,
+                    }
+                    raise ConnectionRefreshError(
+                        msg,
+                        connection=name,
+                        provider=provider.key,
+                        provider_error=resp.text[:200],
+                        first_failure=first,
+                    )
+                # Transient (5xx) — retrying is correct; do NOT cache.
+                raise RuntimeError(msg)
             payload = resp.json()
             new_access = payload.get("access_token", "")
             if not new_access:
                 raise RuntimeError(f"{provider.key} refresh returned no access_token")
+            # Successful refresh ends any failure episode — the next hard
+            # failure (if ever) starts a new one and re-notifies.
+            self._connection_refresh_failures.pop(name, None)
             expires_in = int(payload.get("expires_in", 3600))
             updated = dict(conn)
             updated["access_token"] = new_access

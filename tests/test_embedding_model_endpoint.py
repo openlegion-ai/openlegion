@@ -51,6 +51,10 @@ class TestEmbeddingModelEndpoint:
         runtime_mock.browser_vnc_url = None
         runtime_mock.browser_service_url = None
         runtime_mock.browser_auth_token = ""
+        # Real dict so the POST handler's extra_env refresh is observable
+        # (containers read EMBEDDING_MODEL/DIM from extra_env at start).
+        runtime_mock.extra_env = {}
+        self.runtime_mock = runtime_mock
         health_monitor = HealthMonitor(
             runtime=runtime_mock,
             transport=MagicMock(),
@@ -69,6 +73,7 @@ class TestEmbeddingModelEndpoint:
         )
         router = create_dashboard_router(
             **self.components, mesh_port=8420, telemetry=self.telemetry,
+            runtime=runtime_mock,
         )
         app = FastAPI()
         app.include_router(router)
@@ -154,6 +159,35 @@ class TestEmbeddingModelEndpoint:
             headers=_CSRF,
         )
         assert resp.status_code == 400
+
+    def test_provider_post_refreshes_runtime_extra_env(
+        self, mesh_yaml, monkeypatch,
+    ):
+        # Agent containers read EMBEDDING_MODEL/DIM from runtime.extra_env at
+        # container start — extra_env is otherwise populated only at engine
+        # boot. Without the write-time refresh, "save + restart agents" would
+        # restart containers with the OLD embedding env.
+        monkeypatch.setenv("OPENLEGION_SYSTEM_VOYAGE_API_KEY", "vk-test")
+        resp = self.client.post(
+            "/dashboard/api/embedding-model",
+            json={"value": "voyage"},
+            headers=_CSRF,
+        )
+        assert resp.status_code == 200, resp.text
+        assert self.runtime_mock.extra_env["EMBEDDING_MODEL"] == "voyage/voyage-3.5"
+        assert self.runtime_mock.extra_env["EMBEDDING_DIM"] == "1024"
+
+    def test_none_post_refreshes_runtime_extra_env(self, mesh_yaml, monkeypatch):
+        # "none" must propagate too — keyword-only memory on next restart.
+        for p in ("OPENAI", "VOYAGE", "GEMINI", "COHERE"):
+            monkeypatch.delenv(f"OPENLEGION_SYSTEM_{p}_API_KEY", raising=False)
+        resp = self.client.post(
+            "/dashboard/api/embedding-model",
+            json={"value": "none"},
+            headers=_CSRF,
+        )
+        assert resp.status_code == 200, resp.text
+        assert self.runtime_mock.extra_env["EMBEDDING_MODEL"] == "none"
 
     def test_provider_without_key_rejected(self, mesh_yaml, monkeypatch):
         # A provider with no configured API key is rejected — persisting it

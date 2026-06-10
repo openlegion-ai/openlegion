@@ -25,8 +25,10 @@ class FakeGitHub:
         self.put_status_override = put_status_override
         self.corrupt_sha = corrupt_sha
         self.get_truncated = get_truncated
+        self.urls: list[tuple[str, str]] = []
 
     async def __call__(self, url, method="GET", headers=None, body="", timeout=30, *, mesh_client=None):
+        self.urls.append((method, url))
         if method == "GET":
             if self.stored is None:
                 return {"status_code": 404, "body": json.dumps({"message": "Not Found"})}
@@ -119,6 +121,32 @@ async def test_source_path_reads_file_in_code(monkeypatch, tmp_path):
     out = await git_tool.commit_file(repo="o/r", path="data/leads.csv", message="m", source_path="leads.csv")
     assert out["verified"] is True
     assert base64.b64decode(fake.put_body["content"]) == payload.encode()
+
+
+@pytest.mark.asyncio
+async def test_path_and_branch_url_encoded(monkeypatch):
+    # A filename with a space (the tool's primary CSV use case) or `?`/`#`
+    # must be percent-encoded in the contents-API URL — raw interpolation
+    # malforms the URL / injects query params. The PUT body stays raw
+    # (JSON-encoded). `/` in the path must survive as a separator.
+    fake = FakeGitHub(existing=None)
+    monkeypatch.setattr(git_tool, "http_request", fake)
+    out = await git_tool.commit_file(
+        repo="o/r", path="data/q2 leads #1.csv", message="add",
+        content="a,b\n", branch="feat/spaced branch?",
+    )
+    assert out["committed"] is True and out["verified"] is True
+    get_url = next(u for m, u in fake.urls if m == "GET")
+    put_url = next(u for m, u in fake.urls if m == "PUT")
+    assert get_url == (
+        "https://api.github.com/repos/o/r/contents/data/q2%20leads%20%231.csv"
+        "?ref=feat%2Fspaced%20branch%3F"
+    )
+    assert put_url == (
+        "https://api.github.com/repos/o/r/contents/data/q2%20leads%20%231.csv"
+    )
+    # Branch in the PUT body stays raw — it's a JSON field, not a URL part.
+    assert fake.put_body["branch"] == "feat/spaced branch?"
 
 
 @pytest.mark.asyncio

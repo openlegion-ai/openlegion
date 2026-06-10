@@ -764,6 +764,12 @@ class DashboardEvent(BaseModel):
         "credential_request",
         "credential_request_cancelled",
         "credential_stored",
+        # OAuth connection refresh hard-failed (e.g. ``invalid_grant`` after
+        # the user revoked access at the provider). Emitted once per failure
+        # episode from the mesh ``/mesh/vault/resolve`` catch site; the
+        # notifications producer maps it to a ``credential`` bell entry so
+        # the operator knows to reconnect via Settings → Integrations.
+        "connection_refresh_failed",
         "browser_login_request",
         "browser_login_completed",
         "browser_login_cancelled",
