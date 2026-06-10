@@ -7504,6 +7504,32 @@
         <!-- ═══ SETTINGS SUB-TAB ═══ -->
         <div x-show="systemTab === 'settings'" class="space-y-4">
 
+          <!-- ── Notifications ── -->
+          <div class="bg-gray-900 border border-gray-800 rounded-lg p-5">
+            <div class="flex items-center gap-2 mb-4">
+              <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/></svg>
+              <h3 class="text-base font-medium text-gray-200">Notifications</h3>
+            </div>
+            <div class="flex items-center justify-between gap-4">
+              <div class="flex-1">
+                <div class="text-sm text-gray-200">Pipeline milestone pings</div>
+                <div class="text-xs text-gray-400 mt-0.5 max-w-prose">
+                  Get a notification each time a stage of your work finishes — the
+                  play-by-play. Off by default: you always get the final result
+                  (and a heads-up if it gets stuck), and you can watch live
+                  progress on the Work tab without this.
+                </div>
+              </div>
+              <label class="flex-shrink-0 inline-flex items-center cursor-pointer"
+                :class="milestonePingsSaving && 'opacity-60 cursor-not-allowed'">
+                <input type="checkbox" class="sr-only peer"
+                  :checked="milestonePings" :disabled="milestonePingsSaving"
+                  @change="saveMilestonePings($event.target.checked)">
+                <div class="relative w-9 h-5 bg-gray-700 rounded-full peer-checked:bg-indigo-600 transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4"></div>
+              </label>
+            </div>
+          </div>
+
           <!-- ── 1. LLM ── -->
           <div class="bg-gray-900 border border-gray-800 rounded-lg p-5">
             <div class="flex items-center gap-2 mb-4">

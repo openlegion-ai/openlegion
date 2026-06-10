@@ -350,3 +350,60 @@ async def test_stall_then_terminal_both_delivered():
     await w.sweep_once()           # settle armed
     await w.sweep_once()           # terminal delivery
     assert [c[1] for c in d.calls] == ["stall", "done"]
+
+
+# ── Milestone pings (Phase 2, opt-in) ────────────────────────────
+
+
+def test_claim_milestone_ping_exactly_once():
+    s = _store()
+    assert s.claim_milestone_ping("t1") is True
+    assert s.claim_milestone_ping("t1") is False
+
+
+@pytest.mark.asyncio
+async def test_milestone_ping_when_enabled():
+    s = _store()
+    r = _human_root(s)                       # root assigned to "scout"
+    _finish(s, r["id"], "done", result_summary="stage1")
+    child = s.create(creator="scout", assignee="writer", title="draft",
+                     parent_task_id=r["id"])
+    s.update_status(child["id"], "working", actor="writer")  # chain in-flight
+    d = _Deliver()
+    w = ChainWatcher(s, d, milestones_enabled=lambda: True)
+    await w.sweep_once()
+    # The recently-done root stage is pinged; the working child is not.
+    assert [c[1] for c in d.calls] == ["milestone"]
+    await w.sweep_once()                     # deduped — one ping per stage
+    assert [c[1] for c in d.calls] == ["milestone"]
+
+
+@pytest.mark.asyncio
+async def test_no_milestone_when_disabled():
+    s = _store()
+    r = _human_root(s)
+    _finish(s, r["id"], "done")
+    child = s.create(creator="scout", assignee="writer", title="draft",
+                     parent_task_id=r["id"])
+    s.update_status(child["id"], "working", actor="writer")
+    d = _Deliver()
+    w = ChainWatcher(s, d, milestones_enabled=lambda: False)  # default off
+    await w.sweep_once()
+    assert d.calls == []
+
+
+@pytest.mark.asyncio
+async def test_milestone_skips_old_completions():
+    s = _store()
+    r = _human_root(s)
+    _finish(s, r["id"], "done")
+    child = s.create(creator="scout", assignee="writer", title="d",
+                     parent_task_id=r["id"])
+    s.update_status(child["id"], "working", actor="writer")
+    # Backdate the root's completion well outside the recent window.
+    with s._conn() as conn:
+        conn.execute("UPDATE tasks SET updated_at=1.0 WHERE id=?", (r["id"],))
+    d = _Deliver()
+    w = ChainWatcher(s, d, milestones_enabled=lambda: True)
+    await w.sweep_once()
+    assert d.calls == []  # toggling on mid-pipeline doesn't retro-ping
