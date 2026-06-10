@@ -1640,9 +1640,17 @@ def create_mesh_app(
                     )
                 _refs = _task_record.get("artifact_refs") or []
                 if _refs:
+                    # Refs are creator-supplied strings off the task row —
+                    # same trust level as the description above, so they
+                    # get the same sanitize pass before riding the
+                    # recipient's prompt (str() guards a non-string item
+                    # from turning the wake into a join TypeError).
                     wake_msg += (
                         "\n\nData payload on the blackboard — fetch with "
-                        "read_blackboard: " + ", ".join(_refs[:5])
+                        "read_blackboard: "
+                        + sanitize_for_prompt(
+                            ", ".join(str(r)[:200] for r in _refs[:5])
+                        )
                     )
 
         if lane_manager is not None and dispatch_loop is not None:
