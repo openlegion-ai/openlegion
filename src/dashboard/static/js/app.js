@@ -4765,6 +4765,7 @@ function dashboard() {
           storage: ['fetchStorage', 'fetchDatabaseDetails'],
           uploads: ['fetchUploads'],
           skills: ['loadSkillsCatalog'],
+          milestone_pings: ['fetchMilestonePings'],
         };
         for (const fn of (_configLoaders[evt.data?.scope] || [])) {
           if (typeof this[fn] === 'function') this[fn]();
