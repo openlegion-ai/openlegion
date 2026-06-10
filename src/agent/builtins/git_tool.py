@@ -25,6 +25,7 @@ import base64
 import hashlib
 import json
 import re
+from urllib.parse import quote
 
 from src.agent.builtins.file_tool import _safe_path
 from src.agent.builtins.http_tool import http_request
@@ -197,8 +198,11 @@ async def commit_file(
 
     b64 = base64.b64encode(raw).decode("ascii")
     headers = _gh_headers(credential)
-    base_url = f"{_GITHUB_API}/repos/{repo}/contents/{path}"
-    ref_q = f"?ref={branch}" if branch else ""
+    # URL-encode path/branch: a filename with a space (the primary CSV use
+    # case) or `?`/`#` would otherwise malform the URL / inject query params.
+    # `repo` is already validated to `owner/name` above, so left raw.
+    base_url = f"{_GITHUB_API}/repos/{repo}/contents/{quote(path, safe='/')}"
+    ref_q = f"?ref={quote(branch, safe='')}" if branch else ""
 
     # 1) Look up the existing file SHA (required by the API to UPDATE; absent
     #    means a fresh create). 404 = new file; other errors are fatal.

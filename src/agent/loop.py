@@ -4009,8 +4009,16 @@ class AgentLoop:
                         _task_id,
                     )
                     self.state = "idle"
+                    # Non-empty closer: this message persists in durable chat
+                    # history, and the Anthropic Messages API rejects empty
+                    # content on non-final assistant messages — an empty
+                    # string here 400s the NEXT turn. Chat-bubble suppression
+                    # is handled separately via ``silent_reply`` below.
                     self._chat_messages.append(
-                        {"role": "assistant", "content": ""}
+                        {
+                            "role": "assistant",
+                            "content": "Task closed via terminal coordination tool.",
+                        }
                     )
                     self._log_chat_turn(
                         user_message, "", tool_outputs, turn_id=turn_id,

@@ -6468,6 +6468,7 @@ def create_dashboard_router(
         from src.cli.runtime import (
             _EMBEDDING_PROVIDER_LADDER,
             _embedding_providers_with_keys,
+            _resolve_embedding,
         )
 
         body = await request.json()
@@ -6509,6 +6510,18 @@ def create_dashboard_router(
         config_path.parent.mkdir(parents=True, exist_ok=True)
         with open(config_path, "w") as f:
             yaml.dump(mesh_cfg, f, default_flow_style=False, sort_keys=False)
+
+        # Agent containers read embedding config from runtime.extra_env at
+        # container start (cli/runtime.py populates EMBEDDING_MODEL/DIM only
+        # at engine boot). Without refreshing it here, "save + restart
+        # agents" restarts containers with the OLD embedding env while the
+        # UI reports the new model active.
+        if runtime is not None:
+            eff_model, eff_dim = _resolve_embedding(
+                stored, _embedding_providers_with_keys(),
+            )
+            runtime.extra_env["EMBEDDING_MODEL"] = eff_model
+            runtime.extra_env["EMBEDDING_DIM"] = str(eff_dim)
 
         _emit_config_changed("system_settings")
         return {"value": value, "embedding_model": stored}

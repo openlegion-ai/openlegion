@@ -4726,9 +4726,14 @@ function dashboard() {
         }
         // Brief (TEAM.md) edited elsewhere — live-reload the content for the
         // active team unless the user is mid-edit (don't clobber their buffer).
+        // Two producers: the dashboard's own TEAM.md save emits
+        // field 'project_md' (dashboard/server.py), while the operator
+        // agent's update_team_context mesh endpoint emits field 'context'
+        // (host/server.py).
         const d = evt.data || {};
         const changedTeam = d.team_name || d.name || d.team_id || d.project_id;
-        if (d.field === 'project_md' && changedTeam === this.activeTeam &&
+        if ((d.field === 'project_md' || d.field === 'context') &&
+            changedTeam === this.activeTeam &&
             !this.teamEditing && typeof this.fetchTeamContent === 'function') {
           this.fetchTeamContent();
         }
