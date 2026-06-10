@@ -58,6 +58,7 @@ from src.shared.types import (
 )
 from src.shared.utils import (
     dumps_safe,
+    replace_markdown_section,
     sanitize_for_prompt,
     set_llm_max_tokens_env,
     setup_logging,
@@ -5156,11 +5157,95 @@ def create_mesh_app(
             "team_name": team_name, "team_id": team_name, "project_id": team_name,
         }
 
+    async def _push_team_md(team_name: str, content: str) -> dict[str, bool]:
+        """Push updated TEAM.md content to running team members.
+
+        Best-effort per member (a stopped container just logs). Mirrors
+        the dashboard's ``PUT /api/team`` push loop so the mesh-side
+        team-context/brief writers stop silently diverging from what
+        running agents see until their next restart.
+        """
+        results: dict[str, bool] = {}
+        if transport is None:
+            return results
+        from src.cli.config import _load_projects
+        members = set(
+            (_load_projects().get(team_name) or {}).get("members", []),
+        )
+        targets = [a for a in router.agent_registry.keys() if a in members]
+        for aid in targets:
+            try:
+                resp = await transport.request(
+                    aid, "PUT", "/team", json={"content": content}, timeout=10,
+                )
+                results[aid] = not (
+                    isinstance(resp, dict) and resp.get("error")
+                )
+            except Exception as e:
+                logger.warning("TEAM.md push to %s failed: %s", aid, e)
+                results[aid] = False
+        return results
+
+    @app.put("/mesh/teams/{team_name}/brief")
+    async def mesh_update_team_brief(team_name: str, request: Request) -> dict:
+        """Section-scoped update of the team's shared TEAM.md (P2).
+
+        Body: ``{section, content}`` — replaces (or appends) exactly the
+        ``## {section}`` block and pushes the updated file to running
+        members, so fleet-wide knowledge (canonically a ``User
+        Preferences`` section) propagates without per-agent edits.
+        Operator-or-internal. Content capped at 2,000 chars because
+        TEAM.md rides every member's prompt budget.
+        """
+        caller = _extract_verified_agent_id(request)
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can manage teams")
+        from src.cli.config import PROJECTS_DIR, _load_projects
+        body = await request.json()
+        section = str(body.get("section", "")).strip()
+        content = sanitize_for_prompt(str(body.get("content", ""))).strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 _/&-]{0,63}", section):
+            raise HTTPException(
+                400,
+                "Invalid section name (letters/digits/spaces/_-/&, max 64 chars)",
+            )
+        if not content:
+            raise HTTPException(400, "content is required")
+        if len(content) > 2000:
+            raise HTTPException(
+                400,
+                "content exceeds 2000 chars — TEAM.md is in every "
+                "member's prompt; keep sections tight",
+            )
+        if team_name not in _load_projects():
+            raise HTTPException(404, f"Team '{team_name}' not found")
+        project_md = PROJECTS_DIR / team_name / "project.md"
+        existing = (
+            project_md.read_text(errors="replace")
+            if project_md.exists() else f"# {team_name}\n"
+        )
+        updated = replace_markdown_section(existing, section, content)
+        project_md.write_text(updated)
+        pushed = await _push_team_md(team_name, updated)
+        _emit_team_event(
+            event_bus, "project_updated", agent="operator", name=team_name,
+            extra={"field": "brief", "section": section},
+        )
+        return {
+            "updated": True, "team": team_name, "section": section,
+            "pushed": pushed, "size": len(updated),
+        }
+
     @app.put("/mesh/teams/{team_name}/context")
     async def mesh_update_team_context(team_name: str, request: Request) -> dict:
         """Update a team's description/context (mesh-authed proxy)."""
-        _require_any_auth(request)
-        if _resolve_agent_id("", request) != "operator":
+        # Same operator-or-internal gate as the sibling team endpoints
+        # (goal/archive/brief). The previous ``_resolve_agent_id("",
+        # request) != "operator"`` shape returned "" in dev mode (no auth
+        # tokens) and therefore ALWAYS 403'd header-authenticated callers
+        # there — a legacy quirk, not a deliberate boundary.
+        caller = _extract_verified_agent_id(request)
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can manage teams")
         from src.cli.config import PROJECTS_DIR, _load_projects
         body = await request.json()
@@ -5182,7 +5267,13 @@ def create_mesh_app(
 
         # Update project.md in place
         project_md = PROJECTS_DIR / team_name / "project.md"
-        project_md.write_text(f"# {team_name}\n\n{context}\n")
+        new_content = f"# {team_name}\n\n{context}\n"
+        project_md.write_text(new_content)
+        # P2 gap fix: this writer previously never pushed to running
+        # members (only the dashboard's PUT /api/team did), so an
+        # operator-tool context update was invisible to agents until
+        # their next restart.
+        pushed = await _push_team_md(team_name, new_content)
 
         _emit_team_event(
             event_bus, "project_updated", agent="operator", name=team_name,
@@ -5192,6 +5283,7 @@ def create_mesh_app(
         return {
             "updated": True, "project": team_name, "team": team_name,
             "team_name": team_name, "team_id": team_name, "project_id": team_name,
+            "pushed": pushed,
         }
 
     @app.post("/mesh/teams/{team_name}/goal")
@@ -6720,7 +6812,9 @@ def create_mesh_app(
         }
 
     @app.get("/mesh/teams/{team_id}/summary")
-    async def team_summary(team_id: str, request: Request) -> dict:
+    async def team_summary(
+        team_id: str, request: Request, hours: float = 0,
+    ) -> dict:
         """Synthesized status text + structured fields for a team.
 
         Combines status counts, blocker list, recent completions, and a
@@ -6729,6 +6823,11 @@ def create_mesh_app(
         the on-the-wire shape). The narrative ``status_text`` is plain
         prose so the operator's prompt machinery doesn't have to format
         it again.
+
+        ``hours`` (P2, optional): when > 0, the response also carries
+        ``outcomes_window`` — per-outcome rating counts (accepted /
+        acknowledged / rework / rejected) set within the trailing
+        window, so work summaries reflect rating history.
         """
         store = tasks_store
         caller = _extract_verified_agent_id(request)
@@ -6768,7 +6867,7 @@ def create_mesh_app(
             "description": meta.get("description", ""),
             "members": meta.get("members", []),
         }
-        return {
+        result = {
             "project": meta_block,
             "team": meta_block,
             "status_text": status_text,
@@ -6777,6 +6876,16 @@ def create_mesh_app(
             "recent_completions": s["recent_done"],
             "ask_for_user": s["blockers"],
         }
+        if hours and hours > 0:
+            try:
+                result["outcomes_window"] = store.count_team_outcomes_since(
+                    team_id, since_seconds=min(float(hours), 720.0) * 3600,
+                )
+            except Exception as e:
+                logger.warning(
+                    "team outcome counts failed for %s: %s", team_id, e,
+                )
+        return result
 
     # === Operator product surface (Task 7) — archive / delete ===
     #

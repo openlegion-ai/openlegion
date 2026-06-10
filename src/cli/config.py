@@ -1735,6 +1735,9 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "create_agent", "create_team",
     # Team membership + context
     "add_agents_to_team", "remove_agents_from_team", "update_team_context",
+    # P2 — section-scoped TEAM.md updates (fleet-wide knowledge
+    # propagation; canonical use: '## User Preferences').
+    "update_team_brief",
     # PR 5 — north-star setter is no-confirmation meta-config.
     "set_team_goal",
     # User-visible business goals on the Work tab (separate from

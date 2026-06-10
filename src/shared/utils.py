@@ -69,6 +69,32 @@ def format_dict(d: dict) -> str:
     return dumps_safe(d, indent=2)
 
 
+def replace_markdown_section(text: str, section: str, content: str) -> str:
+    """Replace (or append) one level-2 ``## {section}`` block in markdown.
+
+    The block spans from its heading to the next ``## `` heading or EOF.
+    When the section is absent, it is appended at the end. Used for
+    section-scoped TEAM.md brief updates so an operator-written section
+    (e.g. ``## User Preferences``) never clobbers the rest of the
+    document — last-writer-wins is limited to one section.
+    """
+    import re as _re
+
+    block = f"## {section}\n\n{content.strip()}\n"
+    pattern = _re.compile(
+        rf"^## {_re.escape(section)}[ \t]*\n.*?(?=^## |\Z)",
+        _re.DOTALL | _re.MULTILINE,
+    )
+    if pattern.search(text):
+        # Function repl so backslashes in content can't act as group refs.
+        updated = pattern.sub(lambda _m: block + "\n", text, count=1)
+        return updated.rstrip("\n") + "\n"
+    base = text.rstrip("\n")
+    if base:
+        return f"{base}\n\n{block}"
+    return block
+
+
 # ── Prompt injection sanitization ────────────────────────────
 
 _STRIP_CATEGORIES = frozenset({"Cc", "Cf", "Co", "Cs", "Cn"})
