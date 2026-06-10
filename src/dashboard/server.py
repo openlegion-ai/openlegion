@@ -49,7 +49,7 @@ from src.dashboard.auth import verify_session_cookie
 from src.shared import limits as _limits
 from src.shared.paths import resolve_under_root
 from src.shared.sqlite_helpers import open_db
-from src.shared.types import CRED_HANDLE_RE, MCPServerConfig
+from src.shared.types import CRED_HANDLE_RE
 from src.shared.utils import (
     dumps_safe,
     friendly_streaming_error,
@@ -188,45 +188,6 @@ def _mask_mcp_servers_for_get(servers: list[dict] | None) -> list[dict]:
         env = s.get("env") or {}
         masked["env_keys"] = sorted(env.keys()) if env else []
         result.append(masked)
-    return result
-
-
-def _canonicalize_mcp_servers(servers: list | None) -> list[dict]:
-    """Return a stable canonical form of MCP server dicts for diff
-    comparison. Used by ``api_connector_upsert``'s no-op detection — a
-    GET → unchanged PUT round-trip must not mark agents dirty or
-    prompt for a restart.
-
-    Canonicalization:
-
-    * Parse each entry through :class:`MCPServerConfig` to normalize
-      missing-optional fields (e.g. ``args`` → ``[]``, ``env`` →
-      ``None``) and shape coercion (Pydantic v2 returns dicts on
-      ``model_dump``).
-    * Sort the list by ``name.lower()`` so the comparison is
-      independent of input order.
-    * Normalize ``env == {}`` to ``env is None`` so an empty dict and
-      a missing field compare equal.
-
-    If any entry fails Pydantic validation, returns the raw list
-    unchanged — better to over-report a diff (a false-positive restart
-    prompt) than to silently mask a malformed entry.
-    """
-    if not servers:
-        return []
-    parsed: list[MCPServerConfig] = []
-    for s in servers:
-        try:
-            parsed.append(MCPServerConfig.model_validate(s))
-        except Exception:
-            return list(servers)
-    parsed.sort(key=lambda s: s.name.lower())
-    result: list[dict] = []
-    for s in parsed:
-        d = s.model_dump(exclude_none=False)
-        if d.get("env") == {}:
-            d["env"] = None
-        result.append(d)
     return result
 
 
@@ -2319,17 +2280,23 @@ def create_dashboard_router(
         """The fleet MCP connector catalog + pending-restart state."""
         if connector_store is None:
             raise HTTPException(503, "Connector catalog not available")
+        all_agents = sorted(agent_registry.keys())
         return {
             "connectors": [
                 _connector_to_api(c) for c in connector_store.list()
             ],
-            "pending_restart": connector_store.pending_restart(),
+            # The store may retain stamps for agents that no longer
+            # exist; only live agents are actionable here.
+            "pending_restart": [
+                a for a in connector_store.pending_restart()
+                if a in agent_registry
+            ],
             # Agent-tier vault credential names for the env-row
             # credential picker (names only, never values).
             "available_credentials": sorted(
                 credential_vault.list_agent_credential_names()
             ) if credential_vault else [],
-            "agents": sorted(agent_registry.keys()),
+            "agents": all_agents,
         }
 
     @api_router.put("/api/connectors/{name}")
@@ -2382,13 +2349,14 @@ def create_dashboard_router(
 
         # ── PUT-time $CRED check: existence + per-agent permission ──
         # Surfaces failures synchronously with an actionable message
-        # instead of at agent restart. Agents created later under a
-        # ``"*"`` assignment are still covered by the loud runtime
-        # check in ``resolve_cred_handles`` (red status dot + stderr).
-        check_agents = (
-            _expand_assignment(connector.agents)
-            if "*" in connector.agents else list(connector.agents)
-        )
+        # instead of at agent start. Checked against LIVE agents only
+        # (both for "*" and explicit assignments — a deleted agent's
+        # leftover id must not block edits forever). Agents that appear
+        # later are covered at start time by the per-connector
+        # degradation in ``_build_mcp_servers_env``: the connector is
+        # dropped for that agent with an error log, never blocking the
+        # agent from booting.
+        check_agents = _expand_assignment(connector.agents)
         handles: set[str] = set()
         for arg in connector.args:
             handles.update(CRED_HANDLE_RE.findall(arg))
@@ -2418,11 +2386,14 @@ def create_dashboard_router(
                     )
 
         # ── no-op detection: a GET→unchanged-PUT must not mark agents
-        # dirty or prompt for a restart ──
+        # dirty or prompt for a restart. Both sides are validated
+        # MCPConnector instances, so direct field comparison suffices
+        # (env {} and None compare equal — both mean "no env").
         if previous is not None:
             same_server = (
-                _canonicalize_mcp_servers([connector.server_dict()])
-                == _canonicalize_mcp_servers([previous.server_dict()])
+                connector.command == previous.command
+                and connector.args == previous.args
+                and (connector.env or None) == (previous.env or None)
             )
             if same_server and set(connector.agents) == set(previous.agents):
                 return {
@@ -2437,7 +2408,10 @@ def create_dashboard_router(
         after = _expand_assignment(connector.agents)
         affected = sorted(set(before) | set(after))
 
-        connector_store.upsert(connector)
+        # Disk write off the event loop (same pattern as the skill
+        # marketplace calls in this file).
+        import asyncio as _asyncio
+        await _asyncio.to_thread(connector_store.upsert, connector)
         connector_store.mark_dirty(affected)
         try:
             blackboard.log_audit(
@@ -2474,7 +2448,8 @@ def create_dashboard_router(
         if previous is None:
             raise HTTPException(404, "Connector not found")
         affected = _expand_assignment(previous.agents)
-        connector_store.remove(name)
+        import asyncio as _asyncio
+        await _asyncio.to_thread(connector_store.remove, name)
         connector_store.mark_dirty(affected)
         try:
             blackboard.log_audit(
@@ -2497,32 +2472,71 @@ def create_dashboard_router(
             "restart_required": bool(affected),
         }
 
+    # Agents with a batch-initiated restart currently in flight. Guards
+    # against overlapping batches interleaving stop/start on the same
+    # container (the second batch's stop can kill the container the
+    # first batch's start just created).
+    _restart_batch_inflight: set[str] = set()
+
+    async def _run_restart_batch(agents: list[str]) -> None:
+        """Background batch driver. Sequential by design (no restart
+        herd); each agent reuses the single-agent restart handler so
+        the SPA gets the same event choreography (``agent_restarting``
+        → ``agent_restarted`` / ``restart_failed``). Ends with a
+        ``config_changed`` so the Connectors panel re-derives
+        pending-restart state."""
+        try:
+            for agent_id in agents:
+                try:
+                    await api_restart_agent(agent_id)
+                except Exception as e:
+                    detail = e.detail if isinstance(e, HTTPException) else e
+                    logger.error(
+                        "Batch restart of %r failed: %s", agent_id, detail,
+                    )
+                finally:
+                    _restart_batch_inflight.discard(agent_id)
+        finally:
+            # Belt-and-braces: never leave ids stuck in the in-flight set.
+            _restart_batch_inflight.difference_update(agents)
+            _emit_config_changed("connectors")
+
     @api_router.post("/api/agents/restart-batch")
     async def api_restart_agents_batch(request: Request) -> dict:
-        """Sequentially restart a set of agents (the Connectors page's
-        "restart now" action). Reuses the single-agent restart handler
-        so each agent gets the same event choreography the SPA already
-        renders (``agent_restarting`` → ``agent_restarted`` /
-        ``restart_failed``)."""
+        """Kick off restarts for a set of agents (the Connectors page's
+        "restart now" action) and return immediately — a fleet-wide
+        batch can take minutes per agent, far past any proxy/browser
+        timeout, so completion is reported through the per-agent
+        restart events (which the SPA already renders) rather than the
+        response. Unknown and already-restarting agents are skipped and
+        reported."""
         body = await request.json()
         agents = body.get("agents")
         if not isinstance(agents, list) or not agents:
             raise HTTPException(400, "agents must be a non-empty list")
-        if len(agents) > 32:
-            raise HTTPException(400, "At most 32 agents per batch")
-        results: dict[str, str] = {}
         for agent_id in agents:
             if not isinstance(agent_id, str):
                 raise HTTPException(400, "agents must be a list of agent ids")
+        started: list[str] = []
+        skipped: dict[str, str] = {}
+        seen: set[str] = set()
         for agent_id in agents:
-            try:
-                await api_restart_agent(agent_id)
-                results[agent_id] = "ok"
-            except HTTPException as e:
-                results[agent_id] = f"failed: {e.detail}"
-            except Exception as e:
-                results[agent_id] = f"failed: {e}"
-        return {"results": results}
+            if agent_id in seen:
+                continue
+            seen.add(agent_id)
+            if agent_id not in agent_registry:
+                skipped[agent_id] = "unknown agent"
+            elif agent_id in _restart_batch_inflight:
+                skipped[agent_id] = "restart already in progress"
+            else:
+                started.append(agent_id)
+        _restart_batch_inflight.update(started)
+        if started:
+            import asyncio as _asyncio
+            _asyncio.get_running_loop().create_task(
+                _run_restart_batch(started),
+            )
+        return {"started": started, "skipped": skipped}
 
     @api_router.post("/api/agents")
     async def api_add_agent(request: Request) -> dict:
@@ -2720,6 +2734,19 @@ def create_dashboard_router(
                 logger.info(f"Removed {removed} cron job(s) for agent {agent_id}")
         if lane_manager is not None:
             lane_manager.remove_lane(agent_id)
+
+        # Strip the id from connector assignments + pending-restart
+        # stamps — otherwise a future agent recreated under the same
+        # name silently inherits this agent's MCP connectors (and their
+        # $CRED-bearing env).
+        if connector_store is not None:
+            try:
+                import asyncio as _asyncio
+                await _asyncio.to_thread(connector_store.remove_agent, agent_id)
+            except Exception as e:
+                logger.warning(
+                    "Connector cleanup for '%s' failed: %s", agent_id, e,
+                )
 
         # Clean up per-agent data: blackboard, costs, traces, wallet
         try:

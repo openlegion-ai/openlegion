@@ -495,10 +495,15 @@ class MCPConnector(MCPServerConfig):
     to one agent — there is no separate per-agent MCP config layer.
     Inherits every :class:`MCPServerConfig` validator (name pattern, no
     ``$CRED`` in ``command``, args/env caps) unchanged.
+
+    ``transport`` exists today only so persisted records are tolerant
+    across upgrades/rollbacks: Phase 2 (remote MCP) introduces a
+    ``transport``-discriminated union, and ``extra="forbid"`` would
+    otherwise make THIS version drop any record a newer version wrote.
+    Only ``"stdio"`` is valid here.
     """
 
-    model_config = {"extra": "forbid"}
-
+    transport: Literal["stdio"] = "stdio"
     agents: list[str] = Field(default_factory=list, max_length=128)
 
     @field_validator("agents")
@@ -523,11 +528,13 @@ class MCPConnector(MCPServerConfig):
         return CONNECTOR_ALL_AGENTS in self.agents or agent_id in self.agents
 
     def server_dict(self) -> dict:
-        """The ``MCP_SERVERS``-shaped dict for this connector — the
-        :class:`MCPServerConfig` fields only, assignment stripped."""
-        return MCPServerConfig(
-            name=self.name, command=self.command, args=self.args, env=self.env,
-        ).model_dump(exclude_none=False)
+        """The ``MCP_SERVERS``-shaped dict for this connector: the
+        :class:`MCPServerConfig` fields only — catalog-only fields
+        stripped. ``model_dump`` with an exclude set (rather than
+        re-listing the server fields) so a field added to
+        ``MCPServerConfig`` can never be silently dropped from the
+        container env."""
+        return self.model_dump(exclude={"agents", "transport"}, exclude_none=False)
 
 
 class AgentConfig(BaseModel):

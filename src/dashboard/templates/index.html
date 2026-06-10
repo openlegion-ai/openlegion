@@ -3114,26 +3114,26 @@
                             <div class="text-xs text-gray-500 italic">No connectors assigned. Connect an MCP server on the Connectors page and assign it here.</div>
                           </template>
                           <template x-for="srv in connectorsForAgent(selectedAgent)" :key="srv.name">
-                            <div class="flex items-center gap-3 text-xs py-1.5">
-                              <span class="w-2 h-2 rounded-full shrink-0"
-                                    :class="mcpStatusDotClass(mcpStatusFor(srv.name).state)"
-                                    :title="mcpStatusFor(srv.name).error || mcpStatusFor(srv.name).state"></span>
-                              <span class="text-gray-200 font-mono font-medium shrink-0" x-text="srv.name"></span>
-                              <span x-show="(srv.agents || []).includes('*')"
-                                    class="text-[11px] px-1.5 py-0.5 rounded font-medium leading-none bg-indigo-900/50 text-indigo-300 border border-indigo-800/50 shrink-0"
-                                    title="Assigned fleet-wide (all agents)">fleet</span>
-                              <span class="text-gray-500 shrink-0">&rarr;</span>
-                              <span class="text-gray-400 text-[11px] font-mono flex-1 truncate"
-                                    x-text="(srv.command || '') + (srv.args && srv.args.length ? ' ' + srv.args.join(' ') : '')"></span>
-                              <span x-show="mcpStatusFor(srv.name).state === 'running'"
-                                    class="text-[11px] px-1.5 py-0.5 rounded font-medium leading-none bg-amber-900/50 text-amber-400 border border-amber-800/50 shrink-0"
-                                    x-text="mcpStatusFor(srv.name).toolsCount + ' tools'"></span>
+                            <div>
+                              <div class="flex items-center gap-3 text-xs py-1.5">
+                                <span class="w-2 h-2 rounded-full shrink-0"
+                                      :class="mcpStatusDotClass(mcpStatusFor(srv.name).state)"
+                                      :title="mcpStatusFor(srv.name).error || mcpStatusFor(srv.name).state"></span>
+                                <span class="text-gray-200 font-mono font-medium shrink-0" x-text="srv.name"></span>
+                                <span x-show="(srv.agents || []).includes('*')"
+                                      class="text-[11px] px-1.5 py-0.5 rounded font-medium leading-none bg-indigo-900/50 text-indigo-300 border border-indigo-800/50 shrink-0"
+                                      title="Assigned fleet-wide (all agents)">fleet</span>
+                                <span class="text-gray-500 shrink-0">&rarr;</span>
+                                <span class="text-gray-400 text-[11px] font-mono flex-1 truncate"
+                                      x-text="(srv.command || '') + (srv.args && srv.args.length ? ' ' + srv.args.join(' ') : '')"></span>
+                                <span x-show="mcpStatusFor(srv.name).state === 'running'"
+                                      class="text-[11px] px-1.5 py-0.5 rounded font-medium leading-none bg-amber-900/50 text-amber-400 border border-amber-800/50 shrink-0"
+                                      x-text="mcpStatusFor(srv.name).toolsCount + ' tools'"></span>
+                              </div>
+                              <div x-show="mcpStatusFor(srv.name).state === 'failed' && mcpStatusFor(srv.name).error"
+                                   class="text-[11px] text-red-400 mt-0.5 mb-1"
+                                   x-text="'Failed at startup: ' + mcpStatusFor(srv.name).error"></div>
                             </div>
-                          </template>
-                          <template x-for="srv in connectorsForAgent(selectedAgent)" :key="srv.name + ':err'">
-                            <div x-show="mcpStatusFor(srv.name).state === 'failed' && mcpStatusFor(srv.name).error"
-                                 class="text-[11px] text-red-400 mt-0.5 mb-1"
-                                 x-text="srv.name + ' failed at startup: ' + mcpStatusFor(srv.name).error"></div>
                           </template>
                         </div>
                         <div class="bg-gray-800/50 rounded p-3 md:col-span-2">
@@ -5313,7 +5313,10 @@
               </div>
               <template x-if="connectorDraft?._assignMode === 'some'">
                 <div class="grid grid-cols-2 sm:grid-cols-3 gap-1">
-                  <template x-for="aid in (connectorsData?.agents || [])" :key="aid">
+                  <!-- _agentIds = running agents ∪ this connector's explicit
+                       assignment, so a stopped-but-assigned agent still gets
+                       a checkbox (saving must not silently strip it). -->
+                  <template x-for="aid in (connectorDraft?._agentIds || [])" :key="aid">
                     <label class="flex items-center gap-2 text-xs text-gray-300 py-1 px-2 rounded hover:bg-gray-800/50 cursor-pointer">
                       <input type="checkbox" :checked="connectorDraft._agentSel[aid]"
                              @change="connectorDraft._agentSel[aid] = $event.target.checked"

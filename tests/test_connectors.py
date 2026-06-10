@@ -76,16 +76,52 @@ class TestConnectorStore:
     def test_upsert_replaces_case_insensitive(self, tmp_path):
         s = self._store(tmp_path)
         s.upsert(MCPConnector(name="FS", command="old"))
-        previous = s.upsert(MCPConnector(name="fs", command="new"))
-        assert previous is not None and previous.command == "old"
+        s.upsert(MCPConnector(name="fs", command="new"))
         assert len(s.list()) == 1 and s.list()[0].command == "new"
 
     def test_remove(self, tmp_path):
         s = self._store(tmp_path)
         s.upsert(MCPConnector(name="fs", command="x"))
-        assert s.remove("FS") is not None
-        assert s.remove("fs") is None
+        assert s.remove("FS") is True
+        assert s.remove("fs") is False
         assert self._store(tmp_path).list() == []
+
+    def test_remove_agent_strips_explicit_assignments(self, tmp_path):
+        s = self._store(tmp_path)
+        s.upsert(MCPConnector(name="one", command="c", agents=["a", "b"]))
+        s.upsert(MCPConnector(name="all", command="c", agents=["*"]))
+        s.mark_dirty(["a"])
+        s.remove_agent("a")
+        assert s.get("one").agents == ["b"]
+        # "*" semantics untouched — it means "whatever agents exist".
+        assert s.get("all").agents == ["*"]
+        assert "a" not in s.pending_restart()
+        # Persisted: a fresh load sees the stripped assignment.
+        assert ConnectorStore(str(tmp_path / "connectors.json")).get("one").agents == ["b"]
+
+    def test_external_edit_reloads_and_touches(self, tmp_path):
+        path = tmp_path / "connectors.json"
+        s = ConnectorStore(str(path))
+        s.upsert(MCPConnector(name="fs", command="old", agents=["a"]))
+        servers, gen = s.snapshot_for_agent("a")
+        s.record_agent_start("a", gen)
+        assert s.pending_restart() == []
+        # Hand-edit the file (headless operator) with a different mtime.
+        data = json.loads(path.read_text())
+        data["connectors"][0]["command"] = "new"
+        path.write_text(json.dumps(data))
+        os.utime(path, ns=(1, 1))  # force a visible stat change
+        assert s.get("fs").command == "new"
+        assert s.pending_restart() == ["a"]
+
+    def test_transport_key_tolerated_in_stored_records(self, tmp_path):
+        # Forward/rollback tolerance: records written with the Phase-2
+        # transport field must load (stdio) rather than be dropped.
+        path = tmp_path / "connectors.json"
+        path.write_text(json.dumps({"connectors": [
+            {"name": "fs", "transport": "stdio", "command": "c", "agents": ["*"]},
+        ]}))
+        assert [c.name for c in ConnectorStore(str(path)).list()] == ["fs"]
 
     def test_stdio_for_agent_assignment_and_order(self, tmp_path):
         s = self._store(tmp_path)
@@ -124,13 +160,33 @@ class TestConnectorStore:
         leftovers = [f for f in os.listdir(tmp_path) if f.endswith(".tmp")]
         assert leftovers == []
 
-    def test_dirty_tracking(self, tmp_path):
+    def test_pending_restart_generation_derivation(self, tmp_path):
         s = self._store(tmp_path)
         s.mark_dirty(["b", "a"])
         assert s.pending_restart() == ["a", "b"]
-        s.mark_clean("a")
+        # A restart records the snapshot generation it was built from.
+        _, gen = s.snapshot_for_agent("a")
+        s.record_agent_start("a", gen)
         assert s.pending_restart() == ["b"]
-        s.mark_clean("never-dirty")  # no-op, no raise
+        s.record_agent_start("never-dirty", 0)  # no-op, no raise
+
+    def test_edit_during_container_build_stays_dirty(self, tmp_path):
+        """The race the generation model exists to close: a catalog
+        edit landing between the env-build snapshot and the
+        post-start record must keep the agent pending-restart."""
+        s = self._store(tmp_path)
+        s.upsert(MCPConnector(name="fs", command="v1", agents=["a"]))
+        s.mark_dirty(["a"])
+        servers, snapshot_gen = s.snapshot_for_agent("a")  # env built here
+        # Edit lands while the container is still being created.
+        s.upsert(MCPConnector(name="fs", command="v2", agents=["a"]))
+        s.mark_dirty(["a"])
+        s.record_agent_start("a", snapshot_gen)  # start completes late
+        assert s.pending_restart() == ["a"]
+        # After a restart against the current catalog, it goes clean.
+        _, gen2 = s.snapshot_for_agent("a")
+        s.record_agent_start("a", gen2)
+        assert s.pending_restart() == []
 
 
 # ── RuntimeBackend integration ───────────────────────────────
@@ -144,21 +200,23 @@ class TestRuntimeCatalogIntegration:
 
     def test_unwired_store_means_no_servers(self):
         b = self._backend()
-        assert b._mcp_servers_for("a") == []
+        assert b._mcp_snapshot_for("a") == ([], 0)
 
     def test_wired_store_resolves_assignment(self, tmp_path):
         b = self._backend()
         store = ConnectorStore(str(tmp_path / "c.json"))
         store.upsert(MCPConnector(name="fs", command="mcp-fs", agents=["*"]))
         b.set_connector_store(store)
-        assert [d["name"] for d in b._mcp_servers_for("anyone")] == ["fs"]
+        servers, gen = b._mcp_snapshot_for("anyone")
+        assert [d["name"] for d in servers] == ["fs"]
+        assert gen == store.snapshot_for_agent("anyone")[1]
 
     def test_store_error_degrades_to_no_servers(self):
         b = self._backend()
         broken = MagicMock()
-        broken.stdio_for_agent.side_effect = RuntimeError("disk gone")
+        broken.snapshot_for_agent.side_effect = RuntimeError("disk gone")
         b.set_connector_store(broken)
-        assert b._mcp_servers_for("a") == []
+        assert b._mcp_snapshot_for("a") == ([], 0)
 
     def test_start_agent_signature_has_no_mcp_param(self):
         import inspect
@@ -196,8 +254,9 @@ def connector_env(tmp_path):
     vault = MagicMock()
     vault.resolve_credential.return_value = "secret-value"
     vault.list_agent_credential_names.return_value = ["linear_token"]
+    blackboard = Blackboard(db_path=str(tmp_path / "bb.db"))
     router = create_dashboard_router(
-        blackboard=Blackboard(db_path=str(tmp_path / "bb.db")),
+        blackboard=blackboard,
         health_monitor=None,
         cost_tracker=CostTracker(db_path=str(tmp_path / "costs.db")),
         trace_store=TraceStore(db_path=str(tmp_path / "traces.db")),
@@ -210,7 +269,7 @@ def connector_env(tmp_path):
     app = FastAPI()
     app.include_router(router)
     client = _CSRFClient(app)
-    yield client, store, permissions, vault
+    yield client, store, permissions, vault, blackboard
     client.close()
 
 
@@ -272,13 +331,28 @@ class TestConnectorEndpoints:
         client, store, *_ = connector_env
         body = {"command": "c", "agents": ["alpha"]}
         client.put("/dashboard/api/connectors/fs", json=body)
-        store.mark_clean("alpha")
+        # Simulate the agent restarting against the current catalog.
+        _, gen = store.snapshot_for_agent("alpha")
+        store.record_agent_start("alpha", gen)
         resp = client.put("/dashboard/api/connectors/fs", json=body)
         assert resp.status_code == 200
         data = resp.json()
         assert data["restart_required"] is False
         assert data["affected_agents"] == []
         assert store.pending_restart() == []
+
+    def test_cred_check_skips_ghost_explicit_agents(self, connector_env):
+        # A deleted agent's leftover id in an explicit assignment must
+        # not block edits forever — the check runs against live agents.
+        client, _, permissions, *_ = connector_env
+        permissions.can_access_credential.side_effect = (
+            lambda agent, cred: agent != "ghost"
+        )
+        resp = client.put("/dashboard/api/connectors/x", json={
+            "command": "c", "env": {"K": "$CRED{linear_token}"},
+            "agents": ["alpha", "ghost"],
+        })
+        assert resp.status_code == 200, resp.text
 
     def test_upsert_validation_error_shape(self, connector_env):
         client, *_ = connector_env
@@ -296,7 +370,7 @@ class TestConnectorEndpoints:
         assert resp.status_code == 400
 
     def test_cred_missing_from_vault_rejected(self, connector_env):
-        client, _, _, vault = connector_env
+        client, _, _, vault, _ = connector_env
         vault.resolve_credential.return_value = None
         resp = client.put("/dashboard/api/connectors/x", json={
             "command": "c", "env": {"K": "$CRED{ghost}"}, "agents": ["alpha"],
@@ -305,7 +379,7 @@ class TestConnectorEndpoints:
         assert "ghost" in resp.json()["detail"]
 
     def test_cred_permission_blocked_agent_named(self, connector_env):
-        client, _, permissions, _ = connector_env
+        client, _, permissions, *_ = connector_env
         permissions.can_access_credential.side_effect = (
             lambda agent, cred: agent != "beta"
         )
@@ -318,7 +392,8 @@ class TestConnectorEndpoints:
     def test_delete_marks_previous_assignment_dirty(self, connector_env):
         client, store, *_ = connector_env
         client.put("/dashboard/api/connectors/fs", json={"command": "c", "agents": ["alpha"]})
-        store.mark_clean("alpha")
+        _, gen = store.snapshot_for_agent("alpha")
+        store.record_agent_start("alpha", gen)
         resp = client.request("DELETE", "/dashboard/api/connectors/fs")
         assert resp.status_code == 200
         data = resp.json()
@@ -331,28 +406,56 @@ class TestConnectorEndpoints:
         client, *_ = connector_env
         assert client.request("DELETE", "/dashboard/api/connectors/ghost").status_code == 404
 
+    def test_pending_restart_filters_to_live_agents(self, connector_env):
+        client, store, *_ = connector_env
+        store.mark_dirty(["alpha", "long-gone"])
+        data = client.get("/dashboard/api/connectors").json()
+        assert data["pending_restart"] == ["alpha"]
+
+    def test_audit_row_redacts_connector_env_values(self, connector_env):
+        # Pin: env VALUES never reach the audit table; keys survive as
+        # env_keys (the 'covert plaintext secret leak' guard).
+        client, _, _, _, blackboard = connector_env
+        client.put("/dashboard/api/connectors/linear", json={
+            "command": "c", "env": {"LINEAR_API_KEY": "$CRED{linear_token}"},
+            "agents": ["alpha"],
+        })
+        rows = blackboard.get_audit_log(per_page=10)
+        flat = json.dumps(rows)
+        assert "edit_connector" in flat
+        assert "$CRED{linear_token}" not in flat
+        assert "LINEAR_API_KEY" in flat
+
     def test_restart_batch_validates_body(self, connector_env):
         client, *_ = connector_env
         assert client.post("/dashboard/api/agents/restart-batch", json={"agents": []}).status_code == 400
         assert client.post(
-            "/dashboard/api/agents/restart-batch", json={"agents": ["a"] * 33},
-        ).status_code == 400
-        assert client.post(
             "/dashboard/api/agents/restart-batch", json={"agents": [1]},
         ).status_code == 400
 
-    def test_restart_batch_reports_per_agent_results(self, connector_env):
+    def test_restart_batch_starts_known_skips_unknown_and_dedupes(self, connector_env):
         client, *_ = connector_env
-        # No runtime wired in this fixture → the single-agent restart
-        # handler 503s for known agents, 404s for unknown; either way
-        # the batch reports per-agent failure instead of raising.
         resp = client.post(
-            "/dashboard/api/agents/restart-batch", json={"agents": ["alpha", "ghost"]},
+            "/dashboard/api/agents/restart-batch",
+            json={"agents": ["alpha", "ghost", "alpha"]},
         )
         assert resp.status_code == 200
-        results = resp.json()["results"]
-        assert set(results) == {"alpha", "ghost"}
-        assert all(v.startswith("failed:") for v in results.values())
+        data = resp.json()
+        assert data["started"] == ["alpha"]
+        assert data["skipped"] == {"ghost": "unknown agent"}
+
+    def test_restart_batch_no_cap_for_large_fleets(self, connector_env):
+        # The old 32-cap made 'Restart now' unusable for exactly the
+        # fleet-wide connectors the feature exists for. Unknown ids are
+        # skipped, not rejected.
+        client, *_ = connector_env
+        agents = [f"a{i}" for i in range(40)]
+        resp = client.post(
+            "/dashboard/api/agents/restart-batch", json={"agents": agents},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["started"] == []
+        assert len(resp.json()["skipped"]) == 40
 
     def test_unavailable_store_503(self, tmp_path):
         from src.dashboard.events import EventBus

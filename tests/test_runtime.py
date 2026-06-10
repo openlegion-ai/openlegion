@@ -1744,21 +1744,27 @@ class TestBuildMcpServersEnv:
         result = json.loads(b._build_mcp_servers_env(servers, agent_id="a1"))
         assert result == servers
 
-    def test_missing_credential_propagates_value_error(self, monkeypatch):
-        # Vault has linear_token; config asks for github_token.
+    def test_missing_credential_drops_only_that_server(self, monkeypatch, caplog):
+        # Per-connector degradation: a fleet connector with a missing
+        # credential must not brick an agent that never asked for it —
+        # the bad server is dropped (error logged), the rest ship.
         b = self._backend(
             vault=self._vault_with(monkeypatch, linear_token="x"),
             permissions=self._perms_allow_all(),
         )
-        servers = [{
-            "name": "x", "command": "y",
-            "env": {"K": "$CRED{github_token}"},
-        }]
-        with pytest.raises(ValueError) as excinfo:
-            b._build_mcp_servers_env(servers, agent_id="a1")
-        assert "github_token" in str(excinfo.value)
+        servers = [
+            {"name": "bad", "command": "y", "env": {"K": "$CRED{github_token}"}},
+            {"name": "good", "command": "z", "env": {"K": "$CRED{linear_token}"}},
+        ]
+        result = json.loads(b._build_mcp_servers_env(servers, agent_id="a1"))
+        assert [s["name"] for s in result] == ["good"]
+        assert result[0]["env"]["K"] == "x"
+        assert any(
+            "bad" in r.message and "github_token" in r.message
+            for r in caplog.records
+        )
 
-    def test_permission_denied_propagates_value_error(self, monkeypatch):
+    def test_permission_denied_drops_only_that_server(self, monkeypatch, caplog):
         b = self._backend(
             vault=self._vault_with(monkeypatch, linear_token="x"),
             permissions=self._perms_deny_all(),
@@ -1767,9 +1773,9 @@ class TestBuildMcpServersEnv:
             "name": "x", "command": "y",
             "env": {"K": "$CRED{linear_token}"},
         }]
-        with pytest.raises(ValueError) as excinfo:
-            b._build_mcp_servers_env(servers, agent_id="a1")
-        assert "permission" in str(excinfo.value).lower()
+        result = json.loads(b._build_mcp_servers_env(servers, agent_id="a1"))
+        assert result == []
+        assert any("permission" in r.message.lower() for r in caplog.records)
 
     def test_setter_wires_vault_and_permissions(self, monkeypatch):
         b = self._backend()

@@ -2513,6 +2513,7 @@ function dashboard() {
           this.fetchChannels();
           this.fetchApiKeys();
           this.loadIntegrations();
+          this.loadConnectors();
         }
         // apikeys needs only fetchSettings(), already called unconditionally above.
         if (this.systemTab === 'network') {
@@ -6639,10 +6640,12 @@ function dashboard() {
 
     // Connectors assigned to one agent — drives the read-only panel on
     // the agent's Config tab (status dots come from agentMcpStatus).
+    // Uses the server-expanded assigned_agents so '*'-expansion
+    // semantics live in exactly one place (the mesh).
     connectorsForAgent(agentId) {
       if (!agentId || !this.connectorsData) return [];
       return (this.connectorsData.connectors || []).filter(
-        c => (c.agents || []).includes('*') || (c.agents || []).includes(agentId),
+        c => (c.assigned_agents || []).includes(agentId),
       );
     },
 
@@ -6656,6 +6659,7 @@ function dashboard() {
     connectorStartAdd() {
       this.connectorErrors = {};
       this.connectorGlobalError = null;
+      const agentIds = [...(this.connectorsData?.agents || [])];
       this.connectorDraft = {
         _isNew: true,
         name: '',
@@ -6665,9 +6669,8 @@ function dashboard() {
         _replaceEnv: true,       // new connector: env is whatever you type
         _envKeys: [],
         _assignMode: 'all',      // 'all' | 'some'
-        _agentSel: Object.fromEntries(
-          (this.connectorsData?.agents || []).map(a => [a, false]),
-        ),
+        _agentIds: agentIds,     // checkbox rows (frozen at form open)
+        _agentSel: Object.fromEntries(agentIds.map(a => [a, false])),
       };
     },
 
@@ -6675,6 +6678,14 @@ function dashboard() {
       this.connectorErrors = {};
       this.connectorGlobalError = null;
       const assignedAll = (c.agents || []).includes('*');
+      const explicit = assignedAll ? [] : (c.agents || []);
+      // Checkbox rows = running agents ∪ the connector's explicit
+      // assignment. Without the union, an assigned-but-not-running
+      // agent would have no checkbox and a Save would silently strip
+      // its assignment.
+      const agentIds = [...new Set([
+        ...(this.connectorsData?.agents || []), ...explicit,
+      ])].sort();
       this.connectorDraft = {
         _isNew: false,
         name: c.name,
@@ -6687,10 +6698,9 @@ function dashboard() {
         _replaceEnv: false,
         _envKeys: Array.isArray(c.env_keys) ? [...c.env_keys] : [],
         _assignMode: assignedAll ? 'all' : 'some',
+        _agentIds: agentIds,
         _agentSel: Object.fromEntries(
-          (this.connectorsData?.agents || []).map(
-            a => [a, !assignedAll && (c.agents || []).includes(a)],
-          ),
+          agentIds.map(a => [a, !assignedAll && explicit.includes(a)]),
         ),
       };
     },
@@ -6728,6 +6738,20 @@ function dashboard() {
       if (!name || !command) {
         this.showToast('Name and command are required.');
         return;
+      }
+      // The PUT is an upsert — guard the CREATE path against silently
+      // overwriting an existing connector of the same name.
+      if (d._isNew) {
+        const lowered = name.toLowerCase();
+        const exists = (this.connectorsData?.connectors || []).some(
+          c => (c.name || '').toLowerCase() === lowered,
+        );
+        if (exists) {
+          this.connectorErrors = {
+            name: `A connector named "${name}" already exists — edit it instead.`,
+          };
+          return;
+        }
       }
       if (d._replaceEnv) {
         for (const row of (d._envRows || [])) {
@@ -6828,6 +6852,11 @@ function dashboard() {
       if (this.connectorRestarting || !(agents || []).length) return;
       this.connectorRestarting = true;
       try {
+        // The batch runs server-side in the background (a fleet-wide
+        // restart can take minutes per agent — far past fetch/proxy
+        // timeouts). Progress arrives through the per-agent restart
+        // events the SPA already renders; the server emits a final
+        // config_changed(connectors) that refreshes pending state.
         const resp = await fetch(`${window.__config.apiBase}/agents/restart-batch`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ agents }),
@@ -6837,14 +6866,14 @@ function dashboard() {
           this.showToast(`Error: ${typeof data.detail === 'string' ? data.detail : 'Restart failed'}`);
           return;
         }
-        const results = data.results || {};
-        const failed = Object.keys(results).filter(a => results[a] !== 'ok');
-        this.showToast(failed.length
-          ? `Restarted ${agents.length - failed.length}/${agents.length} — failed: ${failed.join(', ')}`
-          : `Restarted ${agents.length} agent${agents.length === 1 ? '' : 's'}.`);
+        const started = data.started || [];
+        const skipped = Object.keys(data.skipped || {});
+        this.showToast(started.length
+          ? `Restarting ${started.length} agent${started.length === 1 ? '' : 's'}…`
+            + (skipped.length ? ` (skipped: ${skipped.join(', ')})` : '')
+          : `Nothing to restart${skipped.length ? ` (skipped: ${skipped.join(', ')})` : ''}.`);
         this.connectorRestartPrompt = null;
         this.fetchAgents();
-        await this.loadConnectors();
       } catch (e) {
         this.showToast(`Error: ${e.message || String(e)}`);
       } finally {

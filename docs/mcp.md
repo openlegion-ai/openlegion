@@ -69,7 +69,7 @@ Records are validated by `src.shared.types.MCPConnector` (which inherits every `
 }
 ```
 
-**Permission gate.** Each handle is checked against the assigned agents' `allowed_credentials` glob lists (via `permissions.can_access_credential`) at **both** PUT time — the dashboard rejects an unsavable connector synchronously, naming the blocked agents — and runtime (so a permission revoked after save, or an agent created later under a `"*"` assignment without the grant, is enforced at its next restart through the loud failure path).
+**Permission gate.** Each handle is checked against the assigned LIVE agents' `allowed_credentials` glob lists (via `permissions.can_access_credential`) at PUT time — the dashboard rejects an unsavable connector synchronously, naming the blocked agents. At agent start, enforcement is **per-connector degradation**: a connector whose credential is missing or denied for that agent is dropped from its `MCP_SERVERS` (error logged with the connector, agent, and reason) while the rest ship — a fleet connector must never brick an agent that didn't ask for it (e.g. an agent created after a `"*"` connector was saved, under the default deny-all credential ACL).
 
 **What handles protect (and what they don't):**
 
@@ -89,8 +89,8 @@ The runtime exposure is bounded by the existing container hardening (UID 1000, `
 **Failure modes:**
 
 - **Vault not wired.** `RuntimeBackend` raises a clear startup error if the config contains `$CRED{...}` handles but the mesh credential vault was not plumbed in via `set_credential_resolver`. Silent literal-passthrough was rejected as a footgun: a misconfigured deploy would otherwise ship literal `$CRED{...}` strings to subprocesses.
-- **Credential missing.** Agent start raises `ValueError`; the dashboard surfaces this through the existing restart-failed UX with the credential name in the error message. Fix by storing the credential and retrying restart.
-- **Permission denied.** Same as missing — agent start raises with the credential name. Fix by extending the agent's `allowed_credentials` glob.
+- **Credential missing or permission denied.** That connector is DROPPED for that agent at start (error logged naming the connector, agent, and credential); the agent boots with its remaining connectors. The agent's Config-tab panel shows the dropped server's status dot as gray (it never reached the container). Fix by storing the credential / extending the agent's `allowed_credentials` glob, then restarting the agent.
+- **Corrupt `connectors.json`.** Loads as an empty catalog (error logged); agents start with no MCP servers rather than failing to boot.
 
 ### `GET /api/connectors` env masking
 
