@@ -5483,6 +5483,21 @@ class TestWorkplaceTabRoutes:
                  if p["root_task_id"] == root["id"])
         assert p["stalled"] is True
 
+    def test_workplace_pipelines_caps_root_count(self):
+        from src.dashboard.server import _MAX_PIPELINE_ROOTS
+        client = self._client_with_v2(True)
+        # More in-flight human roots than the cap (distinct assignees so the
+        # per-assignee pending cap can't interfere).
+        for i in range(_MAX_PIPELINE_ROOTS + 5):
+            r = self.tasks_store.create(
+                creator="operator", assignee=f"w{i}", title=f"p{i}",
+                origin={"kind": "human", "channel": "dashboard", "user": "u1"},
+            )
+            self.tasks_store.update_status(r["id"], "working", actor=f"w{i}")
+        resp = client.get("/dashboard/api/workplace/pipelines")
+        assert resp.status_code == 200
+        assert len(resp.json()["pipelines"]) <= _MAX_PIPELINE_ROOTS
+
     def test_workplace_pending_lists_open_nonces(self):
         # No need for v2 — pending list is independent of orchestration.
         client = self._client_with_v2(False)
