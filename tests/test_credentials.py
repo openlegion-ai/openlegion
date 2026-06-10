@@ -4783,26 +4783,36 @@ class TestCredentialKindAndModelCompat:
         assert v.get_credential_kind("anthropic") == "api_key"
 
     def test_oauth_allowed_models_env_override(self, monkeypatch):
-        """OPENLEGION_OAUTH_ALLOWED_MODELS_OPENAI overrides the default subset."""
-        # The env override is read at module import time, so we have to
-        # reload the module to pick it up.
-        import importlib
+        """OPENLEGION_OAUTH_ALLOWED_MODELS_OPENAI overrides the default subset.
 
-        import src.host.credentials as creds_mod
+        Exercises ``_parse_env_models`` (the module-import-time parser)
+        directly rather than ``importlib.reload``-ing the module — an
+        in-place reload re-mints every class in the module's (shared) dict,
+        breaking ``pytest.raises``/``except`` class-identity for any other
+        test file that captured a binding at collection time.
+        """
+        from src.host.credentials import (
+            OAUTH_ALLOWED_MODELS_OPENAI,
+            _parse_env_models,
+        )
         monkeypatch.setenv(
             "OPENLEGION_OAUTH_ALLOWED_MODELS_OPENAI",
             "openai/custom-model-one,openai/custom-model-two",
         )
-        importlib.reload(creds_mod)
-        try:
-            assert "openai/custom-model-one" in creds_mod.OAUTH_ALLOWED_MODELS_OPENAI
-            assert "openai/custom-model-two" in creds_mod.OAUTH_ALLOWED_MODELS_OPENAI
-            # Default model dropped after override.
-            assert "openai/gpt-5.3-codex" not in creds_mod.OAUTH_ALLOWED_MODELS_OPENAI
-        finally:
-            # Reset to defaults so other tests aren't polluted.
-            monkeypatch.delenv("OPENLEGION_OAUTH_ALLOWED_MODELS_OPENAI", raising=False)
-            importlib.reload(creds_mod)
+        parsed = _parse_env_models(
+            "OPENLEGION_OAUTH_ALLOWED_MODELS_OPENAI",
+            OAUTH_ALLOWED_MODELS_OPENAI,
+        )
+        assert "openai/custom-model-one" in parsed
+        assert "openai/custom-model-two" in parsed
+        # Default model dropped after override.
+        assert "openai/gpt-5.3-codex" not in parsed
+        # Unset env falls back to the passed default set.
+        monkeypatch.delenv("OPENLEGION_OAUTH_ALLOWED_MODELS_OPENAI")
+        assert _parse_env_models(
+            "OPENLEGION_OAUTH_ALLOWED_MODELS_OPENAI",
+            OAUTH_ALLOWED_MODELS_OPENAI,
+        ) == OAUTH_ALLOWED_MODELS_OPENAI
 
     def test_anthropic_oauth_family_accepts_any_claude_by_default(self, monkeypatch):
         """By default (no override env), Anthropic OAuth accepts ANY model
@@ -4878,39 +4888,43 @@ class TestCredentialKindAndModelCompat:
     def test_anthropic_oauth_override_enforces_exact_match(self, monkeypatch):
         """When the operator sets OPENLEGION_OAUTH_ALLOWED_MODELS_ANTHROPIC,
         it becomes an opt-in EXACT restriction — family matching is disabled
-        and only the listed models pass."""
-        import importlib
+        and only the listed models pass.
 
+        The env var is parsed at module import time into
+        ``_ANTHROPIC_OAUTH_ALLOWLIST_IS_OPERATOR_SET`` + the
+        ``_OAUTH_ALLOWED_MODELS`` entry; patch those parsed globals directly
+        instead of ``importlib.reload``-ing the module — an in-place reload
+        re-mints every class in the module's (shared) dict, so exception
+        classes raised afterwards no longer match the bindings other test
+        files captured at collection time (``pytest.raises`` in
+        test_oauth_integrations.py broke exactly this way).
+        ``test_parse_env_models_override`` covers the env-string parsing.
+        """
         import src.host.credentials as creds_mod
-        monkeypatch.setenv(
-            "OPENLEGION_OAUTH_ALLOWED_MODELS_ANTHROPIC",
-            "anthropic/claude-opus-4-7",
+        monkeypatch.setattr(
+            creds_mod, "_ANTHROPIC_OAUTH_ALLOWLIST_IS_OPERATOR_SET", True,
         )
-        importlib.reload(creds_mod)
-        try:
-            # Recreate the vault from the reloaded module so it picks up
-            # the operator-set flag + parsed override set.
-            self._purge_env(monkeypatch)
-            monkeypatch.setenv(
-                "OPENLEGION_SYSTEM_ANTHROPIC_API_KEY",
-                "sk-ant-oat01-" + "x" * 80,
-            )
-            v = creds_mod.CredentialVault()
-            assert v.get_credential_kind("anthropic") == "oauth"
-            # Exact-listed model passes.
-            ok, reason = v.is_model_compatible("anthropic/claude-opus-4-7")
-            assert ok is True, reason
-            # A different (family-matching) version is now REJECTED because
-            # the operator opted into an exact subset.
-            ok2, reason2 = v.is_model_compatible("anthropic/claude-opus-4-8")
-            assert ok2 is False
-            assert reason2 is not None
-            assert "OAuth-allowed models" in reason2
-        finally:
-            monkeypatch.delenv(
-                "OPENLEGION_OAUTH_ALLOWED_MODELS_ANTHROPIC", raising=False
-            )
-            importlib.reload(creds_mod)
+        monkeypatch.setitem(
+            creds_mod._OAUTH_ALLOWED_MODELS,
+            "anthropic",
+            frozenset({"anthropic/claude-opus-4-7"}),
+        )
+        self._purge_env(monkeypatch)
+        monkeypatch.setenv(
+            "OPENLEGION_SYSTEM_ANTHROPIC_API_KEY",
+            "sk-ant-oat01-" + "x" * 80,
+        )
+        v = creds_mod.CredentialVault()
+        assert v.get_credential_kind("anthropic") == "oauth"
+        # Exact-listed model passes.
+        ok, reason = v.is_model_compatible("anthropic/claude-opus-4-7")
+        assert ok is True, reason
+        # A different (family-matching) version is now REJECTED because
+        # the operator opted into an exact subset.
+        ok2, reason2 = v.is_model_compatible("anthropic/claude-opus-4-8")
+        assert ok2 is False
+        assert reason2 is not None
+        assert "OAuth-allowed models" in reason2
 
     def test_openai_oauth_unchanged_still_exact(self, monkeypatch):
         """The OpenAI OAuth subset is genuinely restricted (codex) and stays
