@@ -5163,7 +5163,11 @@ def create_mesh_app(
         Best-effort per member (a stopped container just logs). Mirrors
         the dashboard's ``PUT /api/team`` push loop so the mesh-side
         team-context/brief writers stop silently diverging from what
-        running agents see until their next restart.
+        running agents see until their next restart. Pushes run
+        CONCURRENTLY (same as the dashboard loop) so the request's
+        latency is one member's worst case (10s timeout), not the sum —
+        a large team with several stopped containers must not turn one
+        brief update into a minute-long call.
         """
         results: dict[str, bool] = {}
         if transport is None:
@@ -5173,18 +5177,23 @@ def create_mesh_app(
             (_load_projects().get(team_name) or {}).get("members", []),
         )
         targets = [a for a in router.agent_registry.keys() if a in members]
-        for aid in targets:
+        if not targets:
+            return results
+
+        async def _push_one(aid: str) -> tuple[str, bool]:
             try:
                 resp = await transport.request(
                     aid, "PUT", "/team", json={"content": content}, timeout=10,
                 )
-                results[aid] = not (
+                return aid, not (
                     isinstance(resp, dict) and resp.get("error")
                 )
             except Exception as e:
                 logger.warning("TEAM.md push to %s failed: %s", aid, e)
-                results[aid] = False
-        return results
+                return aid, False
+
+        pairs = await asyncio.gather(*(_push_one(a) for a in targets))
+        return dict(pairs)
 
     @app.put("/mesh/teams/{team_name}/brief")
     async def mesh_update_team_brief(team_name: str, request: Request) -> dict:
