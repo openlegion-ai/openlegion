@@ -104,14 +104,18 @@ def test_heartbeat_tools_constant():
       the heartbeat procedure already called it for roster summary
       and drill-ins but the allowlist denied the call — a pre-existing
       contract mismatch Codex flagged during PR 972 review.
+    * v5 (B5 task-run diagnostics): + ``inspect_task_run``. Read-only
+      per-task execution summary (tokens, LLM calls, thinking, trace
+      errors) so the rate-stale-deliverables step can look at HOW a
+      task ran before grading it.
     """
     assert _HEARTBEAT_TOOLS == frozenset({
         "list_agents", "get_agent_profile", "get_system_status",
         "notify_user",
         "check_inbox", "workflow_snapshot", "await_task_event",
         "rate_delivery", "manage_goals",
-        "inspect_agents",
+        "inspect_agents", "inspect_task_run",
     })
     # v3 main was 9 tools (no save_observations — removed pre-merge);
-    # v4 this branch added inspect_agents = 10.
-    assert len(_HEARTBEAT_TOOLS) == 10
+    # v4 added inspect_agents = 10; v5 added inspect_task_run = 11.
+    assert len(_HEARTBEAT_TOOLS) == 11

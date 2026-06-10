@@ -203,6 +203,10 @@ _HEARTBEAT_TOOLS = frozenset({
     # for drill-ins; without it the prompted procedure is denied by
     # this allowlist (caught by Codex pre-merge review of PR 972).
     "inspect_agents",
+    # B5 — read-only per-task execution diagnostics. Lets the heartbeat's
+    # rate-stale-deliverables step look at HOW a task ran (tokens, LLM
+    # calls, thinking, trace errors) before grading it.
+    "inspect_task_run",
 })
 
 # Tool calls whose ONLY purpose is to read state — they don't produce

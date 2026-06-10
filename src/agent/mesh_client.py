@@ -1411,6 +1411,16 @@ class MeshClient:
         _raise_with_body(response)
         return response.json()
 
+    async def get_task_run(self, task_id: str) -> dict | None:
+        """Operator-tier per-task execution diagnostics. ``None`` on 404."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/tasks/{task_id}/run",
+        )
+        if response.status_code == 404:
+            return None
+        _raise_with_body(response)
+        return response.json()
+
     async def read_user_notifications(
         self, hours: float = 24, limit: int = 50,
     ) -> dict:

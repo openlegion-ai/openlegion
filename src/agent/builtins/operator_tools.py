@@ -1085,6 +1085,54 @@ async def workflow_snapshot(
     return result
 
 
+@tool(
+    name="inspect_task_run",
+    operator_only=True,
+    description=(
+        "Diagnose HOW a task actually executed — use this when a "
+        "deliverable came out shallow, wrong, or late and you need to "
+        "know why before fixing anything. Returns the task record "
+        "(thinking level, blocker note, outcome/feedback), the status-"
+        "transition timeline, and an execution summary from traces: "
+        "LLM call count, total tokens, models used, and error events "
+        "during the run. Read it for the common failure shapes: very "
+        "few LLM calls + low tokens on a deep task = the worker "
+        "finished too early (re-dispatch with a fuller brief and "
+        "thinking='high'); trace errors = tooling/infra trouble; "
+        "thinking=null on analysis work = depth was never requested. "
+        "Trace numbers are window-scoped to the assignee, so "
+        "concurrent activity in the window is included."
+    ),
+    parameters={
+        "task_id": {
+            "type": "string",
+            "description": "Task id to diagnose",
+        },
+    },
+)
+async def inspect_task_run(
+    task_id: str,
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Operator-only per-task execution diagnostics via mesh endpoint."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    try:
+        result = await mesh_client.get_task_run(task_id)
+    except Exception as e:
+        return {
+            "error": f"Failed to read task run: {e}",
+            "task_id": task_id,
+        }
+    if result is None:
+        return {"error": "not_found", "task_id": task_id}
+    return result
+
+
 # Each task-status poll is wrapped in
 # ``asyncio.wait_for(..., _AWAIT_TASK_EVENT_POLL_BUDGET_S)`` so a stuck HTTP
 # retry chain (``_get_with_retry`` worst-case ≈ 90s with 3×30s attempts)

@@ -5723,6 +5723,93 @@ def create_mesh_app(
             )
         return snapshot
 
+    @app.get("/mesh/tasks/{task_id}/run")
+    async def get_task_run(task_id: str, request: Request) -> dict:
+        """Operator diagnostics for a single task run (B5).
+
+        Answers "why did this come out the way it did": the task record
+        (thinking level, blocker note, outcome), the durable
+        ``task_events`` timeline, and an execution summary aggregated
+        from the trace store — LLM call count, total tokens, models
+        used, and any error-status trace events for the assignee within
+        the task's lifetime window. The trace slice is time-window
+        scoped (traces are keyed by trace_id, not task_id), so
+        concurrent activity by the same agent in the window is included
+        — treat the numbers as the agent's activity DURING the task,
+        not a strict per-task ledger. Operator-only.
+        """
+        caller = _extract_verified_agent_id(request)
+        if not (
+            _caller_is_operator(caller, request)
+            or _is_internal_caller(request)
+        ):
+            raise HTTPException(403, "task run inspection is operator-only")
+        record = tasks_store.get(task_id)
+        if record is None:
+            raise HTTPException(404, f"Task '{task_id}' not found")
+        events = tasks_store.list_events(task_id)
+
+        started = record.get("created_at")
+        ended = record.get("completed_at") or time.time()
+        llm_calls = 0
+        tokens_used = 0
+        models: set[str] = set()
+        trace_errors: list[dict] = []
+        if trace_store is not None and record.get("assignee") and started:
+            try:
+                rows = trace_store.query(
+                    agent=record["assignee"],
+                    since=started - 5,
+                    until=ended + 5,
+                    limit=1000,
+                )
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning("task run trace query failed: %s", e)
+                rows = []
+            for ev in rows:
+                meta = ev.get("meta") or {}
+                if ev.get("event_type") in ("llm_call", "llm_stream"):
+                    llm_calls += 1
+                    t = meta.get("tokens_used")
+                    if isinstance(t, (int, float)):
+                        tokens_used += int(t)
+                    m = meta.get("model")
+                    if m:
+                        models.add(str(m))
+                if ev.get("status") == "error" or ev.get("error"):
+                    trace_errors.append({
+                        "event_type": ev.get("event_type", ""),
+                        "error": (ev.get("error") or "")[:200],
+                        "timestamp": ev.get("timestamp"),
+                    })
+
+        duration_s = (
+            round(ended - started, 1) if started else None
+        )
+        return {
+            "task": {
+                k: record.get(k)
+                for k in (
+                    "id", "title", "status", "assignee", "creator",
+                    "thinking", "blocker_note", "outcome", "feedback_text",
+                    "result_summary", "created_at", "completed_at",
+                    "parent_task_id", "previous_task_id",
+                )
+            },
+            "execution": {
+                "duration_seconds": duration_s,
+                "llm_calls": llm_calls,
+                "tokens_used": tokens_used,
+                "models": sorted(models),
+                "trace_errors": trace_errors[:10],
+                "trace_window_note": (
+                    "aggregated from the assignee's trace events during "
+                    "the task window — includes any concurrent activity"
+                ),
+            },
+            "events": events[:50],
+        }
+
     @app.get("/mesh/user-notifications")
     async def get_user_notifications(
         request: Request, hours: float = 24, limit: int = 50,

@@ -1718,6 +1718,10 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     # blocking primitive (see _HEARTBEAT_TOOLS in src/agent/loop.py for
     # the heartbeat surface; both tools self-reject for non-operators).
     "workflow_snapshot", "await_task_event",
+    # Per-task execution diagnostics (B5) — answers "why did this come
+    # out shallow/wrong": thinking level, token/LLM-call counts, trace
+    # errors, status timeline. Pairs with rate_delivery on rework.
+    "inspect_task_run",
     # Configuration edits — edit_agent applies every field immediately
     # and emits an undo receipt (5min for soft fields, 30min for hard).
     # undo_change lets the operator self-revert within the TTL.
@@ -1807,6 +1811,9 @@ _OPERATOR_HEARTBEAT_TOOLS: list[str] = [
     # heartbeat procedure but missing from this allowlist; added so
     # the runtime gate stops denying the prompted call.
     "inspect_agents",
+    # B5 — read-only per-task run diagnostics (tokens, LLM calls,
+    # thinking, trace errors) so rating decisions can be informed.
+    "inspect_task_run",
 ]
 
 _OPERATOR_SOUL = """\
