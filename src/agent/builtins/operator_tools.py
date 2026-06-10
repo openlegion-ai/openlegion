@@ -2989,9 +2989,10 @@ async def manage_goals(
 # rating buttons that lived on the "Recently delivered" cards before
 # the Work-tab cutover. The deleted UI hit the same dashboard endpoint
 # the drill-in modal uses; this tool routes through the mesh so the
-# operator agent can score completed tasks from its heartbeat loop
-# (preserves the agent-feedback machine loop: memory writes on
-# accepted/rework/rejected + auto-rework spawn on rework).
+# operator agent can score completed tasks from its heartbeat loop.
+# Feedback loop (A1): rework/rejected feedback is pushed into the rated
+# agent's learnings (corrections file) + rework auto-spawns a follow-up
+# task; accepted/acknowledged are rating signals only.
 
 _VALID_RATE_OUTCOMES = frozenset({
     "accepted", "acknowledged", "rework", "rejected",
@@ -3004,9 +3005,10 @@ _MAX_RATE_FEEDBACK_CHARS = 2000
     operator_only=True,
     description=(
         "Record outcome for a completed task. Operator's per-task "
-        "judgment — preserves the agent-feedback machine loop "
-        "(memory writes + auto-rework spawn). Default to "
-        "'acknowledged' when uncertain; never guess. Operator-only."
+        "judgment. rework/rejected feedback is pushed into the rated "
+        "agent's learnings so it improves next time; rework also "
+        "auto-spawns a follow-up task. Default to 'acknowledged' when "
+        "uncertain; never guess. Operator-only."
     ),
     parameters={
         "task_id": {"type": "string", "description": "Task to rate."},
@@ -3014,10 +3016,11 @@ _MAX_RATE_FEEDBACK_CHARS = 2000
             "type": "string",
             "enum": ["accepted", "acknowledged", "rework", "rejected"],
             "description": (
-                "accepted = matches ask cleanly. acknowledged = neutral/"
-                "low-confidence (no memory write). rework = fixable miss "
-                "(spawns follow-up task; feedback required). rejected = "
-                "needs restart (feedback required)."
+                "accepted = matches ask cleanly (rating only). "
+                "acknowledged = neutral/low-confidence. rework = fixable "
+                "miss (spawns follow-up task; feedback pushed to agent's "
+                "learnings; feedback required). rejected = needs restart "
+                "(feedback pushed to learnings; feedback required)."
             ),
         },
         "feedback": {

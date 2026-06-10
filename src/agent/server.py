@@ -604,6 +604,38 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         team_path.write_text(content)
         return {"updated": True, "size": team_path.stat().st_size}
 
+    @app.post("/learnings/feedback")
+    async def record_outcome_feedback(request: Request) -> dict:
+        """Accept rating feedback for one of this agent's completed tasks.
+
+        A1 (rating → learning loop): the mesh pushes the operator's /
+        user's ``rework`` / ``rejected`` feedback here; it lands in the
+        corrections learnings file and rides ``get_learnings_context``
+        into every future prompt. Mesh-internal only — same gate as
+        ``PUT /team`` so agents can't forge corrections into their own
+        (or via SSRF, a peer's) learnings.
+        """
+        if not request.headers.get("x-mesh-internal"):
+            raise HTTPException(
+                403,
+                "Feedback writes via this endpoint require X-Mesh-Internal header.",
+            )
+        if not loop.workspace:
+            raise HTTPException(503, "Workspace not available")
+        body = await request.json()
+        feedback = body.get("feedback", "")
+        if not isinstance(feedback, str) or not feedback.strip():
+            raise HTTPException(400, "feedback must be a non-empty string")
+        task_id = str(body.get("task_id", ""))[:64]
+        title = str(body.get("title", ""))[:200]
+        outcome = str(body.get("outcome", ""))[:32] or "rework"
+        original = f"Task {task_id}: {title}" if title else f"Task {task_id}"
+        loop.workspace.record_correction(
+            original=sanitize_for_prompt(original),
+            correction=f"[{outcome}] {sanitize_for_prompt(feedback)}",
+        )
+        return {"recorded": True}
+
     @app.post("/config")
     async def update_runtime_config(request: Request) -> dict:
         """Hot-reload runtime config (model, thinking) without container restart.

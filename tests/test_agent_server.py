@@ -952,3 +952,59 @@ class TestHeartbeatForceLlmHeader:
             )
         assert resp.status_code == 200
         assert mock_loop.execute_heartbeat.call_args.kwargs.get("force_llm") is False
+
+
+class TestLearningsFeedbackEndpoint:
+    """A1: mesh-pushed rating feedback lands in the corrections file."""
+
+    @pytest.mark.asyncio
+    async def test_feedback_recorded_to_corrections(self, tmp_workspace):
+        app, loop = _make_app(tmp_workspace)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t",
+        ) as c:
+            r = await c.post(
+                "/learnings/feedback",
+                json={
+                    "task_id": "task_1",
+                    "title": "SEO audit",
+                    "outcome": "rework",
+                    "feedback": "Too shallow — include per-keyword data",
+                },
+                headers={"x-mesh-internal": "1"},
+            )
+        assert r.status_code == 200
+        assert r.json()["recorded"] is True
+        corrections = (
+            Path(tmp_workspace) / "learnings" / "corrections.md"
+        ).read_text()
+        assert "Task task_1: SEO audit" in corrections
+        assert "[rework] Too shallow" in corrections
+        # ...and it reaches the prompt-injection surface.
+        ctx = loop.workspace.get_learnings_context()
+        assert "Too shallow" in ctx
+
+    @pytest.mark.asyncio
+    async def test_requires_mesh_internal_header(self, tmp_workspace):
+        app, _ = _make_app(tmp_workspace)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t",
+        ) as c:
+            r = await c.post(
+                "/learnings/feedback",
+                json={"task_id": "t", "outcome": "rework", "feedback": "x"},
+            )
+        assert r.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_empty_feedback_rejected(self, tmp_workspace):
+        app, _ = _make_app(tmp_workspace)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t",
+        ) as c:
+            r = await c.post(
+                "/learnings/feedback",
+                json={"task_id": "t", "outcome": "rework", "feedback": "  "},
+                headers={"x-mesh-internal": "1"},
+            )
+        assert r.status_code == 400

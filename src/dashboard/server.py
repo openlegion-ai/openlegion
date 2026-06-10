@@ -8182,6 +8182,14 @@ def create_dashboard_router(
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
         result: dict = {"ok": True, "task": updated}
+        # A1 — push actionable feedback into the rated agent's learnings
+        # (best-effort; see src/host/feedback_push.py for the contract).
+        from src.host.feedback_push import push_outcome_feedback
+        push_status = await push_outcome_feedback(
+            transport, updated, outcome, feedback,
+        )
+        if push_status:
+            result["feedback_push"] = push_status
         if outcome == "rework":
             try:
                 rework = tasks_store.create_rework_task(

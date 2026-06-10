@@ -4683,6 +4683,7 @@ def create_mesh_app(
         # ``completed_at`` (when the agent finished) — review delay no
         # longer drops lagged rejections off the heartbeat.
         outcome_rejected_24h: dict[str, int] = {}
+        outcome_rework_24h: dict[str, int] = {}
         execution_failures_24h: dict[str, int] = {}
         stale_tasks_24h: dict[str, int] = {}
         chain_breaks_24h: dict[str, int] = {}
@@ -4698,6 +4699,17 @@ def create_mesh_app(
                     aid: count
                     for aid, count in tasks_store.count_outcomes_since(
                         "rejected", since_seconds=_day_seconds,
+                    ).items()
+                    if aid != "operator"
+                }
+                # A5 — rework counts. The "agent racked up N reworks in a
+                # row → offer a tune-up" playbook had no data source: the
+                # metrics surfaced rejected but not rework, which is the
+                # far more common negative rating.
+                outcome_rework_24h = {
+                    aid: count
+                    for aid, count in tasks_store.count_outcomes_since(
+                        "rework", since_seconds=_day_seconds,
                     ).items()
                     if aid != "operator"
                 }
@@ -4799,6 +4811,7 @@ def create_mesh_app(
             # Per-agent task outcome / failure / stale counts (PR-J').
             # Empty dicts when tasks_v2 is disabled OR no rows match.
             "outcome_rejected_24h_count": outcome_rejected_24h,
+            "outcome_rework_24h_count": outcome_rework_24h,
             "execution_failures_24h_count": execution_failures_24h,
             "stale_tasks_24h_count": stale_tasks_24h,
             # Operator's own untriaged-inbox depth (Bug 6). Scalar count
@@ -5309,6 +5322,91 @@ def create_mesh_app(
     _BACK_EDGE_WAKE_WINDOW_SECONDS = 60.0
     _back_edge_wake_state: dict[str, float] = {}
 
+    def _wake_operator_for_human_chain(
+        task_record: dict,
+        event_kind: str,
+        payload_extras: dict | None,
+    ) -> None:
+        """A2 — recovery wake to the operator for a failed/blocked task
+        on a HUMAN-originated chain.
+
+        Mirrors the agent-origin back-edge: event written to
+        ``inbox/operator/task_event/{id}`` (actionable 7-day TTL,
+        surfaced via check_inbox) + a rate-limited lane wake. The wake
+        deliberately does NOT thread ``task_id`` into the lane — the
+        operator's turn is a recovery turn ABOUT the task, not an
+        execution of it, so the chat auto-close machinery must not
+        touch the (failed/blocked) row. ``auto_notify=False`` because
+        ChainWatcher already delivered the failure to the user — the
+        wake message says so to prevent a double notification.
+        Best-effort throughout; shares ``_back_edge_wake_state`` so a
+        burst (lane timeout + sweep retry) coalesces to one wake.
+        """
+        task_id = task_record.get("id")
+        assignee = task_record.get("assignee") or "?"
+        origin_dict = task_record.get("origin") or {}
+        payload: dict = {
+            "kind": event_kind,
+            "task_id": task_id,
+            "recipient": assignee,
+            "title": task_record.get("title"),
+            "status": task_record.get("status"),
+            "ts": int(time.time()),
+        }
+        if payload_extras:
+            for k, v in payload_extras.items():
+                if k not in payload:
+                    payload[k] = v
+        try:
+            blackboard.write(
+                f"inbox/operator/task_event/{task_id}",
+                payload, written_by="mesh", ttl=_BACK_EDGE_TTL_ACTIONABLE,
+            )
+        except Exception as e:
+            logger.warning(
+                "Operator back-edge write failed for task %s: %s",
+                task_id, e,
+            )
+            return
+        if lane_manager is None or dispatch_loop is None:
+            return
+        if "operator" not in router.agent_registry:
+            return
+        now = time.time()
+        if now - _back_edge_wake_state.get(task_id, 0.0) < _BACK_EDGE_WAKE_WINDOW_SECONDS:
+            return
+        _back_edge_wake_state[task_id] = now
+        title = task_record.get("title") or "(no title)"
+        wake_msg = (
+            f"User-originated task {task_id} ({title}) assigned to "
+            f"'{assignee}' reached {event_kind}. The system already "
+            "informed the user — do NOT re-notify about the failure "
+            "itself. Your job is recovery: inspect_task_run"
+            f"('{task_id}') to diagnose, then manage_task to retry/"
+            "reroute (with a better brief and thinking level if the "
+            "run was shallow), or edit_agent if the failure looks "
+            "systemic. Notify the user only once recovery is underway "
+            "or genuinely impossible."
+        )
+        try:
+            wake_origin = MessageOrigin(
+                kind="human",
+                channel=str(origin_dict.get("channel") or ""),
+                user=str(origin_dict.get("user") or ""),
+            )
+            asyncio.run_coroutine_threadsafe(
+                lane_manager.enqueue(
+                    "operator", wake_msg, mode="followup",
+                    origin=wake_origin, auto_notify=False,
+                    task_id=None,
+                ),
+                dispatch_loop,
+            )
+        except Exception as e:
+            logger.warning(
+                "Operator wake for task %s failed: %s", task_id, e,
+            )
+
     def _write_task_event_back_edge(
         task_record: dict,
         *,
@@ -5347,6 +5445,23 @@ def create_mesh_app(
             # Self-handoffs (sender == recipient) suppress so an
             # originating agent's check_inbox stays clean.
             if origin_kind not in {"agent", "operator"}:
+                # A2 — human-origin chains used to fall out here with NO
+                # signal to anyone who could act: ChainWatcher tells the
+                # USER their task failed, but the operator — the only
+                # party with manage_task / edit_agent / inspect_task_run
+                # — was never woken and only stumbled on the failure at
+                # the next heartbeat. Wake the operator into a full chat
+                # turn (where its complete toolset is available) for
+                # failed/blocked transitions on user-originated work.
+                if (
+                    origin_kind == "human"
+                    and event_kind in _BACK_EDGE_WAKE_KINDS
+                    and task_id
+                    and assignee != "operator"
+                ):
+                    _wake_operator_for_human_chain(
+                        task_record, event_kind, payload_extras,
+                    )
                 return
             if not origin_user or origin_user == assignee:
                 return
@@ -6143,6 +6258,17 @@ def create_mesh_app(
             description = sanitize_for_prompt(description_override) or None
         else:
             description = original.get("description") or None
+            # A3 — a verbatim clone repeats the exact failure: the
+            # retrying agent never saw WHY the first attempt failed
+            # (blocker_note stayed on the original row). Append it so
+            # the retry starts informed. Caller-supplied description
+            # overrides skip this — the caller already rewrote the brief.
+            blocker = (original.get("blocker_note") or "").strip()
+            if blocker:
+                description = (
+                    f"{description or original['title']}\n\n"
+                    f"## Previous attempt failed\n{blocker[:500]}"
+                )
         new_assignee = body.get("assignee") or original["assignee"]
         if not new_assignee or not _AGENT_ID_RE.match(new_assignee):
             raise HTTPException(400, f"Invalid assignee: {new_assignee!r}")
@@ -7145,6 +7271,14 @@ def create_mesh_app(
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
         result: dict = {"ok": True, "task": updated}
+        # A1 — push actionable feedback into the rated agent's learnings
+        # (best-effort; see src/host/feedback_push.py for the contract).
+        from src.host.feedback_push import push_outcome_feedback
+        push_status = await push_outcome_feedback(
+            transport, updated, outcome, feedback,
+        )
+        if push_status:
+            result["feedback_push"] = push_status
         if outcome == "rework":
             try:
                 rework = tasks_store.create_rework_task(

@@ -308,7 +308,9 @@ class TestOperatorConstants:
         #    save_observations, so v3 baseline was 9 not 10.)
         #  * v5 (B5 task-run diagnostics): +inspect_task_run — read-only
         #    per-task execution summary so rating decisions are informed.
-        assert len(_OPERATOR_HEARTBEAT_TOOLS) == 11
+        #  * v6 (A5 heartbeat consistency): +read_file — the prompted
+        #    "re-read GOALS.json each cycle" call was denied without it.
+        assert len(_OPERATOR_HEARTBEAT_TOOLS) == 12
         # The operator-tier heartbeat tools must also be on the main
         # operator allowlist — they're the tools operator can use from
         # both /chat and heartbeat. Two heartbeat entries are

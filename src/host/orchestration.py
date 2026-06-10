@@ -88,14 +88,16 @@ PENDING_STATUSES: frozenset[str] = frozenset({"pending"})
 # ``tasks.outcome`` column reflects the LATEST rating, so a re-rate just
 # overwrites without admin intervention.
 #
-# - ``accepted``: positive signal. Writes a reinforcement memory entry.
+# - ``accepted``: positive signal. Rating only — nothing is written to
+#   the agent (praise in the corrections file would dilute the signal).
 # - ``rework``: negative signal with a fix-it brief. Auto-spawns a
-#   rework task AND writes the feedback into the rated agent's memory
-#   so the agent recalls it on the next task.
-# - ``rejected``: terminal negative. Writes feedback to memory; does
-#   NOT auto-spawn a rework.
-# - ``acknowledged``: neutral, "reviewed without judgement". Does not
-#   write to memory and does not spawn rework.
+#   rework task AND pushes the feedback into the rated agent's
+#   learnings (corrections file, via the mesh ``feedback_push`` helper)
+#   so the agent sees it in every future prompt.
+# - ``rejected``: terminal negative. Pushes feedback to the agent's
+#   learnings; does NOT auto-spawn a rework.
+# - ``acknowledged``: neutral, "reviewed without judgement". No push,
+#   no rework spawn.
 VALID_OUTCOMES: frozenset[str] = frozenset(
     {"accepted", "rework", "rejected", "acknowledged"}
 )
@@ -1945,8 +1947,11 @@ class Tasks:
         Inherits ``assignee`` and ``project_id`` from ``previous_task_id``
         so the same agent picks up the redo. The new task's title is
         ``"Rework: {previous_title}"`` and its description (the brief
-        the agent reads) is the operator's feedback. ``previous_task_id``
-        is set on the new row so the lineage is queryable.
+        the agent reads) is the operator's feedback followed by an
+        ``## Original brief`` section carrying the previous description
+        (A3 — feedback alone left the agent guessing what the original
+        ask was). ``previous_task_id`` is set on the new row so the
+        lineage is queryable.
 
         Raises :class:`TaskNotFound` if the source task does not exist
         and :class:`ValueError` if the feedback is empty / oversized.
@@ -1962,6 +1967,17 @@ class Tasks:
         if previous is None:
             raise TaskNotFound(previous_task_id)
         new_title = f"Rework: {previous['title']}"[:200]
+        # A3 — the rework brief used to be the feedback ALONE; the agent
+        # picking it up had no idea what the original ask was (lineage
+        # existed only as the previous_task_id column, never surfaced in
+        # the prompt). Append the original brief, feedback first so a
+        # length cut never trims the actionable part.
+        new_description = feedback
+        prev_desc = (previous.get("description") or "").strip()
+        if prev_desc and prev_desc != previous.get("title"):
+            new_description = (
+                f"{feedback}\n\n## Original brief\n{prev_desc[:1000]}"
+            )
         new_id = f"task_{uuid.uuid4().hex[:12]}"
         now = time.time()
         with self._conn() as conn:
@@ -1980,7 +1996,7 @@ class Tasks:
                     previous.get("project_id"),
                     previous.get("parent_task_id"),
                     new_title,
-                    feedback,
+                    new_description,
                     actor,
                     previous["assignee"],
                     previous.get("priority", 0),
