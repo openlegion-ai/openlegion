@@ -1,5 +1,6 @@
 """Unit tests for credential vault."""
 
+import copy
 import json
 from unittest.mock import MagicMock, patch
 
@@ -5672,10 +5673,11 @@ class TestMarkAnthropicCacheBreakpoints:
             ],
             "messages": [
                 {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "working\n\nvolatile suffix"},
             ],
         }
 
-    def test_marks_last_tool_system_and_string_message(self):
+    def test_marks_last_tool_system_and_second_to_last_message(self):
         body = self._full_body()
         _mark_anthropic_cache_breakpoints(body)
 
@@ -5685,13 +5687,15 @@ class TestMarkAnthropicCacheBreakpoints:
         # (b) last system block only
         assert "cache_control" not in body["system"][0]
         assert body["system"][1]["cache_control"] == _EPHEMERAL
-        # (c) string content converted to a list block with cache_control
-        content = body["messages"][0]["content"]
-        assert content == [
+        # (c) SECOND-TO-LAST message: string content converted to a list
+        # block with cache_control. The (volatile-bearing) last message
+        # stays untouched so it sits after the breakpoint.
+        assert body["messages"][0]["content"] == [
             {"type": "text", "text": "hello", "cache_control": _EPHEMERAL}
         ]
+        assert body["messages"][1]["content"] == "working\n\nvolatile suffix"
 
-    def test_last_message_list_content_marks_last_block(self):
+    def test_second_to_last_list_content_marks_last_block(self):
         body = {
             "messages": [
                 {
@@ -5701,20 +5705,36 @@ class TestMarkAnthropicCacheBreakpoints:
                         {"type": "tool_result", "tool_use_id": "2", "content": "y"},
                     ],
                 },
+                {"role": "assistant", "content": "final + volatile"},
             ],
         }
         _mark_anthropic_cache_breakpoints(body)
         blocks = body["messages"][0]["content"]
         assert "cache_control" not in blocks[0]
         assert blocks[1]["cache_control"] == _EPHEMERAL
+        assert body["messages"][1]["content"] == "final + volatile"
 
-    def test_last_message_non_cacheable_block_not_tagged(self):
-        # A non-cacheable trailing block (e.g. ``thinking``) must NOT be
-        # tagged — Anthropic rejects cache_control there. The system/tools
-        # breakpoints still apply; only the message breakpoint is skipped.
+    def test_single_message_body_gets_no_message_breakpoint(self):
+        # With one message there is no stable history worth caching — the
+        # final message carries the per-request volatile suffix and never
+        # reappears verbatim, so tagging it would never produce a cache hit.
+        body = {
+            "system": [{"type": "text", "text": "s"}],
+            "messages": [{"role": "user", "content": "hello"}],
+        }
+        _mark_anthropic_cache_breakpoints(body)
+        assert body["messages"][0]["content"] == "hello"
+        assert body["system"][0]["cache_control"] == _EPHEMERAL
+
+    def test_non_cacheable_block_walks_back_to_earlier_message(self):
+        # A non-cacheable trailing block (e.g. ``thinking``) on the
+        # second-to-last message must NOT be tagged — Anthropic rejects
+        # cache_control there. The walk continues backward to the nearest
+        # message with a cacheable last block.
         body = {
             "system": [{"type": "text", "text": "s"}],
             "messages": [
+                {"role": "user", "content": "early"},
                 {
                     "role": "assistant",
                     "content": [
@@ -5722,13 +5742,78 @@ class TestMarkAnthropicCacheBreakpoints:
                         {"type": "thinking", "thinking": "..."},
                     ],
                 },
+                {"role": "user", "content": "final + volatile"},
             ],
         }
         _mark_anthropic_cache_breakpoints(body)
-        blocks = body["messages"][0]["content"]
+        blocks = body["messages"][1]["content"]
         assert "cache_control" not in blocks[0]
         assert "cache_control" not in blocks[1]
+        assert body["messages"][0]["content"] == [
+            {"type": "text", "text": "early", "cache_control": _EPHEMERAL}
+        ]
+        assert body["messages"][2]["content"] == "final + volatile"
         assert body["system"][0]["cache_control"] == _EPHEMERAL
+
+    def test_no_cacheable_message_before_last_tags_nothing(self):
+        body = {
+            "messages": [
+                {"role": "assistant", "content": [{"type": "thinking", "thinking": "..."}]},
+                {"role": "user", "content": "final"},
+            ],
+        }
+        _mark_anthropic_cache_breakpoints(body)
+        assert "cache_control" not in body["messages"][0]["content"][0]
+        assert body["messages"][1]["content"] == "final"
+
+    def test_breakpoint_targets_message_resent_verbatim_next_round(self):
+        # Regression for the volatile-suffix divergence: the agent loop folds
+        # a per-request volatile suffix into the LAST message only
+        # (loop.py:_append_volatile_to_messages), so round N's last message
+        # never reappears verbatim in round N+1 — the history copy is resent
+        # CLEAN. The rolling breakpoint must therefore land on a message that
+        # IS resent byte-identical, i.e. the second-to-last.
+        history = [
+            {"role": "user", "content": "do the task"},
+            {"role": "assistant", "content": [{"type": "text", "text": "step 1 done"}]},
+            {"role": "user", "content": "continue"},
+        ]
+        # Round N: last message carries that round's volatile suffix.
+        round_n = copy.deepcopy(history)
+        round_n[-1] = {
+            "role": "user",
+            "content": "continue\n\n[Live context]\nvolatile-round-N",
+        }
+        body_n = {"messages": copy.deepcopy(round_n)}
+        _mark_anthropic_cache_breakpoints(body_n)
+
+        # Tag landed on the second-to-last (pure history) message — the
+        # suffix-bearing last message is untouched.
+        tagged_idx = 1
+        assert (
+            body_n["messages"][tagged_idx]["content"][-1]["cache_control"]
+            == _EPHEMERAL
+        )
+        assert body_n["messages"][-1] == round_n[-1]
+
+        # Round N+1: history resent CLEAN, two new messages appended, the new
+        # last message carries round N+1's suffix.
+        round_n1 = copy.deepcopy(history) + [
+            {"role": "assistant", "content": "step 2 done"},
+            {
+                "role": "user",
+                "content": "wrap up\n\n[Live context]\nvolatile-round-N+1",
+            },
+        ]
+        # Core assertion: the message the round-N breakpoint landed on
+        # reappears byte-identical in round N+1, so the cached span up to the
+        # breakpoint matches and the history is billed as a cache READ.
+        assert json.dumps(history[tagged_idx], sort_keys=True) == json.dumps(
+            round_n1[tagged_idx], sort_keys=True
+        )
+        # Whereas the old last-message target (suffix-bearing) does NOT
+        # reappear in round N+1 — it is resent clean there.
+        assert round_n[-1] != round_n1[2]
 
     def test_empty_or_missing_fields_no_error_no_spurious_keys(self):
         # Completely empty.
@@ -5783,10 +5868,19 @@ class TestMarkAnthropicCacheBreakpointsOpenAiFmt:
             "messages": [
                 {"role": "system", "content": "agent system prompt"},
                 {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "working"},
+                {"role": "user", "content": "final + volatile suffix"},
             ],
         }
 
-    def test_native_anthropic_tags_system_last_tool_and_last_message(self):
+    def _assert_untagged(self, kw):
+        assert "cache_control" not in kw["tools"][1]
+        assert kw["messages"][0]["content"] == "agent system prompt"
+        assert kw["messages"][1]["content"] == "hello"
+        assert kw["messages"][2]["content"] == "working"
+        assert kw["messages"][3]["content"] == "final + volatile suffix"
+
+    def test_native_anthropic_tags_system_last_tool_and_second_to_last(self):
         kw = self._kwargs()
         _mark_anthropic_cache_breakpoints_openai_fmt(kw)
 
@@ -5801,34 +5895,78 @@ class TestMarkAnthropicCacheBreakpointsOpenAiFmt:
                 "cache_control": _EPHEMERAL,
             }
         ]
-        # last (user) message string content → list block with cache_control
-        assert kw["messages"][1]["content"] == [
-            {"type": "text", "text": "hello", "cache_control": _EPHEMERAL}
+        # SECOND-TO-LAST message tagged — the final (volatile-bearing)
+        # message stays untouched so it sits after the rolling breakpoint.
+        assert kw["messages"][1]["content"] == "hello"
+        assert kw["messages"][2]["content"] == [
+            {"type": "text", "text": "working", "cache_control": _EPHEMERAL}
         ]
+        assert kw["messages"][3]["content"] == "final + volatile suffix"
+
+    def test_walk_skips_tool_and_system_roles(self):
+        kw = {
+            "model": "anthropic/claude-x",
+            "messages": [
+                {"role": "system", "content": "sys"},
+                {"role": "assistant", "content": "calling tool"},
+                {"role": "tool", "content": "tool result", "tool_call_id": "1"},
+                {"role": "user", "content": "final + volatile"},
+            ],
+        }
+        _mark_anthropic_cache_breakpoints_openai_fmt(kw)
+        # tool-role message (index 2, the second-to-last) skipped — litellm's
+        # cache_control passthrough on tool-role content is uncertain. The
+        # walk lands on the nearest assistant message instead.
+        assert kw["messages"][2]["content"] == "tool result"
+        assert kw["messages"][1]["content"] == [
+            {"type": "text", "text": "calling tool", "cache_control": _EPHEMERAL}
+        ]
+        assert kw["messages"][3]["content"] == "final + volatile"
+
+    def test_system_only_prefix_gets_no_rolling_breakpoint(self):
+        # [system, user] — the walk from index len-2 hits the system message
+        # (already tagged at the front) and skips it; no second tag lands.
+        kw = {
+            "model": "anthropic/claude-x",
+            "messages": [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "hello + volatile"},
+            ],
+        }
+        _mark_anthropic_cache_breakpoints_openai_fmt(kw)
+        assert kw["messages"][0]["content"] == [
+            {"type": "text", "text": "sys", "cache_control": _EPHEMERAL}
+        ]
+        assert kw["messages"][1]["content"] == "hello + volatile"
+
+    def test_idempotent(self):
+        kw = self._kwargs()
+        _mark_anthropic_cache_breakpoints_openai_fmt(kw)
+        first = json.dumps(kw, sort_keys=True)
+        _mark_anthropic_cache_breakpoints_openai_fmt(kw)
+        second = json.dumps(kw, sort_keys=True)
+        assert first == second
+        # Exactly one cache_control per breakpoint slot (tools, system,
+        # rolling message) — no accumulation across re-runs.
+        assert second.count('"cache_control"') == 3
 
     def test_rewritten_openai_model_tags_nothing(self):
         # api_base / credit-proxy rewrite turns the model into ``openai/...``,
         # which silently drops cache_control — the guard must skip.
         kw = self._kwargs(model="openai/claude-x")
         _mark_anthropic_cache_breakpoints_openai_fmt(kw)
-        assert "cache_control" not in kw["tools"][1]
-        assert kw["messages"][0]["content"] == "agent system prompt"
-        assert kw["messages"][1]["content"] == "hello"
+        self._assert_untagged(kw)
 
     def test_non_anthropic_model_tags_nothing(self):
         kw = self._kwargs(model="gemini/gemini-2.5-pro")
         _mark_anthropic_cache_breakpoints_openai_fmt(kw)
-        assert "cache_control" not in kw["tools"][1]
-        assert kw["messages"][0]["content"] == "agent system prompt"
-        assert kw["messages"][1]["content"] == "hello"
+        self._assert_untagged(kw)
 
     def test_disabled_flag_tags_nothing(self, monkeypatch):
         monkeypatch.setattr(_cred_mod, "_PROMPT_CACHE_ENABLED", False)
         kw = self._kwargs()
         _mark_anthropic_cache_breakpoints_openai_fmt(kw)
-        assert "cache_control" not in kw["tools"][1]
-        assert kw["messages"][0]["content"] == "agent system prompt"
-        assert kw["messages"][1]["content"] == "hello"
+        self._assert_untagged(kw)
 
     def test_single_system_message_not_double_tagged(self):
         # When the only message IS the system message, tag it once (via the
