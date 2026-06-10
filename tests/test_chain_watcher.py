@@ -132,6 +132,82 @@ def test_verdict_cancelled():
     assert s.chain_terminal_verdict(r["id"]) == ("cancelled", "")
 
 
+def test_verdict_partial_cancel_delivers_done():
+    """A chain that substantively completed but has one cancelled branch must
+    resolve to 'done' (not a silent 'cancelled') — every user pipeline ends in
+    a user-facing outcome."""
+    s = _store()
+    r = _human_root(s)
+    _finish(s, r["id"], "done", result_summary="main work done")
+    branch = s.create(creator="scout", assignee="helper", title="optional",
+                      parent_task_id=r["id"])
+    s.update_status(branch["id"], "cancelled", actor="x")
+    assert s.chain_terminal_verdict(r["id"]) == ("done", "main work done")
+
+
+def test_verdict_all_cancelled_stays_silent():
+    """A chain whose root was cancelled is a genuine manual cancellation →
+    ('cancelled', ''), even with downstream cancelled branches."""
+    s = _store()
+    r = _human_root(s)
+    s.update_status(r["id"], "cancelled", actor="x")
+    branch = s.create(creator="scout", assignee="helper", title="optional",
+                      parent_task_id=r["id"])
+    s.update_status(branch["id"], "cancelled", actor="x")
+    assert s.chain_terminal_verdict(r["id"]) == ("cancelled", "")
+
+
+def test_verdict_root_cancelled_after_partial_progress_stays_silent():
+    """Cancellation is judged by the ROOT, not "any done task": if the user
+    cancels their request after a sub-stage already finished, we must NOT claim
+    "✅ complete" — the root was cancelled, so stay silent."""
+    s = _store()
+    r = _human_root(s)
+    child = s.create(creator="scout", assignee="helper", title="sub-stage",
+                     parent_task_id=r["id"])
+    _finish(s, child["id"], "done", result_summary="a stage finished")
+    s.update_status(r["id"], "cancelled", actor="x")  # user cancels the request
+    assert s.chain_terminal_verdict(r["id"]) == ("cancelled", "")
+
+
+def test_verdict_depth_cap_not_false_terminal(monkeypatch):
+    """A chain deeper than the recursion cap must NOT be declared terminal
+    while a node beyond the cap is still non-terminal — otherwise the watcher
+    delivers a false 'done' while a deep branch is still running."""
+    monkeypatch.setattr("src.host.orchestration.MAX_WORKFLOW_CHAIN_DEPTH", 3)
+    s = _store()
+    r = _human_root(s)
+    _finish(s, r["id"], "done", result_summary="root")
+    prev = r["id"]
+    for i in range(1, 4):  # depths 1..3 — all done, all visible to the CTE
+        rec = s.create(creator="scout", assignee="w", title=f"s{i}",
+                       parent_task_id=prev)
+        _finish(s, rec["id"], "done")
+        prev = rec["id"]
+    # depth 4 — still working, beyond the cap, so invisible to the CTE.
+    deep = s.create(creator="scout", assignee="w", title="deep",
+                    parent_task_id=prev)
+    s.update_status(deep["id"], "working", actor="x")
+    assert s.chain_terminal_verdict(r["id"]) is None
+
+
+def test_verdict_chain_ending_exactly_at_cap_still_delivers(monkeypatch):
+    """A chain that NATURALLY ends at the depth cap (no descendants beyond it)
+    is NOT truncated — it must still deliver, not be silenced forever. Guards
+    against a depth-heuristic that can't tell a cap-deep leaf from truncation."""
+    monkeypatch.setattr("src.host.orchestration.MAX_WORKFLOW_CHAIN_DEPTH", 3)
+    s = _store()
+    r = _human_root(s)
+    _finish(s, r["id"], "done", result_summary="root")
+    prev = r["id"]
+    for i in range(1, 4):  # depths 1..3 — the deepest (3) is a genuine leaf
+        rec = s.create(creator="scout", assignee="w", title=f"s{i}",
+                       parent_task_id=prev)
+        _finish(s, rec["id"], "done", result_summary=f"leaf{i}")
+        prev = rec["id"]
+    assert s.chain_terminal_verdict(r["id"]) == ("done", "leaf3")
+
+
 # ── Watcher: a recording deliver double ──────────────────────────
 
 
@@ -244,6 +320,31 @@ async def test_non_human_root_never_delivered():
     assert d.calls == []
 
 
+@pytest.mark.asyncio
+async def test_poison_root_does_not_abort_sweep():
+    """A store error deriving the verdict for ONE root must not starve the
+    others — the terminal path is isolated per-root like stall/milestone."""
+    s = _store()
+    bad = _human_root(s, assignee="bad")    # created first → swept first
+    good = _human_root(s, assignee="good")
+    _finish(s, bad["id"], "done", result_summary="bad")
+    _finish(s, good["id"], "done", result_summary="good")
+    # The bad root's verdict raises every sweep; the good one is fine.
+    real_verdict = s.chain_terminal_verdict
+
+    def flaky(root_id):
+        if root_id == bad["id"]:
+            raise RuntimeError("boom")
+        return real_verdict(root_id)
+
+    s.chain_terminal_verdict = flaky
+    d = _Deliver()
+    w = ChainWatcher(s, d, settle_s=0)
+    await w.sweep_once()   # arm settle for good (bad raises, isolated)
+    await w.sweep_once()   # settled → good delivered despite bad raising
+    assert [c[0] for c in d.calls] == [good["id"]]
+
+
 # ── Store: stall state + claim (Phase 3a) ────────────────────────
 
 
@@ -279,6 +380,26 @@ def test_chain_stall_state_ts_when_child_pending():
     s.create(creator="scout", assignee="writer", title="next",
              parent_task_id=r["id"])  # pending, nothing working
     assert s.chain_stall_state(r["id"]) is not None
+
+
+def test_chain_stall_state_depth_cap_returns_none(monkeypatch):
+    """A truncated chain isn't assessed for stall: the visible prefix reads as
+    parked (all pending) but a deep ``working`` node beyond the cap is making
+    progress invisibly — the guard suppresses a wrong nudge."""
+    monkeypatch.setattr("src.host.orchestration.MAX_WORKFLOW_CHAIN_DEPTH", 3)
+    s = _store()
+    r = _human_root(s)  # pending
+    prev = r["id"]
+    for i in range(1, 4):  # depths 1..3 — pending, visible to the CTE
+        rec = s.create(creator="scout", assignee="w", title=f"s{i}",
+                       parent_task_id=prev)
+        prev = rec["id"]
+    # depth 4 — working, beyond the cap, so invisible. Without the guard the
+    # visible prefix would read as a stall candidate and return a timestamp.
+    deep = s.create(creator="scout", assignee="w", title="deep",
+                    parent_task_id=prev)
+    s.update_status(deep["id"], "working", actor="x")
+    assert s.chain_stall_state(r["id"]) is None
 
 
 def test_claim_chain_stall_exactly_once():

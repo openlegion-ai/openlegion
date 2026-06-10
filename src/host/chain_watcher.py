@@ -136,42 +136,58 @@ class ChainWatcher:
                 continue
             live_ids.add(root_id)
 
-            verdict = self._tasks.chain_terminal_verdict(root_id)
-            if verdict is None:
-                # Still active (or a new hop just appeared) — reset settle.
-                self._settling.pop(root_id, None)
-                await self._maybe_nudge_stall(root, root_id)
-                if milestones_on:
-                    await self._maybe_ping_milestones(root, root_id)
-                continue
-
-            kind, summary = verdict
-            if kind == "cancelled":
-                # Manual cancellation is not a surprise to surface. Claim it
-                # so the chain stops being re-scanned, but deliver nothing.
-                self._tasks.claim_chain_delivery(root_id, "cancelled")
-                self._settling.pop(root_id, None)
-                continue
-
-            first = self._settling.get(root_id)
-            now_mono = self._clock()
-            if first is None:
-                self._settling[root_id] = now_mono
-                continue
-            if now_mono - first < self._settle_s:
-                continue
-
-            # Settled and still terminal — deliver, then claim on success.
-            delivered = await self._run_deliver(root, kind, summary)
-            if delivered:
-                self._tasks.claim_chain_delivery(root_id, kind)
-                self._settling.pop(root_id, None)
-            # If delivery failed, leave the settle timestamp in place so the
-            # next sweep retries immediately (no silent loss).
+            # Per-root isolation: a failure deriving the verdict or claiming a
+            # delivery for ONE root must not abort the rest of the sweep (the
+            # stall/milestone helpers already self-isolate; this guards the
+            # terminal path the same way). A poison root self-heals next sweep.
+            try:
+                await self._process_root(root, root_id, milestones_on)
+            except Exception as e:
+                logger.warning(
+                    "chain watcher: processing root %s failed: %s", root_id, e,
+                )
 
         # Bound memory: forget settle timers for roots no longer watchable.
         for stale in [r for r in self._settling if r not in live_ids]:
             self._settling.pop(stale, None)
+
+    async def _process_root(
+        self, root: dict, root_id: str, milestones_on: bool,
+    ) -> None:
+        """Deliver/settle/nudge a single watchable root. Raises on store
+        errors so :meth:`sweep_once` can isolate one bad root from the rest."""
+        verdict = self._tasks.chain_terminal_verdict(root_id)
+        if verdict is None:
+            # Still active (or a new hop just appeared) — reset settle.
+            self._settling.pop(root_id, None)
+            await self._maybe_nudge_stall(root, root_id)
+            if milestones_on:
+                await self._maybe_ping_milestones(root, root_id)
+            return
+
+        kind, summary = verdict
+        if kind == "cancelled":
+            # Manual cancellation is not a surprise to surface. Claim it
+            # so the chain stops being re-scanned, but deliver nothing.
+            self._tasks.claim_chain_delivery(root_id, "cancelled")
+            self._settling.pop(root_id, None)
+            return
+
+        first = self._settling.get(root_id)
+        now_mono = self._clock()
+        if first is None:
+            self._settling[root_id] = now_mono
+            return
+        if now_mono - first < self._settle_s:
+            return
+
+        # Settled and still terminal — deliver, then claim on success.
+        delivered = await self._run_deliver(root, kind, summary)
+        if delivered:
+            self._tasks.claim_chain_delivery(root_id, kind)
+            self._settling.pop(root_id, None)
+        # If delivery failed, leave the settle timestamp in place so the
+        # next sweep retries immediately (no silent loss).
 
     async def _maybe_nudge_stall(self, root: dict, root_id: str) -> None:
         """Nudge the user once if a non-terminal chain is parked + quiet.

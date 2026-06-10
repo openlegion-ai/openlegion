@@ -522,6 +522,14 @@ class Tasks:
         ``summary`` is a best-effort human string: the failed task's
         blocker_note, or the most-recently-completed done leaf's
         result_summary.
+
+        Cancellation is judged by the ROOT task (the user's request itself):
+        a chain whose root completed but had a *cancelled* downstream branch
+        resolves to ``done`` (don't swallow real completion); only a chain
+        whose root was cancelled is treated as a silent manual cancellation
+        (don't claim "complete" just because a sub-stage finished before the
+        user cancelled). This keeps the "every user pipeline ends in a
+        user-facing outcome" guarantee without false "complete" pings.
         """
         with self._conn() as conn:
             rows = conn.execute(
@@ -534,12 +542,32 @@ class Tasks:
                 "    WHERE c.depth < ?"
                 ") "
                 "SELECT t.id, t.status, t.result_summary, t.blocker_note, "
-                "  t.completed_at, t.updated_at "
+                "  t.completed_at, t.updated_at, "
+                "  (SELECT COUNT(*) FROM tasks x "
+                "     WHERE (x.parent_task_id IN (SELECT id FROM chain) "
+                "         OR x.previous_task_id IN (SELECT id FROM chain)) "
+                "       AND x.id NOT IN (SELECT id FROM chain)) "
                 "FROM tasks t "
                 "WHERE t.id IN (SELECT DISTINCT id FROM chain)",
                 (root_task_id, MAX_WORKFLOW_CHAIN_DEPTH),
             ).fetchall()
         if not rows:
+            return None
+        # Truncation guard: count any task that is a child (by parent_task_id
+        # or previous_task_id) of a chain node yet falls OUTSIDE the recursion
+        # — i.e. the depth cap cut off real descendants we cannot see. When
+        # that happens we can't prove the WHOLE chain is terminal, so treat it
+        # as still-active (return None) rather than risk a false "done"/"failed"
+        # delivery while a deep branch is still running. A chain that naturally
+        # ENDS at the cap has no such children (count 0) and still delivers —
+        # only genuine truncation is suppressed. Practically unreachable below
+        # the creation guard's default ceiling (25 << 200).
+        if (rows[0][6] or 0) > 0:
+            logger.warning(
+                "chain_terminal_verdict: chain %s has descendants beyond depth "
+                "cap %d — treating as active (cannot prove terminal)",
+                root_task_id, MAX_WORKFLOW_CHAIN_DEPTH,
+            )
             return None
         if any(r[1] not in TERMINAL_STATUSES for r in rows):
             return None
@@ -548,11 +576,23 @@ class Tasks:
             failed = [r for r in rows if r[1] == "failed"]
             failed.sort(key=lambda r: r[4] or r[5] or 0.0)
             return "failed", (failed[-1][3] or "").strip()
-        if "cancelled" in statuses:
+        # No failure: the chain is wholly done/cancelled. Judge by the ROOT.
+        # The chain is proven terminal above, so the root is itself done or
+        # cancelled — gate the silent path on the root, not on "any cancelled".
+        root_status = next(
+            (r[1] for r in rows if r[0] == root_task_id), None
+        )
+        if root_status == "cancelled":
+            # The user's request task itself was cancelled — a manual action,
+            # not a surprise to surface. Don't claim "complete" even if a
+            # sub-stage finished first. The watcher claims it silently.
             return "cancelled", ""
+        # The root completed — deliver the done outcome (a cancelled downstream
+        # branch must not swallow real completion). The root itself is a done
+        # row, so done_leaves is non-empty here.
         done_leaves = [r for r in rows if r[1] == "done"]
         done_leaves.sort(key=lambda r: r[4] or r[5] or 0.0)
-        summary = (done_leaves[-1][2] or "").strip() if done_leaves else ""
+        summary = (done_leaves[-1][2] or "").strip()
         return "done", summary
 
     def chain_stall_state(self, root_task_id: str) -> float | None:
@@ -582,12 +622,21 @@ class Tasks:
                 "                  OR t.previous_task_id = c.id) "
                 "    WHERE c.depth < ?"
                 ") "
-                "SELECT t.status, t.updated_at "
+                "SELECT t.status, t.updated_at, "
+                "  (SELECT COUNT(*) FROM tasks x "
+                "     WHERE (x.parent_task_id IN (SELECT id FROM chain) "
+                "         OR x.previous_task_id IN (SELECT id FROM chain)) "
+                "       AND x.id NOT IN (SELECT id FROM chain)) "
                 "FROM tasks t "
                 "WHERE t.id IN (SELECT DISTINCT id FROM chain)",
                 (root_task_id, MAX_WORKFLOW_CHAIN_DEPTH),
             ).fetchall()
         if not rows:
+            return None
+        # Truncation guard (mirrors chain_terminal_verdict): if real descendants
+        # were cut off by the depth cap, a deep ``working`` node would be
+        # invisible — so don't emit a (possibly wrong) stall nudge.
+        if (rows[0][2] or 0) > 0:
             return None
         statuses = {r[0] for r in rows}
         if all(s in TERMINAL_STATUSES for s in statuses):
