@@ -124,5 +124,7 @@ def is_context_overflow(text: str) -> bool:
     ``LLMContextOverflowError`` lets the chat loop self-heal (prune + retry)
     instead of aborting the turn and re-wedging.
     """
-    t = (text or "").lower()
+    # Strip backticks first: Anthropic also emits "input length and
+    # `max_tokens` exceed context limit...", which would defeat the marker.
+    t = (text or "").lower().replace("`", "")
     return any(marker in t for marker in CONTEXT_OVERFLOW_MARKERS)

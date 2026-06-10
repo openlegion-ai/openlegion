@@ -166,6 +166,9 @@ async def test_unrelated_runtime_error_still_permanent():
     "This model's maximum context length is 200000 tokens",
     "context_length_exceeded",
     "Your input length and max_tokens exceed the context window",
+    # Anthropic's backticked variant — the backticks around max_tokens must
+    # not defeat the marker match (is_context_overflow strips them).
+    "input length and `max_tokens` exceed context limit: 215000 + 32000 > 204798",
     "context length exceeded the limit",
 ])
 @pytest.mark.asyncio

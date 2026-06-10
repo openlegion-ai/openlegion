@@ -4569,6 +4569,17 @@ async def test_complete_task_on_exact_cap_round_closes_done_not_blocked():
     # Early return fired after exactly ONE LLM round — the extra tool-calling
     # responses were never consumed.
     assert loop.llm.chat.await_count == 1
+    # The closing assistant message persisted to durable history must be
+    # NON-empty: the Anthropic Messages API rejects empty content on
+    # non-final assistant messages, so an empty closer 400s the NEXT turn
+    # (chat-bubble suppression is handled via ``silent_reply``, not here).
+    # Assistant messages WITH tool_calls may legitimately be empty.
+    for msg in loop._chat_messages:
+        if msg.get("role") == "assistant" and not msg.get("tool_calls"):
+            assert str(msg.get("content", "")).strip(), (
+                f"empty persisted assistant message would 400 the next "
+                f"Anthropic turn: {msg!r}"
+            )
 
 
 @pytest.mark.asyncio

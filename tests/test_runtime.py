@@ -2157,6 +2157,53 @@ class TestDispatchErrorSurfacing:
         assert fetched["status"] == "working"
 
 
+# ── Chain-outcome bell kinds ──────────────────────────────────
+
+
+class TestDeliverChainOutcomeBellKind:
+    """The dashboard-bell `kind` chosen per chain outcome. Bound to a stub
+    `self` (same pattern as TestChannelPushRetry); a dashboard origin keeps
+    the channel-push branch out of play, so only the bell write runs."""
+
+    def _deliver(self, kind):
+        from src.cli.runtime import RuntimeContext
+
+        class _Store:
+            def __init__(self):
+                self.adds = []
+            def add(self, **kw):
+                self.adds.append(kw)
+                return "n1"
+
+        class _Stub:
+            _notification_store = _Store()
+            event_bus = None
+
+        stub = _Stub()
+        root = {
+            "id": "t-root", "assignee": "worker", "title": "do thing",
+            "origin": {"kind": "human", "channel": "dashboard", "user": "u1"},
+        }
+        ok = RuntimeContext._deliver_chain_outcome(stub, root, kind, "summary")
+        assert ok is True
+        assert len(stub._notification_store.adds) == 1
+        return stub._notification_store.adds[0]
+
+    def test_failed_chain_rings_alert_not_delivered(self):
+        # A failure must NOT ride the success/delivery bell kind — `alert`
+        # is what the stall branch and degradation notifications use.
+        add = self._deliver("failed")
+        assert add["kind"] == "alert"
+
+    def test_done_chain_rings_delivered(self):
+        add = self._deliver("done")
+        assert add["kind"] == "delivered"
+
+    def test_stall_chain_rings_alert(self):
+        add = self._deliver("stall")
+        assert add["kind"] == "alert"
+
+
 # ── Chain-outcome channel push retry ──────────────────────────
 
 
