@@ -1909,6 +1909,48 @@ class TestDispatchTimeoutAlignment:
         _args, kwargs = transport.request.call_args
         assert kwargs["timeout"] == 1860  # 1800 (override) + 60
 
+    @pytest.mark.asyncio
+    async def test_dispatch_synthesizes_trace_id_when_context_has_none(
+        self, monkeypatch,
+    ):
+        """Lane-dispatched turns run in the lane worker's bare context, so
+        ``current_trace_id`` is unset. Without a synthesized id the
+        x-trace-id header was never sent, the recipient's LLM calls
+        carried no trace id, and the mesh proxy recorded NO llm rows for
+        handoff runs — ``inspect_task_run`` read 0 calls / 0 tokens in
+        production (caught live on cake)."""
+        from src.shared.trace import current_trace_id
+
+        dispatch_fn, ctx, transport = _capture_dispatch_fn(monkeypatch)
+        transport.request.return_value = {"response": "done"}
+        assert current_trace_id.get() is None
+
+        result = await dispatch_fn("agent-x", "handoff work")
+
+        assert result == "done"
+        _args, kwargs = transport.request.call_args
+        tid = kwargs["headers"]["x-trace-id"]
+        assert tid.startswith("tr_") and len(tid) > 6
+
+    @pytest.mark.asyncio
+    async def test_dispatch_propagates_ambient_trace_id_unchanged(
+        self, monkeypatch,
+    ):
+        """An ambient trace id (channel/user-originated dispatch) must keep
+        propagating verbatim — synthesis only fills the gap."""
+        from src.shared.trace import current_trace_id
+
+        dispatch_fn, ctx, transport = _capture_dispatch_fn(monkeypatch)
+        transport.request.return_value = {"response": "done"}
+        token = current_trace_id.set("tr_ambient123")
+        try:
+            await dispatch_fn("agent-x", "channel work")
+        finally:
+            current_trace_id.reset(token)
+
+        _args, kwargs = transport.request.call_args
+        assert kwargs["headers"]["x-trace-id"] == "tr_ambient123"
+
 
 # ── RC-2: dispatch-error surfacing + redaction ─────────────────────────────
 #

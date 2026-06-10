@@ -776,10 +776,25 @@ class RuntimeContext:
             task_id: str | None = None,
             **_kwargs,
         ) -> str:
-            from src.shared.trace import current_trace_id, origin_header
+            from src.shared.trace import (
+                current_trace_id,
+                new_trace_id,
+                origin_header,
+            )
 
-            tid = current_trace_id.get()
-            if tid and self.trace_store:
+            # Synthesize a trace id when the dispatch context has none.
+            # Lane-dispatched turns (hand_off wakes, recovery wakes) run
+            # in the lane worker's bare context, so ``current_trace_id``
+            # is unset — the x-trace-id header was never sent, the
+            # recipient's LLM calls carried no trace id, and the mesh
+            # proxy (whose trace writes are gated on ``req_trace_id``)
+            # recorded NO llm rows for exactly the handoff runs that
+            # ``inspect_task_run`` exists to diagnose: its execution
+            # summary read 0 calls / 0 tokens in production. (Caught
+            # live on cake; unit tests seed trace rows manually and
+            # could not surface this.)
+            tid = current_trace_id.get() or new_trace_id()
+            if self.trace_store:
                 self.trace_store.record(
                     trace_id=tid, source="dispatch", agent=agent_name,
                     event_type="chat", detail=message[:200],
@@ -787,9 +802,7 @@ class RuntimeContext:
                 )
             import time as _time
             t0 = _time.time()
-            extra_headers: dict[str, str] = {}
-            if tid:
-                extra_headers["x-trace-id"] = tid
+            extra_headers: dict[str, str] = {"x-trace-id": tid}
             extra_headers.update(origin_header(origin))
             # Bug 2/3 fix: when the wake carried an originating task_id,
             # forward it so the agent's /chat handler can auto-close that
