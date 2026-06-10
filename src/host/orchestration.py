@@ -1151,6 +1151,30 @@ class Tasks:
             ).fetchall()
         return {row[0]: int(row[1] or 0) for row in rows if row[0]}
 
+    def count_team_outcomes_since(
+        self,
+        team_id: str,
+        *,
+        since_seconds: float,
+    ) -> dict[str, int]:
+        """Count rated tasks per OUTCOME for one team within a window.
+
+        P2 — feeds the work-summary metrics block so daily summaries
+        reflect the user's rating history (accepted/rework/rejected),
+        not just status counts. Same ``outcome_set_at`` filter rationale
+        as :meth:`count_outcomes_since`.
+        """
+        cutoff = time.time() - since_seconds
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT outcome, COUNT(*) FROM tasks "
+                f"WHERE {self._team_col} = ? AND outcome IS NOT NULL "
+                f"AND outcome_set_at IS NOT NULL AND outcome_set_at >= ? "
+                f"GROUP BY outcome",
+                (team_id, cutoff),
+            ).fetchall()
+        return {row[0]: int(row[1] or 0) for row in rows if row[0]}
+
     def count_failed_status_since(
         self,
         *,

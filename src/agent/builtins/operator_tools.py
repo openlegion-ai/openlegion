@@ -2077,6 +2077,56 @@ async def update_team_context(
 
 
 @tool(
+    name="update_team_brief",
+    operator_only=True,
+    description=(
+        "Update ONE section of a team's shared TEAM.md brief — every "
+        "member sees TEAM.md in its prompt, so this is how you propagate "
+        "fleet-wide knowledge without editing agents one by one. The "
+        "canonical use is a 'User Preferences' section: when the user "
+        "tells you durable preferences (tone, audience, formats, "
+        "constraints), write them here once and the whole team adapts "
+        "immediately (the updated file is pushed to running members). "
+        "Section-scoped: only the named '## section' block is replaced "
+        "or appended; the rest of TEAM.md is untouched. Keep sections "
+        "tight — TEAM.md rides every member's prompt budget."
+    ),
+    parameters={
+        "team_name": {"type": "string", "description": "Team name"},
+        "section": {
+            "type": "string",
+            "description": (
+                "Section heading WITHOUT the '##' (e.g. 'User Preferences')"
+            ),
+        },
+        "content": {
+            "type": "string",
+            "description": "New section body (markdown, max 2000 chars)",
+        },
+    },
+)
+async def update_team_brief(
+    team_name: str = "",
+    section: str = "",
+    content: str = "",
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Section-scoped TEAM.md update, pushed to running members."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if not team_name or not section or not content:
+        return {"error": "team_name, section, and content are all required"}
+    try:
+        return await mesh_client.update_team_brief(team_name, section, content)
+    except Exception as e:
+        return {"error": f"Failed to update team brief: {e}"}
+
+
+@tool(
     name="set_team_goal",
     operator_only=True,
     description="Set a team's north star + success criteria.",
@@ -2243,11 +2293,13 @@ async def compose_work_summary(
     period_start = now - period_hours * 3600
     period_end = now
 
-    # Pull the existing team summary as the base.
+    # Pull the existing team summary as the base. ``hours`` adds the
+    # window-scoped rating counts (P2) so the summary reflects how the
+    # user judged the period's work, not just what moved.
     base: dict = {}
     if scope_kind == "team":
         try:
-            base = await mesh_client.team_summary(scope_id)
+            base = await mesh_client.team_summary(scope_id, hours=period_hours)
         except Exception as e:
             return {"error": f"Failed to fetch team summary for {scope_id!r}: {e}"}
     counts = (base.get("counts") if isinstance(base, dict) else {}) or {}
@@ -2274,6 +2326,10 @@ async def compose_work_summary(
         # feedback fetch succeeding.
         prior_feedback = []
 
+    outcomes_window = (
+        base.get("outcomes_window") if isinstance(base, dict) else {}
+    ) or {}
+
     # Build the metrics block.
     metrics = {
         "period_hours": period_hours,
@@ -2283,6 +2339,11 @@ async def compose_work_summary(
         "tasks_failed": int(counts.get("failed", 0) or 0),
         "top_blocker_count": len(top_blockers),
         "recent_completion_count": len(recent_completions),
+        # P2 — rating history within the window, keyed by outcome.
+        "outcomes_accepted": int(outcomes_window.get("accepted", 0) or 0),
+        "outcomes_acknowledged": int(outcomes_window.get("acknowledged", 0) or 0),
+        "outcomes_rework": int(outcomes_window.get("rework", 0) or 0),
+        "outcomes_rejected": int(outcomes_window.get("rejected", 0) or 0),
     }
 
     # Build narrative — deterministic, no LLM. Markdown so dashboard can
@@ -2300,6 +2361,18 @@ async def compose_work_summary(
         f"{metrics['tasks_done']} delivered · "
         f"{metrics['tasks_failed']} failed."
     )
+    rated_total = (
+        metrics["outcomes_accepted"] + metrics["outcomes_acknowledged"]
+        + metrics["outcomes_rework"] + metrics["outcomes_rejected"]
+    )
+    if rated_total:
+        narrative_lines.append("")
+        narrative_lines.append(
+            f"**Ratings**: {metrics['outcomes_accepted']} accepted · "
+            f"{metrics['outcomes_acknowledged']} acknowledged · "
+            f"{metrics['outcomes_rework']} rework · "
+            f"{metrics['outcomes_rejected']} rejected."
+        )
     if top_blockers:
         narrative_lines.append("")
         narrative_lines.append("**Top blockers**:")

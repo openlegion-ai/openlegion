@@ -1612,11 +1612,29 @@ class MeshClient:
         """DEPRECATED: alias for :meth:`team_outputs`."""
         return await self.team_outputs(project_id, since)
 
-    async def team_summary(self, team_id: str) -> dict:
-        """Synthesized status summary for a team."""
-        response = await self._get_with_retry(
-            f"{self.mesh_url}/mesh/teams/{team_id}/summary",
+    async def update_team_brief(
+        self, team_name: str, section: str, content: str,
+    ) -> dict:
+        """Section-scoped TEAM.md update + push to running members (P2)."""
+        client = await self._get_client()
+        response = await client.put(
+            f"{self.mesh_url}/mesh/teams/{team_name}/brief",
+            json={"section": section, "content": content},
+            headers=self._trace_headers(),
         )
+        _raise_with_body(response)
+        return response.json()
+
+    async def team_summary(self, team_id: str, hours: float = 0) -> dict:
+        """Synthesized status summary for a team.
+
+        ``hours`` > 0 also returns ``outcomes_window`` — per-outcome
+        rating counts within the trailing window (P2).
+        """
+        url = f"{self.mesh_url}/mesh/teams/{team_id}/summary"
+        if hours and hours > 0:
+            url += f"?hours={float(hours)}"
+        response = await self._get_with_retry(url)
         _raise_with_body(response)
         return response.json()
 
