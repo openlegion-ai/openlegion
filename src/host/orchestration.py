@@ -1283,7 +1283,7 @@ class Tasks:
                           "total": N},
             }
 
-        ``age_in_state_seconds`` is ``int(now - max(updated_at, created_at))``
+        ``age_in_state_seconds`` is ``int(now - (updated_at or created_at))``
         — the wall-clock age since the last status mutation (or
         creation, for never-transitioned rows).
         """
