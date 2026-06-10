@@ -1,7 +1,10 @@
 # MCP Connectors — Global Catalog, Fleet Assignment, Remote Transport & OAuth
 
 **Date:** 2026-06-10
-**Status:** Proposed
+**Status:** Phase 1 implemented 2026-06-10 (stricter no-backcompat variant: the per-agent
+`mcp_servers` layer was REMOVED rather than kept alongside — the catalog is the sole source of
+truth and an agent-specific server is a connector assigned to one agent; `agents: []` defaults
+to unassigned rather than D3's two-layer coexistence). Phases 2-3 proposed.
 **Scope:** Promote MCP from a per-agent config field to a fleet-level **Connectors** catalog
 (connect once, enable for all agents or specific agents — the Skills-page interaction model),
 housed on the existing Integrations settings page (relabelled "Connectors"). Phase 2 adds a
