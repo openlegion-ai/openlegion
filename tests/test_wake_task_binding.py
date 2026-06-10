@@ -182,3 +182,108 @@ async def test_unknown_task_id_dropped(wake_app):
 
     assert len(lane.calls) == 1
     assert lane.calls[0]["kwargs"].get("task_id") is None
+
+
+@pytest.mark.asyncio
+async def test_wake_message_carries_task_brief(wake_app):
+    """B2: when the wake is bound to a task (M3 check passed), the lane
+    message is enriched with the task description so the recipient's chat
+    turn starts from the full brief, not the title-sized wake stub."""
+    app, lane, tasks_store = wake_app
+    brief = (
+        "## Objective\nDeep SEO audit of example.com\n"
+        "## Deliverable\nFull written audit saved as an artifact."
+    )
+    rec = tasks_store.create(
+        creator="scout", assignee="writer",
+        title="Deep SEO audit", description=brief,
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        resp = await client.post(
+            "/mesh/wake",
+            params={"target": "writer", "message": "New task from scout: Deep SEO audit"},
+            headers={"X-Agent-ID": "scout", "x-task-id": rec["id"]},
+        )
+    assert resp.status_code == 200
+    _settle()
+
+    assert len(lane.calls) == 1
+    lane_msg = lane.calls[0]["args"][1]
+    assert "## Task Brief" in lane_msg
+    assert "Deep SEO audit of example.com" in lane_msg
+    assert "saved as an artifact" in lane_msg
+
+
+@pytest.mark.asyncio
+async def test_wake_message_skips_brief_when_description_is_title(wake_app):
+    """Legacy handoffs (description == title) gain no redundant brief block."""
+    app, lane, tasks_store = wake_app
+    rec = tasks_store.create(
+        creator="scout", assignee="writer",
+        title="quick ping", description="quick ping",
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        await client.post(
+            "/mesh/wake",
+            params={"target": "writer", "message": "New task from scout: quick ping"},
+            headers={"X-Agent-ID": "scout", "x-task-id": rec["id"]},
+        )
+    _settle()
+
+    lane_msg = lane.calls[0]["args"][1]
+    assert "## Task Brief" not in lane_msg
+
+
+@pytest.mark.asyncio
+async def test_wake_message_lists_artifact_refs(wake_app):
+    """Data-payload pointers ride the wake so the recipient knows to fetch."""
+    app, lane, tasks_store = wake_app
+    rec = tasks_store.create(
+        creator="scout", assignee="writer", title="stage work",
+        artifact_refs=["output/scout/ho_123"],
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        await client.post(
+            "/mesh/wake",
+            params={"target": "writer", "message": "New task from scout: stage work"},
+            headers={"X-Agent-ID": "scout", "x-task-id": rec["id"]},
+        )
+    _settle()
+
+    lane_msg = lane.calls[0]["args"][1]
+    assert "read_blackboard" in lane_msg
+    assert "output/scout/ho_123" in lane_msg
+
+
+@pytest.mark.asyncio
+async def test_dropped_task_id_means_no_brief_enrichment(wake_app):
+    """A mismatched task_id is dropped by the M3 gate — the brief of an
+    UNRELATED task must not leak into the wake message either."""
+    app, lane, tasks_store = wake_app
+    rec = tasks_store.create(
+        creator="scout", assignee="analyst",  # NOT the wake target
+        title="other work", description="secret brief for analyst",
+    )
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        await client.post(
+            "/mesh/wake",
+            params={"target": "writer", "message": "nudge"},
+            headers={"X-Agent-ID": "scout", "x-task-id": rec["id"]},
+        )
+    _settle()
+
+    lane_msg = lane.calls[0]["args"][1]
+    assert "secret brief" not in lane_msg
+    assert lane.calls[0]["kwargs"].get("task_id") is None

@@ -1622,6 +1622,28 @@ def create_mesh_app(
                     target,
                 )
                 task_id = None
+            else:
+                # Brief delivery: the wake message travels as a URL query
+                # param and is historically a one-liner ("New task from X:
+                # {summary[:200]}"), so the recipient's chat turn used to
+                # start from a title-sized stub — the full task description
+                # (the handoff brief) never reached the worker unless it
+                # thought to call check_inbox. Enrich the lane message with
+                # the bound task's description + artifact pointers here,
+                # where the record is already in hand from the M3 lookup.
+                _desc = (_task_record.get("description") or "").strip()
+                _title = (_task_record.get("title") or "").strip()
+                if _desc and _desc != _title and _desc[:200] not in wake_msg:
+                    wake_msg += (
+                        "\n\n## Task Brief\n"
+                        + sanitize_for_prompt(_desc[:6_000])
+                    )
+                _refs = _task_record.get("artifact_refs") or []
+                if _refs:
+                    wake_msg += (
+                        "\n\nData payload on the blackboard — fetch with "
+                        "read_blackboard: " + ", ".join(_refs[:5])
+                    )
 
         if lane_manager is not None and dispatch_loop is not None:
             try:

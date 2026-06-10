@@ -1618,3 +1618,85 @@ class TestHandOffParentTaskIdPropagation:
 
         kwargs = mc.create_task.call_args.kwargs
         assert kwargs.get("parent_task_id") is None
+
+
+class TestHandOffBrief:
+    """B2: the `brief` param becomes the task description so the recipient
+    starts with full context instead of a title-sized stub."""
+
+    @pytest.mark.asyncio
+    async def test_brief_becomes_description(self):
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="operator")
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+        brief = (
+            "## Objective\nDeep SEO audit of example.com\n\n"
+            "## Context\nUser cares about long-tail keyword gaps.\n\n"
+            "## Deliverable\nFull written audit saved as an artifact."
+        )
+
+        result = await hand_off(
+            to="analyst",
+            summary="Deep SEO audit of example.com",
+            brief=brief,
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        kwargs = mc.create_task.call_args.kwargs
+        assert kwargs["title"] == "Deep SEO audit of example.com"
+        assert kwargs["description"] == brief
+
+    @pytest.mark.asyncio
+    async def test_brief_truncated_at_cap(self):
+        from src.agent.builtins.coordination_tool import (
+            _MAX_BRIEF_CHARS,
+            hand_off,
+        )
+
+        mc = _make_mesh_client(agent_id="operator")
+        mc.list_agents.return_value = {"analyst": {}}
+
+        await hand_off(
+            to="analyst",
+            summary="big brief",
+            brief="b" * (_MAX_BRIEF_CHARS + 5_000),
+            mesh_client=mc,
+        )
+
+        kwargs = mc.create_task.call_args.kwargs
+        assert len(kwargs["description"]) <= _MAX_BRIEF_CHARS
+
+    @pytest.mark.asyncio
+    async def test_long_summary_with_brief_keeps_caller_split(self):
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="operator")
+        mc.list_agents.return_value = {"analyst": {}}
+        long_summary = "Audit the SEO of example.com and " + "x" * 150
+
+        await hand_off(
+            to="analyst",
+            summary=long_summary,
+            brief="the real instructions",
+            mesh_client=mc,
+        )
+
+        kwargs = mc.create_task.call_args.kwargs
+        # Caller provided both — title hard-capped, brief preserved verbatim.
+        assert len(kwargs["title"]) <= 200
+        assert kwargs["description"] == "the real instructions"
+
+    @pytest.mark.asyncio
+    async def test_no_brief_preserves_legacy_shape(self):
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.list_agents.return_value = {"analyst": {}}
+
+        await hand_off(to="analyst", summary="quick ping", mesh_client=mc)
+
+        kwargs = mc.create_task.call_args.kwargs
+        assert kwargs["title"] == "quick ping"
+        assert kwargs["description"] == "quick ping"

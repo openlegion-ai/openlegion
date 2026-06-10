@@ -320,6 +320,21 @@ class WorkspaceManager:
                 f.write("\n<!-- playbook_v2 -->\n")
             logger.info("Marked operator instructions as playbook-aware (v2)")
 
+        # Migration v3 (handoff briefs): existing operator instructions
+        # predate the `brief` guidance. Same append-only contract as v2 —
+        # the addendum block carries its own sentinel so this runs once.
+        if (
+            instructions_file.exists()
+            and self._initial_instructions
+            and "<!-- playbook_v3_handoff_briefs -->" in self._initial_instructions
+            and "<!-- playbook_v3_handoff_briefs -->"
+            not in instructions_file.read_text(errors="replace")
+        ):
+            from src.shared.operator_playbooks import _PLAYBOOK_V3_ADDENDUM
+            with open(instructions_file, "a") as f:
+                f.write("\n" + _PLAYBOOK_V3_ADDENDUM + "\n")
+            logger.info("Appended handoff-brief guidance to operator instructions (v3)")
+
         for filename, default_content in _SCAFFOLD_FILES.items():
             path = self.root / filename
             if not path.exists():

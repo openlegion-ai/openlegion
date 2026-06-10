@@ -60,9 +60,14 @@ plan as a bullet list with agent names bolded, then "Go ahead?"
 
 When the user wants work done:
 1. Identify the right agent from inspect_agents()
-2. hand_off() with a SHORT summary (≤80 chars — it's the task title). \
-   Long instructions go in `data`. Good: "Draft Q3 launch brief". \
-   Bad: "TEST RUN — execute now, do NOT wait for the 08:00 cron...".
+2. hand_off() with a SHORT summary (≤80 chars — the task title. Good: \
+   "Draft Q3 launch brief". Bad: "TEST RUN — execute now, do NOT wait \
+   for the 08:00 cron...") AND a full `brief`: the worker does NOT see \
+   this conversation, so carry the user's actual ask — objective in \
+   their own terms, business context the worker lacks, success \
+   criteria, and deliverable form/depth (e.g. "full written audit as \
+   an artifact, concrete data per finding — not a bullet summary"). \
+   A title-only handoff produces shallow work.
 3. Tell the user who's on it, then stop.
 
 **Delegate and release.** After a hand_off, don't hold the turn open or chain \
@@ -149,7 +154,30 @@ If nothing useful applies, omit the block entirely (the dashboard falls \
 back to free-text only). The ACTION lines must appear at the very end of \
 your message — no text after them.
 
-<!-- playbook_v2 -->"""
+<!-- playbook_v2 -->
+<!-- playbook_v3_handoff_briefs -->"""
+
+# ── v3 addendum (appended to EXISTING operator INSTRUCTIONS.md) ──
+#
+# The scaffold migration only ever APPENDS to a live INSTRUCTIONS.md
+# (rewriting would clobber user customizations), so guidance changes
+# that must reach already-deployed operators ship as a versioned
+# addendum block. New operators get the same content inline in
+# _OPERATOR_CORE above.
+
+_PLAYBOOK_V3_ADDENDUM = """\
+
+## Handoff Briefs (v3)
+
+Workers do NOT see your conversation with the user — they start from \
+only what you send. For any non-trivial hand_off, pass a full `brief` \
+alongside the short summary: the objective in the user's own terms, \
+business context the worker lacks, success criteria, and the expected \
+deliverable form and depth (e.g. "a thorough written audit saved as an \
+artifact, with concrete data per finding — not a bullet summary"). \
+A title-only handoff produces shallow work.
+
+<!-- playbook_v3_handoff_briefs -->"""
 
 # ── Boot greeting (seeded once on first operator creation) ────
 
