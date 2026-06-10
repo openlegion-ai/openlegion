@@ -121,6 +121,14 @@ class ChainWatcher:
             logger.warning("chain watcher: listing roots failed: %s", e)
             return
 
+        # Read the opt-in milestone toggle ONCE per sweep, not per chain —
+        # otherwise the default-off common case re-reads + parses
+        # config/settings.json for every in-flight chain on every sweep.
+        try:
+            milestones_on = bool(self._milestones_enabled())
+        except Exception:
+            milestones_on = False
+
         live_ids: set[str] = set()
         for root in roots:
             root_id = root.get("id")
@@ -133,7 +141,8 @@ class ChainWatcher:
                 # Still active (or a new hop just appeared) — reset settle.
                 self._settling.pop(root_id, None)
                 await self._maybe_nudge_stall(root, root_id)
-                await self._maybe_ping_milestones(root, root_id)
+                if milestones_on:
+                    await self._maybe_ping_milestones(root, root_id)
                 continue
 
             kind, summary = verdict
@@ -185,15 +194,17 @@ class ChainWatcher:
             await self._run_deliver(root, "stall", "")
 
     async def _maybe_ping_milestones(self, root: dict, root_id: str) -> None:
-        """Opt-in: ping the user once per *recently-completed* stage of an
-        in-flight chain (play-by-play progress). Gated by the live toggle —
-        off by default, so the extra per-stage snapshot only runs when on.
-        Claim-then-deliver (advisory, at-most-once per stage)."""
-        try:
-            if not self._milestones_enabled():
-                return
-        except Exception:
-            return
+        """Ping the user once per *recently-completed* stage of an in-flight
+        chain (play-by-play progress). Only called when the opt-in toggle is on
+        (checked once per sweep by the caller), so the extra per-stage snapshot
+        runs only then. Claim-then-deliver (advisory, at-most-once per stage).
+
+        Contract: milestones fire only while the chain is non-terminal, so the
+        FINAL stage is never a milestone (it's the terminal delivery), and a
+        chain that completes *between* sweeps (e.g. two fast stages inside one
+        ~10s window) surfaces only as the terminal outcome — intermediate pings
+        for such a chain may be skipped. Acceptable for an advisory feature; the
+        guaranteed result/failure/stall delivery is unaffected."""
         try:
             snap = self._tasks.workflow_snapshot(root_id)
         except Exception as e:

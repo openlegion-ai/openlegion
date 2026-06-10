@@ -5498,6 +5498,20 @@ class TestWorkplaceTabRoutes:
         assert resp.status_code == 200
         assert len(resp.json()["pipelines"]) <= _MAX_PIPELINE_ROOTS
 
+    def test_milestone_pings_rejects_non_bool(self):
+        # A string "false" must NOT enable it; missing/non-object body → 400.
+        # All these 400 before any settings write, so no chdir isolation needed.
+        client = self._client_with_v2(True)
+        assert client.post(
+            "/dashboard/api/milestone-pings", json={"enabled": "false"}
+        ).status_code == 400
+        assert client.post(
+            "/dashboard/api/milestone-pings", json={}
+        ).status_code == 400
+        assert client.post(
+            "/dashboard/api/milestone-pings", json=[]
+        ).status_code == 400
+
     def test_milestone_pings_toggle_roundtrip(self, tmp_path, monkeypatch):
         # The settings helpers read a RELATIVE config/settings.json at request
         # time. Build the client at repo-root cwd (so its construction reads

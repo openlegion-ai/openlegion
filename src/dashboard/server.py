@@ -6138,8 +6138,16 @@ def create_dashboard_router(
     @api_router.post("/api/milestone-pings")
     async def api_set_milestone_pings(request: Request) -> dict:
         """Persist the milestone-pings toggle (default off)."""
-        body = await request.json()
-        enabled = bool(body.get("enabled", False))
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "body must be valid JSON")
+        if not isinstance(body, dict):
+            raise HTTPException(400, "body must be a JSON object")
+        enabled = body.get("enabled")
+        # Require a real bool — a string like "false" must not enable it.
+        if not isinstance(enabled, bool):
+            raise HTTPException(400, "enabled must be a boolean")
         with _settings_lock:
             settings = _load_settings()
             settings["milestone_pings_enabled"] = enabled

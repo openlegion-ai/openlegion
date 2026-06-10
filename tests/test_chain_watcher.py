@@ -407,3 +407,40 @@ async def test_milestone_skips_old_completions():
     w = ChainWatcher(s, d, milestones_enabled=lambda: True)
     await w.sweep_once()
     assert d.calls == []  # toggling on mid-pipeline doesn't retro-ping
+
+
+@pytest.mark.asyncio
+async def test_milestone_at_most_once_even_if_delivery_fails():
+    # claim-then-deliver: a failing bell write does NOT cause a re-ping next
+    # sweep (advisory at-most-once, deliberately NOT at-least-once).
+    s = _store()
+    r = _human_root(s)
+    _finish(s, r["id"], "done")
+    child = s.create(creator="scout", assignee="writer", title="d",
+                     parent_task_id=r["id"])
+    s.update_status(child["id"], "working", actor="writer")
+    d = _Deliver(returns=False)              # delivery always "fails"
+    w = ChainWatcher(s, d, milestones_enabled=lambda: True)
+    await w.sweep_once()
+    assert len(d.calls) == 1                 # delivered once (failed)
+    await w.sweep_once()
+    assert len(d.calls) == 1                 # claimed → not retried despite failure
+
+
+@pytest.mark.asyncio
+async def test_milestone_skipped_when_chain_already_terminal():
+    # Fast-chain contract: a chain wholly terminal at sweep time yields the
+    # terminal delivery only — intermediate stages get no milestone.
+    s = _store()
+    r = _human_root(s)
+    _finish(s, r["id"], "done")
+    child = s.create(creator="scout", assignee="writer", title="d",
+                     parent_task_id=r["id"])
+    _finish(s, child["id"], "done")          # both done before any sweep
+    d = _Deliver()
+    w = ChainWatcher(s, d, settle_s=0, milestones_enabled=lambda: True)
+    await w.sweep_once()                      # arm terminal settle
+    await w.sweep_once()                      # terminal delivery
+    kinds = [c[1] for c in d.calls]
+    assert "milestone" not in kinds
+    assert kinds.count("done") == 1
