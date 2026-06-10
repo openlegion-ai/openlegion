@@ -898,7 +898,7 @@ class RuntimeContext:
 
     async def _handle_notify_origin(
         self, origin: "MessageOrigin", message: str, agent_name: str = "",
-    ) -> None:
+    ) -> bool:
         """Route a completed task result back to the originating channel+user.
 
         Called by the lane worker after a hand-off task completes with
@@ -914,20 +914,23 @@ class RuntimeContext:
         so we hop onto the channel's own loop via ``run_coroutine_threadsafe``
         to avoid cross-loop client reuse.  WhatsApp has no dedicated loop
         (it's webhook-driven), so we call directly.
+
+        Returns ``True`` iff the send succeeded — the chain-outcome retry path
+        gates on this. The lane caller ignores the return (backward compatible).
         """
         if not origin or not self.channel_manager:
-            return
+            return False
         channel_type = origin.channel
         user = origin.user
         if not channel_type or not user:
-            return
+            return False
         ch = self.channel_manager._channel_map.get(channel_type)
         if ch is None:
             logger.debug(
                 "Origin channel %s not connected — dropping notification to %s",
                 channel_type, user,
             )
-            return
+            return False
 
         labelled = f"[{agent_name}] {message}" if agent_name else message
 
@@ -940,10 +943,12 @@ class RuntimeContext:
                 await asyncio.wrap_future(concurrent_fut)
             else:
                 await ch.send_to_user(user, labelled)
+            return True
         except Exception as e:
             logger.warning(
                 "send_to_user(%s, %s) failed: %s", channel_type, user, e,
             )
+            return False
 
     def _deliver_chain_outcome(self, root: dict, kind: str, summary: str) -> bool:
         """Deliver one terminal outcome for a user chain to its originator.
@@ -1011,8 +1016,12 @@ class RuntimeContext:
             except Exception as e:
                 logger.debug("notification_added emit failed: %s", e)
 
-        # 2. Best-effort — push to a paired chat channel for non-dashboard
-        #    originators. Never blocks or fails the durable delivery.
+        # 2. Push to a paired chat channel for non-dashboard originators, with
+        #    bounded retry so a transient channel failure (network blip, rate
+        #    limit) doesn't silently drop it. Runs as a background task so it
+        #    never blocks the watcher sweep; the durable bell (above) remains
+        #    the cross-restart guarantee, so a channel down past the retries
+        #    still leaves the user the bell.
         if channel and channel != "dashboard" and user:
             try:
                 from src.shared.types import MessageOrigin
@@ -1020,12 +1029,12 @@ class RuntimeContext:
                     kind="human", channel=channel, user=user,
                 )
                 push = asyncio.create_task(
-                    self._handle_notify_origin(
+                    self._channel_push_with_retry(
                         origin_obj, f"{title}\n{body}", assignee,
                     )
                 )
-                # Retain a strong ref until the push completes (asyncio only
-                # holds a weak ref; without this the task can be GC'd mid-send).
+                # Retain a strong ref until it completes (asyncio only holds a
+                # weak ref; without this the task can be GC'd mid-send).
                 self._pending_chain_pushes.add(push)
                 push.add_done_callback(self._pending_chain_pushes.discard)
             except Exception as e:
@@ -1033,6 +1042,27 @@ class RuntimeContext:
                     "chain outcome channel push schedule failed: %s", e,
                 )
         return True
+
+    async def _channel_push_with_retry(
+        self, origin: "MessageOrigin", message: str, agent_name: str,
+        *, attempts: int = 3, backoff_s: float = 3.0,
+    ) -> None:
+        """Deliver a chain-outcome push to a chat channel, retrying transient
+        failures. Best-effort: the dashboard bell is the durable guarantee, so
+        after the attempts are exhausted we log and stop (no hot loop)."""
+        for i in range(attempts):
+            try:
+                if await self._handle_notify_origin(origin, message, agent_name):
+                    return
+            except Exception as e:
+                logger.debug("chain outcome channel push attempt failed: %s", e)
+            if i < attempts - 1:
+                await asyncio.sleep(backoff_s * (i + 1))
+        logger.warning(
+            "chain outcome channel push to %s/%s gave up after %d attempts "
+            "(bell delivered as fallback)",
+            origin.channel, origin.user, attempts,
+        )
 
     def _start_mesh_server(self) -> None:
         import uvicorn
