@@ -2701,6 +2701,43 @@ function dashboard() {
       }
     },
 
+    // Solid dot color for the pipeline card's condensed (collapsed) stage
+    // flow — same status palette as ``pipelineStageClass`` but as a filled
+    // swatch rather than a bordered chip.
+    pipelineStageDot(status) {
+      switch (status) {
+        case 'done': return 'bg-emerald-400/80';
+        case 'working': return 'bg-blue-400/80';
+        case 'blocked': return 'bg-amber-400/80';
+        case 'failed': return 'bg-red-400/80';
+        case 'cancelled': return 'bg-gray-600';
+        default: return 'bg-gray-500/70'; // pending / accepted
+      }
+    },
+
+    // Compact "age in current state" for a pipeline stage row: <1m / 12m /
+    // 3h / 2d. Takes ``age_in_state_seconds`` from workflow_snapshot.
+    humanizeAge(seconds) {
+      const s = Math.max(0, Number(seconds) || 0);
+      if (s < 60) return '<1m';
+      if (s < 3600) return `${Math.round(s / 60)}m`;
+      if (s < 86400) return `${Math.round(s / 3600)}h`;
+      return `${Math.round(s / 86400)}d`;
+    },
+
+    // One-line "what's happening now" for the collapsed pipeline card:
+    // the first non-terminal stage and what it's doing. Plain text.
+    pipelineCurrentLabel(p) {
+      const terminal = { done: 1, failed: 1, cancelled: 1 };
+      const stages = (p && p.stages) || [];
+      const cur = stages.find((s) => !terminal[s.status]);
+      if (!cur) return 'wrapping up';
+      const who = this.agentDisplayName(cur.assignee) || 'someone';
+      if (cur.status === 'blocked') return `${who} blocked`;
+      if (cur.status === 'working') return `${who} working`;
+      return `${who} · ${cur.status}`;
+    },
+
     async loadWorkplaceSummaries() {
       // Monotonic serial. ``loadWorkplaceSummaries`` can be called
       // concurrently (initial load + WS-debounce + manual retry); the

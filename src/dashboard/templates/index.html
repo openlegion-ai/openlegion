@@ -1824,11 +1824,13 @@
                         <div class="space-y-1">
                           <template x-for="t in teamWork.inflight" :key="t.id">
                             <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg px-3 py-2">
-                              <div class="flex flex-col gap-0.5 sm:flex-row sm:items-center sm:justify-between sm:gap-2">
-                                <span class="text-sm text-gray-200 truncate min-w-0" x-text="t.title"></span>
-                                <span class="text-[11px] text-gray-500 flex-shrink-0 font-mono" x-text="teamHandoffLabel(t)"></span>
+                              <div class="flex items-start gap-2 min-w-0">
+                                <span class="text-sm text-gray-200 truncate min-w-0 flex-1" :title="t.title" x-text="t.title"></span>
+                                <span class="text-[10px] px-1.5 py-0.5 rounded-full border flex-shrink-0"
+                                      :class="pipelineStageClass(t.status)" x-text="t.status"></span>
                               </div>
-                              <div class="text-[11px] text-gray-600 mt-0.5" x-text="t.status"></div>
+                              <div class="text-[11px] text-gray-500 font-mono mt-1 truncate"
+                                   :title="teamHandoffLabel(t)" x-text="teamHandoffLabel(t)"></div>
                             </div>
                           </template>
                         </div>
@@ -1839,11 +1841,12 @@
                         <div class="space-y-1">
                           <template x-for="t in teamWork.doneToday" :key="t.id">
                             <div class="bg-gray-800/30 border border-gray-800 rounded-lg px-3 py-2">
-                              <div class="flex flex-col gap-0.5 sm:flex-row sm:items-center sm:justify-between sm:gap-2">
-                                <span class="text-sm text-gray-300 truncate min-w-0" x-text="t.title"></span>
-                                <span class="text-[11px] text-gray-600 flex-shrink-0 font-mono" x-text="teamHandoffLabel(t)"></span>
+                              <div class="flex items-start gap-2 min-w-0">
+                                <span class="text-sm text-gray-300 truncate min-w-0 flex-1" :title="t.title" x-text="t.title"></span>
+                                <span class="text-[11px] text-gray-600 flex-shrink-0 font-mono truncate max-w-[40%]"
+                                      :title="teamHandoffLabel(t)" x-text="teamHandoffLabel(t)"></span>
                               </div>
-                              <div x-show="t.outcome" class="text-[11px] text-emerald-400/80 mt-0.5" x-text="'✓ ' + (t.outcome || '')"></div>
+                              <div x-show="t.outcome" class="text-[11px] text-emerald-400/80 mt-1 break-words" x-text="'✓ ' + (t.outcome || '')"></div>
                             </div>
                           </template>
                         </div>
@@ -4273,30 +4276,83 @@
               <span class="text-[11px] text-gray-500"
                     x-text="workplacePipelines.length + (workplacePipelines.length === 1 ? ' pipeline' : ' pipelines')"></span>
             </div>
+            <!-- Pipeline card. Collapsed: title + status badge + a condensed
+                 stage-dot flow and the current stage. Click the header to
+                 expand the full per-stage detail (assignee, age, title,
+                 blocker_note). Per-card ``expanded`` is local Alpine state
+                 (nested x-data inside x-for) so toggling one card never
+                 re-renders the others. Every text field is truncate/min-w-0
+                 or break-words guarded — no horizontal overflow at any width. -->
             <template x-for="p in workplacePipelines" :key="p.root_task_id">
-              <div class="bg-gradient-to-b from-gray-800/55 to-gray-800/25 border rounded-xl p-3 pl-4 relative"
+              <div x-data="{ expanded: false }"
+                   class="bg-gradient-to-b from-gray-800/55 to-gray-800/25 border rounded-xl relative overflow-hidden transition-colors"
                    :class="p.stalled ? 'border-amber-700/50' : 'border-gray-700/50'"
                    data-testid="workplace-pipeline-card">
-                <span class="absolute left-0 top-3 bottom-3 w-1 rounded-full"
+                <span class="absolute left-0 top-2.5 bottom-2.5 w-1 rounded-full"
                       :class="p.stalled ? 'bg-amber-500/70' : 'bg-emerald-500/60'" aria-hidden="true"></span>
-                <div class="flex items-center gap-2 mb-2">
-                  <span class="text-sm font-medium text-gray-100 truncate"
-                        x-text="p.title || 'Untitled pipeline'"></span>
-                  <template x-if="p.stalled">
-                    <span class="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-amber-900/40 text-amber-300 flex-shrink-0">⏳ stalled</span>
-                  </template>
-                </div>
-                <!-- Stage chips: assignee + status, kickoff → downstream. -->
-                <div class="flex flex-wrap items-center gap-1.5">
-                  <template x-for="(st, i) in p.stages" :key="st.task_id">
-                    <div class="flex items-center gap-1.5">
-                      <span class="text-[11px] px-2 py-0.5 rounded-full border flex items-center gap-1"
-                            :class="pipelineStageClass(st.status)"
-                            :title="(st.title || '') + ' — ' + st.status + (st.blocker_note ? (': ' + st.blocker_note) : '')">
-                        <span class="truncate max-w-[7rem]" x-text="st.assignee || '?'"></span>
-                        <span class="opacity-70" x-text="st.status"></span>
+                <!-- Header (click to expand/collapse) -->
+                <button type="button" @click="expanded = !expanded" :aria-expanded="expanded"
+                        class="w-full text-left p-3 pl-4 flex items-start gap-2.5 hover:bg-white/[0.02] transition-colors"
+                        data-testid="workplace-pipeline-header">
+                  <div class="min-w-0 flex-1">
+                    <div class="flex items-center gap-2 min-w-0">
+                      <span class="text-sm font-medium text-gray-100 truncate min-w-0"
+                            x-text="p.title || 'Untitled pipeline'"></span>
+                    </div>
+                    <!-- Condensed flow: a status dot per stage + count + current stage. -->
+                    <div class="flex items-center flex-wrap gap-x-2 gap-y-1 mt-1.5 text-[11px] text-gray-500 min-w-0">
+                      <span class="flex items-center gap-1 flex-shrink-0" aria-hidden="true">
+                        <template x-for="(st, i) in p.stages.slice(0, 6)" :key="st.task_id">
+                          <span class="w-1.5 h-1.5 rounded-full" :class="pipelineStageDot(st.status)"></span>
+                        </template>
                       </span>
-                      <span x-show="i < p.stages.length - 1" class="text-gray-600 text-xs">→</span>
+                      <span class="flex-shrink-0"
+                            x-text="p.stages.length + (p.stages.length === 1 ? ' stage' : ' stages')"></span>
+                      <span class="text-gray-600 flex-shrink-0" aria-hidden="true">·</span>
+                      <span class="truncate min-w-0" x-text="pipelineCurrentLabel(p)"></span>
+                    </div>
+                  </div>
+                  <div class="flex items-center gap-1.5 flex-shrink-0">
+                    <span class="text-[10px] font-semibold px-1.5 py-0.5 rounded"
+                          :class="p.stalled ? 'bg-amber-900/40 text-amber-300' : 'bg-emerald-900/30 text-emerald-300'"
+                          x-text="p.stalled ? '⏳ Stalled' : 'Active'"></span>
+                    <svg class="w-3.5 h-3.5 text-gray-500 transition-transform" :class="expanded && 'rotate-180'"
+                         fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" aria-hidden="true">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7"/>
+                    </svg>
+                  </div>
+                </button>
+                <!-- Expanded per-stage detail -->
+                <div x-show="expanded" x-cloak
+                     x-transition:enter="transition ease-out duration-150"
+                     x-transition:enter-start="opacity-0 -translate-y-1"
+                     x-transition:enter-end="opacity-100 translate-y-0"
+                     class="px-3 pl-4 pb-3 space-y-1.5"
+                     data-testid="workplace-pipeline-detail">
+                  <div class="text-[11px] text-gray-500 pb-0.5 flex items-center flex-wrap gap-x-2 gap-y-0.5">
+                    <span x-show="p.assignee">started by <span class="text-gray-400" x-text="agentDisplayName(p.assignee)"></span></span>
+                    <span x-show="p.created_at" class="text-gray-600" x-text="relativeTime(p.created_at)"></span>
+                  </div>
+                  <template x-for="(st, i) in p.stages" :key="st.task_id">
+                    <div class="rounded-lg bg-gray-900/40 border border-gray-800/70 px-2.5 py-2">
+                      <div class="flex items-start gap-2 min-w-0">
+                        <span class="text-[10px] font-mono text-gray-600 mt-1 flex-shrink-0 w-3 text-right" x-text="i + 1"></span>
+                        <div class="min-w-0 flex-1">
+                          <div class="flex items-center gap-2 min-w-0">
+                            <span class="text-[10px] px-1.5 py-0.5 rounded-full border flex-shrink-0"
+                                  :class="pipelineStageClass(st.status)" x-text="st.status"></span>
+                            <span class="text-xs text-gray-300 truncate min-w-0"
+                                  x-text="agentDisplayName(st.assignee) || '?'"></span>
+                            <span class="text-[10px] text-gray-600 flex-shrink-0 ml-auto"
+                                  x-text="humanizeAge(st.age_in_state_seconds)"></span>
+                          </div>
+                          <div x-show="st.title" class="text-[11px] text-gray-500 mt-1 truncate"
+                               :title="st.title" x-text="st.title"></div>
+                          <div x-show="st.blocker_note" class="mt-1.5 text-[11px] rounded px-2 py-1 break-words"
+                               :class="st.status === 'failed' ? 'bg-red-950/40 text-red-300' : 'bg-amber-950/40 text-amber-300'"
+                               x-text="st.blocker_note"></div>
+                        </div>
+                      </div>
                     </div>
                   </template>
                 </div>
