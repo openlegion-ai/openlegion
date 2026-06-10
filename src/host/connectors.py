@@ -43,7 +43,7 @@ import tempfile
 import threading
 from pathlib import Path
 
-from src.shared.types import CONNECTOR_ALL_AGENTS, MCPConnector
+from src.shared.types import MCPConnector
 from src.shared.utils import setup_logging
 
 logger = setup_logging("host.connectors")
@@ -183,19 +183,6 @@ class ConnectorStore:
                 c.server_dict() for c in self._connectors
                 if c.applies_to(agent_id)
             ]
-
-    def assigned_agents(self, name: str, known_agents: list[str]) -> list[str]:
-        """Concrete RUNNING agent ids a connector applies to: ``'*'``
-        expanded against the live registry, explicit ids intersected
-        with it (an id not currently registered has no container to
-        restart). Display surfaces use the raw ``agents`` field."""
-        c = self.get(name)
-        if c is None:
-            return []
-        if CONNECTOR_ALL_AGENTS in c.agents:
-            return sorted(known_agents)
-        known = set(known_agents)
-        return sorted(a for a in c.agents if a in known)
 
     # ── pending-restart tracking ─────────────────────────────────
 

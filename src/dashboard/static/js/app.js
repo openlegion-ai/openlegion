@@ -4779,6 +4779,9 @@ function dashboard() {
           webhooks: ['fetchWebhooks'],
           api_keys: ['fetchApiKeys'],
           integrations: ['loadIntegrations'],
+          // Safe to background-refresh: the connector add/edit form
+          // binds to connectorDraft, not connectorsData.
+          connectors: ['loadConnectors'],
           storage: ['fetchStorage', 'fetchDatabaseDetails'],
           uploads: ['fetchUploads'],
           skills: ['loadSkillsCatalog'],

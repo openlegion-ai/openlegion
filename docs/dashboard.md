@@ -19,7 +19,7 @@ The dashboard has **four** top-level tabs. Tab IDs are frozen for URL stability 
 | `chat` | **Chat** | Multi-agent chat surface — slide-over panels, streaming, command palette entry. Default tab on boot |
 | `workplace` | **Work** | Kanban / Needs-You / Activity feed / Pending Actions — the Board surface. See [Work Tab](#work-tab) |
 | `fleet` | **Teams (N)** | Agent grid with operator card prepended in standalone view, drill-down agent detail (config, identity, capabilities, files). URL `/teams` (legacy `/agents` accepted as back-compat). See [Team Tab](#team-tab) |
-| `system` | **Settings** | 11 sub-tabs: Activity / Costs / Automation / Integrations / API Keys / Wallet / Network / Storage / Operator / Browser / Settings. See [System Tab](#system-tab) |
+| `system` | **Settings** | Sub-tabs: Activity / Costs / Automation / Connectors (sub-tab ID `integrations`) / Skills / API Keys / Wallet / Network / Storage / Operator / Browser / Settings. See [System Tab](#system-tab) |
 
 The defaults — `tabs` array and `activeTab: 'chat'` — live in `src/dashboard/static/js/app.js` (top of the `dashboard()` factory). Routes parse the URL hash into `{ tab, systemTab, agentId, identityTab, activityView }` (the Work tab has no sub-routes — `/home/*` variants all normalize to `/home`).
 
@@ -129,7 +129,7 @@ The System tab is split into **11 sub-tabs** along the top. Default sub-tab: `ac
 | **Activity** (default) | Trace stream + live event log + Blackboard browser. Routes to `/activity/events` and `/activity/logs` deep links via `activityView` |
 | **Costs** | Per-agent LLM spend with period selector (today/week/month) and budget bars |
 | **Automation** | Cron jobs + webhook endpoints. View schedule, last run time, run count, error count. Actions: Run / Pause / Resume / Edit / Delete |
-| **Integrations** | Configured credentials with tier labels (system or agent, names only — never values), pub/sub subscriptions, model pricing |
+| **Connectors** (sub-tab ID `integrations`) | MCP connector catalog (connect a server once, assign to all agents or specific ones — see [MCP Integration](mcp.md)), OAuth connected services, channels, configured credentials (names only — never values) |
 | **API Keys** | Named external API keys (`/dashboard/api/external-api-keys`) for inbound integrations |
 | **Wallet** | Wallet seed init, addresses (Ethereum + Solana), RPC endpoints, per-agent wallet enablement |
 | **Network** | Fleet-wide and per-agent proxy configuration. See [Proxy Configuration](#proxy-configuration) |

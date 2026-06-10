@@ -167,8 +167,8 @@ _get_builtin_tool_names._cache = None  # type: ignore[attr-defined]
 
 
 def _mask_mcp_servers_for_get(servers: list[dict] | None) -> list[dict]:
-    """Return ``mcp_servers`` with env values stripped, suitable for GET
-    responses. Env values may be plaintext secrets or ``$CRED{name}``
+    """Return MCP server dicts with env values stripped, suitable for
+    GET responses. Env values may be plaintext secrets or ``$CRED{name}``
     handles pointing at one; neither is safe to ship over the API.
 
     Each server entry retains ``name``, ``command``, and ``args``;
@@ -176,9 +176,9 @@ def _mask_mcp_servers_for_get(servers: list[dict] | None) -> list[dict]:
     with ``env_keys`` — a sorted list of the env variable names. The
     omission is deliberate: a naive ``GET → edit → PUT`` round-trip
     would otherwise lose env when the PUT handler interprets a present
-    ``env=null`` as "replace with no env." The PUT contract is "env
-    absent = preserve, env present (dict or {}) = replace wholesale"
-    (see T5 in :func:`_api_put_agent_config`).
+    ``env=null`` as "replace with no env." The connector PUT contract
+    is "env absent = preserve, env present (dict or {}) = replace
+    wholesale" (see ``api_connector_upsert``).
     """
     if not servers:
         return []
@@ -192,10 +192,10 @@ def _mask_mcp_servers_for_get(servers: list[dict] | None) -> list[dict]:
 
 
 def _canonicalize_mcp_servers(servers: list | None) -> list[dict]:
-    """Return a stable canonical form of ``mcp_servers`` for diff
-    comparison. Used by the PUT handler to set ``mcp_touched`` only
-    when an effective change occurred — a GET → no-op PUT round-trip
-    must not trigger a container restart.
+    """Return a stable canonical form of MCP server dicts for diff
+    comparison. Used by ``api_connector_upsert``'s no-op detection — a
+    GET → unchanged PUT round-trip must not mark agents dirty or
+    prompt for a restart.
 
     Canonicalization:
 
@@ -209,10 +209,8 @@ def _canonicalize_mcp_servers(servers: list | None) -> list[dict]:
       a missing field compare equal.
 
     If any entry fails Pydantic validation, returns the raw list
-    unchanged — better to over-report a diff (false positive
-    ``mcp_touched``) than to silently mask a malformed legacy entry.
-    The CLI load path (T7) drops malformed entries before they reach
-    this function in normal flow.
+    unchanged — better to over-report a diff (a false-positive restart
+    prompt) than to silently mask a malformed entry.
     """
     if not servers:
         return []

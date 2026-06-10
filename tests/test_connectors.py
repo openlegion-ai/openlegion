@@ -103,15 +103,6 @@ class TestConnectorStore:
         s.upsert(MCPConnector(name="staged", command="c"))
         assert s.stdio_for_agent("a") == []
 
-    def test_assigned_agents_expansion(self, tmp_path):
-        s = self._store(tmp_path)
-        s.upsert(MCPConnector(name="all", command="c", agents=["*"]))
-        s.upsert(MCPConnector(name="some", command="c", agents=["a", "ghost"]))
-        assert s.assigned_agents("all", ["b", "a"]) == ["a", "b"]
-        # Explicit ids intersect with the live registry.
-        assert s.assigned_agents("some", ["a", "b"]) == ["a"]
-        assert s.assigned_agents("missing", ["a"]) == []
-
     def test_corrupt_file_fails_closed(self, tmp_path):
         path = tmp_path / "connectors.json"
         path.write_text("{not json")
@@ -264,6 +255,18 @@ class TestConnectorEndpoints:
         assert store.get("linear").env == {"K": "v"}
         assert store.get("linear").command == "c2"
         assert store.get("linear").agents == ["alpha"]
+
+    def test_affected_agents_intersect_live_registry(self, connector_env):
+        client, *_ = connector_env
+        resp = client.put("/dashboard/api/connectors/x", json={
+            "command": "c", "agents": ["alpha", "ghost"],
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        # 'ghost' has no running container to restart; raw assignment kept.
+        assert data["affected_agents"] == ["alpha"]
+        assert data["connector"]["agents"] == ["alpha", "ghost"]
+        assert data["connector"]["assigned_agents"] == ["alpha"]
 
     def test_upsert_noop_returns_no_restart(self, connector_env):
         client, store, *_ = connector_env
