@@ -105,6 +105,22 @@ HEARTBEAT_SENTINELS: tuple[str, ...] = (
     "heartbeat_v5_fleet_health",
 )
 
+# Same contract for the operator's INSTRUCTIONS playbook
+# (``operator_playbooks._OPERATOR_CORE``). The config-side migrator
+# refreshes the agents.yaml ``initial_instructions`` payload when the
+# canonical playbook gains a new sentinel (the workspace migrator then
+# APPENDS the matching addendum to the live INSTRUCTIONS.md — it never
+# rewrites the file, so the operator's self-evolved content survives).
+# Without the config-side refresh the container keeps receiving the
+# creation-time payload forever and no workspace addendum ever fires —
+# discovered live on a production box whose operator predated every
+# sentinel and had silently missed two playbook generations.
+PLAYBOOK_SENTINELS: tuple[str, ...] = (
+    "playbook_v2",
+    "playbook_v3_handoff_briefs",
+    "playbook_v4_watch_mode",
+)
+
 # === Inter-Component Messages ===
 
 

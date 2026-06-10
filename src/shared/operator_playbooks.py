@@ -74,7 +74,8 @@ When the user wants work done:
 await_task_event to babysit a pipeline — the system watches every user chain \
 and auto-delivers the final result (or a failure) when it finishes, plus a \
 heads-up if it gets stuck. Re-engage only to summarize a finished result when \
-asked, or to unstick a real blocker.
+asked, or to unstick a real blocker. EXCEPTION: when the user explicitly asks \
+to watch — see "Watching a Pipeline".
 
 Don't do the work yourself. Don't over-explain the routing — just do it.
 
@@ -154,8 +155,25 @@ If nothing useful applies, omit the block entirely (the dashboard falls \
 back to free-text only). The ACTION lines must appear at the very end of \
 your message — no text after them.
 
+
+## Watching a Pipeline (watch mode)
+
+Only when the user EXPLICITLY asks to watch, follow, or test a \
+workflow live, stay on the turn and narrate instead of releasing: \
+after hand_off, loop await_task_event(task_id, timeout_s=90). Each \
+return, tell the user in ONE short line what changed (stage done -> \
+name it + who picked up next; unchanged -> "still working (Nm)" at \
+most every other timeout) — your text streams live. When a stage \
+completes, find the next task via workflow_snapshot(root_task_id) \
+and await that id. Stop and summarize when the chain is terminal \
+(one line per stage + where the deliverable landed), a stage fails \
+(inspect_task_run, then recover), or ~20 minutes pass (release — \
+the system auto-delivers the outcome). No explicit ask to watch -> \
+delegate and release.
+
 <!-- playbook_v2 -->
-<!-- playbook_v3_handoff_briefs -->"""
+<!-- playbook_v3_handoff_briefs -->
+<!-- playbook_v4_watch_mode -->"""
 
 # ── v3 addendum (appended to EXISTING operator INSTRUCTIONS.md) ──
 #
@@ -178,6 +196,29 @@ artifact, with concrete data per finding — not a bullet summary"). \
 A title-only handoff produces shallow work.
 
 <!-- playbook_v3_handoff_briefs -->"""
+
+# ── v4 addendum (appended to EXISTING operator INSTRUCTIONS.md) ──
+# Same append-only contract as v3; new operators get the identical
+# content inline in _OPERATOR_CORE above.
+
+_PLAYBOOK_V4_ADDENDUM = """\
+
+## Watching a Pipeline (v4 watch mode)
+
+Only when the user EXPLICITLY asks to watch, follow, or test a \
+workflow live, stay on the turn and narrate instead of releasing: \
+after hand_off, loop await_task_event(task_id, timeout_s=90). Each \
+return, tell the user in ONE short line what changed (stage done -> \
+name it + who picked up next; unchanged -> "still working (Nm)" at \
+most every other timeout) — your text streams live. When a stage \
+completes, find the next task via workflow_snapshot(root_task_id) \
+and await that id. Stop and summarize when the chain is terminal \
+(one line per stage + where the deliverable landed), a stage fails \
+(inspect_task_run, then recover), or ~20 minutes pass (release — \
+the system auto-delivers the outcome). No explicit ask to watch -> \
+delegate and release.
+
+<!-- playbook_v4_watch_mode -->"""
 
 # ── Boot greeting (seeded once on first operator creation) ────
 
