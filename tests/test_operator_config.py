@@ -162,13 +162,16 @@ class TestEnsureOperatorModelSync(_TempConfigMixin):
         carries the sentinel) so the refresh branch is a no-op.
         """
         from src.cli.config import _OPERATOR_HEARTBEAT
+        from src.shared.operator_playbooks import _OPERATOR_CORE
 
         # Pre-create operator with matching model AND the canonical
-        # heartbeat template (sentinel present → no refresh).
+        # heartbeat + instructions templates (sentinels present → both
+        # refresh branches are no-ops, pinning the pure no-write path).
         agents_cfg = {"agents": {"operator": {
             "role": "Existing operator",
             "model": "openai/gpt-4o-mini",
             "heartbeat": _OPERATOR_HEARTBEAT,
+            "initial_instructions": _OPERATOR_CORE,
         }}}
         with open(self._agents_path, "w") as f:
             yaml.dump(agents_cfg, f)
@@ -577,3 +580,86 @@ class TestEnsureOperatorUsesConfigModel(_TempConfigMixin):
         with open(self._agents_path) as f:
             agents_cfg = yaml.safe_load(f)
         assert agents_cfg["agents"]["operator"]["model"] == "anthropic/claude-3-haiku"
+
+
+class TestEnsureOperatorInstructionsRefresh(_TempConfigMixin):
+    """Config-side playbook roll-forward (PLAYBOOK_SENTINELS).
+
+    The workspace migrator appends a new playbook addendum only when the
+    container's INITIAL_INSTRUCTIONS payload carries the new sentinel —
+    and the payload comes verbatim from agents.yaml, written once at
+    creation. This refresh keeps the payload current (live finding
+    2026-06-11: a production operator predating every sentinel silently
+    missed two playbook generations)."""
+
+    def _seed_operator(self, instructions):
+        entry = {
+            "role": "Existing operator",
+            "model": "openai/gpt-4o-mini",
+        }
+        if instructions is not None:
+            entry["initial_instructions"] = instructions
+        with open(self._agents_path, "w") as f:
+            yaml.dump({"agents": {"operator": entry}}, f)
+
+    def _run(self):
+        with self._mock_config():
+            from src.cli.config import _ensure_operator_agent
+            _ensure_operator_agent(default_model="openai/gpt-4o-mini")
+        with open(self._agents_path) as f:
+            return yaml.safe_load(f)["agents"]["operator"]
+
+    def test_rolls_forward_payload_with_prior_sentinel(self):
+        self._seed_operator(
+            "old playbook text\n<!-- playbook_v2 -->\n"
+            "<!-- playbook_v3_handoff_briefs -->"
+        )
+        agent = self._run()
+        from src.shared.operator_playbooks import _OPERATOR_CORE
+        assert agent["initial_instructions"] == _OPERATOR_CORE
+        assert "<!-- playbook_v4_watch_mode -->" in agent["initial_instructions"]
+
+    def test_pre_sentinel_payload_treated_as_customised(self):
+        self._seed_operator("user-customised playbook, no sentinels")
+        agent = self._run()
+        assert agent["initial_instructions"] == (
+            "user-customised playbook, no sentinels"
+        )
+
+    def test_empty_payload_bootstrapped(self):
+        self._seed_operator("")
+        agent = self._run()
+        from src.shared.operator_playbooks import _OPERATOR_CORE
+        assert agent["initial_instructions"] == _OPERATOR_CORE
+
+    def test_current_payload_untouched(self):
+        custom = "current + user edit\n<!-- playbook_v4_watch_mode -->"
+        self._seed_operator(custom)
+        agent = self._run()
+        assert agent["initial_instructions"] == custom
+
+    def test_core_carries_latest_playbook_sentinel(self):
+        """Mirror of the heartbeat would-never-fire guard: the canonical
+        playbook must embed the LATEST sentinel or the roll-forward is
+        permanently inert."""
+        from src.shared.operator_playbooks import _OPERATOR_CORE
+        from src.shared.types import PLAYBOOK_SENTINELS
+        assert f"<!-- {PLAYBOOK_SENTINELS[-1]} -->" in _OPERATOR_CORE
+
+    def test_watch_mode_guidance_content(self):
+        """Watch mode pins: explicit-ask gating, the narrate loop, the
+        await timeout within the streaming-idle cap, and the
+        delegate-and-release carve-out."""
+        from src.agent.builtins.operator_tools import (
+            _AWAIT_TASK_EVENT_MAX_TIMEOUT_S,
+        )
+        from src.shared.operator_playbooks import (
+            _OPERATOR_CORE,
+            _PLAYBOOK_V4_ADDENDUM,
+        )
+        for text in (_OPERATOR_CORE, _PLAYBOOK_V4_ADDENDUM):
+            assert "EXPLICITLY" in text
+            assert "await_task_event" in text
+            assert "workflow_snapshot" in text
+            assert f"timeout_s={_AWAIT_TASK_EVENT_MAX_TIMEOUT_S}" in text
+            assert "delegate and release" in text

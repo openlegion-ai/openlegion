@@ -131,8 +131,10 @@ class TestPlaybookConstants:
         # 6000 → 6400 for the Phase-1d "delegate and release" routing rule
         # (hand off → stop; the chain watcher delivers the terminal outcome);
         # 6400 → 6800 for the handoff-brief rule (workers don't see the
-        # conversation — carry the user's ask + deliverable depth in `brief`).
-        assert len(_OPERATOR_CORE) < 6800
+        # conversation — carry the user's ask + deliverable depth in `brief`);
+        # 6800 → 7800 for watch mode (loop await_task_event + narrate when
+        # the user explicitly asks to watch a pipeline live).
+        assert len(_OPERATOR_CORE) < 7800
         assert len(_OPERATOR_CORE) > 1000
 
     def test_playbooks_have_numbered_steps(self):

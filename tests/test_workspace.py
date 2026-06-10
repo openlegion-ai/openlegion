@@ -1383,3 +1383,54 @@ class TestHeartbeatVersionedRefresh:
         )
         assert "New revision" in content
         assert "Older revision text" not in content
+
+
+class TestPlaybookV4WatchModeMigration:
+    """v4 watch-mode addendum — append-only migration to a live
+    INSTRUCTIONS.md, gated on the sentinel arriving in the container's
+    INITIAL_INSTRUCTIONS payload (see PLAYBOOK_SENTINELS in shared types)."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _seed_pre_v4_instructions(self):
+        (Path(self._tmpdir) / "INSTRUCTIONS.md").write_text(
+            "# My evolved instructions\n\nOperator-curated content.\n"
+            "<!-- playbook_v2 -->\n<!-- playbook_v3_handoff_briefs -->\n"
+        )
+
+    def test_appends_addendum_when_payload_carries_sentinel(self):
+        from src.shared.operator_playbooks import _OPERATOR_CORE
+        self._seed_pre_v4_instructions()
+        WorkspaceManager(
+            workspace_dir=self._tmpdir, initial_instructions=_OPERATOR_CORE,
+        )
+        text = (Path(self._tmpdir) / "INSTRUCTIONS.md").read_text()
+        # Evolved content preserved (append-only), addendum landed once.
+        assert "Operator-curated content." in text
+        assert "Watching a Pipeline" in text
+        assert text.count("<!-- playbook_v4_watch_mode -->") == 1
+
+    def test_migration_is_idempotent(self):
+        from src.shared.operator_playbooks import _OPERATOR_CORE
+        self._seed_pre_v4_instructions()
+        WorkspaceManager(
+            workspace_dir=self._tmpdir, initial_instructions=_OPERATOR_CORE,
+        )
+        WorkspaceManager(
+            workspace_dir=self._tmpdir, initial_instructions=_OPERATOR_CORE,
+        )
+        text = (Path(self._tmpdir) / "INSTRUCTIONS.md").read_text()
+        assert text.count("<!-- playbook_v4_watch_mode -->") == 1
+
+    def test_skips_when_payload_lacks_sentinel(self):
+        self._seed_pre_v4_instructions()
+        WorkspaceManager(
+            workspace_dir=self._tmpdir,
+            initial_instructions="stale payload without sentinels",
+        )
+        text = (Path(self._tmpdir) / "INSTRUCTIONS.md").read_text()
+        assert "playbook_v4_watch_mode" not in text

@@ -335,6 +335,21 @@ class WorkspaceManager:
                 f.write("\n" + _PLAYBOOK_V3_ADDENDUM + "\n")
             logger.info("Appended handoff-brief guidance to operator instructions (v3)")
 
+        # Migration v4 (watch mode): loop await_task_event + narrate when
+        # the user explicitly asks to watch a pipeline. Same append-only
+        # contract as v2/v3.
+        if (
+            instructions_file.exists()
+            and self._initial_instructions
+            and "<!-- playbook_v4_watch_mode -->" in self._initial_instructions
+            and "<!-- playbook_v4_watch_mode -->"
+            not in instructions_file.read_text(errors="replace")
+        ):
+            from src.shared.operator_playbooks import _PLAYBOOK_V4_ADDENDUM
+            with open(instructions_file, "a") as f:
+                f.write("\n" + _PLAYBOOK_V4_ADDENDUM + "\n")
+            logger.info("Appended watch-mode guidance to operator instructions (v4)")
+
         for filename, default_content in _SCAFFOLD_FILES.items():
             path = self.root / filename
             if not path.exists():

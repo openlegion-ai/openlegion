@@ -2013,6 +2013,63 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
                 "both layers fresh from the canonical template."
             )
 
+        # Refresh the operator's ``initial_instructions`` payload the same
+        # way. The workspace migrator appends a new playbook addendum to
+        # the live INSTRUCTIONS.md ONLY when the container's
+        # INITIAL_INSTRUCTIONS payload carries the new sentinel — and that
+        # payload comes verbatim from agents.yaml, which was written once
+        # at creation and never updated. Without this roll-forward,
+        # existing operators never receive any playbook addendum (live
+        # finding 2026-06-11: a production operator predating every
+        # sentinel had silently missed two playbook generations). Note
+        # this only refreshes the PAYLOAD — the workspace-side migrator
+        # still appends to the live INSTRUCTIONS.md, so the operator's
+        # self-evolved content is never rewritten.
+        from src.shared.types import PLAYBOOK_SENTINELS
+        existing_instructions = op_entry.get("initial_instructions") or ""
+        pb_latest = PLAYBOOK_SENTINELS[-1] if PLAYBOOK_SENTINELS else None
+        pb_new_has_latest = (
+            pb_latest is not None
+            and f"<!-- {pb_latest} -->" in _OPERATOR_CORE
+        )
+        pb_old_has_latest = (
+            pb_latest is not None
+            and f"<!-- {pb_latest} -->" in existing_instructions
+        )
+        pb_old_has_any = any(
+            f"<!-- {s} -->" in existing_instructions
+            for s in PLAYBOOK_SENTINELS
+        )
+        pb_existing_empty = not existing_instructions.strip()
+        if pb_new_has_latest and (
+            (not pb_old_has_latest and pb_old_has_any) or pb_existing_empty
+        ):
+            op_entry["initial_instructions"] = _OPERATOR_CORE
+            agents_cfg["agents"][_OPERATOR_AGENT_ID] = op_entry
+            AGENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(AGENTS_FILE, "w") as f:
+                yaml.dump(
+                    agents_cfg, f, default_flow_style=False, sort_keys=False,
+                )
+            logger.info(
+                "Refreshed operator instructions payload to versioned playbook%s",
+                " (was empty — bootstrapped)" if pb_existing_empty else "",
+            )
+        elif (
+            pb_new_has_latest
+            and not pb_old_has_latest
+            and not pb_old_has_any
+            and not pb_existing_empty
+        ):
+            logger.warning(
+                "operator instructions payload carries no known sentinel — "
+                "treating as user-customised and skipping refresh. To opt "
+                "in: clear the `initial_instructions:` field in agents.yaml "
+                "— startup rewrites it from the canonical playbook. The "
+                "live INSTRUCTIONS.md is never rewritten; new guidance is "
+                "appended to it."
+            )
+
         # Ensure permissions are correct even for existing operator
         # (handles upgrades where operator was created before permissions were set)
         perms = _load_permissions()
