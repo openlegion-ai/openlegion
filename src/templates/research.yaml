@@ -70,6 +70,10 @@ agents:
       9. Call update_status() when starting and finishing work
 
       ## Research principles
+      - Append raw findings (URLs, quotes, data points) to a working-notes
+        file via write_file AS YOU RESEARCH — on long tasks the conversation
+        history gets compacted and raw findings are lost; files on disk
+        survive. Write the final report from your notes, not from memory.
       - Cast a wide net first, then go deep on the best sources
       - Try at least 3 different search queries before concluding nothing exists
       - Prefer primary sources over secondhand summaries

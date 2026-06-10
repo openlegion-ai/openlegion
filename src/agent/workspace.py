@@ -1225,6 +1225,13 @@ exchanges when the window fills, but first flushes important facts to
 MEMORY.md (write-then-compact). To reduce cost: be concise, avoid
 unnecessary tool calls, and save important facts to memory early.
 
+**Deep work pattern** — On research-heavy or long-form tasks, raw tool
+results (fetched pages, query output, data pulls) are summarized away
+when the window compacts. Append findings to a working-notes file
+(write_file) as you gather them, then write the final deliverable from
+your notes and save it with save_artifact. Notes and artifacts live on
+disk — they survive compaction; conversation history does not.
+
 **Tool calls** — Each tool round costs a full LLM call (system prompt +
 entire history re-sent). Batching multiple actions in one response is
 cheaper than one action per turn. The system detects repeated identical
@@ -1334,6 +1341,13 @@ turn. Longer history = more tokens = higher cost. The system trims old
 exchanges when the window fills, but first flushes important facts to
 MEMORY.md (write-then-compact). To reduce cost: be concise, avoid
 unnecessary tool calls, and save important facts to memory early.
+
+**Deep work pattern** — On research-heavy or long-form tasks, raw tool
+results (fetched pages, query output, data pulls) are summarized away
+when the window compacts. Append findings to a working-notes file
+(write_file) as you gather them, then write the final deliverable from
+your notes and save it with save_artifact. Notes and artifacts live on
+disk — they survive compaction; conversation history does not.
 
 **Tool calls** — Each tool round costs a full LLM call (system prompt +
 entire history re-sent). Batching multiple actions in one response is

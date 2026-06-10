@@ -1892,6 +1892,12 @@ class AgentLoop:
                 "- Use notify_user for the user; blackboard for other agents only.\n"
             )
         rules += (
+            "- Long-form deliverables (reports, audits, plans, research): "
+            "append findings to a working-notes file via write_file AS YOU "
+            "WORK (notes survive context compaction), then save the FULL "
+            "document with save_artifact. Reference the artifact in your "
+            "final JSON and notify_user — never shrink the deliverable "
+            "itself into a summary.\n"
             f"- You have max {self.MAX_ITERATIONS} iterations.\n"
             f"- Use update_workspace to evolve your SOUL.md, INSTRUCTIONS.md, "
             f"USER.md, and HEARTBEAT.md over time.\n"
@@ -4516,6 +4522,12 @@ class AgentLoop:
             "there is genuinely nothing to do). A plain-text reply with no "
             "tool call and no {\"result\": {...}} envelope auto-closes the "
             "task as failed (no_outbound_effects).\n"
+            "- Long-form deliverables (reports, audits, plans, research): "
+            "append findings to a working-notes file via write_file AS YOU "
+            "WORK (notes survive context compaction), then save the FULL "
+            "document with save_artifact. Reference the artifact in your "
+            "final answer — never shrink the deliverable itself into a "
+            "summary.\n"
             "- Before answering from memory, run memory_search first.\n"
             "- Use update_workspace to save lasting knowledge and user preferences.\n"
         )
