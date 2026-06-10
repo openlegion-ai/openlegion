@@ -11275,6 +11275,7 @@ function dashboard() {
         workflow_snapshot: 'mapping the workflow',
         await_task_event: 'waiting on a task',
         inspect_task_run: 'diagnosing a task run',
+        update_team_brief: 'updating the team brief',
         skills_list: 'browsing its skills',
         skill_view: 'reading a skill',
         install_skill: 'installing a skill',
