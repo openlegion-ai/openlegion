@@ -427,3 +427,38 @@ class TestBackEdgeTTLSplit:
             if r.value.get("task_id") == "task_ttl_block"
         )
         assert entry.ttl == 604800  # 7 days
+
+
+class TestOperatorRecoveryWakeGlobalThrottle:
+    def test_mass_failure_storm_caps_wakes_but_writes_all_events(
+        self, mesh_app_with_back_edge,
+    ):
+        """A2 hardening: a provider outage failing many user chains at
+        once produces at most _OPERATOR_RECOVERY_WAKE_MAX wakes in the
+        window — every event is still written so the heartbeat's
+        check_inbox catches up on the suppressed remainder."""
+        app, blackboard, lane, _loop = mesh_app_with_back_edge
+        n = 8
+        for i in range(n):
+            rec = _record(
+                f"task_storm_{i}",
+                origin={"kind": "human", "channel": "web", "user": "u1"},
+            )
+            app._write_task_event_back_edge(
+                rec, event_kind="task_failed",
+                payload_extras={"error": "provider outage"},
+            )
+        _settle()
+
+        # All 8 events landed in the operator's inbox...
+        op_rows = blackboard.list_by_prefix("inbox/operator/task_event/")
+        storm_ids = {
+            r.value.get("task_id") for r in op_rows
+            if str(r.value.get("task_id", "")).startswith("task_storm_")
+        }
+        assert len(storm_ids) == n
+        # ...but only the capped number of wakes fired.
+        operator_wakes = [
+            c for c in lane.calls if c["args"][0] == "operator"
+        ]
+        assert len(operator_wakes) == 5  # _OPERATOR_RECOVERY_WAKE_MAX
