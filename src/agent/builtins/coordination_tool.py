@@ -197,6 +197,9 @@ async def hand_off(
         return {"error": f"Invalid agent ID: '{to}'"}
 
     summary = sanitize_for_prompt(summary)
+    # ``or ""`` — models emit explicit ``brief: null``, which arrives
+    # here as None (same defense the ``thinking`` line below uses).
+    brief = brief or ""
     brief = sanitize_for_prompt(brief)[:_MAX_BRIEF_CHARS] if brief.strip() else ""
     thinking = (thinking or "").strip().lower()
     if thinking and thinking not in ("off", "low", "medium", "high"):

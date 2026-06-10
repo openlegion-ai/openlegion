@@ -1364,6 +1364,24 @@ async def test_task_run_aggregates_traces_in_window(tmp_path, monkeypatch):
             status="error", error="rate limited",
             meta={"model": "anthropic/claude-x", "tokens_used": 300},
         )
+        # Streamed call: the proxy records an ``llm_stream`` row at
+        # stream start AND an ``llm_call`` row (tokens, streaming=True)
+        # at completion. Only the completion row may count — counting
+        # both kinds doubled llm_calls for streamed traffic.
+        traces.record(
+            trace_id="tr3", source="mesh.api_proxy", agent="analyst",
+            event_type="llm_stream", detail="llm/chat",
+            meta={"model": "anthropic/claude-x"},
+        )
+        traces.record(
+            trace_id="tr3", source="mesh.api_proxy", agent="analyst",
+            event_type="llm_call", detail="llm/chat", duration_ms=700,
+            status="ok",
+            meta={
+                "model": "anthropic/claude-x", "tokens_used": 500,
+                "streaming": True,
+            },
+        )
         # Different agent in the same window — must NOT count.
         traces.record(
             trace_id="tr2", source="mesh.api_proxy", agent="scout",
@@ -1377,8 +1395,8 @@ async def test_task_run_aggregates_traces_in_window(tmp_path, monkeypatch):
             )
         assert r.status_code == 200
         execution = r.json()["execution"]
-        assert execution["llm_calls"] == 2
-        assert execution["tokens_used"] == 1500
+        assert execution["llm_calls"] == 3
+        assert execution["tokens_used"] == 2000
         assert execution["models"] == ["anthropic/claude-x"]
         assert len(execution["trace_errors"]) == 1
         assert "rate limited" in execution["trace_errors"][0]["error"]
