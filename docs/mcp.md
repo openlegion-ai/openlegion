@@ -14,61 +14,70 @@ LLM -> tool_call("read_file", {path: "/data/report.csv"})
         -> result
 ```
 
-## Configuration
+## Configuration — the connector catalog
 
-`mcp_servers` is an agent-level field on a fleet template (`src/templates/*.yaml`) or on a runtime agent record. The host serializes the list as JSON into the `MCP_SERVERS` environment variable when launching the agent container (`DockerBackend` in `src/host/runtime.py`).
+MCP servers are **connectors**: fleet-level records in `config/connectors.json`, each pairing a server definition with an **agent assignment**. The catalog (managed by `src/host/connectors.py:ConnectorStore`) is the single source of truth — there is no per-agent MCP config. Connect a server once and enable it for the whole fleet (`agents: ["*"]`) or for specific agents; an agent-specific server is simply a connector assigned to one agent.
 
-```yaml
-# src/templates/your_template.yaml
-name: analyst
-agents:
-  analyst:
-    role: "Data analyst"
-    model: "openai/gpt-4.1-mini"
-    mcp_servers:
-      - name: filesystem
-        command: mcp-server-filesystem
-        args: ["/data"]
-      - name: sqlite
-        command: mcp-server-sqlite
-        args: ["--db", "/data/analytics.db"]
+```json
+{
+  "connectors": [
+    {
+      "name": "fetch",
+      "command": "mcp-server-fetch",
+      "args": [],
+      "env": null,
+      "agents": ["*"]
+    },
+    {
+      "name": "sqlite",
+      "command": "mcp-server-sqlite",
+      "args": ["--db", "/data/analytics.db"],
+      "env": { "DB_KEY": "$CRED{analytics_db_key}" },
+      "agents": ["researcher", "analyst"]
+    }
+  ]
+}
 ```
 
-There is no top-level `config/agents.yaml` file shipped with the repo — agents are defined either via the fleet template system (`src/cli/config.py:_load_templates`) or created at runtime through the dashboard / operator tools.
+At every agent (re)start, the runtime asks the catalog for the agent's assigned set (`RuntimeBackend._mcp_snapshot_for` in `src/host/runtime.py`) and serializes it as JSON into the `MCP_SERVERS` container environment variable. `MCP_SERVERS` is startup-only by design — **catalog edits apply on the next restart of the affected agents** (the dashboard prompts for it; nothing restarts automatically). Catalog order is meaningful: it feeds the first-server-wins tool-name conflict policy.
 
-### Server Config Fields
+A missing or corrupt `connectors.json` fails **closed to an empty catalog** (error logged, agents start with no MCP servers); a store read error at start degrades the same way rather than blocking the agent.
+
+### Connector Fields
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `name` | string | Yes | Unique identifier (1-64 chars, `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`). Used as a prefix when a tool name collides with a built-in or another server's tool (`mcp_<server>_<tool>`). Case-insensitive duplicate names are rejected. |
+| `name` | string | Yes | Unique identifier (1-64 chars, `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`, case-insensitive uniqueness). Used as a prefix when a tool name collides with a built-in or another server's tool (`mcp_<server>_<tool>`). |
 | `command` | string | Yes | Command to launch the server (max 256 chars). **Cannot contain `$CRED{name}` handles** — use `env` or `args` if a credential needs to reach the subprocess. |
 | `args` | list[string] | No | Command-line arguments (defaults to `[]`, max 32 entries × 512 chars). May contain `$CRED{name}` handles — the mesh resolves them at agent start. |
 | `env` | dict[string, string] | No | Environment variables for the server process (defaults to `None`, max 32 entries × 4096-char values). Values may contain `$CRED{name}` handles. |
+| `agents` | list[string] | No | Assignment: `["*"]` = every agent (exclusive — cannot be combined with explicit ids), or explicit agent ids. Defaults to `[]` (staged, reaches nobody). |
 
-Entries are validated by `src.shared.types.MCPServerConfig` at load time (`src/cli/config.py:_load_config`), at PUT time (`/api/agents/{id}/config`), and persisted as plain dicts so existing tooling that diffs `config/agents.yaml` keeps working.
+Records are validated by `src.shared.types.MCPConnector` (which inherits every `MCPServerConfig` validator) at store load time and at dashboard PUT time.
 
 ### Credential handles in `env` and `args`
 
 `$CRED{name}` references the agent-tier credential vault. The mesh resolves them just before serializing the `MCP_SERVERS` env var for the agent container — the resolved plaintext goes into the subprocess environment, never to disk and never through the API surface.
 
-```yaml
-mcp_servers:
-  - name: linear
-    command: mcp-server-linear
-    args: ["--workspace", "ol"]
-    env:
-      LINEAR_API_KEY: "$CRED{linear_token}"
+```json
+{
+  "name": "linear",
+  "command": "mcp-server-linear",
+  "args": ["--workspace", "ol"],
+  "env": { "LINEAR_API_KEY": "$CRED{linear_token}" },
+  "agents": ["*"]
+}
 ```
 
-**Permission gate.** Each handle is checked against the agent's `allowed_credentials` glob list (via `permissions.can_access_credential`) at **both** PUT time (so the dashboard rejects an unsavable config synchronously) and runtime (so a permission revoked after save is enforced on next restart).
+**Permission gate.** Each handle is checked against the assigned LIVE agents' `allowed_credentials` glob lists (via `permissions.can_access_credential`) at PUT time — the dashboard rejects an unsavable connector synchronously, naming the blocked agents. At agent start, enforcement is **per-connector degradation**: a connector whose credential is missing or denied for that agent is dropped from its `MCP_SERVERS` (error logged with the connector, agent, and reason) while the rest ship — a fleet connector must never brick an agent that didn't ask for it (e.g. an agent created after a `"*"` connector was saved, under the default deny-all credential ACL).
 
 **What handles protect (and what they don't):**
 
 | Surface | Protected? |
 |---|---|
-| `config/agents.yaml` on disk | ✅ stored as `$CRED{name}` reference |
+| `config/connectors.json` on disk | ✅ stored as `$CRED{name}` reference |
 | `audit_log` table | ✅ env values redacted; only keys preserved |
-| `GET /api/agents/{id}/config` | ✅ `env` field omitted; `env_keys` returned instead |
+| `GET /api/connectors` | ✅ `env` field omitted; `env_keys` returned instead |
 | Container `MCP_SERVERS` env var | ❌ plaintext after mesh resolves |
 | MCP subprocess `env` | ❌ plaintext (the subprocess needs the value to authenticate — this is a protocol fact, not a routing problem) |
 | Container process memory | ❌ plaintext |
@@ -80,65 +89,62 @@ The runtime exposure is bounded by the existing container hardening (UID 1000, `
 **Failure modes:**
 
 - **Vault not wired.** `RuntimeBackend` raises a clear startup error if the config contains `$CRED{...}` handles but the mesh credential vault was not plumbed in via `set_credential_resolver`. Silent literal-passthrough was rejected as a footgun: a misconfigured deploy would otherwise ship literal `$CRED{...}` strings to subprocesses.
-- **Credential missing.** Agent start raises `ValueError`; the dashboard surfaces this through the existing restart-failed UX with the credential name in the error message. Fix by storing the credential and retrying restart.
-- **Permission denied.** Same as missing — agent start raises with the credential name. Fix by extending the agent's `allowed_credentials` glob.
+- **Credential missing or permission denied.** That connector is DROPPED for that agent at start (error logged naming the connector, agent, and credential); the agent boots with its remaining connectors. The agent's Config-tab panel shows the dropped server's status dot as gray (it never reached the container). Fix by storing the credential / extending the agent's `allowed_credentials` glob, then restarting the agent.
+- **Corrupt `connectors.json`.** Loads as an empty catalog (error logged); agents start with no MCP servers rather than failing to boot.
 
-### Dashboard `GET /config` env masking
+### `GET /api/connectors` env masking
 
-`env` values are never returned by the dashboard config API. Each MCP server entry in the response omits the `env` key entirely and returns `env_keys: ["KEY1", "KEY2"]` instead — the dashboard renders the list of env-var names without ever holding the values.
+`env` values are never returned by the connectors API. Each record in the response omits the `env` key entirely and returns `env_keys: ["KEY1", "KEY2"]` instead — the dashboard renders the list of env-var names without ever holding the values.
 
 The `env` field is **omitted**, not returned as `null`. This is deliberate: a naive `GET → edit → PUT` round-trip would otherwise lose env because the PUT handler treats "`env` present in body" as "replace wholesale." Omission lets the PUT handler tell "client preserved env" from "client wants to clear env":
 
-- **Field absent from request body** → preserve persisted env for this server (matched by name).
+- **Field absent from request body** → preserve the persisted env for this connector.
 - **Field present (as `{}` or `{K: v}`)** → replace wholesale.
 
-### `mcp_touched` only fires on real diffs
+### No-op saves don't prompt restarts
 
-Saving a config that doesn't actually change the persisted `mcp_servers` does NOT restart the agent. The PUT handler canonicalizes both sides (Pydantic model load + `model_dump(exclude_none=False)`, sorted by `name.lower()`, with `env={}` normalized to `env=None`) and only triggers the restart if the diff is non-empty.
+Saving a connector that doesn't actually change the persisted record (same canonical server fields, same assignment set) returns `restart_required: false` with an empty `affected_agents` list and marks nothing dirty — a `GET → unchanged PUT` round-trip never nags the operator to restart.
 
 ### Concurrent edits
 
-Last-write-wins semantics for the whole `mcp_servers` field. The dashboard does not currently use an `If-Match` / etag concurrency token, so two operators editing the same agent's MCP config simultaneously will have one overwrite the other. This is consistent with how every other dashboard config edit behaves today.
+Last-write-wins per connector record. The dashboard does not use an `If-Match` / etag concurrency token — consistent with every other dashboard config edit under the single-operator model. (Unlike the old per-agent field, the store itself holds its lock across the whole load→mutate→save, so two writers can't lose each other's *unrelated* connectors.)
 
-## Managing MCP servers from the dashboard
+## Managing connectors from the dashboard
 
-The agent settings → Config tab has an **MCP Servers** section that wraps the contract above. The visual UI is the primary path for users — fleet templates and the REST API still work but are no longer the only way in.
+Settings → **Connectors** (sub-tab ID `integrations` — only the label changed) opens with the **MCP connectors** panel. Each catalog record renders as a row with the assignment badge (**All agents** in indigo, or the explicit agent count), the command preview, and an env-var-count chip; hover a row for **Edit** and **Remove**, or click **+ Connect MCP server**.
 
-In display mode each configured server renders as a row with a status dot (green = running, red = failed at last startup, gray = pending restart), the command preview, and a tool-count badge. Click an agent's settings → Edit to manage.
+The agent's own Config tab keeps a **read-only** MCP Connectors panel showing the connectors assigned to that agent with live status dots (green = running, red = failed at last startup with the captured error inline, gray = pending restart) and a "Manage in Connectors →" link. Assignment is edited only on the Connectors page.
 
-### Adding / editing / removing servers
+### The connector form
 
-The edit-mode list reuses the inline Webhooks pattern: hover a row for **Edit** and **Remove** buttons, or click **+ Add MCP server** to open a fresh form. Each form has:
-
-- **Name** and **Command** as plain inputs (validated against the same `MCPServerConfig` model the backend uses — same regex, same length caps, same `$CRED{...}` rejection in `command`).
-- **Args** as a list-of-pairs (one input per arg + remove + `+ Add arg`). No JSON syntax to learn.
+- **Name** and **Command** as plain inputs (validated against the same `MCPConnector` model the backend uses — same regex, same length caps, same `$CRED{...}` rejection in `command`). Name is immutable once created.
+- **Args** as a list-of-rows (one input per arg + remove + `+ Add arg`). No JSON syntax to learn.
 - **Env** as a list-of-rows where each row has a key field, a **Credential | Plain text** type toggle, and the value field:
-  - **Credential** shows a dropdown filtered to the credentials the agent's `allowed_credentials` policy actually permits — the saved value becomes a `$CRED{name}` handle resolved by the mesh at agent start.
+  - **Credential** shows a dropdown of agent-tier vault credential names — the saved value becomes a `$CRED{name}` handle resolved by the mesh at agent start.
   - **Plain text** is a regular input. If you paste something that looks like an API key (e.g. starts with `sk-`, `ghp_`, `pat-`, `Bearer ...`, or is high-entropy), an inline warning nudges you toward Credential mode.
 - A **Replace env vars** toggle (edit mode only) that defaults OFF — existing env preserves on the wire. When ON, the editor starts empty and the save replaces env wholesale; the UI explains that values are not retrievable from the masked GET (you'd need to re-supply all of them).
+- **Enabled for** — the assignment control: **All agents** or **Specific agents** with a checkbox per fleet member.
 - An inline Node-runtime warning chip below the command input when it starts with `npx`/`bunx`/`pnpm dlx`/`yarn dlx`/`node`/`npm`/`pnpm`/`yarn`/`bun` (the default agent image is Python-only).
 
-### Save + restart flow
+### Save + restart flow (explicit, never automatic)
 
-Clicking the outer **Save** in the Config tab will auto-commit any open MCP draft (or block with a toast if the draft is incomplete) so typed entries don't get silently dropped. If `mcp_servers` actually changed (the dashboard does the same canonical diff as the backend's `mcp_touched` check), the agent is restarted automatically. The toast reports success/failure; the per-server status dot reflects the new state once the post-restart capabilities fetch lands.
-
-If the restart itself fails (the config persisted but the container didn't come back up against it), the edit form **stays open** with a persistent red banner: *"Config saved, but agent restart failed: &lt;reason&gt;"* + a **Retry restart** button. Retry calls `POST /restart` only — the config is already on disk, no re-PUT.
+A successful save returns the **affected agents** — the union of the assignment before and after the edit (an agent *removed* from a connector needs a bounce to lose its tools, too). The UI shows an amber prompt: *"X affects N agents — the change applies after restart"* with **Restart now** (calls `POST /api/agents/restart-batch`, which sequentially reuses the single-agent restart flow and its event choreography) and **Later**. Until the affected agents restart, a standing notice lists them as *running an older connector setup*; the pending state clears automatically when the runtime successfully starts each agent against the current catalog.
 
 ### Failure visibility
 
-A red status dot expands to show the captured stderr from `MCPClient.start()` (truncated to 500 chars). The common ones — `command not found`, missing or denied `$CRED{...}` reference, permission error — surface here without needing to tail container logs.
+A red status dot on the agent's panel expands to show the captured stderr from `MCPClient.start()` (truncated to 500 chars). The common ones — `command not found`, missing or denied `$CRED{...}` reference, permission error — surface there without needing to tail container logs.
 
-Validation errors from the backend (regex failures, oversize fields, `$CRED` in `command`, etc.) come back as a structured 400 and render as **inline red text** next to the offending field. Errors that don't map to a single row (e.g. case-insensitive duplicate names rejected by the `AgentConfig` field validator) render as a banner above the list.
+Validation errors from the backend (regex failures, oversize fields, `$CRED` in `command`, a bad `agents` list, etc.) come back as a structured 400 (`{detail: {field: "connector", errors: [...]}}`) and render as **inline red text** next to the offending field; credential pre-flight failures name the blocked agents and the fix.
 
-### Operator-tool MCP management
+### Operator-tool connector management
 
-**Not yet supported.** The operator agent can READ which MCP servers are configured on each agent (through the existing capabilities surface) but cannot ADD or REMOVE them via chat. A follow-up will introduce an operator-requested-setup flow modeled on the existing credential-request and browser-login patterns: the operator surfaces a request card in the dashboard, the human reviews and saves, the agent picks up the new server on restart. Until then, MCP writes are dashboard-only.
+**Not supported, by design.** The operator agent can READ which connectors an agent runs (through the existing capabilities surface) but cannot ADD or REMOVE them via chat — chat-driven installation of arbitrary tool servers is a prompt-injection-shaped hole. A follow-up will introduce an operator-requested-setup flow modeled on the existing credential-request and browser-login patterns: the operator surfaces a request card in the dashboard, the human reviews and saves, the affected agents pick up the connector on restart.
 
 ## How It Works
 
 ### Startup Sequence
 
-1. The runtime layer (`DockerBackend` / `SandboxBackend` in `src/host/runtime.py`) reads `mcp_servers` from the agent's record and serializes it as JSON into the `MCP_SERVERS` environment variable passed to the agent container (`environment["MCP_SERVERS"] = self._build_mcp_servers_env(...)`). Any `$CRED{name}` handles in `env` values or `args` strings are resolved here against the mesh credential vault — the agent container receives plaintext values; the persisted config retains the handle.
+1. The runtime layer (`DockerBackend` / `SandboxBackend` in `src/host/runtime.py`) asks the connector catalog for the agent's assigned set (`self._mcp_snapshot_for(agent_id)`) and serializes it as JSON into the `MCP_SERVERS` environment variable passed to the agent container (`environment["MCP_SERVERS"] = self._build_mcp_servers_env(...)`). Any `$CRED{name}` handles in `env` values or `args` strings are resolved here against the mesh credential vault — the agent container receives plaintext values; the persisted catalog retains the handle.
 2. Agent container starts; `src/agent/__main__.py` reads `MCP_SERVERS`
 3. `MCPClient` is created and passed to `ToolRegistry`
 4. During lifespan startup, `MCPClient.start()` launches each server:
@@ -173,7 +179,7 @@ If an agent has `ALLOWED_TOOLS` configured (operator mode — `loop.py:277-287` 
 Conflicts are resolved at registration time, before execution:
 
 - If an MCP tool has the same name as a built-in tool, the MCP tool is renamed to `mcp_{server_name}_{tool_name}` and a warning is logged. The built-in always keeps its original name.
-- If two MCP servers provide tools with the same name, conflicts are resolved in **config / registration order**: the first server listed in `mcp_servers` keeps the unprefixed name, and any subsequent server providing the same tool name gets prefixed with `mcp_{server_name}_{tool_name}`.
+- If two MCP servers provide tools with the same name, conflicts are resolved in **catalog / registration order**: the first assigned connector keeps the unprefixed name, and any subsequent server providing the same tool name gets prefixed with `mcp_{server_name}_{tool_name}`.
 
 After registration every tool has a unique name, so there is no runtime priority resolution.
 
@@ -197,8 +203,9 @@ On agent shutdown, `MCPClient.stop()` closes the `AsyncExitStack`, which termina
 | `src/agent/mcp_client.py` | `MCPClient` class -- server lifecycle, tool discovery, call routing |
 | `src/agent/tools.py` | `ToolRegistry` -- MCP tool registration and execution routing |
 | `src/agent/__main__.py` | Reads `MCP_SERVERS` env var, creates MCPClient, manages lifespan |
-| `src/host/runtime.py` | Passes `mcp_servers` config as container environment variable |
-| `src/host/health.py` | Preserves `mcp_servers` across agent restarts |
+| `src/host/connectors.py` | `ConnectorStore` — the fleet connector catalog (`config/connectors.json`) |
+| `src/host/runtime.py` | Resolves each agent's assigned connectors into the `MCP_SERVERS` container env var at start |
+| `src/dashboard/server.py` | `GET/PUT/DELETE /api/connectors`, `POST /api/agents/restart-batch` |
 
 ### Key Classes
 
@@ -230,7 +237,7 @@ Some well-known MCP servers that work with OpenLegion:
 
 **Caveat:** the default `Dockerfile.agent` image is Python-only — Node.js is **not** installed. npm-based MCP servers (most of the entries above, including `@modelcontextprotocol/server-filesystem`, `@modelcontextprotocol/server-github`, and `@playwright/mcp`) will fail to launch out of the box; you must build a custom agent image with Node.js installed and the server package available on `PATH`. Python-based MCP servers work with the default image — the `mcp` Python SDK is pre-installed in `Dockerfile.agent`.
 
-If you use a custom agent image and the `mcp` package is missing, the `from mcp import ...` block at the top of `src/agent/mcp_client.py` swallows the `ImportError` silently with no log line — the only visible signal is that `MCPClient.start()` later logs `"MCP SDK not installed — cannot start MCP servers"` and returns early, but only if `mcp_servers` is actually configured for that agent.
+If you use a custom agent image and the `mcp` package is missing, the `from mcp import ...` block at the top of `src/agent/mcp_client.py` swallows the `ImportError` silently with no log line — the only visible signal is that `MCPClient.start()` later logs `"MCP SDK not installed — cannot start MCP servers"` and returns early, but only if the agent actually has assigned connectors.
 
 ## Writing a Custom MCP Server
 
@@ -251,13 +258,15 @@ if __name__ == "__main__":
     server.run(transport="stdio")
 ```
 
-Configure it on an agent — either in a fleet template under `src/templates/*.yaml` or by setting `mcp_servers` directly on the agent record (the host will serialize it into `MCP_SERVERS` for you):
+Connect it on Settings → Connectors (or write the catalog record directly):
 
-```yaml
-mcp_servers:
-  - name: my-tools
-    command: python
-    args: ["/app/tools/my_server.py"]
+```json
+{
+  "name": "my-tools",
+  "command": "python",
+  "args": ["/app/tools/my_server.py"],
+  "agents": ["*"]
+}
 ```
 
 ## Troubleshooting

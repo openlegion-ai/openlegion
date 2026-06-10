@@ -3101,28 +3101,38 @@
                             </div>
                           </div>
                         </div>
-                        <!-- MCP Servers (read-only mirror; edit UI lives below in Config edit mode) -->
+                        <!-- MCP Connectors (read-only — assignment is managed on Settings → Connectors) -->
                         <div class="bg-gray-800/50 rounded p-3 md:col-span-2">
                           <div class="text-xs text-gray-400 mb-2 flex items-center gap-2">
-                            <span>MCP Servers</span>
+                            <span>MCP Connectors</span>
                             <span class="text-[11px] text-gray-500"
-                                  x-text="(agentConfigs[selectedAgent]?.mcp_servers || []).length + ' configured'"></span>
+                                  x-text="connectorsForAgent(selectedAgent).length + ' assigned'"></span>
+                            <a href="#" @click.prevent="switchTab('system'); switchSystemTab('integrations')"
+                               class="text-[11px] text-indigo-400 hover:text-indigo-300 ml-auto">Manage in Connectors →</a>
                           </div>
-                          <template x-if="!(agentConfigs[selectedAgent]?.mcp_servers || []).length">
-                            <div class="text-xs text-gray-500 italic">None configured.</div>
+                          <template x-if="!connectorsForAgent(selectedAgent).length">
+                            <div class="text-xs text-gray-500 italic">No connectors assigned. Connect an MCP server on the Connectors page and assign it here.</div>
                           </template>
-                          <template x-for="srv in (agentConfigs[selectedAgent]?.mcp_servers || [])" :key="srv.name">
-                            <div class="flex items-center gap-3 text-xs py-1.5">
-                              <span class="w-2 h-2 rounded-full shrink-0"
-                                    :class="mcpStatusDotClass(mcpStatusFor(srv.name).state)"
-                                    :title="mcpStatusFor(srv.name).error || mcpStatusFor(srv.name).state"></span>
-                              <span class="text-gray-200 font-mono font-medium shrink-0" x-text="srv.name"></span>
-                              <span class="text-gray-500 shrink-0">&rarr;</span>
-                              <span class="text-gray-400 text-[11px] font-mono flex-1 truncate"
-                                    x-text="(srv.command || '') + (srv.args && srv.args.length ? ' ' + srv.args.join(' ') : '')"></span>
-                              <span x-show="mcpStatusFor(srv.name).state === 'running'"
-                                    class="text-[11px] px-1.5 py-0.5 rounded font-medium leading-none bg-amber-900/50 text-amber-400 border border-amber-800/50 shrink-0"
-                                    x-text="mcpStatusFor(srv.name).toolsCount + ' tools'"></span>
+                          <template x-for="srv in connectorsForAgent(selectedAgent)" :key="srv.name">
+                            <div>
+                              <div class="flex items-center gap-3 text-xs py-1.5">
+                                <span class="w-2 h-2 rounded-full shrink-0"
+                                      :class="mcpStatusDotClass(mcpStatusFor(srv.name).state)"
+                                      :title="mcpStatusFor(srv.name).error || mcpStatusFor(srv.name).state"></span>
+                                <span class="text-gray-200 font-mono font-medium shrink-0" x-text="srv.name"></span>
+                                <span x-show="(srv.agents || []).includes('*')"
+                                      class="text-[11px] px-1.5 py-0.5 rounded font-medium leading-none bg-indigo-900/50 text-indigo-300 border border-indigo-800/50 shrink-0"
+                                      title="Assigned fleet-wide (all agents)">fleet</span>
+                                <span class="text-gray-500 shrink-0">&rarr;</span>
+                                <span class="text-gray-400 text-[11px] font-mono flex-1 truncate"
+                                      x-text="(srv.command || '') + (srv.args && srv.args.length ? ' ' + srv.args.join(' ') : '')"></span>
+                                <span x-show="mcpStatusFor(srv.name).state === 'running'"
+                                      class="text-[11px] px-1.5 py-0.5 rounded font-medium leading-none bg-amber-900/50 text-amber-400 border border-amber-800/50 shrink-0"
+                                      x-text="mcpStatusFor(srv.name).toolsCount + ' tools'"></span>
+                              </div>
+                              <div x-show="mcpStatusFor(srv.name).state === 'failed' && mcpStatusFor(srv.name).error"
+                                   class="text-[11px] text-red-400 mt-0.5 mb-1"
+                                   x-text="'Failed at startup: ' + mcpStatusFor(srv.name).error"></div>
                             </div>
                           </template>
                         </div>
@@ -3397,221 +3407,6 @@
                                   <span x-text="ch.label"></span>
                                 </label>
                               </template>
-                            </div>
-                          </div>
-                          <!-- MCP Servers (edit mode) — connect external tool servers to this agent. -->
-                          <div class="md:col-span-2">
-                            <label class="text-xs text-gray-400 mb-1.5 flex items-center gap-2">
-                              <span>MCP Servers</span>
-                              <span class="text-[11px] text-amber-500/70 ml-auto">restart required after changes</span>
-                            </label>
-                            <!-- Configured server list -->
-                            <template x-if="(editForm.mcp_servers || []).length">
-                              <div class="space-y-0 mb-2">
-                                <template x-for="(srv, idx) in editForm.mcp_servers" :key="srv.name + ':' + idx">
-                                  <div>
-                                    <!-- Compact row (hidden while this row is being edited) -->
-                                    <div x-show="editForm._mcpEditIndex !== idx"
-                                         class="flex items-center gap-3 text-xs group py-2 px-2 -mx-2 rounded-md hover:bg-gray-800/40 transition-colors border-b border-gray-800/30 last:border-0">
-                                      <span class="w-2 h-2 rounded-full shrink-0"
-                                            :class="mcpStatusDotClass(mcpStatusFor(srv.name).state)"
-                                            :title="mcpStatusFor(srv.name).error || mcpStatusFor(srv.name).state"></span>
-                                      <span class="text-gray-200 font-mono font-medium shrink-0" x-text="srv.name"></span>
-                                      <span class="text-gray-500 shrink-0">&rarr;</span>
-                                      <span class="text-gray-400 text-[11px] font-mono flex-1 truncate"
-                                            x-text="(srv.command || '') + (srv.args && srv.args.length ? ' ' + srv.args.join(' ') : '')"></span>
-                                      <span x-show="mcpStatusFor(srv.name).state === 'running'"
-                                            class="text-[11px] px-1.5 py-0.5 rounded font-medium leading-none bg-amber-900/50 text-amber-400 border border-amber-800/50 shrink-0"
-                                            x-text="mcpStatusFor(srv.name).toolsCount + ' tools'"></span>
-                                      <button type="button" @click="mcpStartEdit(idx)"
-                                              class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[11px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-all shrink-0">Edit</button>
-                                      <button type="button" @click="mcpRemoveAt(idx)"
-                                              class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[11px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-all shrink-0">Remove</button>
-                                    </div>
-                                    <!-- Failed-startup error band (collapsed under the row) -->
-                                    <div x-show="editForm._mcpEditIndex !== idx && mcpStatusFor(srv.name).state === 'failed' && mcpStatusFor(srv.name).error"
-                                         class="text-[11px] text-red-400 mt-0.5 mb-1 px-2 -mx-2"
-                                         x-text="'Failed at startup: ' + mcpStatusFor(srv.name).error"></div>
-                                    <!-- Inline edit form -->
-                                    <div x-show="editForm._mcpEditIndex === idx" x-transition
-                                         class="bg-gray-800/30 border border-gray-800 rounded-lg p-3 mt-1 mb-2 space-y-2">
-                                      <!-- name + command -->
-                                      <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                                        <div>
-                                          <label class="text-[11px] text-gray-400 block mb-0.5">Name</label>
-                                          <input type="text" x-model="editForm._mcpDraft.name" class="dash-input w-full" placeholder="linear">
-                                          <div x-show="editForm._mcpErrors?.[idx]?.name" class="text-[11px] text-red-400 mt-1" x-text="editForm._mcpErrors?.[idx]?.name"></div>
-                                        </div>
-                                        <div>
-                                          <label class="text-[11px] text-gray-400 block mb-0.5">Command</label>
-                                          <input type="text" x-model="editForm._mcpDraft.command" class="dash-input w-full" placeholder="mcp-server-linear">
-                                          <div x-show="mcpDetectJsRuntime(editForm._mcpDraft.command)"
-                                               class="text-[11px] text-amber-400 mt-1">Default agent image is Python-only. Node-based MCP servers need a custom image — see docs.</div>
-                                          <div x-show="editForm._mcpErrors?.[idx]?.command" class="text-[11px] text-red-400 mt-1" x-text="editForm._mcpErrors?.[idx]?.command"></div>
-                                        </div>
-                                      </div>
-                                      <!-- args (list of pairs) -->
-                                      <div>
-                                        <label class="text-[11px] text-gray-400 block mb-0.5">Args (one per row)</label>
-                                        <template x-for="(arg, aidx) in editForm._mcpDraft._argRows" :key="aidx">
-                                          <div class="flex items-center gap-1.5 mb-1">
-                                            <input type="text" x-model="arg.value" class="dash-input flex-1" placeholder="--workspace">
-                                            <button type="button" @click="mcpRemoveArgRow(aidx)" class="text-[11px] px-1.5 py-1 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-colors">×</button>
-                                          </div>
-                                        </template>
-                                        <button type="button" @click="mcpAddArgRow()" class="text-[11px] text-gray-400 hover:text-gray-300 transition-colors">+ Add arg</button>
-                                        <div x-show="editForm._mcpErrors?.[idx]?.args" class="text-[11px] text-red-400 mt-1" x-text="editForm._mcpErrors?.[idx]?.args"></div>
-                                      </div>
-                                      <!-- env: read-only display of existing env_keys (when not replacing) -->
-                                      <div>
-                                        <div class="flex items-center gap-2 mb-0.5">
-                                          <label class="text-[11px] text-gray-400">Env</label>
-                                          <button type="button" @click="mcpToggleReplaceEnv()"
-                                                  class="text-[11px] px-2 py-0.5 rounded transition-colors"
-                                                  :class="editForm._mcpDraft._replaceEnv ? 'bg-indigo-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'"
-                                                  x-text="editForm._mcpDraft._replaceEnv ? 'Replacing — cancel to keep current' : 'Replace env vars'"></button>
-                                        </div>
-                                        <!-- Preserve mode: show existing keys read-only -->
-                                        <template x-if="!editForm._mcpDraft._replaceEnv">
-                                          <div>
-                                            <template x-if="(srv.env_keys || []).length">
-                                              <div class="flex flex-wrap gap-1">
-                                                <template x-for="k in srv.env_keys" :key="k">
-                                                  <span class="inline-flex items-center text-[11px] font-mono px-2 py-0.5 rounded bg-gray-800 text-gray-400 border border-gray-700" x-text="k"></span>
-                                                </template>
-                                              </div>
-                                            </template>
-                                            <template x-if="!(srv.env_keys || []).length">
-                                              <div class="text-[11px] text-gray-500 italic">No env vars.</div>
-                                            </template>
-                                            <div class="text-[11px] text-gray-500 italic mt-1">Values hidden. Toggle "Replace env vars" to set new values — you'll need to supply ALL env vars (existing values are not retrievable).</div>
-                                          </div>
-                                        </template>
-                                        <!-- Replace mode: row editor with type toggle -->
-                                        <template x-if="editForm._mcpDraft._replaceEnv">
-                                          <div>
-                                            <template x-for="(row, ridx) in editForm._mcpDraft._envRows" :key="ridx">
-                                              <div class="flex items-center gap-1.5 mb-1">
-                                                <input type="text" x-model="row.key" class="dash-input w-32" placeholder="KEY">
-                                                <select x-model="row.type" class="dash-select text-[11px]">
-                                                  <option value="cred">Credential</option>
-                                                  <option value="plain">Plain text</option>
-                                                </select>
-                                                <template x-if="row.type === 'cred'">
-                                                  <select x-model="row.value" class="dash-select flex-1">
-                                                    <option value="">— pick credential —</option>
-                                                    <template x-for="c in (agentConfigs[selectedAgent]?.resolved_credentials || [])" :key="c">
-                                                      <option :value="c" x-text="c"></option>
-                                                    </template>
-                                                  </select>
-                                                </template>
-                                                <template x-if="row.type === 'plain'">
-                                                  <div class="flex-1">
-                                                    <input type="text" x-model="row.value" class="dash-input w-full" placeholder="value">
-                                                    <div x-show="mcpDetectSecretLike(row.value)" class="text-[11px] text-amber-400 mt-0.5">Looks like an API key. Use Credential mode instead.</div>
-                                                  </div>
-                                                </template>
-                                                <button type="button" @click="mcpRemoveEnvRow(ridx)" class="text-[11px] px-1.5 py-1 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-colors">×</button>
-                                              </div>
-                                            </template>
-                                            <button type="button" @click="mcpAddEnvRow()" class="text-[11px] text-gray-400 hover:text-gray-300 transition-colors">+ Add env var</button>
-                                          </div>
-                                        </template>
-                                        <div x-show="editForm._mcpErrors?.[idx]?.env" class="text-[11px] text-red-400 mt-1" x-text="editForm._mcpErrors?.[idx]?.env"></div>
-                                      </div>
-                                      <!-- Buttons -->
-                                      <div class="flex items-center justify-end gap-2 pt-1">
-                                        <button type="button" @click="mcpCancelDraft()"
-                                                class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">Cancel</button>
-                                        <button type="button" @click="mcpCommitDraft()"
-                                                :disabled="!editForm._mcpDraft?.name || !editForm._mcpDraft?.command"
-                                                class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors disabled:opacity-50">Apply</button>
-                                      </div>
-                                    </div>
-                                  </div>
-                                </template>
-                              </div>
-                            </template>
-                            <template x-if="!(editForm.mcp_servers || []).length && !editForm._showMcpAddForm">
-                              <div class="text-xs text-gray-500 italic mb-2">No MCP servers configured. Add one to extend this agent's tools (e.g. Linear, GitHub, a database).</div>
-                            </template>
-                            <!-- Add form -->
-                            <div x-show="editForm._showMcpAddForm" x-transition
-                                 class="bg-gray-800/30 border border-gray-800 rounded-lg p-3 mt-1 mb-2 space-y-2">
-                              <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                                <div>
-                                  <label class="text-[11px] text-gray-400 block mb-0.5">Name</label>
-                                  <input type="text" x-model="editForm._mcpDraft.name" class="dash-input w-full" placeholder="linear">
-                                </div>
-                                <div>
-                                  <label class="text-[11px] text-gray-400 block mb-0.5">Command</label>
-                                  <input type="text" x-model="editForm._mcpDraft.command" class="dash-input w-full" placeholder="mcp-server-linear">
-                                  <div x-show="mcpDetectJsRuntime(editForm._mcpDraft.command)"
-                                       class="text-[11px] text-amber-400 mt-1">Default agent image is Python-only. Node-based MCP servers need a custom image — see docs.</div>
-                                </div>
-                              </div>
-                              <div>
-                                <label class="text-[11px] text-gray-400 block mb-0.5">Args (one per row)</label>
-                                <template x-for="(arg, aidx) in editForm._mcpDraft._argRows" :key="aidx">
-                                  <div class="flex items-center gap-1.5 mb-1">
-                                    <input type="text" x-model="arg.value" class="dash-input flex-1" placeholder="--workspace">
-                                    <button type="button" @click="mcpRemoveArgRow(aidx)" class="text-[11px] px-1.5 py-1 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-colors">×</button>
-                                  </div>
-                                </template>
-                                <button type="button" @click="mcpAddArgRow()" class="text-[11px] text-gray-400 hover:text-gray-300 transition-colors">+ Add arg</button>
-                              </div>
-                              <div>
-                                <label class="text-[11px] text-gray-400 block mb-0.5">Env vars</label>
-                                <template x-for="(row, ridx) in editForm._mcpDraft._envRows" :key="ridx">
-                                  <div class="flex items-center gap-1.5 mb-1">
-                                    <input type="text" x-model="row.key" class="dash-input w-32" placeholder="KEY">
-                                    <select x-model="row.type" class="dash-select text-[11px]">
-                                      <option value="cred">Credential</option>
-                                      <option value="plain">Plain text</option>
-                                    </select>
-                                    <template x-if="row.type === 'cred'">
-                                      <select x-model="row.value" class="dash-select flex-1">
-                                        <option value="">— pick credential —</option>
-                                        <template x-for="c in (agentConfigs[selectedAgent]?.resolved_credentials || [])" :key="c">
-                                          <option :value="c" x-text="c"></option>
-                                        </template>
-                                      </select>
-                                    </template>
-                                    <template x-if="row.type === 'plain'">
-                                      <div class="flex-1">
-                                        <input type="text" x-model="row.value" class="dash-input w-full" placeholder="value">
-                                        <div x-show="mcpDetectSecretLike(row.value)" class="text-[11px] text-amber-400 mt-0.5">Looks like an API key. Use Credential mode instead.</div>
-                                      </div>
-                                    </template>
-                                    <button type="button" @click="mcpRemoveEnvRow(ridx)" class="text-[11px] px-1.5 py-1 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-colors">×</button>
-                                  </div>
-                                </template>
-                                <button type="button" @click="mcpAddEnvRow()" class="text-[11px] text-gray-400 hover:text-gray-300 transition-colors">+ Add env var</button>
-                              </div>
-                              <div class="flex items-center justify-end gap-2 pt-1">
-                                <button type="button" @click="mcpCancelDraft()"
-                                        class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">Cancel</button>
-                                <button type="button" @click="mcpCommitDraft()"
-                                        :disabled="!editForm._mcpDraft?.name || !editForm._mcpDraft?.command"
-                                        class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors disabled:opacity-50">Add</button>
-                              </div>
-                            </div>
-                            <button x-show="!editForm._showMcpAddForm && editForm._mcpEditIndex === -1"
-                                    type="button" @click="mcpStartAdd()"
-                                    class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">+ Add MCP server</button>
-                            <!-- Top-level validation banner (errors that don't map to a single row, e.g. duplicate names) -->
-                            <div x-show="editForm._mcpGlobalError" x-cloak
-                                 class="mt-2 p-2 rounded bg-red-900/20 border border-red-800/50 text-[11px] text-red-300"
-                                 x-text="editForm._mcpGlobalError"></div>
-                            <!-- Restart failure banner (post save+restart attempt) -->
-                            <div x-show="editForm._mcpRestartError" x-cloak
-                                 class="mt-3 p-2 rounded bg-red-900/20 border border-red-800/50 text-[11px] text-red-300 flex items-center gap-2">
-                              <span class="flex-1">
-                                Config saved, but agent restart failed:
-                                <span class="font-mono text-red-400" x-text="editForm._mcpRestartError"></span>
-                              </span>
-                              <button type="button" @click="retryMcpRestart(editForm._editingAgentId || selectedAgent)"
-                                      class="text-[11px] px-2 py-1 rounded bg-red-900/40 hover:bg-red-900/60 text-red-200 transition-colors">Retry restart</button>
                             </div>
                           </div>
                           <div class="md:col-span-2">
@@ -5352,8 +5147,207 @@
           </div>
         </div><!-- /skills sub-tab -->
 
-        <!-- Integrations sub-tab (Connected services + Channels + Developer/API) -->
+        <!-- Connectors sub-tab (MCP connectors + Connected services + Channels + Developer/API).
+             Sub-tab ID stays 'integrations' — it appears in URL paths and persisted
+             prefs; only the LABEL changed to "Connectors" (same pattern as fleet→Teams). -->
         <div x-show="systemTab === 'integrations'">
+
+        <!-- MCP connectors — fleet catalog: connect a server once, assign it to all agents or specific ones -->
+        <div class="text-xs text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">MCP connectors<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Connect MCP (Model Context Protocol) tool servers once and enable them for your whole fleet or specific agents. Servers run inside each assigned agent's container; credential values come from the vault via $CRED handles. Changes apply when the affected agents restart.</span></span></div>
+        <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-6">
+          <!-- Post-save restart prompt (explicit — catalog edits never auto-restart) -->
+          <div x-show="connectorRestartPrompt" x-cloak
+               class="mb-3 p-2.5 rounded bg-amber-900/20 border border-amber-800/50 text-xs text-amber-200 flex items-center gap-2 flex-wrap">
+            <span class="flex-1">
+              <span class="font-medium" x-text="'“' + (connectorRestartPrompt?.name || '') + '”'"></span>
+              affects <span class="font-medium" x-text="(connectorRestartPrompt?.affected || []).length"></span>
+              agent<span x-show="(connectorRestartPrompt?.affected || []).length !== 1">s</span>
+              (<span x-text="(connectorRestartPrompt?.affected || []).join(', ')"></span>) — the change applies after restart.
+            </span>
+            <button type="button" @click="restartConnectorAgents(connectorRestartPrompt?.affected || [])"
+                    :disabled="connectorRestarting"
+                    class="text-[11px] px-2.5 py-1 rounded bg-amber-700/60 hover:bg-amber-700 text-amber-50 transition-colors disabled:opacity-50 shrink-0"
+                    x-text="connectorRestarting ? 'Restarting…' : 'Restart now'"></button>
+            <button type="button" @click="connectorRestartPrompt = null" :disabled="connectorRestarting"
+                    class="text-[11px] px-2.5 py-1 rounded border border-amber-800/50 hover:border-amber-700 text-amber-300 transition-colors disabled:opacity-50 shrink-0">Later</button>
+          </div>
+          <!-- Standing pending-restart notice (survives prompt dismissal) -->
+          <div x-show="!connectorRestartPrompt && (connectorsData?.pending_restart || []).length" x-cloak
+               class="mb-3 p-2.5 rounded bg-amber-900/10 border border-amber-800/30 text-xs text-amber-300/90 flex items-center gap-2 flex-wrap">
+            <span class="flex-1">
+              <span class="font-medium" x-text="(connectorsData?.pending_restart || []).length"></span>
+              agent<span x-show="(connectorsData?.pending_restart || []).length !== 1">s</span>
+              running an older connector setup (<span x-text="(connectorsData?.pending_restart || []).join(', ')"></span>).
+            </span>
+            <button type="button" @click="restartConnectorAgents(connectorsData?.pending_restart || [])"
+                    :disabled="connectorRestarting"
+                    class="text-[11px] px-2.5 py-1 rounded bg-amber-700/40 hover:bg-amber-700/70 text-amber-100 transition-colors disabled:opacity-50 shrink-0"
+                    x-text="connectorRestarting ? 'Restarting…' : 'Restart to apply'"></button>
+          </div>
+          <!-- Loading / empty states -->
+          <div x-show="connectorsLoading && !connectorsData" class="text-xs text-gray-500 py-2">Loading connectors…</div>
+          <template x-if="connectorsData && !(connectorsData.connectors || []).length && !connectorDraft">
+            <div class="text-xs text-gray-500 italic mb-3">No connectors yet. Connect an MCP server once and enable it for your whole fleet or specific agents.</div>
+          </template>
+          <!-- Catalog list -->
+          <template x-if="(connectorsData?.connectors || []).length">
+            <div class="space-y-0 mb-2">
+              <template x-for="c in connectorsData.connectors" :key="c.name">
+                <div x-show="!(connectorDraft && !connectorDraft._isNew && connectorDraft.name === c.name)"
+                     class="flex items-center gap-3 text-xs group py-2 px-2 -mx-2 rounded-md hover:bg-gray-800/40 transition-colors border-b border-gray-800/30 last:border-0">
+                  <span class="text-gray-200 font-mono font-medium shrink-0" x-text="c.name"></span>
+                  <span class="text-[11px] px-1.5 py-0.5 rounded font-medium leading-none shrink-0"
+                        :class="(c.agents || []).includes('*') ? 'bg-indigo-900/50 text-indigo-300 border border-indigo-800/50' : 'bg-gray-800 text-gray-400 border border-gray-700'"
+                        :title="(c.agents || []).includes('*') ? 'Assigned to every agent' : (c.agents || []).join(', ') || 'Not assigned to any agent'"
+                        x-text="connectorAssignmentLabel(c)"></span>
+                  <span class="text-gray-500 shrink-0">&rarr;</span>
+                  <span class="text-gray-400 text-[11px] font-mono flex-1 truncate"
+                        x-text="(c.command || '') + (c.args && c.args.length ? ' ' + c.args.join(' ') : '')"></span>
+                  <span x-show="(c.env_keys || []).length"
+                        class="text-[11px] px-1.5 py-0.5 rounded leading-none bg-gray-800 text-gray-500 border border-gray-700 shrink-0"
+                        :title="'Env vars: ' + (c.env_keys || []).join(', ')"
+                        x-text="(c.env_keys || []).length + ' env'"></span>
+                  <button type="button" @click="connectorStartEdit(c)"
+                          class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[11px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-all shrink-0">Edit</button>
+                  <button type="button" @click="deleteConnector(c.name)"
+                          class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[11px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-all shrink-0">Remove</button>
+                </div>
+              </template>
+            </div>
+          </template>
+          <!-- Add / edit form -->
+          <div x-show="connectorDraft" x-cloak x-transition
+               class="bg-gray-800/30 border border-gray-800 rounded-lg p-3 mt-1 mb-2 space-y-2.5">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <div>
+                <label class="text-[11px] text-gray-400 block mb-0.5">Name</label>
+                <input type="text" x-model="connectorDraft.name" :disabled="connectorDraft && !connectorDraft._isNew"
+                       class="dash-input w-full disabled:opacity-60" placeholder="linear">
+                <div x-show="connectorErrors.name" class="text-[11px] text-red-400 mt-1" x-text="connectorErrors.name"></div>
+              </div>
+              <div>
+                <label class="text-[11px] text-gray-400 block mb-0.5">Command</label>
+                <input type="text" x-model="connectorDraft.command" class="dash-input w-full" placeholder="mcp-server-linear">
+                <div x-show="connectorDraft && mcpDetectJsRuntime(connectorDraft.command)"
+                     class="text-[11px] text-amber-400 mt-1">Default agent image is Python-only. Node-based MCP servers need a custom image — see docs.</div>
+                <div x-show="connectorErrors.command" class="text-[11px] text-red-400 mt-1" x-text="connectorErrors.command"></div>
+              </div>
+            </div>
+            <div>
+              <label class="text-[11px] text-gray-400 block mb-0.5">Args (one per row)</label>
+              <template x-for="(arg, aidx) in (connectorDraft?._argRows || [])" :key="aidx">
+                <div class="flex items-center gap-1.5 mb-1">
+                  <input type="text" x-model="arg.value" class="dash-input flex-1" placeholder="--workspace">
+                  <button type="button" @click="connectorRemoveArgRow(aidx)" class="text-[11px] px-1.5 py-1 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-colors">×</button>
+                </div>
+              </template>
+              <button type="button" @click="connectorAddArgRow()" class="text-[11px] text-gray-400 hover:text-gray-300 transition-colors">+ Add arg</button>
+              <div x-show="connectorErrors.args" class="text-[11px] text-red-400 mt-1" x-text="connectorErrors.args"></div>
+            </div>
+            <div>
+              <div class="flex items-center gap-2 mb-0.5">
+                <label class="text-[11px] text-gray-400">Env</label>
+                <button type="button" x-show="connectorDraft && !connectorDraft._isNew" @click="connectorToggleReplaceEnv()"
+                        class="text-[11px] px-2 py-0.5 rounded transition-colors"
+                        :class="connectorDraft?._replaceEnv ? 'bg-indigo-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'"
+                        x-text="connectorDraft?._replaceEnv ? 'Replacing — cancel to keep current' : 'Replace env vars'"></button>
+              </div>
+              <!-- Preserve mode (existing connector, not replacing): keys read-only -->
+              <template x-if="connectorDraft && !connectorDraft._replaceEnv">
+                <div>
+                  <template x-if="(connectorDraft._envKeys || []).length">
+                    <div class="flex flex-wrap gap-1">
+                      <template x-for="k in connectorDraft._envKeys" :key="k">
+                        <span class="inline-flex items-center text-[11px] font-mono px-2 py-0.5 rounded bg-gray-800 text-gray-400 border border-gray-700" x-text="k"></span>
+                      </template>
+                    </div>
+                  </template>
+                  <template x-if="!(connectorDraft._envKeys || []).length">
+                    <div class="text-[11px] text-gray-500 italic">No env vars.</div>
+                  </template>
+                  <div class="text-[11px] text-gray-500 italic mt-1">Values hidden. Toggle "Replace env vars" to set new values — you'll need to supply ALL env vars (existing values are not retrievable).</div>
+                </div>
+              </template>
+              <!-- Replace mode: row editor with Credential | Plain toggle -->
+              <template x-if="connectorDraft && connectorDraft._replaceEnv">
+                <div>
+                  <template x-for="(row, ridx) in connectorDraft._envRows" :key="ridx">
+                    <div class="flex items-center gap-1.5 mb-1">
+                      <input type="text" x-model="row.key" class="dash-input w-32" placeholder="KEY">
+                      <select x-model="row.type" class="dash-select text-[11px]">
+                        <option value="cred">Credential</option>
+                        <option value="plain">Plain text</option>
+                      </select>
+                      <template x-if="row.type === 'cred'">
+                        <select x-model="row.value" class="dash-select flex-1">
+                          <option value="">— pick credential —</option>
+                          <template x-for="cName in (connectorsData?.available_credentials || [])" :key="cName">
+                            <option :value="cName" x-text="cName"></option>
+                          </template>
+                        </select>
+                      </template>
+                      <template x-if="row.type === 'plain'">
+                        <div class="flex-1">
+                          <input type="text" x-model="row.value" class="dash-input w-full" placeholder="value">
+                          <div x-show="mcpDetectSecretLike(row.value)" class="text-[11px] text-amber-400 mt-0.5">Looks like an API key. Use Credential mode instead.</div>
+                        </div>
+                      </template>
+                      <button type="button" @click="connectorRemoveEnvRow(ridx)" class="text-[11px] px-1.5 py-1 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-colors">×</button>
+                    </div>
+                  </template>
+                  <button type="button" @click="connectorAddEnvRow()" class="text-[11px] text-gray-400 hover:text-gray-300 transition-colors">+ Add env var</button>
+                </div>
+              </template>
+              <div x-show="connectorErrors.env" class="text-[11px] text-red-400 mt-1" x-text="connectorErrors.env"></div>
+            </div>
+            <!-- Assignment: all agents or specific -->
+            <div>
+              <label class="text-[11px] text-gray-400 block mb-1">Enabled for</label>
+              <div class="flex items-center gap-2 mb-1.5">
+                <button type="button" @click="connectorDraft._assignMode = 'all'"
+                        class="text-[11px] px-2.5 py-1 rounded transition-colors"
+                        :class="connectorDraft?._assignMode === 'all' ? 'bg-indigo-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'">All agents</button>
+                <button type="button" @click="connectorDraft._assignMode = 'some'"
+                        class="text-[11px] px-2.5 py-1 rounded transition-colors"
+                        :class="connectorDraft?._assignMode === 'some' ? 'bg-indigo-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700'">Specific agents</button>
+              </div>
+              <template x-if="connectorDraft?._assignMode === 'some'">
+                <div class="grid grid-cols-2 sm:grid-cols-3 gap-1">
+                  <!-- _agentIds = running agents ∪ this connector's explicit
+                       assignment, so a stopped-but-assigned agent still gets
+                       a checkbox (saving must not silently strip it). -->
+                  <template x-for="aid in (connectorDraft?._agentIds || [])" :key="aid">
+                    <label class="flex items-center gap-2 text-xs text-gray-300 py-1 px-2 rounded hover:bg-gray-800/50 cursor-pointer">
+                      <input type="checkbox" :checked="connectorDraft._agentSel[aid]"
+                             @change="connectorDraft._agentSel[aid] = $event.target.checked"
+                             class="rounded border-gray-600 bg-gray-800 text-indigo-500 focus:ring-indigo-500 focus:ring-offset-0">
+                      <span class="font-mono" x-text="aid"></span>
+                    </label>
+                  </template>
+                </div>
+              </template>
+              <div x-show="connectorErrors.agents" class="text-[11px] text-red-400 mt-1" x-text="connectorErrors.agents"></div>
+            </div>
+            <!-- Global error + buttons -->
+            <div x-show="connectorGlobalError" x-cloak
+                 class="p-2 rounded bg-red-900/20 border border-red-800/50 text-[11px] text-red-300"
+                 x-text="connectorGlobalError"></div>
+            <div class="flex items-center justify-between gap-2 pt-1">
+              <span class="text-[11px] text-gray-500">Applies after the affected agents restart — you'll be prompted.</span>
+              <div class="flex items-center gap-2">
+                <button type="button" @click="connectorCancelDraft()"
+                        class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">Cancel</button>
+                <button type="button" @click="saveConnector()"
+                        :disabled="connectorSaving || !connectorDraft?.name || !connectorDraft?.command"
+                        class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors disabled:opacity-50"
+                        x-text="connectorSaving ? 'Saving…' : (connectorDraft?._isNew ? 'Connect' : 'Save')"></button>
+              </div>
+            </div>
+          </div>
+          <button x-show="!connectorDraft" type="button" @click="connectorStartAdd()"
+                  :disabled="!connectorsData"
+                  class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">+ Connect MCP server</button>
+        </div>
 
         <!-- Connected services (OAuth) — let agents act on your accounts -->
         <div class="text-xs text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">Connected services<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Let your agents act on your accounts. Connect Google (Drive, Gmail, Calendar) with one-click OAuth — register your own Google Cloud OAuth client once, then connect accounts. Agents resolve the connection by name with transparent token refresh; they never see the tokens.</span></span></div>

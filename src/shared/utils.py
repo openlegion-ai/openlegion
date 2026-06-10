@@ -13,6 +13,39 @@ from typing import Any
 UTC = timezone.utc
 
 
+def atomic_write_text(path: "os.PathLike[str] | str", content: str) -> None:
+    """Write ``content`` to ``path`` atomically (tempfile + ``os.replace``).
+
+    A concurrent reader sees the old or the new complete file, never a
+    torn one. The temp file is unlinked on any failure. This is the
+    canonical home for the pattern — ``_save_permissions``
+    (src/cli/config.py), ``_save_budgets`` (src/host/costs.py),
+    ``CronScheduler._save`` and the dashboard ``_save_settings`` carry
+    older inline copies; migrate them here when next touched.
+    """
+    import tempfile
+    from pathlib import Path
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=str(target.parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass  # already closed by fdopen
+        Path(tmp_path).unlink(missing_ok=True)
+        raise
+    try:
+        os.replace(tmp_path, target)
+    except BaseException:
+        Path(tmp_path).unlink(missing_ok=True)
+        raise
+
+
 def set_llm_max_tokens_env(env: dict[str, str], agent_cfg: dict) -> None:
     """Inject ``LLM_MAX_TOKENS`` into a per-agent container env dict from the
     agent's YAML config.

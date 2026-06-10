@@ -269,6 +269,7 @@ def _proxy_input_too_large(params: dict) -> int | None:
 if TYPE_CHECKING:
     from src.dashboard.events import EventBus
     from src.host.api_keys import ApiKeyManager
+    from src.host.connectors import ConnectorStore
     from src.host.costs import CostTracker
     from src.host.credentials import CredentialVault
     from src.host.cron import CronScheduler
@@ -771,6 +772,7 @@ def create_mesh_app(
     api_key_manager: ApiKeyManager | None = None,
     help_requests_db: str | None = None,
     cfg: dict | None = None,
+    connector_store: "ConnectorStore | None" = None,
 ) -> FastAPI:
     """Create the FastAPI application for the mesh host process."""
     # M19: disable interactive API docs / OpenAPI schema by default to avoid
@@ -1106,7 +1108,8 @@ def create_mesh_app(
 
         Covers: rate-limit buckets, credential vault locks, blackboard
         data, pub/sub subscriptions, lane workers, cron jobs, cost
-        records, trace records, and wallet records.
+        records, trace records, wallet records, and connector
+        assignments.
         """
         # H11: revoke the agent's mesh auth token and reload the in-memory
         # ACL so a deleted agent can no longer authenticate or be permission-
@@ -1150,6 +1153,17 @@ def create_mesh_app(
                 wallet_service.cleanup_agent(agent_id)
             except Exception as e:
                 logger.warning("Wallet cleanup for '%s' failed: %s", agent_id, e)
+        # Strip the id from connector assignments + pending-restart
+        # stamps — otherwise a future agent recreated under the same
+        # name silently inherits this agent's MCP connectors (and
+        # their $CRED-bearing env). Mirrors the dashboard delete path.
+        if connector_store is not None:
+            try:
+                connector_store.remove_agent(agent_id)
+            except Exception as e:
+                logger.warning(
+                    "Connector cleanup for '%s' failed: %s", agent_id, e,
+                )
 
     app.cleanup_agent = _cleanup_agent  # type: ignore[attr-defined]
 

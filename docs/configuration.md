@@ -39,10 +39,6 @@ agents:
       daily_usd: 5.00
       monthly_usd: 100.00
     thinking: medium
-    mcp_servers:
-      - name: filesystem
-        command: mcp-server-filesystem
-        args: ["/data"]
 ```
 
 ### Agent Fields
@@ -60,7 +56,7 @@ agents:
 | `soul` | string | No | Seeds `SOUL.md` on first boot — defines the agent's personality and behavioral guidelines |
 | `initial_instructions` | string | No | Seeds `INSTRUCTIONS.md` on first boot. Distinct from `system_prompt` — this sets the agent's operating instructions file |
 | `thinking` | string | No | Extended thinking/reasoning mode: `off` (default), `low`, `medium`, or `high`. Anthropic models use thinking budgets (5K/10K/25K tokens). OpenAI o-series models use `reasoning_effort`. Ignored for unsupported models |
-| `mcp_servers` | list | No | External MCP tool servers. See [MCP Integration](mcp.md) |
+| | | | MCP tool servers are NOT an agent field — they live in the fleet connector catalog (`config/connectors.json`, Settings → Connectors). See [MCP Integration](mcp.md) |
 | `initial_interface` | string | No | Seeds `INTERFACE.md` on first boot. Defines the agent's public collaboration contract — what inputs it accepts, what outputs it produces, and what topics it subscribes to. Readable by other agents via `get_agent_profile`. |
 
 ### Model Format

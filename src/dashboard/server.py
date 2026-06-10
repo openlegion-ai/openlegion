@@ -49,7 +49,7 @@ from src.dashboard.auth import verify_session_cookie
 from src.shared import limits as _limits
 from src.shared.paths import resolve_under_root
 from src.shared.sqlite_helpers import open_db
-from src.shared.types import CRED_HANDLE_RE, MCPServerConfig
+from src.shared.types import CRED_HANDLE_RE
 from src.shared.utils import (
     dumps_safe,
     friendly_streaming_error,
@@ -167,8 +167,8 @@ _get_builtin_tool_names._cache = None  # type: ignore[attr-defined]
 
 
 def _mask_mcp_servers_for_get(servers: list[dict] | None) -> list[dict]:
-    """Return ``mcp_servers`` with env values stripped, suitable for GET
-    responses. Env values may be plaintext secrets or ``$CRED{name}``
+    """Return MCP server dicts with env values stripped, suitable for
+    GET responses. Env values may be plaintext secrets or ``$CRED{name}``
     handles pointing at one; neither is safe to ship over the API.
 
     Each server entry retains ``name``, ``command``, and ``args``;
@@ -176,9 +176,9 @@ def _mask_mcp_servers_for_get(servers: list[dict] | None) -> list[dict]:
     with ``env_keys`` — a sorted list of the env variable names. The
     omission is deliberate: a naive ``GET → edit → PUT`` round-trip
     would otherwise lose env when the PUT handler interprets a present
-    ``env=null`` as "replace with no env." The PUT contract is "env
-    absent = preserve, env present (dict or {}) = replace wholesale"
-    (see T5 in :func:`_api_put_agent_config`).
+    ``env=null`` as "replace with no env." The connector PUT contract
+    is "env absent = preserve, env present (dict or {}) = replace
+    wholesale" (see ``api_connector_upsert``).
     """
     if not servers:
         return []
@@ -188,47 +188,6 @@ def _mask_mcp_servers_for_get(servers: list[dict] | None) -> list[dict]:
         env = s.get("env") or {}
         masked["env_keys"] = sorted(env.keys()) if env else []
         result.append(masked)
-    return result
-
-
-def _canonicalize_mcp_servers(servers: list | None) -> list[dict]:
-    """Return a stable canonical form of ``mcp_servers`` for diff
-    comparison. Used by the PUT handler to set ``mcp_touched`` only
-    when an effective change occurred — a GET → no-op PUT round-trip
-    must not trigger a container restart.
-
-    Canonicalization:
-
-    * Parse each entry through :class:`MCPServerConfig` to normalize
-      missing-optional fields (e.g. ``args`` → ``[]``, ``env`` →
-      ``None``) and shape coercion (Pydantic v2 returns dicts on
-      ``model_dump``).
-    * Sort the list by ``name.lower()`` so the comparison is
-      independent of input order.
-    * Normalize ``env == {}`` to ``env is None`` so an empty dict and
-      a missing field compare equal.
-
-    If any entry fails Pydantic validation, returns the raw list
-    unchanged — better to over-report a diff (false positive
-    ``mcp_touched``) than to silently mask a malformed legacy entry.
-    The CLI load path (T7) drops malformed entries before they reach
-    this function in normal flow.
-    """
-    if not servers:
-        return []
-    parsed: list[MCPServerConfig] = []
-    for s in servers:
-        try:
-            parsed.append(MCPServerConfig.model_validate(s))
-        except Exception:
-            return list(servers)
-    parsed.sort(key=lambda s: s.name.lower())
-    result: list[dict] = []
-    for s in parsed:
-        d = s.model_dump(exclude_none=False)
-        if d.get("env") == {}:
-            d["env"] = None
-        result.append(d)
     return result
 
 
@@ -708,6 +667,10 @@ def create_dashboard_router(
     # concurrent users in multi-tenant SSO deployments. Auto-instantiated
     # when omitted so existing test setups keep working.
     opened_conversations_store: Any = None,
+    # Fleet MCP connector catalog (System → Connectors). The same
+    # instance must be wired into the runtime backend via
+    # ``set_connector_store`` so catalog edits apply on agent restart.
+    connector_store: Any = None,
 ) -> APIRouter:
     """Create the dashboard FastAPI router."""
     # Lazy-init telemetry sink so callers (mesh CLI, tests) can opt out by
@@ -2319,6 +2282,294 @@ def create_dashboard_router(
         _emit_config_changed("skills")
         return result
 
+    # ── MCP connectors (fleet catalog) ───────────────────────
+    # The connector catalog is the single source of truth for which
+    # agents run which MCP servers. Records persist in
+    # config/connectors.json; the runtime serializes each agent's
+    # assigned set into MCP_SERVERS at container start, so every
+    # catalog change applies on the next restart of the affected
+    # agents (returned as ``affected_agents`` for the UI's
+    # restart-now/later prompt — D7: no automatic mass-restarts).
+
+    def _expand_assignment(agents: list[str]) -> list[str]:
+        """Concrete running agent ids for an ``agents`` field."""
+        from src.shared.types import CONNECTOR_ALL_AGENTS
+        if CONNECTOR_ALL_AGENTS in agents:
+            return sorted(agent_registry.keys())
+        return sorted(a for a in agents if a in agent_registry)
+
+    def _connector_to_api(c: Any) -> dict:
+        """Catalog record → API shape. Env values masked to
+        ``env_keys`` (same contract as the old per-agent surface:
+        a GET→edit→PUT round-trip that omits ``env`` preserves it)."""
+        masked = _mask_mcp_servers_for_get([c.server_dict()])[0]
+        masked["agents"] = list(c.agents)
+        masked["assigned_agents"] = _expand_assignment(c.agents)
+        return masked
+
+    @api_router.get("/api/connectors")
+    async def api_connectors_list() -> dict:
+        """The fleet MCP connector catalog + pending-restart state."""
+        if connector_store is None:
+            raise HTTPException(503, "Connector catalog not available")
+        all_agents = sorted(agent_registry.keys())
+        return {
+            "connectors": [
+                _connector_to_api(c) for c in connector_store.list()
+            ],
+            # The store may retain stamps for agents that no longer
+            # exist; only live agents are actionable here.
+            "pending_restart": [
+                a for a in connector_store.pending_restart()
+                if a in agent_registry
+            ],
+            # Agent-tier vault credential names for the env-row
+            # credential picker (names only, never values).
+            "available_credentials": sorted(
+                credential_vault.list_agent_credential_names()
+            ) if credential_vault else [],
+            "agents": all_agents,
+        }
+
+    @api_router.put("/api/connectors/{name}")
+    async def api_connector_upsert(name: str, request: Request) -> dict:
+        """Create or replace a connector. Body: MCPConnector fields
+        (``name`` taken from the path). ``env`` absent = preserve the
+        persisted env; present (dict/``{}``/``null``) = replace
+        wholesale. Returns the affected agents so the UI can offer the
+        restart-now/later choice."""
+        if connector_store is None:
+            raise HTTPException(503, "Connector catalog not available")
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, "Body must be a JSON object")
+        body_name = body.get("name")
+        if body_name is not None and str(body_name).lower() != name.lower():
+            raise HTTPException(
+                400, "Connector name in body does not match URL path",
+            )
+        from src.shared.types import MCPConnector
+        previous = connector_store.get(name)
+        raw = dict(body)
+        raw["name"] = previous.name if previous is not None else name
+        # Display-side artifacts a GET-replay would carry.
+        raw.pop("env_keys", None)
+        raw.pop("assigned_agents", None)
+        # Absent = preserve (same contract as env): a partial PUT must
+        # not silently wipe the persisted env or assignment.
+        if "env" not in body and previous is not None:
+            raw["env"] = previous.env
+        if "agents" not in body and previous is not None:
+            raw["agents"] = previous.agents
+        try:
+            connector = MCPConnector.model_validate(raw)
+        except ValidationError as ve:
+            # Structured per-field errors for inline UI rendering.
+            # ``ctx``/``input`` stripped — they can contain raw objects
+            # FastAPI's JSON encoder rejects.
+            safe_errors = [
+                {
+                    "loc": [str(p) for p in e.get("loc", ())],
+                    "msg": e.get("msg", ""),
+                    "type": e.get("type", ""),
+                }
+                for e in ve.errors(include_url=False)
+            ]
+            raise HTTPException(
+                400, detail={"field": "connector", "errors": safe_errors},
+            )
+
+        # ── PUT-time $CRED check: existence + per-agent permission ──
+        # Surfaces failures synchronously with an actionable message
+        # instead of at agent start. Checked against LIVE agents only
+        # (both for "*" and explicit assignments — a deleted agent's
+        # leftover id must not block edits forever). Agents that appear
+        # later are covered at start time by the per-connector
+        # degradation in ``_build_mcp_servers_env``: the connector is
+        # dropped for that agent with an error log, never blocking the
+        # agent from booting.
+        check_agents = _expand_assignment(connector.agents)
+        handles: set[str] = set()
+        for arg in connector.args:
+            handles.update(CRED_HANDLE_RE.findall(arg))
+        for env_val in (connector.env or {}).values():
+            handles.update(CRED_HANDLE_RE.findall(env_val))
+        for cred_name in sorted(handles):
+            if (
+                credential_vault is not None
+                and credential_vault.resolve_credential(cred_name) is None
+            ):
+                raise HTTPException(
+                    400,
+                    f"Credential {cred_name!r} does not exist in the vault. "
+                    "Store it via the credentials surface first.",
+                )
+            if permissions is not None:
+                blocked = [
+                    a for a in check_agents
+                    if not permissions.can_access_credential(a, cred_name)
+                ]
+                if blocked:
+                    raise HTTPException(
+                        400,
+                        f"Agent(s) {', '.join(repr(a) for a in blocked)} lack "
+                        f"permission for credential {cred_name!r}. Grant it "
+                        "in their permissions or narrow the assignment.",
+                    )
+
+        # ── no-op detection: a GET→unchanged-PUT must not mark agents
+        # dirty or prompt for a restart. Both sides are validated
+        # MCPConnector instances, so direct field comparison suffices
+        # (env {} and None compare equal — both mean "no env").
+        if previous is not None:
+            same_server = (
+                connector.command == previous.command
+                and connector.args == previous.args
+                and (connector.env or None) == (previous.env or None)
+            )
+            if same_server and set(connector.agents) == set(previous.agents):
+                return {
+                    "connector": _connector_to_api(previous),
+                    "affected_agents": [],
+                    "restart_required": False,
+                }
+
+        # Affected = before ∪ after assignment (an agent REMOVED from a
+        # connector needs a bounce to lose its tools, too).
+        before = _expand_assignment(previous.agents) if previous else []
+        after = _expand_assignment(connector.agents)
+        affected = sorted(set(before) | set(after))
+
+        # Disk write off the event loop (same pattern as the skill
+        # marketplace calls in this file).
+        import asyncio as _asyncio
+        await _asyncio.to_thread(connector_store.upsert, connector)
+        connector_store.mark_dirty(affected)
+        try:
+            blackboard.log_audit(
+                action="edit_connector",
+                target=connector.name,
+                field="connector",
+                before_value=json.dumps(
+                    _redact_mcp_env_for_audit(
+                        [{**previous.server_dict(), "agents": previous.agents}],
+                    ) if previous else None,
+                ),
+                after_value=json.dumps(_redact_mcp_env_for_audit(
+                    [{**connector.server_dict(), "agents": connector.agents}],
+                )),
+                actor="dashboard",
+                provenance="user",
+            )
+        except Exception as e:
+            logger.warning("Audit log failed for connector %s: %s", name, e)
+        _emit_config_changed("connectors", name=connector.name)
+        return {
+            "connector": _connector_to_api(connector),
+            "affected_agents": affected,
+            "restart_required": bool(affected),
+        }
+
+    @api_router.delete("/api/connectors/{name}")
+    async def api_connector_delete(name: str) -> dict:
+        """Remove a connector. Affected agents keep the server until
+        their next restart (returned for the restart prompt)."""
+        if connector_store is None:
+            raise HTTPException(503, "Connector catalog not available")
+        previous = connector_store.get(name)
+        if previous is None:
+            raise HTTPException(404, "Connector not found")
+        affected = _expand_assignment(previous.agents)
+        import asyncio as _asyncio
+        await _asyncio.to_thread(connector_store.remove, name)
+        connector_store.mark_dirty(affected)
+        try:
+            blackboard.log_audit(
+                action="delete_connector",
+                target=previous.name,
+                field="connector",
+                before_value=json.dumps(_redact_mcp_env_for_audit(
+                    [{**previous.server_dict(), "agents": previous.agents}],
+                )),
+                after_value="",
+                actor="dashboard",
+                provenance="user",
+            )
+        except Exception as e:
+            logger.warning("Audit log failed for connector %s: %s", name, e)
+        _emit_config_changed("connectors", name=previous.name)
+        return {
+            "removed": True,
+            "affected_agents": affected,
+            "restart_required": bool(affected),
+        }
+
+    # Agents with a batch-initiated restart currently in flight. Guards
+    # against overlapping batches interleaving stop/start on the same
+    # container (the second batch's stop can kill the container the
+    # first batch's start just created).
+    _restart_batch_inflight: set[str] = set()
+
+    async def _run_restart_batch(agents: list[str]) -> None:
+        """Background batch driver. Sequential by design (no restart
+        herd); each agent reuses the single-agent restart handler so
+        the SPA gets the same event choreography (``agent_restarting``
+        → ``agent_restarted`` / ``restart_failed``). Ends with a
+        ``config_changed`` so the Connectors panel re-derives
+        pending-restart state."""
+        try:
+            for agent_id in agents:
+                try:
+                    await api_restart_agent(agent_id)
+                except Exception as e:
+                    detail = e.detail if isinstance(e, HTTPException) else e
+                    logger.error(
+                        "Batch restart of %r failed: %s", agent_id, detail,
+                    )
+                finally:
+                    _restart_batch_inflight.discard(agent_id)
+        finally:
+            # Belt-and-braces: never leave ids stuck in the in-flight set.
+            _restart_batch_inflight.difference_update(agents)
+            _emit_config_changed("connectors")
+
+    @api_router.post("/api/agents/restart-batch")
+    async def api_restart_agents_batch(request: Request) -> dict:
+        """Kick off restarts for a set of agents (the Connectors page's
+        "restart now" action) and return immediately — a fleet-wide
+        batch can take minutes per agent, far past any proxy/browser
+        timeout, so completion is reported through the per-agent
+        restart events (which the SPA already renders) rather than the
+        response. Unknown and already-restarting agents are skipped and
+        reported."""
+        body = await request.json()
+        agents = body.get("agents")
+        if not isinstance(agents, list) or not agents:
+            raise HTTPException(400, "agents must be a non-empty list")
+        for agent_id in agents:
+            if not isinstance(agent_id, str):
+                raise HTTPException(400, "agents must be a list of agent ids")
+        started: list[str] = []
+        skipped: dict[str, str] = {}
+        seen: set[str] = set()
+        for agent_id in agents:
+            if agent_id in seen:
+                continue
+            seen.add(agent_id)
+            if agent_id not in agent_registry:
+                skipped[agent_id] = "unknown agent"
+            elif agent_id in _restart_batch_inflight:
+                skipped[agent_id] = "restart already in progress"
+            else:
+                started.append(agent_id)
+        _restart_batch_inflight.update(started)
+        if started:
+            import asyncio as _asyncio
+            _asyncio.get_running_loop().create_task(
+                _run_restart_batch(started),
+            )
+        return {"started": started, "skipped": skipped}
+
     @api_router.post("/api/agents")
     async def api_add_agent(request: Request) -> dict:
         """Add a new agent: create config, start container, register."""
@@ -2516,6 +2767,19 @@ def create_dashboard_router(
         if lane_manager is not None:
             lane_manager.remove_lane(agent_id)
 
+        # Strip the id from connector assignments + pending-restart
+        # stamps — otherwise a future agent recreated under the same
+        # name silently inherits this agent's MCP connectors (and their
+        # $CRED-bearing env).
+        if connector_store is not None:
+            try:
+                import asyncio as _asyncio
+                await _asyncio.to_thread(connector_store.remove_agent, agent_id)
+            except Exception as e:
+                logger.warning(
+                    "Connector cleanup for '%s' failed: %s", agent_id, e,
+                )
+
         # Clean up per-agent data: blackboard, costs, traces, wallet
         try:
             blackboard.cleanup_agent_data(agent_id)
@@ -2661,16 +2925,6 @@ def create_dashboard_router(
                 agent_cfg.get("llm_timeout_seconds")
                 or _limits.resolve("llm_timeout_seconds")
             ),
-            # MCP server entries are masked: env values (which may be
-            # plaintext secrets or ``$CRED{name}`` handles pointing at
-            # one) are NEVER returned. The UI binds to ``env_keys`` to
-            # render the list of variable names. The ``env`` field is
-            # omitted from each entry so a naive GET→PUT round-trip
-            # cannot accidentally clear env (PUT semantics in T5:
-            # ``env`` absent = preserve; present = replace wholesale).
-            "mcp_servers": _mask_mcp_servers_for_get(
-                agent_cfg.get("mcp_servers"),
-            ),
             "allowed_credentials": allowed_creds,
             "available_credentials": sorted(agent_cred_names),
             "system_credentials": system_cred_names,
@@ -2778,7 +3032,6 @@ def create_dashboard_router(
         pending_writes: list[tuple[str, object]] = []
         budget_apply: dict[str, float] | None = None
         runtime_payload: dict[str, object] = {}
-        mcp_touched = False
 
         if "model" in body:
             new_model = body["model"]
@@ -2914,152 +3167,13 @@ def create_dashboard_router(
             pending_writes.append(("llm_timeout_seconds", lts))
             runtime_payload["llm_timeout_seconds"] = lts
 
-        if "mcp_servers" in body:
-            mcp_val = body["mcp_servers"]
-            if not isinstance(mcp_val, list):
-                raise HTTPException(status_code=400, detail="mcp_servers must be a list")
-
-            # ── env preserve-or-replace, per-server ───────────────────
-            # If a server dict OMITS the ``env`` key in the request body,
-            # the persisted env from the current server-of-same-name is
-            # preserved. If ``env`` is present (as a dict, ``{}``, or
-            # ``None``), it replaces wholesale. This matches the GET
-            # contract (env is masked / omitted from responses) so a
-            # naive GET → PUT round-trip preserves env rather than
-            # accidentally clearing it.
-            current_servers = agent_cfg.get("mcp_servers") or []
-            current_env_by_name: dict[str, object] = {}
-            for cs in current_servers:
-                if isinstance(cs, dict) and isinstance(cs.get("name"), str):
-                    current_env_by_name[cs["name"]] = cs.get("env")
-
-            effective_raw: list[dict] = []
-            for raw in mcp_val:
-                if not isinstance(raw, dict):
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Each MCP server must be a JSON object",
-                    )
-                s = dict(raw)
-                # Strip ``env_keys`` if the client replayed a GET response
-                # verbatim — GET adds it as the masked stand-in for ``env``
-                # (see ``_mask_mcp_servers_for_get``). MCPServerConfig has
-                # ``extra="forbid"`` so leaving it in would reject the PUT.
-                # The field is purely a display-side artifact; the source
-                # of truth for env keys is the persisted ``env`` dict.
-                s.pop("env_keys", None)
-                if "env" not in raw:
-                    # Preserve from current persisted entry of same name.
-                    s["env"] = current_env_by_name.get(raw.get("name"))
-                effective_raw.append(s)
-
-            # ── Pydantic validation (replaces hand-rolled checks) ─────
-            try:
-                validated = [
-                    MCPServerConfig.model_validate(s) for s in effective_raw
-                ]
-            except ValidationError as ve:
-                # Surface the structured Pydantic error so the dashboard
-                # can map it back to the offending field for inline UI.
-                # Strip ``ctx`` and ``input`` — they can contain raw
-                # exception objects that FastAPI's JSON encoder rejects.
-                safe_errors = [
-                    {
-                        "loc": [str(p) for p in e.get("loc", ())],
-                        "msg": e.get("msg", ""),
-                        "type": e.get("type", ""),
-                    }
-                    for e in ve.errors(include_url=False)
-                ]
-                raise HTTPException(
-                    status_code=400,
-                    detail={"field": "mcp_servers", "errors": safe_errors},
-                )
-            # Case-insensitive duplicate-name rejection (mirrors the
-            # AgentConfig field validator added in T2).
-            names_lower = [v.name.lower() for v in validated]
-            if len(set(names_lower)) != len(names_lower):
-                raise HTTPException(
-                    status_code=400,
-                    detail="Duplicate MCP server names (case-insensitive) are not allowed",
-                )
-
-            # ── PUT-time $CRED check: permission + existence ──────────
-            # Reject the PUT with a clear error if any $CRED reference
-            # in env values or args strings (a) the agent isn't allowed
-            # to use, or (b) doesn't exist in the vault. Mirrors the
-            # runtime-time check in :func:`src.host.credentials.resolve_cred_handles`
-            # but surfaces failures synchronously rather than at agent
-            # start — better UX, lets the operator fix the credentials
-            # surface before saving the config.
-            def _check_cred_refs(text: str, where: str) -> None:
-                for cred_name in set(CRED_HANDLE_RE.findall(text or "")):
-                    if permissions is not None and not permissions.can_access_credential(
-                        agent_id, cred_name,
-                    ):
-                        raise HTTPException(
-                            status_code=400,
-                            detail=(
-                                f"Agent {agent_id!r} does not have permission "
-                                f"to access credential {cred_name!r} "
-                                f"(referenced in {where})."
-                            ),
-                        )
-                    if (
-                        credential_vault is not None
-                        and credential_vault.resolve_credential(cred_name) is None
-                    ):
-                        raise HTTPException(
-                            status_code=400,
-                            detail=(
-                                f"Credential {cred_name!r} referenced in "
-                                f"{where} does not exist in the vault. "
-                                f"Store it via the credentials surface first."
-                            ),
-                        )
-
-            for srv_idx, srv in enumerate(validated):
-                for arg_idx, arg in enumerate(srv.args):
-                    _check_cred_refs(arg, f"mcp_servers[{srv_idx}].args[{arg_idx}]")
-                for env_key, env_val in (srv.env or {}).items():
-                    _check_cred_refs(
-                        env_val, f"mcp_servers[{srv_idx}].env[{env_key!r}]",
-                    )
-
-            # ── mcp_touched only on real diff ────────────────────────
-            # Convert validated MCPServerConfig objects back to dicts
-            # for storage. Compare canonicalized new vs canonicalized
-            # current — a GET → unchanged PUT must NOT trigger a
-            # container restart (previously the flag fired any time
-            # ``mcp_servers`` appeared in the body, regardless of value).
-            effective_dicts = [
-                v.model_dump(exclude_none=False) for v in validated
-            ]
-            if (
-                _canonicalize_mcp_servers(effective_dicts)
-                != _canonicalize_mcp_servers(current_servers)
-            ):
-                pending_writes.append((
-                    "mcp_servers", effective_dicts if effective_dicts else None,
-                ))
-                mcp_touched = True
-
         # Phase 2: apply writes now that every field validated.
         updated: list[str] = []
         def _audit(field: str, old_value: object, new_value: object) -> None:
             """Log a dashboard-initiated edit. Never raises — a broken audit
             sink must not block the caller's config change, but silent
             failure is worth a warning so it doesn't rot unnoticed.
-
-            ``mcp_servers`` env VALUES are redacted before logging — they
-            may be plaintext secrets or ``$CRED{name}`` handles, and the
-            audit table is not a safe place for either. Env KEYS are
-            preserved as ``env_keys`` so a reviewer can still see which
-            env vars changed.
             """
-            if field == "mcp_servers":
-                old_value = _redact_mcp_env_for_audit(old_value)
-                new_value = _redact_mcp_env_for_audit(new_value)
             try:
                 blackboard.log_audit(
                     action="edit_agent",
@@ -3095,9 +3209,8 @@ def create_dashboard_router(
             updated.append("budget")
             _audit("budget", old_budget, budget_apply)
 
-        # Phase 3: hot-reload runtime state. mcp_servers needs a container
-        # restart regardless of hot-reload result.
-        restart_required = mcp_touched
+        # Phase 3: hot-reload runtime state.
+        restart_required = False
         if runtime_payload:
             hot_reloaded = await _hot_reload_runtime_config(agent_id, runtime_payload)
             if not hot_reloaded:
@@ -3191,7 +3304,6 @@ def create_dashboard_router(
                     role=agent_cfg.get("role", "assistant"),
                     tools_dir=tools_dir,
                     model=agent_cfg.get("model", default_model),
-                    mcp_servers=agent_cfg.get("mcp_servers") or None,
                     thinking=agent_cfg.get("thinking", ""),
                     env_overrides=restart_env,
                 ),
@@ -6673,7 +6785,6 @@ def create_dashboard_router(
                         role=acfg.get("role", "assistant"),
                         tools_dir=sd,
                         model=acfg.get("model", default_model),
-                        mcp_servers=acfg.get("mcp_servers") or None,
                         thinking=acfg.get("thinking", ""),
                         env_overrides=re,
                     ),

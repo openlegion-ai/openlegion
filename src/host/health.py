@@ -481,7 +481,6 @@ class HealthMonitor:
             "role": agent_cfg.get("role", ""),
             "tools_dir": os.path.abspath(_td) if _td else "",
             "model": agent_cfg.get("model", default_model),
-            "mcp_servers": agent_cfg.get("mcp_servers") or None,
             "thinking": agent_cfg.get("thinking", ""),
         }
 
@@ -600,7 +599,6 @@ class HealthMonitor:
                         role=info.get("role", ""),
                         tools_dir=info.get("tools_dir", ""),
                         model=info.get("model", ""),
-                        mcp_servers=info.get("mcp_servers"),
                         thinking=info.get("thinking", ""),
                         env_overrides=restart_env,
                     ),

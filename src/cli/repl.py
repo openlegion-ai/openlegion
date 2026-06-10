@@ -458,7 +458,6 @@ class REPLSession:
         agent_cfg_data = _load_config().get("agents", {}).get(new_name, {})
         _td = agent_cfg_data.get("tools_dir", "")
         tools_dir = os.path.abspath(_td) if _td else ""
-        add_mcp_servers = agent_cfg_data.get("mcp_servers") or None
         add_thinking = agent_cfg_data.get("thinking", "")
         # Build per-agent env overrides (no shared extra_env mutation)
         agent_env: dict[str, str] = {}
@@ -475,7 +474,6 @@ class REPLSession:
             role=new_desc,
             tools_dir=tools_dir,
             model=agent_cfg_data.get("model", model),
-            mcp_servers=add_mcp_servers,
             thinking=add_thinking,
             env_overrides=agent_env,
         )
@@ -1192,7 +1190,6 @@ class REPLSession:
         budget_cfg = agent_cfg.get("budget", {})
         daily = budget_cfg.get("daily_usd") if budget_cfg else None
         thinking = agent_cfg.get("thinking", "off") or "off"
-        mcp_servers = agent_cfg.get("mcp_servers") or []
 
         click.echo(f"\n  {click.style(name, bold=True)}")
         click.echo(f"  Model:       {model}")
@@ -1200,9 +1197,14 @@ class REPLSession:
         if daily is not None:
             click.echo(f"  Budget:      ${daily:.2f}/day")
         click.echo(f"  Thinking:    {thinking}")
-        if mcp_servers:
-            mcp_names = ", ".join(s.get("name", "?") for s in mcp_servers)
-            click.echo(f"  MCP:         {len(mcp_servers)} server{'s' if len(mcp_servers) != 1 else ''} ({mcp_names})")
+        # MCP connectors come from the fleet catalog (dashboard-managed).
+        connector_store = getattr(self.ctx, "connector_store", None)
+        if connector_store is not None:
+            assigned = connector_store.stdio_for_agent(name)
+            if assigned:
+                names = ", ".join(s.get("name", "?") for s in assigned)
+                plural = "s" if len(assigned) != 1 else ""
+                click.echo(f"  Connectors:  {len(assigned)} MCP server{plural} ({names})")
 
         # Fetch workspace file info from the agent
         try:
@@ -1227,8 +1229,8 @@ class REPLSession:
         """Interactive config editor with workspace file editing.
 
         When called with no arg, shows the expanded config picker (model,
-        description, budget, thinking, MCP servers, files). When called
-        with a filename, opens it directly in $EDITOR.
+        description, budget, thinking, files). When called with a
+        filename, opens it directly in $EDITOR.
         """
         name = self.current
         if name is None:
@@ -1246,7 +1248,7 @@ class REPLSession:
         # Extended config picker
         click.echo(f"\n  {name}\n  What to change?\n")
         options = [
-            "config    (model, description, budget, thinking, MCP)",
+            "config    (model, description, budget, thinking)",
             "files     (SOUL.md, INSTRUCTIONS.md, USER.md, HEARTBEAT.md)",
         ]
         for i, opt in enumerate(options, 1):
@@ -1357,7 +1359,7 @@ class REPLSession:
                 )
             click.echo("Applied.")
         else:
-            # Model, description, thinking, MCP servers — restart the container.
+            # Model, description, thinking — restart the container.
             self._restart_agent(name)
 
     # ── /edit (backward compat alias) ────────────────────────
@@ -1407,7 +1409,6 @@ class REPLSession:
         _td = agent_cfg.get("tools_dir", "")
         tools_dir = os.path.abspath(_td) if _td else ""
         agent_model = agent_cfg.get("model", default_model)
-        agent_mcp_servers = agent_cfg.get("mcp_servers") or None
         agent_thinking = agent_cfg.get("thinking", "")
 
         # Preserve operator's ALLOWED_TOOLS on restart
@@ -1426,7 +1427,6 @@ class REPLSession:
             role=agent_cfg.get("role", ""),
             tools_dir=tools_dir,
             model=agent_model,
-            mcp_servers=agent_mcp_servers,
             thinking=agent_thinking,
             env_overrides=restart_env,
         )
@@ -1494,6 +1494,16 @@ class REPLSession:
                 click.echo(f"  Removed {removed} cron job(s).")
         if self.ctx.lane_manager:
             self.ctx.lane_manager.remove_lane(name)
+
+        # Strip the id from connector assignments + pending-restart
+        # stamps — otherwise a future agent recreated under the same
+        # name silently inherits this agent's MCP connectors (and
+        # their $CRED-bearing env). Mirrors the dashboard delete path.
+        if getattr(self.ctx, "connector_store", None) is not None:
+            try:
+                self.ctx.connector_store.remove_agent(name)
+            except Exception as e:
+                click.echo(f"  Warning: connector cleanup failed: {e}")
 
         # Remove from config, permissions, and any project membership
         from src.cli.config import _remove_agent

@@ -382,6 +382,12 @@ class RuntimeContext:
             vault=self.credential_vault,
             permissions=self.permissions,
         )
+        # Fleet MCP connector catalog — the single source of truth for
+        # which agents run which MCP servers. The runtime reads it at
+        # every agent (re)start; the dashboard Connectors page manages it.
+        from src.host.connectors import ConnectorStore
+        self.connector_store = ConnectorStore()
+        self.runtime.set_connector_store(self.connector_store)
         self.router = MessageRouter(
             self.permissions, self.agent_urls,
             trace_store=self.trace_store,
@@ -542,7 +548,6 @@ class RuntimeContext:
             _td = agent_cfg.get("tools_dir", "")
             tools_dir = os.path.abspath(_td) if _td else ""
             agent_model = agent_cfg.get("model", default_model)
-            agent_mcp_servers = agent_cfg.get("mcp_servers") or None
             agent_thinking = agent_cfg.get("thinking", "")
 
             # Build per-agent env overrides (no shared extra_env mutation)
@@ -624,7 +629,6 @@ class RuntimeContext:
                     role=agent_cfg["role"],
                     tools_dir=tools_dir,
                     model=agent_model,
-                    mcp_servers=agent_mcp_servers,
                     thinking=agent_thinking,
                     env_overrides=agent_env,
                 )
@@ -644,11 +648,13 @@ class RuntimeContext:
                         project_root=str(PROJECT_ROOT),
                     )
                     self.runtime.extra_env = saved_extra_env
-                    # Re-plumb the credential resolver into the fresh backend.
+                    # Re-plumb the credential resolver + connector catalog
+                    # into the fresh backend.
                     self.runtime.set_credential_resolver(
                         vault=self.credential_vault,
                         permissions=self.permissions,
                     )
+                    self.runtime.set_connector_store(self.connector_store)
                     self.transport = HttpTransport()
                     _ensure_docker_image()
                     url = self.runtime.start_agent(
@@ -656,7 +662,6 @@ class RuntimeContext:
                         role=agent_cfg["role"],
                         tools_dir=tools_dir,
                         model=agent_model,
-                        mcp_servers=agent_mcp_servers,
                         thinking=agent_thinking,
                         env_overrides=agent_env,
                     )
@@ -1159,6 +1164,7 @@ class RuntimeContext:
             wallet_service_ref=wallet_ref,
             api_key_manager=self._api_key_manager,
             cfg=self.cfg,
+            connector_store=self.connector_store,
         )
         app.include_router(webhook_manager.create_router())
         self.health_monitor._cleanup_agent = app.cleanup_agent  # type: ignore[attr-defined]
@@ -1244,6 +1250,7 @@ class RuntimeContext:
             help_requests_store=getattr(app, "help_requests_store", None),
             summaries_store=getattr(app, "summaries_store", None),
             notification_store=self._notification_store,
+            connector_store=self.connector_store,
         )
         app.include_router(dashboard_router)
         app.include_router(create_spa_catchall_router())  # Must be last — SPA deep linking

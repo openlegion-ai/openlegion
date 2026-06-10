@@ -28,6 +28,7 @@ from src.shared.types import CRED_HANDLE_RE
 from src.shared.utils import setup_logging
 
 if TYPE_CHECKING:
+    from src.host.connectors import ConnectorStore
     from src.host.credentials import CredentialVault
     from src.host.permissions import PermissionMatrix
 
@@ -60,15 +61,18 @@ def _mcp_servers_contain_cred_handles(mcp_servers: list[dict]) -> bool:
 class RuntimeBackend(abc.ABC):
     """Abstract backend for starting, stopping, and monitoring agents."""
 
-    # Class-level defaults for the mesh credential resolver. Wired by
-    # ``RuntimeContext`` via :meth:`set_credential_resolver` once the
-    # vault and permission matrix exist. Class-level placement means
-    # tests that bypass ``__init__`` via ``.__new__()`` still get safe
-    # ``None`` defaults — MCP configs with ``$CRED{...}`` handles will
-    # fail loudly at ``start_agent`` rather than silently shipping
-    # literal handles to subprocesses.
+    # Class-level defaults for the mesh credential resolver and the
+    # connector catalog. Wired post-construction via
+    # :meth:`set_credential_resolver` / :meth:`set_connector_store`
+    # once the vault, permission matrix, and catalog exist. Class-level
+    # placement means tests that bypass ``__init__`` via ``.__new__()``
+    # still get safe ``None`` defaults — MCP configs with ``$CRED{...}``
+    # handles will fail loudly at ``start_agent`` rather than silently
+    # shipping literal handles to subprocesses, and an unwired catalog
+    # simply means no MCP servers.
     _vault: CredentialVault | None = None
     _permissions: PermissionMatrix | None = None
+    _connectors: "ConnectorStore | None" = None
 
     def __init__(self, mesh_host_port: int = 8420, project_root: str | None = None):
         self.mesh_host_port = mesh_host_port
@@ -99,6 +103,31 @@ class RuntimeBackend(abc.ABC):
         self._vault = vault
         self._permissions = permissions
 
+    def set_connector_store(self, store: "ConnectorStore | None") -> None:
+        """Wire the fleet MCP connector catalog. The catalog is the
+        single source of truth for which agents run which MCP servers;
+        until wired, agents start with no MCP servers."""
+        self._connectors = store
+
+    def _mcp_snapshot_for(self, agent_id: str) -> tuple[list[dict], int]:
+        """``MCP_SERVERS``-shaped dicts for every connector assigned to
+        this agent, plus the catalog generation the snapshot was taken
+        at (fed back via ``record_agent_start`` after a successful
+        start so pending-restart derivation is race-free). A store read
+        error degrades to no servers — a corrupt catalog must never
+        block an agent from starting. Connector edits apply on the next
+        (re)start; ``MCP_SERVERS`` is startup-only by design."""
+        if self._connectors is None:
+            return [], 0
+        try:
+            return self._connectors.snapshot_for_agent(agent_id)
+        except Exception:
+            logger.exception(
+                "Connector catalog unreadable; starting %r without MCP "
+                "servers", agent_id,
+            )
+            return [], 0
+
     def _build_mcp_servers_env(
         self,
         mcp_servers: list[dict] | None,
@@ -113,13 +142,19 @@ class RuntimeBackend(abc.ABC):
         rejected at config validation time by
         :class:`src.shared.types.MCPServerConfig`.
 
-        Raises ``ValueError`` if the config references credential
-        handles but the resolver has not been wired
-        (vault/permissions are ``None``), or if any referenced
-        credential is missing from the vault or denied by the agent's
-        ``allowed_credentials`` policy. Callers (``start_agent``)
-        propagate this so the failure surfaces through the existing
-        agent-restart error path.
+        Per-connector degradation: a server whose ``$CRED{...}``
+        reference is missing from the vault or denied by THIS agent's
+        ``allowed_credentials`` policy is DROPPED (error logged) and
+        the remaining servers still ship. Fleet connectors mean a
+        single bad grant must not brick an agent that never asked for
+        that server — an agent created after a ``"*"``-assigned
+        connector was saved would otherwise be dead on arrival under
+        the default deny-all credential ACL.
+
+        Still raises ``ValueError`` when handles are present but the
+        resolver was never wired (vault/permissions are ``None``) —
+        that is a deploy misconfiguration that should fail loudly, not
+        a per-agent policy gap.
         """
         if not mcp_servers:
             return json.dumps(mcp_servers or [])
@@ -143,26 +178,34 @@ class RuntimeBackend(abc.ABC):
         resolved_servers: list[dict] = []
         for s in mcp_servers:
             s_copy = dict(s)
-            args = s.get("args") or []
-            if args:
-                s_copy["args"] = [
-                    resolve_cred_handles(
-                        a, vault=self._vault, permissions=self._permissions,
-                        agent_id=agent_id,
-                    )[0]
-                    if isinstance(a, str) else a
-                    for a in args
-                ]
-            env = s.get("env") or {}
-            if env:
-                s_copy["env"] = {
-                    k: resolve_cred_handles(
-                        v, vault=self._vault, permissions=self._permissions,
-                        agent_id=agent_id,
-                    )[0]
-                    if isinstance(v, str) else v
-                    for k, v in env.items()
-                }
+            try:
+                args = s.get("args") or []
+                if args:
+                    s_copy["args"] = [
+                        resolve_cred_handles(
+                            a, vault=self._vault, permissions=self._permissions,
+                            agent_id=agent_id,
+                        )[0]
+                        if isinstance(a, str) else a
+                        for a in args
+                    ]
+                env = s.get("env") or {}
+                if env:
+                    s_copy["env"] = {
+                        k: resolve_cred_handles(
+                            v, vault=self._vault, permissions=self._permissions,
+                            agent_id=agent_id,
+                        )[0]
+                        if isinstance(v, str) else v
+                        for k, v in env.items()
+                    }
+            except ValueError as e:
+                logger.error(
+                    "Dropping MCP connector %r for agent %r — credential "
+                    "resolution failed: %s",
+                    s.get("name", "<?>"), agent_id, e,
+                )
+                continue
             resolved_servers.append(s_copy)
 
         return json.dumps(resolved_servers)
@@ -175,15 +218,16 @@ class RuntimeBackend(abc.ABC):
         tools_dir: str,
         system_prompt: str = "",
         model: str = "",
-        mcp_servers: list[dict] | None = None,
         thinking: str = "",
         env_overrides: dict[str, str] | None = None,
     ) -> str:
         """Start an agent. Returns a URL or identifier for reaching it.
 
-        ``env_overrides`` are per-agent environment variables that are merged
-        on top of the shared ``extra_env`` dict for this call only, without
-        mutating ``extra_env``.
+        MCP servers come from the wired connector catalog
+        (:meth:`set_connector_store` → :meth:`_mcp_snapshot_for`), not
+        from the caller. ``env_overrides`` are per-agent environment
+        variables that are merged on top of the shared ``extra_env``
+        dict for this call only, without mutating ``extra_env``.
         """
 
     @abc.abstractmethod
@@ -209,7 +253,6 @@ class RuntimeBackend(abc.ABC):
         system_prompt: str = "",
         model: str = "",
         ttl: int = 3600,
-        mcp_servers: list[dict] | None = None,
         thinking: str = "",
         env_overrides: dict[str, str] | None = None,
     ) -> str:
@@ -217,7 +260,6 @@ class RuntimeBackend(abc.ABC):
         url = self.start_agent(
             agent_id=agent_id, role=role, tools_dir="",
             system_prompt=system_prompt, model=model,
-            mcp_servers=mcp_servers,
             thinking=thinking,
             env_overrides=env_overrides,
         )
@@ -351,7 +393,6 @@ class DockerBackend(RuntimeBackend):
         tools_dir: str,
         system_prompt: str = "",
         model: str = "",
-        mcp_servers: list[dict] | None = None,
         thinking: str = "",
         env_overrides: dict[str, str] | None = None,
     ) -> str:
@@ -381,7 +422,6 @@ class DockerBackend(RuntimeBackend):
                 auth_token=auth_token,
                 system_prompt=system_prompt,
                 model=model,
-                mcp_servers=mcp_servers,
                 thinking=thinking,
                 env_overrides=env_overrides,
             )
@@ -399,7 +439,6 @@ class DockerBackend(RuntimeBackend):
         auth_token: str,
         system_prompt: str,
         model: str,
-        mcp_servers: list[dict] | None,
         thinking: str,
         env_overrides: dict[str, str] | None,
     ) -> str:
@@ -420,6 +459,7 @@ class DockerBackend(RuntimeBackend):
             environment["INITIAL_INSTRUCTIONS"] = system_prompt
         if model:
             environment["LLM_MODEL"] = model
+        mcp_servers, mcp_generation = self._mcp_snapshot_for(agent_id)
         if mcp_servers:
             environment["MCP_SERVERS"] = self._build_mcp_servers_env(
                 mcp_servers, agent_id=agent_id,
@@ -545,10 +585,14 @@ class DockerBackend(RuntimeBackend):
             "role": role,
             "tools_dir": tools_dir,
             "model": model,
-            "mcp_servers": mcp_servers,
             "thinking": thinking,
         }
         self.agents[agent_id] = agent_info
+        # Stamp the catalog generation this container's env was built
+        # from; pending-restart derives from it (race-free: an edit
+        # landing during the container build has a higher generation).
+        if self._connectors is not None:
+            self._connectors.record_agent_start(agent_id, mcp_generation)
         logger.info(f"Started agent '{agent_id}' (role={role}) at {url}")
         return url
 
@@ -1016,7 +1060,12 @@ class SandboxBackend(RuntimeBackend):
         thinking: str = "",
         env_overrides: dict[str, str] | None = None,
     ) -> Path:
-        """Create the per-agent host directory that will sync into the sandbox."""
+        """Create the per-agent host directory that will sync into the sandbox.
+
+        ``mcp_servers`` is internal plumbing from ``start_agent``,
+        which snapshots the connector catalog (servers + generation)
+        once so the post-start ``record_agent_start`` stamp matches the
+        env actually baked here."""
         ws = self._workspace_root / agent_id
         ws.mkdir(parents=True, exist_ok=True)
         (ws / "data" / "workspace").mkdir(parents=True, exist_ok=True)
@@ -1136,11 +1185,11 @@ class SandboxBackend(RuntimeBackend):
         tools_dir: str,
         system_prompt: str = "",
         model: str = "",
-        mcp_servers: list[dict] | None = None,
         thinking: str = "",
         env_overrides: dict[str, str] | None = None,
     ) -> str:
         sandbox_name = f"openlegion_{_docker_safe_name(agent_id)}"
+        mcp_servers, mcp_generation = self._mcp_snapshot_for(agent_id)
         ws = self._prepare_workspace(
             agent_id, role, tools_dir, system_prompt, model,
             mcp_servers=mcp_servers, thinking=thinking,
@@ -1189,9 +1238,12 @@ class SandboxBackend(RuntimeBackend):
             "role": role,
             "tools_dir": tools_dir,
             "model": model,
-            "mcp_servers": mcp_servers,
             "thinking": thinking,
         }
+        # Stamp the catalog generation this sandbox's env was built
+        # from; pending-restart derives from it (race-free).
+        if self._connectors is not None:
+            self._connectors.record_agent_start(agent_id, mcp_generation)
         logger.info(f"Started agent '{agent_id}' in sandbox '{sandbox_name}'")
         return url
 

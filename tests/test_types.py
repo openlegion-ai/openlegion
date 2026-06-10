@@ -326,50 +326,17 @@ def test_mcp_server_rejects_extra_fields():
         )
 
 
-# === AgentConfig.mcp_servers integration ===
+# === AgentConfig / connector-catalog boundary ===
 
 
-def test_agent_config_mcp_servers_default_none():
-    c = AgentConfig()
-    assert c.mcp_servers is None
-
-
-def test_agent_config_mcp_servers_empty_list_ok():
-    c = AgentConfig(mcp_servers=[])
-    assert c.mcp_servers == []
-
-
-def test_agent_config_mcp_servers_parses_nested():
-    c = AgentConfig(
-        mcp_servers=[
-            {"name": "linear", "command": "mcp-server-linear"},
-            {"name": "fs", "command": "mcp-server-filesystem", "args": ["/data"]},
-        ],
-    )
-    assert len(c.mcp_servers) == 2
-    assert isinstance(c.mcp_servers[0], MCPServerConfig)
-    assert c.mcp_servers[1].args == ["/data"]
-
-
-def test_agent_config_mcp_servers_rejects_case_insensitive_duplicates():
-    with pytest.raises(ValidationError) as excinfo:
-        AgentConfig(
-            mcp_servers=[
-                {"name": "Linear", "command": "x"},
-                {"name": "linear", "command": "y"},
-            ],
-        )
-    assert "duplicate" in str(excinfo.value).lower()
-
-
-def test_agent_config_mcp_servers_allows_distinct_names():
-    c = AgentConfig(
-        mcp_servers=[
-            {"name": "linear", "command": "x"},
-            {"name": "github", "command": "y"},
-        ],
-    )
-    assert {s.name for s in c.mcp_servers} == {"linear", "github"}
+def test_agent_config_has_no_mcp_servers_field():
+    """MCP servers live in the fleet connector catalog
+    (config/connectors.json via MCPConnector), not on agent records.
+    An ``mcp_servers`` key in legacy yaml is an inert extra field."""
+    assert "mcp_servers" not in AgentConfig.model_fields
+    c = AgentConfig(mcp_servers=[{"name": "x", "command": "y"}])  # type: ignore[call-arg]
+    # extra=allow keeps the key as opaque data — never parsed, never used.
+    assert c.model_dump()["mcp_servers"] == [{"name": "x", "command": "y"}]
 
 
 def test_agent_config_keeps_extra_allow_for_outer_unknown_fields():
@@ -397,30 +364,6 @@ def test_agent_config_max_iterations_rejects_out_of_range(bad_value):
     fail loudly at load time rather than silently being clamped."""
     with pytest.raises(ValidationError):
         AgentConfig(role="x", max_iterations=bad_value)
-
-
-def test_agent_config_nested_mcp_server_extras_still_forbidden():
-    # extra=allow on the outer model does NOT leak into nested MCPServerConfig.
-    with pytest.raises(ValidationError) as excinfo:
-        AgentConfig(
-            mcp_servers=[
-                {"name": "linear", "command": "x", "bogus_nested_field": 1},
-            ],
-        )
-    # Error points to the right path
-    assert "mcp_servers" in str(excinfo.value)
-
-
-def test_agent_config_mcp_servers_round_trip_via_model_dump():
-    # Downstream consumers read mcp_servers via .get() expecting dicts.
-    c = AgentConfig(
-        mcp_servers=[
-            {"name": "linear", "command": "mcp-server-linear", "env": {"K": "v"}},
-        ],
-    )
-    dumped = c.model_dump()
-    assert isinstance(dumped["mcp_servers"][0], dict)
-    assert dumped["mcp_servers"][0]["env"] == {"K": "v"}
 
 
 def test_max_output_tokens_is_a_hard_edit_field():

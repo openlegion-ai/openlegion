@@ -261,7 +261,7 @@ The webhook payload is included in the message dispatched to the configured agen
 
 Webhook creation is a **dashboard-only** flow. The endpoint is `POST /api/webhooks` on the dashboard router (`src/dashboard/server.py:6659`); it uses dashboard SSO cookie auth (`ol_session`), not `MESH_AUTH_TOKEN`. There is no `/mesh/webhooks` endpoint.
 
-In practice you create webhooks from the dashboard System → Integrations tab. The request body is `{"name": "<label>", "agent": "<agent_id>", "instructions"?: "<extra>", "secret"?: "<existing-secret>"}`; the server stores `require_signature = bool(body.get("secret"))` and assigns a random 32-byte hex secret (`secrets.token_hex(32)`) if none was supplied. The created hook's secret is returned **once** in the response — store it immediately.
+In practice you create webhooks from the dashboard System → Connectors tab (sub-tab ID `integrations`). The request body is `{"name": "<label>", "agent": "<agent_id>", "instructions"?: "<extra>", "secret"?: "<existing-secret>"}`; the server stores `require_signature = bool(body.get("secret"))` and assigns a random 32-byte hex secret (`secrets.token_hex(32)`) if none was supplied. The created hook's secret is returned **once** in the response — store it immediately.
 
 To rotate the secret on an existing hook, `PATCH /api/webhooks/{hook_id}` with `{"regenerate_secret": true}`.
 
