@@ -31,7 +31,10 @@ _WARNING_THRESHOLD = 0.80  # warn agent to wrap up or save facts
 
 _encoding_cache: dict[str, object | None] = {}
 
-_SUMMARIZATION_INPUT_LIMIT = 20_000  # max chars fed to the summarization LLM call
+_SUMMARIZATION_INPUT_LIMIT = 20_000  # max chars per summarization LLM call (chunk size)
+_SUMMARIZATION_MAX_CHUNKS = 8        # cap on summarization calls per compaction
+_SUMMARY_FOLD_THRESHOLD = 12_000     # combined partial summaries above this get folded once
+_TOOL_RESULT_SUMMARY_CHARS = 2_000   # per tool-result slice fed to the compaction summarizer
 
 _CONSOLIDATION_MIN_INTERVAL_S = 6 * 3600   # at most every 6 hours
 _CONSOLIDATION_MIN_LOG_CHARS = 1_500       # skip if little new material accrued
@@ -722,43 +725,70 @@ class ContextManager:
         older_groups = groups[: len(groups) - len(recent_groups)]
 
         older_messages = [m for g in older_groups for m in g]
-        conversation_text = self._messages_to_text(older_messages)
 
-        summary_prompt = (
+        # Chunked summarization: the legacy shape fed only the FIRST 20k chars
+        # of the older history (and 200 chars per tool result) to a single
+        # summarization call and silently discarded the rest — on research
+        # tasks that orphaned most gathered data right before synthesis.
+        # Instead, pack the older history into ≤20k chunks at message
+        # boundaries, summarize each, and stitch the partials.
+        base_instruction = (
             "Summarize this conversation concisely, preserving key context "
             "the assistant needs to continue helpfully. Include: what was discussed, "
-            "what actions were taken, what's pending, and any user preferences revealed.\n\n"
-            f"Conversation:\n{conversation_text[:_SUMMARIZATION_INPUT_LIMIT]}"
+            "what actions were taken, what's pending, and any user preferences revealed. "
+            "Preserve concrete data points the assistant gathered (names, numbers, "
+            "metrics, URLs, findings) — they cannot be recovered after compaction."
         )
+        chunks = self._chunk_message_texts(
+            older_messages, _SUMMARIZATION_INPUT_LIMIT, _TOOL_RESULT_SUMMARY_CHARS,
+        )
+        if not chunks:
+            return self._hard_prune(messages)
+        if len(chunks) > _SUMMARIZATION_MAX_CHUNKS:
+            # Pathological volume: keep the first chunk (original ask / early
+            # framing) plus the newest chunks, and say so in the summary.
+            omitted = len(chunks) - _SUMMARIZATION_MAX_CHUNKS
+            logger.warning(
+                f"Compaction input spans {len(chunks)} chunks; "
+                f"omitting {omitted} middle chunk(s)"
+            )
+            chunks = [chunks[0]] + chunks[-(_SUMMARIZATION_MAX_CHUNKS - 1):]
 
-        last_err = None
-        summary = None
-        for attempt in range(self._SUMMARIZE_RETRIES + 1):
-            try:
-                response = await self.llm.chat(
-                    system="You produce concise conversation summaries.",
-                    messages=[{"role": "user", "content": summary_prompt}],
-                    max_tokens=1024,
-                    temperature=0.3,
+        if len(chunks) == 1:
+            summary = await self._summarize_text(
+                f"{base_instruction}\n\nConversation:\n{chunks[0]}"
+            )
+            if summary is None:
+                logger.warning("Summarization unavailable, falling back to hard prune")
+                return self._hard_prune(messages)
+        else:
+            partials: list[str] = []
+            for i, chunk in enumerate(chunks):
+                part = await self._summarize_text(
+                    f"{base_instruction}\n\n"
+                    f"This is part {i + 1} of {len(chunks)} of the conversation "
+                    f"(chronological order).\n\nConversation:\n{chunk}"
                 )
-                summary = response.content.strip()
-                if not summary:
-                    logger.warning("Summarization returned empty response, falling back to hard prune")
+                if part is None:
+                    logger.warning("Chunk summarization unavailable, falling back to hard prune")
                     return self._hard_prune(messages)
-                break
-            except Exception as e:
-                last_err = e
-                if attempt < self._SUMMARIZE_RETRIES:
-                    wait = self._SUMMARIZE_BACKOFF * (2 ** attempt)
-                    logger.warning(
-                        f"Summarization failed (attempt {attempt + 1}/{self._SUMMARIZE_RETRIES + 1}), "
-                        f"retrying in {wait}s: {e}"
-                    )
-                    await asyncio.sleep(wait)
-                else:
-                    logger.warning(f"Summarization failed after {self._SUMMARIZE_RETRIES + 1} attempts, "
-                                   f"falling back to hard prune: {last_err}")
-                    return self._hard_prune(messages)
+                partials.append(part)
+            summary = "\n\n".join(
+                f"### Part {i + 1} of {len(partials)}\n{p}"
+                for i, p in enumerate(partials)
+            )
+            if len(summary) > _SUMMARY_FOLD_THRESHOLD:
+                folded = await self._summarize_text(
+                    "Merge these sequential summaries of one conversation into a "
+                    "single coherent summary. Preserve concrete data points "
+                    "(names, numbers, metrics, URLs, findings), decisions, and "
+                    "pending work.\n\n" + summary,
+                    max_tokens=2048,
+                )
+                # Fold failure is non-fatal: the unfolded partials are valid,
+                # just longer.
+                if folded:
+                    summary = folded
 
         # M2: sanitize the LLM-produced summary before re-injecting it into the
         # context window, for Unicode-hygiene uniformity with the memory /
@@ -865,8 +895,15 @@ class ContextManager:
         return pruned
 
     @staticmethod
-    def _messages_to_text(messages: list[dict]) -> str:
-        """Convert messages to readable text for summarization."""
+    def _messages_to_text(messages: list[dict], tool_chars: int = 200) -> str:
+        """Convert messages to readable text for summarization.
+
+        ``tool_chars`` bounds each tool-result slice. The default keeps the
+        fact-extraction path cheap; the compaction summarizer passes a much
+        larger bound because tool results are where gathered data (research
+        findings, fetched pages, query output) lives — over-truncating them
+        here is unrecoverable data loss for the post-compaction conversation.
+        """
         parts: list[str] = []
         for msg in messages:
             role = msg.get("role", "unknown")
@@ -879,10 +916,68 @@ class ContextManager:
                     if isinstance(b, dict) and b.get("type") == "text"
                 )
             if role == "tool":
-                content = content[:200]
+                content = content[:tool_chars]
             if content:
                 parts.append(f"[{role}]: {content}")
         return "\n\n".join(parts)
+
+    @classmethod
+    def _chunk_message_texts(
+        cls, messages: list[dict], chunk_size: int, tool_chars: int,
+    ) -> list[str]:
+        """Render messages to text and pack them into ≤``chunk_size`` chunks.
+
+        Chunk boundaries fall between messages so no message is split across
+        summarization calls (a single oversized message is truncated to fit).
+        """
+        chunks: list[str] = []
+        current: list[str] = []
+        current_len = 0
+        for msg in messages:
+            piece = cls._messages_to_text([msg], tool_chars=tool_chars)
+            if not piece:
+                continue
+            if len(piece) > chunk_size:
+                piece = piece[:chunk_size]
+            if current and current_len + len(piece) + 2 > chunk_size:
+                chunks.append("\n\n".join(current))
+                current = []
+                current_len = 0
+            current.append(piece)
+            current_len += len(piece) + 2
+        if current:
+            chunks.append("\n\n".join(current))
+        return chunks
+
+    async def _summarize_text(self, prompt: str, max_tokens: int = 1024) -> str | None:
+        """One summarization LLM call with retry/backoff.
+
+        Returns the stripped summary, or None on persistent failure or an
+        empty response (callers decide the fallback).
+        """
+        last_err: Exception | None = None
+        for attempt in range(self._SUMMARIZE_RETRIES + 1):
+            try:
+                response = await self.llm.chat(
+                    system="You produce concise conversation summaries.",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=max_tokens,
+                    temperature=0.3,
+                )
+                return response.content.strip() or None
+            except Exception as e:
+                last_err = e
+                if attempt < self._SUMMARIZE_RETRIES:
+                    wait = self._SUMMARIZE_BACKOFF * (2 ** attempt)
+                    logger.warning(
+                        f"Summarization failed (attempt {attempt + 1}/{self._SUMMARIZE_RETRIES + 1}), "
+                        f"retrying in {wait}s: {e}"
+                    )
+                    await asyncio.sleep(wait)
+        logger.warning(
+            f"Summarization failed after {self._SUMMARIZE_RETRIES + 1} attempts: {last_err}"
+        )
+        return None
 
 
 def _now_str() -> str:
