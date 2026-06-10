@@ -52,6 +52,22 @@ import pytest
 # whole session. The test session unconditionally needs the bypass.
 os.environ["OPENLEGION_SKIP_TRUST_TIER_BOOT_GATE"] = "1"
 
+# Keep litellm from autoloading the repo .env during collection.
+# ``import litellm`` (pulled in transitively when test modules import)
+# calls ``load_dotenv()`` unless ``LITELLM_MODE=PRODUCTION``. On a dev
+# machine with a real .env (OAuth creds, wallet seed) that leaks the
+# developer's real credentials into ``os.environ`` before any test
+# runs — ``CredentialVault._load_credentials()`` then picks them up,
+# making local runs diverge from CI (which has no .env) and letting
+# real OAuth-only creds flip vault-behavior tests (e.g. the BYOK
+# provider-validation gate).
+#
+# ``setdefault`` (not hard assignment) — a runner that deliberately
+# wants litellm's dev-mode dotenv loading can still override. The e2e
+# files call ``load_dotenv()`` themselves at module level, so explicit
+# e2e runs with real keys keep working.
+os.environ.setdefault("LITELLM_MODE", "PRODUCTION")
+
 # Time-returning helpers consumed by ``src.browser.service`` via
 # ``from src.browser.timing import X``. ``scroll_increment`` and
 # ``scroll_ramp`` are intentionally excluded — they return pixel counts
@@ -83,6 +99,26 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "real_timing: opt out of the autouse fast-timing fixture and use "
         "the real human-pacing delays from src.browser.timing.",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_default_env_file(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Redirect the credential vault's default .env writes to a temp file.
+
+    Tests must never touch the developer's real .env — it holds real
+    credentials (OAuth tokens, wallet seed), and a crash mid-test
+    corrupts it. ``_persist_to_env`` / ``_remove_from_env`` default to
+    PROJECT_ROOT/.env when called without an explicit ``env_file``, so
+    any test exercising the vault's persistence paths with the default
+    would rewrite the real file. Patching ``_default_env_file`` sends
+    those writes to a per-test temp file instead; tests that pass an
+    explicit ``env_file`` are unaffected.
+    """
+    from src.host import credentials as cred_mod
+
+    monkeypatch.setattr(
+        cred_mod, "_default_env_file", lambda: str(tmp_path / "test.env")
     )
 
 
