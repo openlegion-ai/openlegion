@@ -52,6 +52,22 @@ import pytest
 # whole session. The test session unconditionally needs the bypass.
 os.environ["OPENLEGION_SKIP_TRUST_TIER_BOOT_GATE"] = "1"
 
+# Keep litellm from autoloading the repo .env during collection.
+# ``import litellm`` (pulled in transitively when test modules import)
+# calls ``load_dotenv()`` unless ``LITELLM_MODE=PRODUCTION``. On a dev
+# machine with a real .env (OAuth creds, wallet seed) that leaks the
+# developer's real credentials into ``os.environ`` before any test
+# runs — ``CredentialVault._load_credentials()`` then picks them up,
+# making local runs diverge from CI (which has no .env) and letting
+# real OAuth-only creds flip vault-behavior tests (e.g. the BYOK
+# provider-validation gate).
+#
+# ``setdefault`` (not hard assignment) — a runner that deliberately
+# wants litellm's dev-mode dotenv loading can still override. The e2e
+# files call ``load_dotenv()`` themselves at module level, so explicit
+# e2e runs with real keys keep working.
+os.environ.setdefault("LITELLM_MODE", "PRODUCTION")
+
 # Time-returning helpers consumed by ``src.browser.service`` via
 # ``from src.browser.timing import X``. ``scroll_increment`` and
 # ``scroll_ramp`` are intentionally excluded — they return pixel counts
@@ -84,6 +100,63 @@ def pytest_configure(config: pytest.Config) -> None:
         "real_timing: opt out of the autouse fast-timing fixture and use "
         "the real human-pacing delays from src.browser.timing.",
     )
+
+
+# Credential-bearing env prefixes (see src/host/credentials.py). Snapshotted
+# and restored around every test by ``_isolate_credential_env`` below.
+_CREDENTIAL_ENV_PREFIXES = (
+    "OPENLEGION_SYSTEM_", "OPENLEGION_CRED_", "OPENLEGION_CONN_",
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_credential_env(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """Isolate every test from the developer's real .env — reads AND writes.
+
+    Tests must never touch the real PROJECT_ROOT/.env — it holds real
+    credentials (OAuth tokens, wallet seed), and a crash mid-test
+    corrupts it. Three seams:
+
+    1. ``_default_env_file`` — ``_persist_to_env`` / ``_remove_from_env``
+       default to PROJECT_ROOT/.env when called without an explicit
+       ``env_file``; redirect to a per-test temp file. Tests that pass an
+       explicit ``env_file`` are unaffected.
+    2. ``ENV_FILE`` — the CLI group callback (``src/cli/main.py``) calls
+       ``load_dotenv(cli_config.ENV_FILE)`` on EVERY CliRunner invocation
+       that reaches a subcommand, loading the developer's real .env into
+       ``os.environ`` mid-run and flipping later credential/template tests
+       (the LITELLM_MODE guard above only covers litellm's import-time
+       load). ``cli/config.py`` also WRITES through ``str(ENV_FILE)``.
+       Patched on BOTH modules that bind it — ``src.cli.config`` and
+       ``src.cli.runtime`` (``from``-import copies the binding).
+    3. Belt-and-braces: snapshot the credential-prefixed ``os.environ``
+       keys before the test and restore after, so any pollution path not
+       covered above (e.g. ``_persist_to_env`` setting ``os.environ``)
+       stays confined to the test that caused it. Ambient pre-session
+       values (a developer's deliberate exports) are preserved.
+    """
+    from src.cli import config as cli_config
+    from src.cli import runtime as cli_runtime
+    from src.host import credentials as cred_mod
+
+    monkeypatch.setattr(
+        cred_mod, "_default_env_file", lambda: str(tmp_path / "test.env")
+    )
+    fake_env_file = tmp_path / "cli.env"
+    monkeypatch.setattr(cli_config, "ENV_FILE", fake_env_file)
+    monkeypatch.setattr(cli_runtime, "ENV_FILE", fake_env_file)
+
+    saved = {
+        k: v for k, v in os.environ.items()
+        if k.startswith(_CREDENTIAL_ENV_PREFIXES)
+    }
+    yield
+    for key in [
+        k for k in os.environ if k.startswith(_CREDENTIAL_ENV_PREFIXES)
+    ]:
+        if key not in saved:
+            os.environ.pop(key, None)
+    os.environ.update(saved)
 
 
 @pytest.fixture(autouse=True)

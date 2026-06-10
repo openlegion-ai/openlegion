@@ -990,7 +990,9 @@ class RuntimeContext:
         else:
             title = "⚠️ Task failed"
             body = summary or "Your request hit a failure and stopped."
-            bell_kind = "delivered"
+            # Failure rings the warning bell, not the success/delivery one —
+            # same kind the stall branch and degradation notifications use.
+            bell_kind = "alert"
         payload = {
             "root_task_id": root_id,
             "outcome": kind,

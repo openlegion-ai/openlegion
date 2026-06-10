@@ -472,6 +472,24 @@ class TestNotificationsProducerWiring:
         assert "writer" in rows[0]["title"]
         assert "out of credit" in rows[0]["title"]
 
+    def test_connection_refresh_failed_creates_credential_notification(self):
+        # Dead OAuth grant (e.g. invalid_grant after the user revoked
+        # access). The mesh emits this once per failure episode; the
+        # producer maps it to an actionable ``credential`` bell entry.
+        self.bus.emit("connection_refresh_failed", agent="researcher", data={
+            "connection": "google_drive",
+            "provider": "google",
+            "error": "HTTP 400: invalid_grant",
+        })
+        rows = self.store.list_recent()
+        assert len(rows) == 1
+        assert rows[0]["kind"] == "credential"
+        assert "google_drive" in rows[0]["title"]
+        assert "needs reconnecting" in rows[0]["title"]
+        assert "Settings" in rows[0]["body"]
+        assert rows[0]["payload"]["connection"] == "google_drive"
+        assert rows[0]["payload"]["provider"] == "google"
+
     def test_unrelated_event_does_not_create_notification(self):
         # Sanity check — events outside the frozen mapping table never
         # create rows. Without this we'd be tempted to grow the mapping
