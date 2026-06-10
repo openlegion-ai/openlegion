@@ -6021,7 +6021,16 @@ def create_mesh_app(
                 rows = []
             for ev in rows:
                 meta = ev.get("meta") or {}
-                if ev.get("event_type") in ("llm_call", "llm_stream"):
+                # Count ``llm_call`` rows only. The streaming proxy path
+                # records TWO rows per call — ``llm_stream`` at stream
+                # start and ``llm_call`` (with tokens) at completion —
+                # and the agent loop streams everything, so counting
+                # both kinds doubled ``llm_calls`` and masked exactly
+                # the "very few calls = shallow run" signal this
+                # endpoint exists to surface. A stream aborted before
+                # completion has no ``llm_call`` row and is not counted;
+                # its failure still shows up under ``trace_errors``.
+                if ev.get("event_type") == "llm_call":
                     llm_calls += 1
                     t = meta.get("tokens_used")
                     if isinstance(t, (int, float)):
