@@ -64,18 +64,51 @@ _PROMPT_CACHE_ENABLED = os.environ.get(
 ).strip().lower() not in ("0", "false", "no", "off", "")
 
 
+def _tag_anthropic_message_block(msg: dict, cc: dict) -> bool:
+    """Tag *msg*'s last content block with ``cache_control`` if cacheable.
+
+    String content is converted to a single tagged text block. List content is
+    tagged only when its last block is a cacheable type — Anthropic rejects
+    cache_control on e.g. ``thinking`` blocks; normal agent history ends in
+    text/tool_use/tool_result, but guard defensively so a stray block can
+    never make the proxy emit a rejected request. Returns True iff a
+    breakpoint landed.
+    """
+    content = msg.get("content")
+    if isinstance(content, str) and content:
+        msg["content"] = [{"type": "text", "text": content, "cache_control": cc}]
+        return True
+    if isinstance(content, list) and content and isinstance(content[-1], dict):
+        if content[-1].get("type") in ("text", "tool_use", "tool_result"):
+            content[-1]["cache_control"] = cc
+            return True
+    return False
+
+
 def _mark_anthropic_cache_breakpoints(body: dict) -> None:
     """Tag the stable Anthropic request prefix with ephemeral prompt-cache
-    breakpoints so repeated within-turn re-sends are billed as cache reads
-    (~0.10x) instead of full input.
+    breakpoints so repeated re-sends are billed as cache reads (~0.10x)
+    instead of full input.
 
     Anthropic caches the request prefix up to and including each block marked
     with ``cache_control``. We mark, at most, three breakpoints (limit is 4):
       (a) the LAST tool definition  -> caches the whole tools array,
       (b) the LAST system content block -> caches tools + system,
-      (c) the LAST message's last content block -> caches the append-only
-          message history within a turn (rolling breakpoint).
-    Mutates ``body`` in place. Safe no-op on missing/empty fields; idempotent.
+      (c) the SECOND-TO-LAST message's last cacheable content block -> the
+          rolling history breakpoint. NOT the last message: the agent loop
+          folds a per-request volatile suffix (recent-memory slice, playbooks,
+          runtime context — see ``loop.py:_append_volatile_to_messages``) into
+          the final message of every request, so round N's last message never
+          reappears verbatim in round N+1 (where the history copy is resent
+          CLEAN). Tagging it would make every next round diverge from the
+          cached span right at that message and re-bill the whole history.
+          The second-to-last message is pure append-only history, resent
+          byte-identical next round, so the cache read covers nearly all of
+          it. We walk backward from ``messages[-2]`` to the nearest message
+          with a cacheable last block; single-message bodies get no message
+          breakpoint (nothing stable worth caching).
+    Mutates ``body`` in place. Safe no-op on missing/empty fields; idempotent
+    (a re-run walks to the already-tagged block and re-tags the same dict).
     """
     if not _PROMPT_CACHE_ENABLED:
         return
@@ -87,19 +120,11 @@ def _mark_anthropic_cache_breakpoints(body: dict) -> None:
     if isinstance(system, list) and system and isinstance(system[-1], dict):
         system[-1]["cache_control"] = cc
     messages = body.get("messages")
-    if isinstance(messages, list) and messages and isinstance(messages[-1], dict):
-        content = messages[-1].get("content")
-        if isinstance(content, str) and content:
-            messages[-1]["content"] = [
-                {"type": "text", "text": content, "cache_control": cc}
-            ]
-        elif isinstance(content, list) and content and isinstance(content[-1], dict):
-            # Only tag a cacheable block type. Anthropic rejects cache_control
-            # on e.g. ``thinking`` blocks; normal agent history ends in
-            # text/tool_use/tool_result, but guard defensively so a stray
-            # block can never make the proxy emit a rejected request.
-            if content[-1].get("type") in ("text", "tool_use", "tool_result"):
-                content[-1]["cache_control"] = cc
+    if isinstance(messages, list) and len(messages) >= 2:
+        for i in range(len(messages) - 2, -1, -1):
+            msg = messages[i]
+            if isinstance(msg, dict) and _tag_anthropic_message_block(msg, cc):
+                break
 
 
 def _mark_anthropic_cache_breakpoints_openai_fmt(llm_kwargs: dict) -> None:
@@ -109,8 +134,22 @@ def _mark_anthropic_cache_breakpoints_openai_fmt(llm_kwargs: dict) -> None:
     cache_control through to the Anthropic Messages API for native anthropic
     models. NO-OP unless the final model is native ``anthropic/...`` — the
     OpenAI-compatible rewrite (custom api_base / credit-proxy) drops
-    cache_control, so we must not tag there. Mutates ``llm_kwargs`` in place;
-    safe no-op on missing/empty fields; idempotent.
+    cache_control, so we must not tag there.
+
+    Rolling history breakpoint: the SECOND-TO-LAST qualifying message, not the
+    last. The agent loop folds a per-request volatile suffix into the final
+    message of every request (see ``loop.py:_append_volatile_to_messages``),
+    so the last message never reappears verbatim next round and tagging it
+    would defeat the history cache. We walk backward from ``messages[-2]``,
+    skipping ``system`` (tagged separately at the front — re-tagging the same
+    dict would be harmless but pointless) and ``tool`` roles (uncertain
+    whether litellm passes cache_control through on tool-role content;
+    tagging the nearest user/assistant text message still caches everything
+    before it).
+
+    Mutates ``llm_kwargs`` in place; safe no-op on missing/empty fields;
+    idempotent (a re-run walks to the already-tagged block and re-tags the
+    same dict).
     """
     if not _PROMPT_CACHE_ENABLED:
         return
@@ -125,24 +164,32 @@ def _mark_anthropic_cache_breakpoints_openai_fmt(llm_kwargs: dict) -> None:
     if not isinstance(messages, list) or not messages:
         return
 
-    def _tag_block(msg: dict) -> None:
+    def _tag_block(msg: dict) -> bool:
         c = msg.get("content")
         if isinstance(c, str) and c:
             msg["content"] = [{"type": "text", "text": c, "cache_control": cc}]
-        elif isinstance(c, list) and c and isinstance(c[-1], dict):
+            return True
+        if isinstance(c, list) and c and isinstance(c[-1], dict):
             if c[-1].get("type") == "text":
                 c[-1]["cache_control"] = cc
+                return True
+        return False
 
     # (a) system message (first one) — caches system + tools prefix
     for m in messages:
         if isinstance(m, dict) and m.get("role") == "system":
             _tag_block(m)
             break
-    # (b) last message (rolling breakpoint over append-only history),
-    #     unless it IS the system message already tagged above
-    last = messages[-1]
-    if isinstance(last, dict) and last.get("role") != "system":
-        _tag_block(last)
+    # (b) rolling history breakpoint: nearest qualifying message at or before
+    #     the second-to-last (the final message carries the volatile suffix —
+    #     see docstring). Skip system (already tagged) and tool roles.
+    if len(messages) >= 2:
+        for i in range(len(messages) - 2, -1, -1):
+            m = messages[i]
+            if not isinstance(m, dict) or m.get("role") in ("system", "tool"):
+                continue
+            if _tag_block(m):
+                break
 
 
 # ── Same-model transient retry (prod 503 incident) ───────────

@@ -50,10 +50,12 @@ _TOOL_TIMEOUT = int(os.environ.get("OPENLEGION_TOOL_TIMEOUT", "900"))  # seconds
 # C3 — cache-prefix stabilization (Phase 2 of the operator memory/context
 # overhaul). When ON, per-turn-volatile prompt fragments (context/round
 # warnings, operator playbooks, 5-min runtime context, the ``## Recent``
-# memory slice) are relocated OUT of the cached system block and appended
-# AFTER the mesh-side cache breakpoint (into the last message) so the stable
-# system prefix stays byte-identical turn-to-turn and #1073's prompt cache
-# actually hits. Volatile fragments are relocated below the cache breakpoint.
+# memory slice) are relocated OUT of the cached system block and folded into
+# the LAST message. The mesh-side rolling cache breakpoint is placed on the
+# SECOND-TO-LAST message (see credentials.py:_mark_anthropic_cache_breakpoints),
+# so the suffix-bearing final message sits AFTER every breakpoint: the stable
+# system prefix and the append-only history both stay byte-identical
+# round-to-round and #1073's prompt cache actually hits.
 _FLEET_ROSTER_TTL = 600  # seconds — cache TTL for fleet roster
 _GOALS_TTL = 300  # seconds — cache TTL for goals fetch
 _FALLBACK_MAX_TOKENS = 100_000  # context trim fallback when no context manager
@@ -4615,8 +4617,10 @@ class AgentLoop:
     def _append_volatile_to_messages(
         self, messages: list[dict], suffix: str,
     ) -> list[dict]:
-        """Append ``suffix`` after the cache breakpoint by folding it into a
-        COPY of the last message's content.
+        """Append ``suffix`` after the cache breakpoints by folding it into a
+        COPY of the last message's content. The mesh proxy places the rolling
+        history breakpoint on the SECOND-TO-LAST message precisely because
+        this final message mutates per request and never reappears verbatim.
 
         No-op (returns the same list) when there is nothing to relocate. When
         active, the persistent ``messages``/``_chat_messages`` list is never
