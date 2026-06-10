@@ -2155,3 +2155,67 @@ class TestDispatchErrorSurfacing:
         # Task left untouched — the lane watchdog owns the timeout close.
         fetched = store.get(task_id)
         assert fetched["status"] == "working"
+
+
+# ── Chain-outcome channel push retry ──────────────────────────
+
+
+class TestChannelPushRetry:
+    """Bounded-retry for the chain-outcome chat-channel push. The unbound
+    method is bound to a lightweight stub `self` so we don't construct the
+    full RuntimeContext — it only touches `self._handle_notify_origin`."""
+
+    def _origin(self):
+        from src.shared.types import MessageOrigin
+        return MessageOrigin(kind="human", channel="telegram", user="u1")
+
+    @pytest.mark.asyncio
+    async def test_retries_then_succeeds(self):
+        from src.cli.runtime import RuntimeContext
+
+        class _Stub:
+            def __init__(self):
+                self.calls = 0
+            async def _handle_notify_origin(self, origin, message, agent_name):
+                self.calls += 1
+                return self.calls > 2  # fail attempts 1,2; succeed on 3
+
+        stub = _Stub()
+        await RuntimeContext._channel_push_with_retry(
+            stub, self._origin(), "msg", "agent", attempts=3, backoff_s=0,
+        )
+        assert stub.calls == 3  # stopped as soon as it succeeded
+
+    @pytest.mark.asyncio
+    async def test_gives_up_after_attempts(self):
+        from src.cli.runtime import RuntimeContext
+
+        class _Stub:
+            def __init__(self):
+                self.calls = 0
+            async def _handle_notify_origin(self, origin, message, agent_name):
+                self.calls += 1
+                return False  # always fail
+
+        stub = _Stub()
+        await RuntimeContext._channel_push_with_retry(
+            stub, self._origin(), "msg", "agent", attempts=3, backoff_s=0,
+        )
+        assert stub.calls == 3  # exactly `attempts`, then gives up (no hot loop)
+
+    @pytest.mark.asyncio
+    async def test_first_attempt_success_no_retry(self):
+        from src.cli.runtime import RuntimeContext
+
+        class _Stub:
+            def __init__(self):
+                self.calls = 0
+            async def _handle_notify_origin(self, origin, message, agent_name):
+                self.calls += 1
+                return True
+
+        stub = _Stub()
+        await RuntimeContext._channel_push_with_retry(
+            stub, self._origin(), "msg", "agent", attempts=3, backoff_s=0,
+        )
+        assert stub.calls == 1
