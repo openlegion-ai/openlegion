@@ -6269,36 +6269,6 @@ def create_dashboard_router(
             "delay": settings.get("browser_delay", 0.0),
         }
 
-    @api_router.get("/api/milestone-pings")
-    async def api_get_milestone_pings() -> dict:
-        """Return the opt-in milestone-pings toggle (per-stage progress pings).
-
-        Off by default — the chain watcher reads this same key from
-        config/settings.json and only pings per stage when it's on.
-        """
-        settings = _load_settings()
-        return {"enabled": bool(settings.get("milestone_pings_enabled", False))}
-
-    @api_router.post("/api/milestone-pings")
-    async def api_set_milestone_pings(request: Request) -> dict:
-        """Persist the milestone-pings toggle (default off)."""
-        try:
-            body = await request.json()
-        except Exception:
-            raise HTTPException(400, "body must be valid JSON")
-        if not isinstance(body, dict):
-            raise HTTPException(400, "body must be a JSON object")
-        enabled = body.get("enabled")
-        # Require a real bool — a string like "false" must not enable it.
-        if not isinstance(enabled, bool):
-            raise HTTPException(400, "enabled must be a boolean")
-        with _settings_lock:
-            settings = _load_settings()
-            settings["milestone_pings_enabled"] = enabled
-            _save_settings(settings)
-        _emit_config_changed("milestone_pings")
-        return {"enabled": enabled}
-
     @api_router.get("/api/dashboard/platform-success")
     async def api_get_platform_success() -> dict:
         """Per-platform fleet success rollup over the last 24h.
