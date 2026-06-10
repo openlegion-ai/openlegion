@@ -2326,6 +2326,12 @@ def create_dashboard_router(
                 _connector_to_api(c) for c in connector_store.list()
             ],
             "pending_restart": connector_store.pending_restart(),
+            # Agent-tier vault credential names for the env-row
+            # credential picker (names only, never values).
+            "available_credentials": sorted(
+                credential_vault.list_agent_credential_names()
+            ) if credential_vault else [],
+            "agents": sorted(agent_registry.keys()),
         }
 
     @api_router.put("/api/connectors/{name}")
@@ -2352,8 +2358,12 @@ def create_dashboard_router(
         # Display-side artifacts a GET-replay would carry.
         raw.pop("env_keys", None)
         raw.pop("assigned_agents", None)
+        # Absent = preserve (same contract as env): a partial PUT must
+        # not silently wipe the persisted env or assignment.
         if "env" not in body and previous is not None:
             raw["env"] = previous.env
+        if "agents" not in body and previous is not None:
+            raw["agents"] = previous.agents
         try:
             connector = MCPConnector.model_validate(raw)
         except ValidationError as ve:

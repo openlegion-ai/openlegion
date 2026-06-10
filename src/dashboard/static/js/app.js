@@ -505,7 +505,7 @@ function dashboard() {
       { id: 'operator', label: 'Operator' },
       { id: 'costs', label: 'Costs' },
       { id: 'activity', label: 'Activity' },
-      { id: 'integrations', label: 'Integrations' },
+      { id: 'integrations', label: 'Connectors' },
       { id: 'skills', label: 'Skills' },
       { id: 'apikeys', label: 'API Keys' },
       { id: 'automation', label: 'Automation' },
@@ -526,6 +526,22 @@ function dashboard() {
     fleetSkillsCatalog: null,
     fleetSkillsCatalogLoading: false,
     fleetSkillsSaving: false,
+    // MCP connectors — fleet catalog (System → Connectors). One record =
+    // an MCP server definition + its agent assignment (['*'] = all).
+    // connectorsData: null while loading; {connectors, pending_restart,
+    // available_credentials, agents} once fetched. connectorDraft is the
+    // open add/edit form (null = closed); _-prefixed draft fields are
+    // UI-only and stripped from the wire payload.
+    connectorsData: null,
+    connectorsLoading: false,
+    connectorSaving: false,
+    connectorDraft: null,
+    connectorErrors: {},
+    connectorGlobalError: null,
+    // Post-save restart prompt: {name, affected: [...]} — D7: catalog
+    // edits never auto-restart; the operator confirms.
+    connectorRestartPrompt: null,
+    connectorRestarting: false,
     skillInstallRepo: '',
     skillInstallRef: '',
     skillInstalling: false,
@@ -910,6 +926,7 @@ function dashboard() {
               this.systemTab = route.systemTab;
               if (route.systemTab === 'integrations') {
                 this.fetchChannels(); this.fetchWebhooks(); this.fetchApiKeys(); this.loadIntegrations();
+                this.loadConnectors();
               }
               if (route.systemTab === 'apikeys') {
                 this.fetchSettings();
@@ -2531,7 +2548,7 @@ function dashboard() {
       if (this.systemTab === 'activity' && tabId !== 'activity') this._stopActivityRefresh();
       this.systemTab = tabId;
       this._pushUrl(false);
-      if (tabId === 'integrations') { this.fetchChannels(); this.fetchWebhooks(); this.fetchApiKeys(); this.loadIntegrations(); }
+      if (tabId === 'integrations') { this.fetchChannels(); this.fetchWebhooks(); this.fetchApiKeys(); this.loadIntegrations(); this.loadConnectors(); }
       if (tabId === 'apikeys') { this.fetchSettings(); }
       if (tabId === 'storage') { this.fetchUploads(); this.fetchStorage(); this.fetchDatabaseDetails(); }
       if (tabId === 'skills') { this.loadSkillsCatalog(); }
@@ -5619,6 +5636,9 @@ function dashboard() {
       this.agentCapabilities = null;
       this.agentMcpStatus = [];
       this.agentMcpToolMap = {};
+      // The agent Config tab's read-only Connectors panel needs the
+      // fleet catalog; lazy-load it alongside capabilities.
+      if (this.connectorsData === null) this.loadConnectors();
       try {
         const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/capabilities`);
         if (resp.ok) {
@@ -6587,30 +6607,6 @@ function dashboard() {
         ),
         allowed_credentials: credsStr,
         _credMode: credMode,
-        // MCP servers — populated from the masked GET /config response.
-        // Each entry has {name, command, args, env_keys} (env values
-        // are never returned by GET; the env field is omitted, see PR 1).
-        // Underscore-prefixed fields are UI-only and stripped on save.
-        mcp_servers: Array.isArray(cfg.mcp_servers)
-          ? cfg.mcp_servers.map(s => ({
-              name: s.name || '',
-              command: s.command || '',
-              args: Array.isArray(s.args) ? [...s.args] : [],
-              env_keys: Array.isArray(s.env_keys) ? [...s.env_keys] : [],
-            }))
-          : [],
-        _mcpDraft: null,
-        _mcpEditIndex: -1,
-        _showMcpAddForm: false,
-        _mcpRestartPending: false,
-        _mcpRestartError: null,
-        _mcpErrors: {},
-        _mcpGlobalError: null,
-        // Capture the agent ID this edit form is bound to so the restart-
-        // retry banner targets the right agent even if ``selectedAgent``
-        // changes (e.g. the user clicks a different agent in the list
-        // before clicking Retry).
-        _editingAgentId: this.selectedAgent,
       };
       this.configEditing = true;
     },
@@ -6620,90 +6616,116 @@ function dashboard() {
       this.editForm = {};
     },
 
-    // ── MCP Servers panel helpers (PR 2 of #959) ────────────────────────
-    // The Config tab MCP Servers section uses these to manage state
-    // across add/edit/remove + save+restart orchestration. Underscore-
-    // prefixed fields on editForm (and on _mcpDraft) are UI-only and
-    // explicitly stripped via projection on save.
+    // ── MCP Connectors (System → Connectors fleet catalog) ──────────────
+    // One record = an MCP server definition + its agent assignment.
+    // The catalog applies on agent restart; saves return the affected
+    // agents and the UI prompts restart-now/later (never auto-restarts).
 
-    _mcpBlankDraft() {
-      return {
+    async loadConnectors() {
+      if (this.connectorsLoading) return;
+      this.connectorsLoading = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/connectors`);
+        if (resp.ok) this.connectorsData = await resp.json();
+      } catch (e) {
+        console.error('Failed to load connectors:', e);
+      } finally {
+        this.connectorsLoading = false;
+      }
+    },
+
+    // Connectors assigned to one agent — drives the read-only panel on
+    // the agent's Config tab (status dots come from agentMcpStatus).
+    connectorsForAgent(agentId) {
+      if (!agentId || !this.connectorsData) return [];
+      return (this.connectorsData.connectors || []).filter(
+        c => (c.agents || []).includes('*') || (c.agents || []).includes(agentId),
+      );
+    },
+
+    connectorAssignmentLabel(c) {
+      const a = c.agents || [];
+      if (a.includes('*')) return 'All agents';
+      if (!a.length) return 'No agents';
+      return a.length === 1 ? a[0] : `${a.length} agents`;
+    },
+
+    connectorStartAdd() {
+      this.connectorErrors = {};
+      this.connectorGlobalError = null;
+      this.connectorDraft = {
+        _isNew: true,
         name: '',
         command: '',
         _argRows: [],            // [{value: string}]
-        _envRows: [],            // [{key: string, type: 'cred'|'plain', value: string}]
-        _replaceEnv: true,       // for add: always replace (no preserve baseline)
+        _envRows: [],            // [{key, type: 'cred'|'plain', value}]
+        _replaceEnv: true,       // new connector: env is whatever you type
+        _envKeys: [],
+        _assignMode: 'all',      // 'all' | 'some'
+        _agentSel: Object.fromEntries(
+          (this.connectorsData?.agents || []).map(a => [a, false]),
+        ),
       };
     },
 
-    mcpStartAdd() {
-      this.editForm._mcpDraft = this._mcpBlankDraft();
-      this.editForm._mcpEditIndex = -1;
-      this.editForm._showMcpAddForm = true;
-    },
-
-    mcpStartEdit(idx) {
-      const s = this.editForm.mcp_servers[idx];
-      if (!s) return;
-      // If this entry was added/edited earlier in this session, the
-      // mcpCommitDraft path attached ``_replaceEnv`` and ``_envRows``;
-      // restore them so a second-pass edit doesn't silently drop the
-      // env the user already typed. For entries loaded fresh from
-      // agentConfigs (no prior draft), _envRows is [] and
-      // _replaceEnv defaults to off so existing env is preserved
-      // unless the user explicitly toggles. env_keys is all we know
-      // for these — the masked GET doesn't return values.
-      this.editForm._mcpDraft = {
-        name: s.name,
-        command: s.command,
-        _argRows: (s.args || []).map(v => ({ value: v })),
-        _envRows: Array.isArray(s._envRows)
-          ? s._envRows.map(r => ({ key: r.key, type: r.type, value: r.value }))
-          : [],
-        _replaceEnv: !!s._replaceEnv,
+    connectorStartEdit(c) {
+      this.connectorErrors = {};
+      this.connectorGlobalError = null;
+      const assignedAll = (c.agents || []).includes('*');
+      this.connectorDraft = {
+        _isNew: false,
+        name: c.name,
+        command: c.command || '',
+        _argRows: (c.args || []).map(v => ({ value: v })),
+        _envRows: [],
+        // Editing an existing record defaults to PRESERVE — env values
+        // are never returned by GET, so the user only replaces env when
+        // they explicitly toggle (and must then re-supply ALL vars).
+        _replaceEnv: false,
+        _envKeys: Array.isArray(c.env_keys) ? [...c.env_keys] : [],
+        _assignMode: assignedAll ? 'all' : 'some',
+        _agentSel: Object.fromEntries(
+          (this.connectorsData?.agents || []).map(
+            a => [a, !assignedAll && (c.agents || []).includes(a)],
+          ),
+        ),
       };
-      this.editForm._mcpEditIndex = idx;
-      this.editForm._showMcpAddForm = false;
     },
 
-    mcpCancelDraft() {
-      this.editForm._mcpDraft = null;
-      this.editForm._mcpEditIndex = -1;
-      this.editForm._showMcpAddForm = false;
+    connectorCancelDraft() {
+      this.connectorDraft = null;
+      this.connectorErrors = {};
+      this.connectorGlobalError = null;
     },
 
-    mcpCommitDraft() {
-      const d = this.editForm._mcpDraft;
-      if (!d) return;
+    connectorAddArgRow() {
+      if (this.connectorDraft) this.connectorDraft._argRows.push({ value: '' });
+    },
+    connectorRemoveArgRow(idx) {
+      if (this.connectorDraft) this.connectorDraft._argRows.splice(idx, 1);
+    },
+    connectorAddEnvRow() {
+      if (this.connectorDraft) this.connectorDraft._envRows.push({ key: '', type: 'cred', value: '' });
+    },
+    connectorRemoveEnvRow(idx) {
+      if (this.connectorDraft) this.connectorDraft._envRows.splice(idx, 1);
+    },
+    connectorToggleReplaceEnv() {
+      if (!this.connectorDraft) return;
+      this.connectorDraft._replaceEnv = !this.connectorDraft._replaceEnv;
+      // Rows are kept across an off→on cycle — the wire payload simply
+      // omits env while _replaceEnv is false (backend preserves it).
+    },
+
+    async saveConnector() {
+      const d = this.connectorDraft;
+      if (!d || this.connectorSaving) return;
       const name = (d.name || '').trim();
       const command = (d.command || '').trim();
-      const editIdx = this.editForm._mcpEditIndex;
-      // Reject whitespace-only name/command BEFORE committing — the
-      // Apply button's :disabled check is raw truthiness and lets a
-      // whitespace-only string through. Without this guard, the bad
-      // entry gets committed locally, _mcpDraft is nulled, and the
-      // outer Save's auto-commit guard sees nothing to abort on (it
-      // only checks that _mcpDraft is still set). User would only
-      // discover the issue when the backend 400s on the field-regex.
       if (!name || !command) {
         this.showToast('Name and command are required.');
         return;
       }
-      // Client-side duplicate-name rejection (case-insensitive,
-      // mirrors the backend AgentConfig field-validator). Avoids
-      // confusing top-level Pydantic 400 surfaces — also keeps
-      // ``mcpServersChanged``'s by-name Map lookup honest.
-      const lowered = name.toLowerCase();
-      const collidesAt = this.editForm.mcp_servers.findIndex(
-        (s, i) => i !== editIdx && (s.name || '').toLowerCase() === lowered,
-      );
-      if (collidesAt >= 0) {
-        this.showToast(`Another MCP server already uses name "${name}" (case-insensitive).`);
-        return;
-      }
-      // Reject cred rows with a key but no selected credential —
-      // otherwise mcpDraftToWirePayload silently drops them while
-      // env_keys would still record the key, lying to the user.
       if (d._replaceEnv) {
         for (const row of (d._envRows || [])) {
           const k = (row.key || '').trim();
@@ -6714,100 +6736,117 @@ function dashboard() {
           }
         }
       }
-      // env_keys is a display-only field for the inline edit UI:
-      //   * In replace mode it's derived from the new rows the user supplied.
-      //   * In preserve mode (not replacing) we KEEP the original entry's
-      //     env_keys — otherwise re-opening the row would falsely show
-      //     "No env vars" while the backend still has them. The actual
-      //     env payload is built in mcpDraftToWirePayload, which omits
-      //     env entirely when ``_replaceEnv`` is false (PR 1 preserve-
-      //     by-name semantic).
-      let envKeys;
-      if (d._replaceEnv) {
-        // Dedupe to match the wire payload's dict semantics — a later
-        // duplicate key would overwrite the earlier on the backend, so
-        // ``env_keys`` should reflect a single occurrence per key.
-        const seen = new Set();
-        envKeys = [];
-        for (const r of (d._envRows || [])) {
-          const k = (r.key || '').trim();
-          if (!k || seen.has(k)) continue;
-          seen.add(k);
-          envKeys.push(k);
-        }
-      } else if (editIdx >= 0) {
-        const original = this.editForm.mcp_servers[editIdx];
-        envKeys = (original && Array.isArray(original.env_keys)) ? [...original.env_keys] : [];
-      } else {
-        envKeys = [];
-      }
-      const entry = {
-        name,
+      const body = {
         command,
-        args: d._argRows.map(r => r.value).filter(v => v !== ''),
-        env_keys: envKeys,
-        _replaceEnv: !!d._replaceEnv,
-        _envRows: d._envRows,
+        args: d._argRows.map(r => (r.value || '')).filter(v => v !== ''),
+        agents: d._assignMode === 'all'
+          ? ['*']
+          : Object.keys(d._agentSel || {}).filter(a => d._agentSel[a]).sort(),
       };
-      if (editIdx >= 0) {
-        this.editForm.mcp_servers.splice(editIdx, 1, entry);
-      } else {
-        this.editForm.mcp_servers.push(entry);
+      if (d._replaceEnv) {
+        const env = {};
+        for (const row of (d._envRows || [])) {
+          const k = (row.key || '').trim();
+          if (!k) continue;
+          env[k] = row.type === 'cred' ? `$CRED{${(row.value || '').trim()}}` : (row.value || '');
+        }
+        body.env = env;
       }
-      this.mcpCancelDraft();
+      this.connectorSaving = true;
+      this.connectorErrors = {};
+      this.connectorGlobalError = null;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/connectors/${encodeURIComponent(name)}`, {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          const detail = data.detail;
+          // Structured Pydantic errors → per-field inline display.
+          if (detail && typeof detail === 'object' && Array.isArray(detail.errors)) {
+            const perField = {};
+            const topLevel = [];
+            for (const e of detail.errors) {
+              const loc = e.loc || [];
+              if (loc.length) perField[String(loc[0])] = e.msg || 'Invalid';
+              else topLevel.push(e.msg || 'Invalid');
+            }
+            this.connectorErrors = perField;
+            this.connectorGlobalError = topLevel.join('; ') || null;
+          } else {
+            this.connectorGlobalError = typeof detail === 'string' ? detail : 'Save failed';
+          }
+          return; // keep the form open with inline errors
+        }
+        this.connectorCancelDraft();
+        await this.loadConnectors();
+        if ((data.affected_agents || []).length) {
+          this.connectorRestartPrompt = { name, affected: data.affected_agents };
+        } else {
+          this.showToast(`Connector "${name}" saved.`);
+        }
+      } catch (e) {
+        this.connectorGlobalError = e.message || String(e);
+      } finally {
+        this.connectorSaving = false;
+      }
     },
 
-    mcpRemoveAt(idx) {
-      const s = this.editForm.mcp_servers[idx];
-      if (!s) return;
+    deleteConnector(name) {
       this.showConfirm(
-        'Remove MCP server',
-        `Remove "${s.name}"? Agent will restart when you save.`,
-        () => {
-          this.editForm.mcp_servers.splice(idx, 1);
-          // Keep _mcpEditIndex pointing at the right row after the
-          // splice. If the edited row itself was removed, close the
-          // draft entirely; if a row ABOVE the edited one was removed,
-          // shift the index down by one. Without this, the inline edit
-          // form silently re-binds to a different entry's row.
-          if (this.editForm._mcpEditIndex === idx) {
-            this.mcpCancelDraft();
-          } else if (this.editForm._mcpEditIndex > idx) {
-            this.editForm._mcpEditIndex -= 1;
+        'Remove connector',
+        `Remove "${name}"? Assigned agents keep its tools until their next restart.`,
+        async () => {
+          try {
+            const resp = await fetch(`${window.__config.apiBase}/connectors/${encodeURIComponent(name)}`, {
+              method: 'DELETE',
+            });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) {
+              this.showToast(`Error: ${typeof data.detail === 'string' ? data.detail : 'Remove failed'}`);
+              return;
+            }
+            await this.loadConnectors();
+            if ((data.affected_agents || []).length) {
+              this.connectorRestartPrompt = { name, affected: data.affected_agents };
+            } else {
+              this.showToast(`Connector "${name}" removed.`);
+            }
+          } catch (e) {
+            this.showToast(`Error: ${e.message || String(e)}`);
           }
         },
         true,
       );
     },
 
-    mcpAddArgRow() {
-      if (!this.editForm._mcpDraft) return;
-      this.editForm._mcpDraft._argRows.push({ value: '' });
-    },
-
-    mcpRemoveArgRow(idx) {
-      if (!this.editForm._mcpDraft) return;
-      this.editForm._mcpDraft._argRows.splice(idx, 1);
-    },
-
-    mcpAddEnvRow() {
-      if (!this.editForm._mcpDraft) return;
-      this.editForm._mcpDraft._envRows.push({ key: '', type: 'cred', value: '' });
-    },
-
-    mcpRemoveEnvRow(idx) {
-      if (!this.editForm._mcpDraft) return;
-      this.editForm._mcpDraft._envRows.splice(idx, 1);
-    },
-
-    mcpToggleReplaceEnv() {
-      if (!this.editForm._mcpDraft) return;
-      this.editForm._mcpDraft._replaceEnv = !this.editForm._mcpDraft._replaceEnv;
-      // Don't clear _envRows on toggle-off: the save flow already
-      // omits env entirely whenever ``_replaceEnv`` is false (see
-      // mcpDraftToWirePayload), so the rows are inert until the user
-      // toggles back ON. Preserving them across an off→on cycle stops
-      // the silent drop where a curious toggle would discard typed env.
+    async restartConnectorAgents(agents) {
+      if (this.connectorRestarting || !(agents || []).length) return;
+      this.connectorRestarting = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/restart-batch`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agents }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          this.showToast(`Error: ${typeof data.detail === 'string' ? data.detail : 'Restart failed'}`);
+          return;
+        }
+        const results = data.results || {};
+        const failed = Object.keys(results).filter(a => results[a] !== 'ok');
+        this.showToast(failed.length
+          ? `Restarted ${agents.length - failed.length}/${agents.length} — failed: ${failed.join(', ')}`
+          : `Restarted ${agents.length} agent${agents.length === 1 ? '' : 's'}.`);
+        this.connectorRestartPrompt = null;
+        this.fetchAgents();
+        await this.loadConnectors();
+      } catch (e) {
+        this.showToast(`Error: ${e.message || String(e)}`);
+      } finally {
+        this.connectorRestarting = false;
+      }
     },
 
     mcpDetectJsRuntime(command) {
@@ -6844,55 +6883,6 @@ function dashboard() {
       return 'bg-gray-500/70';  // pending
     },
 
-    // Build the wire payload for one server. ``_replaceEnv`` controls
-    // whether ``env`` is sent at all — omitting it triggers the PR 1
-    // preserve-by-name semantic on the backend.
-    mcpDraftToWirePayload(entry) {
-      const out = {
-        name: entry.name,
-        command: entry.command,
-        args: entry.args || [],
-      };
-      if (entry._replaceEnv) {
-        const env = {};
-        for (const row of (entry._envRows || [])) {
-          const k = (row.key || '').trim();
-          if (!k) continue;
-          if (row.type === 'cred') {
-            const credName = (row.value || '').trim();
-            if (!credName) continue;
-            env[k] = `$CRED{${credName}}`;
-          } else {
-            env[k] = row.value || '';
-          }
-        }
-        out.env = env;
-      }
-      return out;
-    },
-
-    // Diff the live editForm.mcp_servers against the persisted server
-    // list; returns true if a save needs to send mcp_servers. Used to
-    // skip a no-op PUT (matching the backend's diff-based mcp_touched).
-    mcpServersChanged(agentId) {
-      const cfg = this.agentConfigs[agentId] || {};
-      const current = cfg.mcp_servers || [];
-      const draft = this.editForm.mcp_servers || [];
-      if (current.length !== draft.length) return true;
-      const byName = new Map(current.map(s => [s.name, s]));
-      for (const d of draft) {
-        const c = byName.get(d.name);
-        if (!c) return true;
-        if (c.command !== d.command) return true;
-        const ca = c.args || [], da = d.args || [];
-        if (ca.length !== da.length) return true;
-        for (let i = 0; i < ca.length; i++) if (ca[i] !== da[i]) return true;
-        // env diff: only detectable if user explicitly toggled replace
-        if (d._replaceEnv) return true;
-      }
-      return false;
-    },
-
     thinkingOptionsForModel(model) {
       if (!model) return [];
       const m = model.startsWith('openrouter/') ? model.slice('openrouter/'.length) : model;
@@ -6917,31 +6907,6 @@ function dashboard() {
 
     async saveConfigFromDetail(agentId) {
       if (this.configSaving) return;
-      // Don't race a save against an in-flight MCP restart retry; the
-      // retry path mutates the same agent's runtime state.
-      if (this.editForm && this.editForm._mcpRestartPending) {
-        this.showToast('MCP restart in progress — try again in a moment.');
-        return;
-      }
-      // If the user has an open MCP draft (add or edit form) and clicks
-      // the outer Save, auto-commit the draft so the typed entries
-      // aren't silently dropped. Reject the save if the draft is
-      // incomplete (no name/command) — surface a clear toast so the
-      // user knows why their save didn't go through. mcpCommitDraft
-      // can ALSO reject the commit silently (duplicate name, cred row
-      // with no selected credential) — it leaves ``_mcpDraft`` in place
-      // and shows its own toast. Detect that and abort the save so the
-      // user isn't shown a contradictory "Updated: ..." success toast
-      // after a rejection.
-      if (this.editForm && this.editForm._mcpDraft) {
-        const d = this.editForm._mcpDraft;
-        if (!(d.name || '').trim() || !(d.command || '').trim()) {
-          this.showToast('MCP server draft is incomplete — Apply or Cancel it before saving.');
-          return;
-        }
-        this.mcpCommitDraft();
-        if (this.editForm._mcpDraft) return;
-      }
       this.configSaving = true;
       try {
         await this.saveAgentConfig(agentId);
@@ -6987,16 +6952,6 @@ function dashboard() {
         if (Number.isNaN(val)) continue;
         if (val !== _caps[key]) body[key] = val;
       }
-      // MCP servers — only include if the user actually changed something
-      // (mcpServersChanged handles the no-op case so a benign full-body
-      // save doesn't trigger an unnecessary restart). Build the wire
-      // payload per entry: omit env for untouched entries (backend
-      // preserves by name), include env for entries the user replaced.
-      if (this.mcpServersChanged(agentId)) {
-        body.mcp_servers = (this.editForm.mcp_servers || []).map(
-          s => this.mcpDraftToWirePayload(s),
-        );
-      }
       // Handle allowed_credentials + capability flags via the permissions endpoint
       const newCreds = (this.editForm.allowed_credentials || '').split(',').map(s => s.trim()).filter(Boolean);
       const oldCreds = cfg.allowed_credentials || [];
@@ -7031,49 +6986,9 @@ function dashboard() {
           if (resp.ok) {
             configResult = await resp.json();
             allUpdated.push(...configResult.updated);
-            // Clear any prior per-row + top-level MCP errors from a failed earlier save.
-            if (this.editForm) {
-              this.editForm._mcpErrors = {};
-              this.editForm._mcpGlobalError = null;
-            }
           } else {
             const err = await resp.json().catch(() => ({}));
-            // Structured Pydantic validation errors come back as
-            // ``{detail: {field: "mcp_servers", errors: [{loc, msg, type}]}}``
-            // so we can map each error back to the offending row + field
-            // for inline display. Keep edit mode open so the user sees
-            // the inline errors next to their inputs.
             const detail = err.detail;
-            if (detail && typeof detail === 'object' && detail.field === 'mcp_servers' && Array.isArray(detail.errors)) {
-              const perRow = {};
-              const topLevel = [];
-              for (const e of detail.errors) {
-                const loc = e.loc || [];
-                const msg = e.msg || 'Invalid';
-                // Row-level: loc = ["mcp_servers", row_idx, field_name, ...]
-                // Top-level: loc = ["mcp_servers"] — produced by field
-                // validators on AgentConfig.mcp_servers itself (e.g. the
-                // case-insensitive duplicate-name rejection). Surface
-                // these in a banner above the list so the user can see
-                // what's wrong even though there's no row to anchor on.
-                if (loc.length >= 3 && loc[0] === 'mcp_servers') {
-                  const ridx = Number(loc[1]);
-                  if (Number.isFinite(ridx)) {
-                    const field = String(loc[2]);
-                    perRow[ridx] = perRow[ridx] || {};
-                    perRow[ridx][field] = msg;
-                    continue;
-                  }
-                }
-                topLevel.push(msg);
-              }
-              if (this.editForm) {
-                this.editForm._mcpErrors = perRow;
-                this.editForm._mcpGlobalError = topLevel.length ? topLevel.join('; ') : null;
-              }
-              this.showToast('MCP server config has errors — see inline.');
-              return;  // KEEP edit mode open for the user to fix
-            }
             this.showToast(`Error: ${typeof detail === 'string' ? detail : 'Update failed'}`);
             this.cancelConfigEdit();
             return;
@@ -7121,21 +7036,12 @@ function dashboard() {
             const data = await restartResp.json();
             this.showToast(data.ready ? `${agentId} restarted and ready` : `${agentId} restarted (warming up)`);
             this.fetchAgents();
-            // Refresh capabilities so MCP status dots reflect the new server state
-            // (running/failed) and the post-restart tool list classification.
             await this.fetchAgentCapabilities(agentId);
-            if (this.editForm) this.editForm._mcpRestartError = null;
           } else {
-            // Config was persisted but the container restart failed. KEEP
-            // edit mode open so the user can read the error and hit
-            // Retry restart without re-saving (config is already on disk).
             const err = await restartResp.json().catch(() => ({}));
             const msg = (typeof err.detail === 'string' && err.detail) ? err.detail
                       : `restart endpoint returned ${restartResp.status}`;
-            if (this.editForm) this.editForm._mcpRestartError = msg;
-            this.showToast(`${agentId}: config saved, restart failed`);
-            await this.fetchAgentConfig(agentId);
-            return;  // do NOT cancelConfigEdit — user needs the Retry restart UI
+            this.showToast(`${agentId}: config saved, restart failed: ${msg}`);
           }
         } else if (allUpdated.length > 0) {
           this.showToast(`Updated: ${allUpdated.join(', ')}`);
@@ -7143,41 +7049,6 @@ function dashboard() {
         await this.fetchAgentConfig(agentId);
       } catch (e) { this.showToast(`Error: ${e.message}`); }
       this.cancelConfigEdit();
-    },
-
-    // Used by the persistent "Retry restart" banner in the MCP panel
-    // when a save succeeded (config persisted) but the follow-up
-    // ``POST /restart`` failed. Calls /restart again WITHOUT re-PUTting
-    // — the config is already on disk; only the container needs to come
-    // up against it. Clears the error and refreshes capabilities on success.
-    async retryMcpRestart(agentId) {
-      if (!this.editForm) return;
-      if (this.editForm._mcpRestartPending) return;
-      this.editForm._mcpRestartPending = true;
-      this.showToast(`Retrying restart for ${agentId}...`);
-      try {
-        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/restart`, { method: 'POST' });
-        if (resp.ok) {
-          const data = await resp.json();
-          this.showToast(data.ready ? `${agentId} restarted and ready` : `${agentId} restarted (warming up)`);
-          this.editForm._mcpRestartError = null;
-          await this.fetchAgents();
-          await this.fetchAgentConfig(agentId);
-          await this.fetchAgentCapabilities(agentId);
-          this.cancelConfigEdit();
-        } else {
-          const err = await resp.json().catch(() => ({}));
-          const msg = (typeof err.detail === 'string' && err.detail) ? err.detail
-                    : `restart endpoint returned ${resp.status}`;
-          this.editForm._mcpRestartError = msg;
-          this.showToast(`Restart still failing: ${msg}`);
-        }
-      } catch (e) {
-        this.editForm._mcpRestartError = e.message || String(e);
-        this.showToast(`Restart error: ${e.message || String(e)}`);
-      } finally {
-        if (this.editForm) this.editForm._mcpRestartPending = false;
-      }
     },
 
     async restartAgent(agentId) {
