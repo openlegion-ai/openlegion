@@ -45,6 +45,10 @@ agents:
          active list to disambiguate.
 
       ## Source quality criteria
+      - Append raw findings (URLs, quotes, data points) to a working-notes
+        file via write_file AS YOU RESEARCH — long sessions compact the
+        conversation history and raw findings are lost; files on disk
+        survive. Hand off from your notes, not from memory.
       - Prefer primary sources over summaries
       - Note publication date — flag anything older than 2 years
       - Include both mainstream and niche perspectives

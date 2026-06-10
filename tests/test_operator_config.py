@@ -306,7 +306,9 @@ class TestOperatorConstants:
         #    the heartbeat procedure already called it but the allowlist
         #    denied the call. (Note: main had previously dropped
         #    save_observations, so v3 baseline was 9 not 10.)
-        assert len(_OPERATOR_HEARTBEAT_TOOLS) == 10
+        #  * v5 (B5 task-run diagnostics): +inspect_task_run — read-only
+        #    per-task execution summary so rating decisions are informed.
+        assert len(_OPERATOR_HEARTBEAT_TOOLS) == 11
         # The operator-tier heartbeat tools must also be on the main
         # operator allowlist — they're the tools operator can use from
         # both /chat and heartbeat. Two heartbeat entries are

@@ -455,3 +455,29 @@ def test_thinking_max_tokens_honours_raised_cap():
     assert params["max_tokens"] == 64000
     # The thinking budget itself is unchanged — only the total ceiling grows.
     assert params["thinking"]["budget_tokens"] == 10_000
+
+
+def test_thinking_override_takes_precedence_and_clears():
+    """B4: a per-task override beats the configured default for the
+    duration it is set, and removing it restores the default."""
+    llm = LLMClient(
+        mesh_url="http://mesh:8420", agent_id="a1",
+        default_model="anthropic/claude-sonnet-4-6", thinking="off",
+    )
+    assert llm._get_thinking_params() == {}
+
+    llm.thinking_override = "high"
+    params = llm._get_thinking_params()
+    assert params["thinking"]["budget_tokens"] == 25_000
+
+    llm.thinking_override = None
+    assert llm._get_thinking_params() == {}
+
+
+def test_thinking_override_on_openai_reasoning_models():
+    llm = LLMClient(
+        mesh_url="http://mesh:8420", agent_id="a1",
+        default_model="openai/o3-mini", thinking="low",
+    )
+    llm.thinking_override = "high"
+    assert llm._get_thinking_params() == {"reasoning_effort": "high"}

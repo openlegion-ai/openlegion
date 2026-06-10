@@ -1622,6 +1622,36 @@ def create_mesh_app(
                     target,
                 )
                 task_id = None
+            else:
+                # Brief delivery: the wake message travels as a URL query
+                # param and is historically a one-liner ("New task from X:
+                # {summary[:200]}"), so the recipient's chat turn used to
+                # start from a title-sized stub — the full task description
+                # (the handoff brief) never reached the worker unless it
+                # thought to call check_inbox. Enrich the lane message with
+                # the bound task's description + artifact pointers here,
+                # where the record is already in hand from the M3 lookup.
+                _desc = (_task_record.get("description") or "").strip()
+                _title = (_task_record.get("title") or "").strip()
+                if _desc and _desc != _title and _desc[:200] not in wake_msg:
+                    wake_msg += (
+                        "\n\n## Task Brief\n"
+                        + sanitize_for_prompt(_desc[:6_000])
+                    )
+                _refs = _task_record.get("artifact_refs") or []
+                if _refs:
+                    # Refs are creator-supplied strings off the task row —
+                    # same trust level as the description above, so they
+                    # get the same sanitize pass before riding the
+                    # recipient's prompt (str() guards a non-string item
+                    # from turning the wake into a join TypeError).
+                    wake_msg += (
+                        "\n\nData payload on the blackboard — fetch with "
+                        "read_blackboard: "
+                        + sanitize_for_prompt(
+                            ", ".join(str(r)[:200] for r in _refs[:5])
+                        )
+                    )
 
         if lane_manager is not None and dispatch_loop is not None:
             try:
@@ -5504,6 +5534,12 @@ def create_mesh_app(
         priority = int(body.get("priority", 0) or 0)
         dependencies = body.get("dependencies") or None
         artifact_refs = body.get("artifact_refs") or None
+        # B4 — optional per-task reasoning depth for the assignee.
+        thinking = body.get("thinking") or None
+        if thinking is not None and thinking not in ("off", "low", "medium", "high"):
+            raise HTTPException(
+                400, f"thinking must be off/low/medium/high, got {thinking!r}",
+            )
         if not title:
             raise HTTPException(400, "title is required")
         if not assignee or not _AGENT_ID_RE.match(assignee):
@@ -5560,6 +5596,7 @@ def create_mesh_app(
                 dependencies=dependencies if isinstance(dependencies, list) else None,
                 artifact_refs=artifact_refs if isinstance(artifact_refs, list) else None,
                 origin=origin_dict,
+                thinking=thinking,
             )
         except TaskLimitExceeded as e:
             # H5 — per-assignee backlog cap or runaway/cyclic parent
@@ -5708,6 +5745,102 @@ def create_mesh_app(
                 404, f"Root task '{root_task_id}' not found",
             )
         return snapshot
+
+    @app.get("/mesh/tasks/{task_id}/run")
+    async def get_task_run(task_id: str, request: Request) -> dict:
+        """Operator diagnostics for a single task run (B5).
+
+        Answers "why did this come out the way it did": the task record
+        (thinking level, blocker note, outcome), the durable
+        ``task_events`` timeline, and an execution summary aggregated
+        from the trace store — LLM call count, total tokens, models
+        used, and any error-status trace events for the assignee within
+        the task's lifetime window. The trace slice is time-window
+        scoped (traces are keyed by trace_id, not task_id), so
+        concurrent activity by the same agent in the window is included
+        — treat the numbers as the agent's activity DURING the task,
+        not a strict per-task ledger. Operator-only.
+        """
+        caller = _extract_verified_agent_id(request)
+        if not (
+            _caller_is_operator(caller, request)
+            or _is_internal_caller(request)
+        ):
+            raise HTTPException(403, "task run inspection is operator-only")
+        record = tasks_store.get(task_id)
+        if record is None:
+            raise HTTPException(404, f"Task '{task_id}' not found")
+        events = tasks_store.list_events(task_id)
+
+        started = record.get("created_at")
+        ended = record.get("completed_at") or time.time()
+        llm_calls = 0
+        tokens_used = 0
+        models: set[str] = set()
+        trace_errors: list[dict] = []
+        if trace_store is not None and record.get("assignee") and started:
+            try:
+                rows = trace_store.query(
+                    agent=record["assignee"],
+                    since=started - 5,
+                    until=ended + 5,
+                    limit=1000,
+                )
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning("task run trace query failed: %s", e)
+                rows = []
+            for ev in rows:
+                meta = ev.get("meta") or {}
+                # Count ``llm_call`` rows only. The streaming proxy path
+                # records TWO rows per call — ``llm_stream`` at stream
+                # start and ``llm_call`` (with tokens) at completion —
+                # and the agent loop streams everything, so counting
+                # both kinds doubled ``llm_calls`` and masked exactly
+                # the "very few calls = shallow run" signal this
+                # endpoint exists to surface. A stream aborted before
+                # completion has no ``llm_call`` row and is not counted;
+                # its failure still shows up under ``trace_errors``.
+                if ev.get("event_type") == "llm_call":
+                    llm_calls += 1
+                    t = meta.get("tokens_used")
+                    if isinstance(t, (int, float)):
+                        tokens_used += int(t)
+                    m = meta.get("model")
+                    if m:
+                        models.add(str(m))
+                if ev.get("status") == "error" or ev.get("error"):
+                    trace_errors.append({
+                        "event_type": ev.get("event_type", ""),
+                        "error": (ev.get("error") or "")[:200],
+                        "timestamp": ev.get("timestamp"),
+                    })
+
+        duration_s = (
+            round(ended - started, 1) if started else None
+        )
+        return {
+            "task": {
+                k: record.get(k)
+                for k in (
+                    "id", "title", "status", "assignee", "creator",
+                    "thinking", "blocker_note", "outcome", "feedback_text",
+                    "result_summary", "created_at", "completed_at",
+                    "parent_task_id", "previous_task_id",
+                )
+            },
+            "execution": {
+                "duration_seconds": duration_s,
+                "llm_calls": llm_calls,
+                "tokens_used": tokens_used,
+                "models": sorted(models),
+                "trace_errors": trace_errors[:10],
+                "trace_window_note": (
+                    "aggregated from the assignee's trace events during "
+                    "the task window — includes any concurrent activity"
+                ),
+            },
+            "events": events[:50],
+        }
 
     @app.get("/mesh/user-notifications")
     async def get_user_notifications(

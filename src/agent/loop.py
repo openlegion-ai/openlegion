@@ -205,6 +205,10 @@ _HEARTBEAT_TOOLS = frozenset({
     # for drill-ins; without it the prompted procedure is denied by
     # this allowlist (caught by Codex pre-merge review of PR 972).
     "inspect_agents",
+    # B5 — read-only per-task execution diagnostics. Lets the heartbeat's
+    # rate-stale-deliverables step look at HOW a task ran (tokens, LLM
+    # calls, thinking, trace errors) before grading it.
+    "inspect_task_run",
 })
 
 # Tool calls whose ONLY purpose is to read state — they don't produce
@@ -1894,6 +1898,12 @@ class AgentLoop:
                 "- Use notify_user for the user; blackboard for other agents only.\n"
             )
         rules += (
+            "- Long-form deliverables (reports, audits, plans, research): "
+            "append findings to a working-notes file via write_file AS YOU "
+            "WORK (notes survive context compaction), then save the FULL "
+            "document with save_artifact. Reference the artifact in your "
+            "final JSON and notify_user — never shrink the deliverable "
+            "itself into a summary.\n"
             f"- You have max {self.MAX_ITERATIONS} iterations.\n"
             f"- Use update_workspace to evolve your SOUL.md, INSTRUCTIONS.md, "
             f"USER.md, and HEARTBEAT.md over time.\n"
@@ -2863,6 +2873,10 @@ class AgentLoop:
                 # it handles any auto-transition, not just terminal ones.
                 if task_id:
                     await self._auto_close_task(task_id, "working")
+                    # B4: honour a per-task reasoning depth carried on the
+                    # task record (hand_off thinking="high"). Cleared in
+                    # the outer finally so it never outlives this turn.
+                    await self._apply_task_thinking(task_id)
                 try:
                     try:
                         result = await self._chat_inner(user_message)
@@ -3122,6 +3136,24 @@ class AgentLoop:
         finally:
             current_origin.reset(origin_token)
             current_task_id.reset(task_id_token)
+            self.llm.thinking_override = None
+
+    async def _apply_task_thinking(self, task_id: str) -> None:
+        """B4: read the task's ``thinking`` column and pin it as the LLM
+        reasoning level for this turn. Best-effort — a lookup failure or
+        an absent/invalid level just keeps the agent's configured default.
+        """
+        try:
+            record = await self.mesh_client.get_task(task_id)
+        except Exception as e:
+            logger.debug("task thinking lookup failed for %s: %s", task_id, e)
+            return
+        level = (record or {}).get("thinking")
+        if level and level in self.llm.VALID_THINKING_LEVELS:
+            self.llm.thinking_override = level
+            logger.info(
+                "Applying per-task thinking=%s for task %s", level, task_id,
+            )
 
     async def _auto_close_task(
         self, task_id: str, status: str, *,
@@ -4526,6 +4558,12 @@ class AgentLoop:
             "there is genuinely nothing to do). A plain-text reply with no "
             "tool call and no {\"result\": {...}} envelope auto-closes the "
             "task as failed (no_outbound_effects).\n"
+            "- Long-form deliverables (reports, audits, plans, research): "
+            "append findings to a working-notes file via write_file AS YOU "
+            "WORK (notes survive context compaction), then save the FULL "
+            "document with save_artifact. Reference the artifact in your "
+            "final answer — never shrink the deliverable itself into a "
+            "summary.\n"
             "- Before answering from memory, run memory_search first.\n"
             "- Use update_workspace to save lasting knowledge and user preferences.\n"
         )

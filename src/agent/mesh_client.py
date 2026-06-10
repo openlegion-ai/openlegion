@@ -1349,6 +1349,7 @@ class MeshClient:
         dependencies: list[str] | None = None,
         artifact_refs: list[str] | None = None,
         origin: "MessageOrigin | None" = None,
+        thinking: str | None = None,
     ) -> dict:
         """Create a durable task. Returns the new task record.
 
@@ -1356,6 +1357,8 @@ class MeshClient:
         receiving agent's lane worker can attribute task completion back
         to the originating channel/user. Without this, ``hand_off`` v2
         loses the origin a sibling ``wake_agent`` call still carries.
+        ``thinking`` (B4) pins a per-task reasoning depth
+        (off/low/medium/high) for the assignee while executing this task.
         """
         client = await self._get_client()
         body: dict = {
@@ -1373,6 +1376,8 @@ class MeshClient:
             body["dependencies"] = dependencies
         if artifact_refs is not None:
             body["artifact_refs"] = artifact_refs
+        if thinking is not None:
+            body["thinking"] = thinking
         headers = self._trace_headers()
         if origin is not None:
             headers.update(origin_header(origin))
@@ -1400,6 +1405,16 @@ class MeshClient:
         """Operator-tier read of a workflow chain. Returns ``None`` on 404."""
         response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/tasks/workflow/{root_task_id}",
+        )
+        if response.status_code == 404:
+            return None
+        _raise_with_body(response)
+        return response.json()
+
+    async def get_task_run(self, task_id: str) -> dict | None:
+        """Operator-tier per-task execution diagnostics. ``None`` on 404."""
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/tasks/{task_id}/run",
         )
         if response.status_code == 404:
             return None

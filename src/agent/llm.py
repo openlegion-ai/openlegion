@@ -66,6 +66,12 @@ class LLMClient:
         self.default_model = default_model
         self.embedding_model = embedding_model
         self.thinking = thinking
+        # B4 — per-task reasoning override. Set by the agent loop for the
+        # duration of a single handoff turn when the task record carries
+        # an explicit thinking level; None falls back to ``self.thinking``.
+        # Turn execution is serialized (chat lock / busy guard) so a plain
+        # attribute is safe here.
+        self.thinking_override: str | None = None
         # Default output-token cap for chat()/chat_stream() when the caller
         # doesn't pass max_tokens explicitly. Configurable per-agent via the
         # LLM_MAX_TOKENS env var (see __main__.py) and hot-reloadable via the
@@ -122,7 +128,8 @@ class LLMClient:
 
     def _get_thinking_params(self, model: str | None = None) -> dict:
         """Build provider-specific thinking/reasoning parameters."""
-        if self.thinking == "off":
+        level = self.thinking_override or self.thinking
+        if level == "off":
             return {}
         m = model or self.default_model
         if m.startswith("openrouter/"):
@@ -130,7 +137,7 @@ class LLMClient:
         if m.startswith("openlegion/"):
             m = m[len("openlegion/"):]
         if m.startswith("anthropic/"):
-            budget = self._THINKING_BUDGETS.get(self.thinking, 10_000)
+            budget = self._THINKING_BUDGETS.get(level, 10_000)
             # Anthropic requires max_tokens > budget_tokens; ensure enough room
             # for both thinking and output text. Honour the configured output
             # cap so the per-agent max_output_tokens lever is meaningful for
@@ -145,7 +152,7 @@ class LLMClient:
                 "max_tokens": max(self.max_output_tokens, budget + 4096),
             }
         if m.startswith("openai/o") or m.startswith("o1") or m.startswith("o3") or m.startswith("o4"):
-            return {"reasoning_effort": self.thinking}
+            return {"reasoning_effort": level}
         return {}
 
     def _apply_thinking_params(self, params: dict, model: str | None, kwargs: dict) -> None:

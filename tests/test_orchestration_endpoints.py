@@ -1274,3 +1274,134 @@ async def test_create_task_rate_limit_allows_normal_volume(v2_app):
                 headers={"X-Agent-ID": "scout"},
             )
             assert r.status_code == 200, r.text
+
+
+# ── B5: GET /mesh/tasks/{task_id}/run ─────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_task_run_is_operator_only(v2_app):
+    app, _, _ = v2_app
+    rec = app.tasks_store.create(
+        creator="operator", assignee="analyst", title="deep work",
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.get(
+            f"/mesh/tasks/{rec['id']}/run", headers={"X-Agent-ID": "scout"},
+        )
+    assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_task_run_unknown_id_404(v2_app):
+    app, _, _ = v2_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.get(
+            "/mesh/tasks/task_doesnotexist/run",
+            headers={"X-Agent-ID": "operator"},
+        )
+    assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_task_run_returns_record_events_and_execution(v2_app):
+    app, _, _ = v2_app
+    rec = app.tasks_store.create(
+        creator="operator", assignee="analyst", title="deep audit",
+        description="full brief", thinking="high",
+    )
+    app.tasks_store.update_status(rec["id"], "working", actor="analyst")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.get(
+            f"/mesh/tasks/{rec['id']}/run", headers={"X-Agent-ID": "operator"},
+        )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["task"]["id"] == rec["id"]
+    assert body["task"]["thinking"] == "high"
+    assert body["task"]["status"] == "working"
+    # No trace store wired in this fixture — execution summary is zeroed
+    # but present and well-formed.
+    assert body["execution"]["llm_calls"] == 0
+    assert body["execution"]["tokens_used"] == 0
+    # Timeline includes the created + status-change events.
+    kinds = [e["event_kind"] for e in body["events"]]
+    assert "created" in kinds
+
+
+@pytest.mark.asyncio
+async def test_task_run_aggregates_traces_in_window(tmp_path, monkeypatch):
+    """LLM-call traces for the assignee inside the task window roll up
+    into llm_calls / tokens_used / models."""
+    from src.host.traces import TraceStore
+
+    server_module = _reload_server(
+        monkeypatch, tasks_db=str(tmp_path / "tasks.db"),
+    )
+    blackboard = Blackboard(str(tmp_path / "bb.db"))
+    permissions = PermissionMatrix()
+    router = MessageRouter(permissions, {"analyst": "http://analyst:8400"})
+    traces = TraceStore(str(tmp_path / "traces.db"))
+    app = server_module.create_mesh_app(
+        blackboard=blackboard,
+        pubsub=PubSub(),
+        router=router,
+        permissions=permissions,
+        trace_store=traces,
+    )
+    try:
+        rec = app.tasks_store.create(
+            creator="operator", assignee="analyst", title="deep audit",
+        )
+        traces.record(
+            trace_id="tr1", source="mesh.api_proxy", agent="analyst",
+            event_type="llm_call", detail="llm/chat", duration_ms=900,
+            status="ok", meta={"model": "anthropic/claude-x", "tokens_used": 1200},
+        )
+        traces.record(
+            trace_id="tr1", source="mesh.api_proxy", agent="analyst",
+            event_type="llm_call", detail="llm/chat", duration_ms=400,
+            status="error", error="rate limited",
+            meta={"model": "anthropic/claude-x", "tokens_used": 300},
+        )
+        # Streamed call: the proxy records an ``llm_stream`` row at
+        # stream start AND an ``llm_call`` row (tokens, streaming=True)
+        # at completion. Only the completion row may count — counting
+        # both kinds doubled llm_calls for streamed traffic.
+        traces.record(
+            trace_id="tr3", source="mesh.api_proxy", agent="analyst",
+            event_type="llm_stream", detail="llm/chat",
+            meta={"model": "anthropic/claude-x"},
+        )
+        traces.record(
+            trace_id="tr3", source="mesh.api_proxy", agent="analyst",
+            event_type="llm_call", detail="llm/chat", duration_ms=700,
+            status="ok",
+            meta={
+                "model": "anthropic/claude-x", "tokens_used": 500,
+                "streaming": True,
+            },
+        )
+        # Different agent in the same window — must NOT count.
+        traces.record(
+            trace_id="tr2", source="mesh.api_proxy", agent="scout",
+            event_type="llm_call", detail="llm/chat",
+            meta={"model": "other", "tokens_used": 999},
+        )
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.get(
+                f"/mesh/tasks/{rec['id']}/run",
+                headers={"X-Agent-ID": "operator"},
+            )
+        assert r.status_code == 200
+        execution = r.json()["execution"]
+        assert execution["llm_calls"] == 3
+        assert execution["tokens_used"] == 2000
+        assert execution["models"] == ["anthropic/claude-x"]
+        assert len(execution["trace_errors"]) == 1
+        assert "rate limited" in execution["trace_errors"][0]["error"]
+    finally:
+        blackboard.close()
+        traces.close()
+        monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
+        importlib.reload(server_module)

@@ -32,6 +32,12 @@ logger = setup_logging("agent.builtins.coordination_tool")
 # only the artifact_ref, keeping the SQLite table small.
 _HANDOFF_TTL = 86_400  # 24 hours — safety net for unprocessed handoffs
 
+# Cap on the inline handoff ``brief``. The brief becomes the task
+# description AND is delivered inline in the recipient's wake message
+# (mesh-side enrichment), so it must stay bounded — long-form payloads
+# belong in ``data`` (blackboard) or artifacts.
+_MAX_BRIEF_CHARS = 6_000
+
 # Mirrors ``host/orchestration.TERMINAL_STATUSES`` — the set of statuses
 # that a task can no longer transition out of. Defined locally so the
 # coordination tool stays decoupled from host internals.
@@ -116,17 +122,22 @@ _RESERVED_ENVELOPE_KEYS: frozenset[str] = frozenset(
         "Keep the 'summary' SHORT — it becomes the task title in the "
         "recipient's inbox and on the dashboard. Aim for ≤80 characters, "
         "like a Git commit subject line. Examples: 'Draft Q3 launch brief' "
-        "or 'Review pricing change for SKU-123'. If you need to send a "
-        "full instruction or spec, put it in 'data' (JSON) — that's where "
-        "long context belongs. A long summary will still work (the system "
-        "auto-splits it into a short title + description) but a hand-"
-        "written short summary reads better.\n\n"
-        "If you have output data to share, pass it as 'data' (JSON string). "
-        "It will be written to the blackboard and the task will include a "
-        "pointer so the recipient can read it. For lightweight handoffs "
-        "where the summary is enough context, omit 'data'.\n\n"
+        "or 'Review pricing change for SKU-123'.\n\n"
+        "For any non-trivial handoff, ALWAYS pass 'brief'. The recipient "
+        "does NOT see your conversation — they start from only what you "
+        "send, so a one-line summary with no brief produces shallow work. "
+        "Write the brief as markdown covering: the objective, background "
+        "the recipient lacks (who asked and why, constraints, what you "
+        "already know), success criteria, and the expected deliverable "
+        "(form, depth, where to save it). The brief is delivered to the "
+        "recipient together with the task.\n\n"
+        "If you have structured output data to share, pass it as 'data' "
+        "(JSON string). It will be written to the blackboard and the task "
+        "will include a pointer so the recipient can read it. For "
+        "lightweight handoffs where the summary is enough context, omit "
+        "'data' and 'brief'.\n\n"
         "The target agent sees the task in their inbox (via check_inbox) "
-        "with your summary and a pointer to your output."
+        "with your summary, your brief, and a pointer to your output."
     ),
     parameters={
         "to": {
@@ -141,20 +152,42 @@ _RESERVED_ENVELOPE_KEYS: frozenset[str] = frozenset(
                 "Put long instructions in 'data', not here."
             ),
         },
+        "brief": {
+            "type": "string",
+            "description": (
+                "Full markdown brief for the recipient: objective, "
+                "background they lack, success criteria, expected "
+                "deliverable form and depth. Delivered with the task. "
+                "Strongly recommended for any non-trivial handoff "
+                "(max 6,000 chars)."
+            ),
+            "default": "",
+        },
         "data": {
             "type": "string",
             "description": (
-                "Optional JSON string of output data or a full instruction "
-                "for the recipient. Written to the blackboard so the "
-                "recipient can read the full details. This is where long "
-                "context belongs — keep 'summary' to a short title."
+                "Optional JSON string of structured output data for the "
+                "recipient. Written to the blackboard so the recipient "
+                "can read the full details. Use 'brief' for instructions "
+                "and context; use 'data' for payloads."
+            ),
+            "default": "",
+        },
+        "thinking": {
+            "type": "string",
+            "description": (
+                "Optional reasoning depth for this task: 'high' for deep "
+                "analysis/research/audits, 'medium', 'low', or 'off'. "
+                "Omit to use the recipient's configured default. Use "
+                "'high' whenever the deliverable needs depth, not speed."
             ),
             "default": "",
         },
     },
 )
 async def hand_off(
-    to: str, summary: str, data: str = "", *, mesh_client=None,
+    to: str, summary: str, brief: str = "", data: str = "",
+    thinking: str = "", *, mesh_client=None,
 ) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
@@ -164,14 +197,29 @@ async def hand_off(
         return {"error": f"Invalid agent ID: '{to}'"}
 
     summary = sanitize_for_prompt(summary)
-    # The handoff ``summary`` carries both the headline (becomes the
-    # task title) and the full instruction (becomes the description).
-    # Agents historically dumped multi-sentence instructions into
-    # ``summary`` — that produced wall-of-text titles in the dashboard.
-    # ``Tasks.create`` applies the same policy as a backstop, but we
-    # mirror it here so the title we surface in result envelopes, wake
-    # messages, and downstream logs is already short.
-    if len(summary) > LONG_TITLE_THRESHOLD:
+    # ``or ""`` — models emit explicit ``brief: null``, which arrives
+    # here as None (same defense the ``thinking`` line below uses).
+    brief = brief or ""
+    brief = sanitize_for_prompt(brief)[:_MAX_BRIEF_CHARS] if brief.strip() else ""
+    thinking = (thinking or "").strip().lower()
+    if thinking and thinking not in ("off", "low", "medium", "high"):
+        return {
+            "error": (
+                f"Invalid thinking level {thinking!r} — use "
+                "'off', 'low', 'medium', or 'high' (or omit it)."
+            ),
+        }
+    # The handoff ``summary`` carries the headline (becomes the task
+    # title); the full instruction belongs in ``brief`` (becomes the
+    # description, and the mesh delivers it inline in the recipient's
+    # wake message). Agents historically dumped multi-sentence
+    # instructions into ``summary`` — that produced wall-of-text titles
+    # in the dashboard. ``Tasks.create`` applies the same policy as a
+    # backstop, but we mirror it here so the title we surface in result
+    # envelopes, wake messages, and downstream logs is already short.
+    if brief:
+        title, description = normalize_title_and_description(summary, brief)
+    elif len(summary) > LONG_TITLE_THRESHOLD:
         title, description = normalize_title_and_description(summary, None)
     else:
         title = summary
@@ -318,6 +366,7 @@ async def hand_off(
             parent_task_id=parent_task_id,
             artifact_refs=[artifact_ref] if artifact_ref else None,
             origin=origin,
+            thinking=thinking or None,
         )
     except Exception as e:
         # Bug H: operator hit a live case where seo-strategist called

@@ -129,8 +129,10 @@ class TestPlaybookConstants:
         # Bumped 5200 → 6000 to accommodate the autonomous-by-default
         # frame copy (immediate-apply edits, ratings-as-feedback guidance);
         # 6000 → 6400 for the Phase-1d "delegate and release" routing rule
-        # (hand off → stop; the chain watcher delivers the terminal outcome).
-        assert len(_OPERATOR_CORE) < 6400
+        # (hand off → stop; the chain watcher delivers the terminal outcome);
+        # 6400 → 6800 for the handoff-brief rule (workers don't see the
+        # conversation — carry the user's ask + deliverable depth in `brief`).
+        assert len(_OPERATOR_CORE) < 6800
         assert len(_OPERATOR_CORE) > 1000
 
     def test_playbooks_have_numbered_steps(self):

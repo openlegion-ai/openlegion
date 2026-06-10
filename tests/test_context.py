@@ -1192,3 +1192,109 @@ class TestSummarizeTailCap:
         tail_tokens = estimate_tokens(result[1:], cm.model)
         assert tail_tokens <= cm.max_tokens * 0.5 + 50, \
             f"retained tail {tail_tokens} exceeds 0.5*max_tokens cap"
+
+
+class TestChunkedSummarization:
+    """B1: compaction summarizes ALL older history in chunks instead of
+    truncating to the first 20k chars (and 200 chars per tool result)."""
+
+    @staticmethod
+    def _recording_llm(fold_content: str = "FOLDED", part_content: str = "part summary"):
+        llm = MagicMock()
+        prompts: list[str] = []
+
+        async def chat(system, messages, max_tokens=None, temperature=None, **kw):
+            prompt = messages[0]["content"]
+            prompts.append(prompt)
+            if prompt.startswith("Merge these sequential summaries"):
+                return LLMResponse(content=fold_content, tokens_used=10)
+            return LLMResponse(content=part_content, tokens_used=10)
+
+        llm.chat = AsyncMock(side_effect=chat)
+        return llm, prompts
+
+    @pytest.mark.asyncio
+    async def test_content_beyond_20k_reaches_summarizer(self):
+        llm, prompts = self._recording_llm()
+        cm = ContextManager(max_tokens=100, llm=llm, workspace=None)
+        msgs = []
+        for i in range(30):
+            role = "user" if i % 2 == 0 else "assistant"
+            msgs.append({"role": role, "content": f"MARKER_{i} " + "x" * 2000})
+
+        result = await cm._summarize_compact("system", msgs)
+
+        joined = "\n".join(prompts)
+        # Multiple chunk calls were made...
+        assert len(prompts) >= 2
+        # ...and content past the legacy 20k truncation point survived.
+        assert "MARKER_20" in joined
+        assert "MARKER_25" in joined
+        # The stitched summary carries part headers.
+        summary_msg = result[0]["content"]
+        assert "Part 1 of" in summary_msg
+
+    @pytest.mark.asyncio
+    async def test_tool_results_not_over_truncated(self):
+        llm, prompts = self._recording_llm()
+        cm = ContextManager(max_tokens=100, llm=llm, workspace=None)
+        msgs = [
+            {"role": "user", "content": "do deep research"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "t1", "function": {"name": "web_search", "arguments": "{}"}}],
+            },
+            # Marker sits past the legacy 200-char tool-result cut.
+            {"role": "tool", "tool_call_id": "t1", "content": "x" * 1000 + " TOOLMARKER " + "y" * 200},
+        ]
+        # Trailing small groups so the tool group lands in "older".
+        for i in range(8):
+            role = "user" if i % 2 == 0 else "assistant"
+            msgs.append({"role": role, "content": f"tail {i}"})
+
+        await cm._summarize_compact("system", msgs)
+
+        assert "TOOLMARKER" in "\n".join(prompts)
+
+    @pytest.mark.asyncio
+    async def test_long_partials_get_folded_once(self):
+        llm, prompts = self._recording_llm(part_content="p" * 5000)
+        cm = ContextManager(max_tokens=100, llm=llm, workspace=None)
+        msgs = []
+        for i in range(30):
+            role = "user" if i % 2 == 0 else "assistant"
+            msgs.append({"role": role, "content": f"m{i} " + "x" * 2000})
+
+        result = await cm._summarize_compact("system", msgs)
+
+        fold_calls = [p for p in prompts if p.startswith("Merge these sequential summaries")]
+        assert len(fold_calls) == 1
+        assert "FOLDED" in result[0]["content"]
+
+    @pytest.mark.asyncio
+    async def test_single_chunk_keeps_single_call(self):
+        llm, prompts = self._recording_llm()
+        cm = ContextManager(max_tokens=100, llm=llm, workspace=None)
+        msgs = _make_messages(10, chars_each=200)
+
+        result = await cm._summarize_compact("system", msgs)
+
+        assert len(prompts) == 1
+        assert "part summary" in result[0]["content"]
+
+    def test_chunk_message_texts_boundaries(self):
+        msgs = [{"role": "user", "content": f"msg{i} " + "z" * 40} for i in range(10)]
+        chunks = ContextManager._chunk_message_texts(msgs, chunk_size=120, tool_chars=200)
+        assert len(chunks) > 1
+        assert all(len(c) <= 120 for c in chunks)
+        # Every message's marker survives across the chunk set.
+        joined = "".join(chunks)
+        for i in range(10):
+            assert f"msg{i}" in joined
+
+    def test_chunk_message_texts_truncates_oversized_message(self):
+        msgs = [{"role": "user", "content": "B" * 500}]
+        chunks = ContextManager._chunk_message_texts(msgs, chunk_size=100, tool_chars=200)
+        assert len(chunks) == 1
+        assert len(chunks[0]) <= 100

@@ -53,6 +53,10 @@ agents:
       - When a task involves multiple steps, execute them sequentially
       - If a command fails, read the error carefully and try a different approach
       - Save important facts to memory so you remember them across sessions
+      - On research-heavy or long-form tasks, append findings to a
+        working-notes file (write_file) as you go — long sessions compact
+        the conversation history; files survive. Save the full deliverable
+        with save_artifact, never just a summary of it.
       - When working autonomously (heartbeat, cron), use notify_user to report results
 
       ## Using tools proactively
