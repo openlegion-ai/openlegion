@@ -411,6 +411,11 @@ function dashboard() {
     // flow back into operator's next composition. List is ordered
     // newest-first by ``generated_at``.
     workplaceSummaries: [],
+    // In-flight operator-rooted pipelines (live card). Each entry:
+    // {root_task_id, title, assignee, created_at, stages[], summary{}, stalled}.
+    // Loaded from /api/workplace/pipelines, WS-debounce-refreshed on task
+    // status changes so the card tracks chains as they move.
+    workplacePipelines: [],
     // Per-summary inline feedback box state. Keyed by summary id;
     // value is the current draft feedback string. The user opens the
     // box by clicking the rework icon → enters reason → submits →
@@ -448,6 +453,7 @@ function dashboard() {
       help: false,
       summaries: false,
       goals: false,
+      pipelines: false,
     },
     workplaceErrors: {
       teams: '',
@@ -457,6 +463,7 @@ function dashboard() {
       help: '',
       summaries: '',
       goals: '',
+      pipelines: '',
     },
     // In-flight audit-log undo so we can disable the button per-row.
     auditReverting: {},
@@ -2624,6 +2631,7 @@ function dashboard() {
           this.loadWorkplaceHelpRequests(),
           this.loadWorkplaceSummaries(),
           this.loadWorkplaceGoals(),
+          this.loadWorkplacePipelines(),
         ]);
       } finally {
         this.workplaceLoading = false;
@@ -2643,8 +2651,50 @@ function dashboard() {
         help: this.loadWorkplaceHelpRequests,
         summaries: this.loadWorkplaceSummaries,
         goals: this.loadWorkplaceGoals,
+        pipelines: this.loadWorkplacePipelines,
       }[section];
       if (fn) fn.call(this);
+    },
+
+    // Live pipeline card — in-flight operator-rooted chains. Serial-guarded
+    // (mirrors loadWorkplaceSummaries) because it's WS-debounce-refreshed and
+    // can race the initial load / manual retry.
+    async loadWorkplacePipelines() {
+      const serial = (this._pipelinesFetchSerial || 0) + 1;
+      this._pipelinesFetchSerial = serial;
+      this.workplaceSectionLoading.pipelines = true;
+      this.workplaceErrors.pipelines = '';
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/workplace/pipelines`);
+        if (serial !== this._pipelinesFetchSerial) return;  // superseded
+        if (!resp.ok) {
+          this.workplaceErrors.pipelines = `Couldn't load pipelines (HTTP ${resp.status})`;
+          return;
+        }
+        const data = await resp.json();
+        if (serial !== this._pipelinesFetchSerial) return;  // superseded
+        this.workplacePipelines = data.pipelines || [];
+      } catch (e) {
+        if (serial !== this._pipelinesFetchSerial) return;  // superseded
+        this.workplaceErrors.pipelines = (e && e.message)
+          ? `Couldn't load pipelines: ${e.message}` : "Couldn't load pipelines";
+      } finally {
+        if (serial === this._pipelinesFetchSerial) {
+          this.workplaceSectionLoading.pipelines = false;
+        }
+      }
+    },
+
+    // Tailwind classes for a pipeline stage chip, by task status.
+    pipelineStageClass(status) {
+      switch (status) {
+        case 'done': return 'bg-emerald-900/30 border-emerald-700/40 text-emerald-300';
+        case 'working': return 'bg-blue-900/30 border-blue-700/40 text-blue-300';
+        case 'blocked': return 'bg-amber-900/30 border-amber-700/40 text-amber-300';
+        case 'failed': return 'bg-red-900/30 border-red-700/40 text-red-300';
+        case 'cancelled': return 'bg-gray-800/40 border-gray-700/40 text-gray-400';
+        default: return 'bg-gray-800/40 border-gray-700/40 text-gray-300'; // pending / accepted
+      }
     },
 
     async loadWorkplaceSummaries() {
@@ -3944,6 +3994,17 @@ function dashboard() {
     handleWorkplaceEvent(evt) {
       if (!evt || !evt.type) return;
       const data = evt.data || {};
+      // Live pipeline card — any task lifecycle change can move a chain
+      // through its stages, so debounce-refresh the in-flight pipelines.
+      if (evt.type === 'task_created' || evt.type === 'task_status_changed'
+          || evt.type === 'task_outcome') {
+        if (this._pipelinesDebounce) clearTimeout(this._pipelinesDebounce);
+        this._pipelinesDebounce = setTimeout(() => {
+          if (typeof this.loadWorkplacePipelines === 'function') {
+            this.loadWorkplacePipelines();
+          }
+        }, 300);
+      }
       if (evt.type === 'task_created') {
         // Add stub row so the Stuck Tasks panel + drill-in see it
         // immediately; background reload fills in the rest.

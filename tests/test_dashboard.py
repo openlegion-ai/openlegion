@@ -5431,6 +5431,58 @@ class TestWorkplaceTabRoutes:
         rows = resp.json()["blockers"]
         assert any(r["id"] == rec["id"] for r in rows)
 
+    def test_workplace_pipelines_lists_in_flight_human_chain(self):
+        client = self._client_with_v2(True)
+        root = self.tasks_store.create(
+            creator="operator", assignee="scout", title="research trends",
+            origin={"kind": "human", "channel": "dashboard", "user": "u1"},
+        )
+        self.tasks_store.update_status(root["id"], "working", actor="scout")
+        resp = client.get("/dashboard/api/workplace/pipelines")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["enabled"] is True
+        p = next(p for p in data["pipelines"]
+                 if p["root_task_id"] == root["id"])
+        assert p["title"] == "research trends"
+        assert p["stages"] and p["summary"]["total"] >= 1
+        assert p["stalled"] is False  # working but not old
+
+    def test_workplace_pipelines_excludes_terminal_and_non_human(self):
+        client = self._client_with_v2(True)
+        # Completed human chain — excluded (not in-flight).
+        done = self.tasks_store.create(
+            creator="operator", assignee="scout", title="done one",
+            origin={"kind": "human", "channel": "dashboard", "user": "u1"},
+        )
+        self.tasks_store.update_status(done["id"], "working", actor="scout")
+        self.tasks_store.update_status(done["id"], "done", actor="scout")
+        # Worker-origin in-flight root — excluded (not human).
+        agent_root = self.tasks_store.create(
+            creator="a", assignee="b", title="internal",
+            origin={"kind": "agent", "channel": "", "user": "b"},
+        )
+        self.tasks_store.update_status(agent_root["id"], "working", actor="b")
+        resp = client.get("/dashboard/api/workplace/pipelines")
+        ids = [p["root_task_id"] for p in resp.json()["pipelines"]]
+        assert done["id"] not in ids
+        assert agent_root["id"] not in ids
+
+    def test_workplace_pipelines_flags_blocked_as_stalled(self):
+        client = self._client_with_v2(True)
+        root = self.tasks_store.create(
+            creator="operator", assignee="scout", title="stuck pipeline",
+            origin={"kind": "human", "channel": "dashboard", "user": "u1"},
+        )
+        self.tasks_store.update_status(root["id"], "working", actor="scout")
+        self.tasks_store.update_status(
+            root["id"], "blocked", actor="scout", blocker_note="needs creds",
+        )
+        resp = client.get("/dashboard/api/workplace/pipelines")
+        p = next(p for p in resp.json()["pipelines"]
+                 if p["root_task_id"] == root["id"])
+        assert p["stalled"] is True
+
     def test_workplace_pending_lists_open_nonces(self):
         # No need for v2 — pending list is independent of orchestration.
         client = self._client_with_v2(False)

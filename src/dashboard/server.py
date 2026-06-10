@@ -7640,6 +7640,56 @@ def create_dashboard_router(
             rows = []
         return {"enabled": True, "blockers": rows}
 
+    @api_router.get("/api/workplace/pipelines")
+    async def api_workplace_pipelines() -> dict:
+        """In-flight operator-rooted chains + stage progress (live pipeline card).
+
+        Reuses ``list_watchable_human_roots`` (human-origin chain roots not yet
+        terminally delivered, within the window) and ``workflow_snapshot`` per
+        root. Only chains with a non-terminal stage are returned (in-flight),
+        so completed chains drop off automatically. A chain is flagged
+        ``stalled`` when a stage is blocked or has been ``working`` a long time
+        — mirroring the stall watchdog's signal for the UI.
+        """
+        if tasks_store is None:
+            return {"enabled": False, "pipelines": []}
+        import time as _t
+        window_s = 24 * 3600   # show in-flight chains from the last day
+        slow_s = 300           # a working stage older than this reads as slow
+        _terminal = ("done", "failed", "cancelled")
+        pipelines: list[dict] = []
+        try:
+            roots = tasks_store.list_watchable_human_roots(
+                since=_t.time() - window_s,
+            )
+            for root in roots:
+                snap = tasks_store.workflow_snapshot(root["id"])
+                if not snap:
+                    continue
+                stages = snap.get("stages", [])
+                if not any(s.get("status") not in _terminal for s in stages):
+                    continue  # wholly terminal — not in-flight
+                stalled = any(
+                    s.get("status") == "blocked"
+                    or (s.get("status") == "working"
+                        and (s.get("age_in_state_seconds") or 0) > slow_s)
+                    for s in stages
+                )
+                pipelines.append({
+                    "root_task_id": root["id"],
+                    "title": root.get("title") or "",
+                    "assignee": root.get("assignee") or "",
+                    "created_at": root.get("created_at"),
+                    "stages": stages,
+                    "summary": snap.get("summary", {}),
+                    "stalled": stalled,
+                })
+        except Exception as e:
+            logger.warning("workplace pipelines listing failed: %s", e)
+            return {"enabled": True, "pipelines": []}
+        pipelines.sort(key=lambda p: p.get("created_at") or 0, reverse=True)
+        return {"enabled": True, "pipelines": pipelines}
+
     @api_router.get("/api/workplace/pending")
     async def api_workplace_pending() -> dict:
         """List open pending actions for inline + System>Operator review.
