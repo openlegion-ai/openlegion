@@ -355,6 +355,11 @@ class Tasks:
                     root_task_id TEXT PRIMARY KEY,
                     notified_at REAL NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS milestone_pings (
+                    task_id TEXT PRIMARY KEY,
+                    pinged_at REAL NOT NULL
+                );
             """)
             # Resolve the active column name. ``team_id`` is canonical;
             # ``project_id`` is the pre-rename column kept readable so
@@ -603,6 +608,21 @@ class Tasks:
                 "INSERT OR IGNORE INTO chain_stall_notices "
                 "(root_task_id, notified_at) VALUES (?, ?)",
                 (root_task_id, time.time()),
+            )
+            return cur.rowcount == 1
+
+    def claim_milestone_ping(self, task_id: str) -> bool:
+        """Atomically claim the one milestone ping for a completed stage.
+
+        One ping per stage (task), ever. Separate ledger so milestone pings
+        (opt-in, per-stage progress) don't interact with terminal / stall
+        delivery. Durable → survives restarts (no re-ping of old stages).
+        """
+        with self._conn() as conn:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO milestone_pings (task_id, pinged_at) "
+                "VALUES (?, ?)",
+                (task_id, time.time()),
             )
             return cur.rowcount == 1
 

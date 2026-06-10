@@ -981,6 +981,12 @@ class RuntimeContext:
                 "Want me to check in?"
             )
             bell_kind = "alert"
+        elif kind == "milestone":
+            # Opt-in per-stage progress ping. Bell-only (gated below) so it
+            # can't spam a chat channel; a gentle `info` note, not an alert.
+            title = "✅ Progress"
+            body = summary or f"A stage of '{root_title}' finished."
+            bell_kind = "info"
         else:
             title = "⚠️ Task failed"
             body = summary or "Your request hit a failure and stopped."
@@ -1021,8 +1027,9 @@ class RuntimeContext:
         #    limit) doesn't silently drop it. Runs as a background task so it
         #    never blocks the watcher sweep; the durable bell (above) remains
         #    the cross-restart guarantee, so a channel down past the retries
-        #    still leaves the user the bell.
-        if channel and channel != "dashboard" and user:
+        #    still leaves the user the bell. Milestones stay bell-only — a
+        #    per-stage play-by-play would spam a chat channel.
+        if kind != "milestone" and channel and channel != "dashboard" and user:
             try:
                 from src.shared.types import MessageOrigin
                 origin_obj = MessageOrigin(
@@ -1075,6 +1082,23 @@ class RuntimeContext:
             "(bell delivered as fallback)",
             origin.channel, origin.user, attempts,
         )
+
+    def _milestone_pings_enabled(self) -> bool:
+        """Read the opt-in milestone-pings toggle from config/settings.json.
+
+        Read on demand each sweep (mirrors how the host runtime reads
+        browser/captcha settings); default off, fail-safe to off on any error
+        so a malformed settings file can't start spamming pings.
+        """
+        try:
+            import json
+            from pathlib import Path
+            p = Path("config/settings.json")
+            if not p.exists():
+                return False
+            return bool(json.loads(p.read_text()).get("milestone_pings_enabled", False))
+        except Exception:
+            return False
 
     def _start_mesh_server(self) -> None:
         import uvicorn
@@ -1501,6 +1525,7 @@ class RuntimeContext:
             from src.host.chain_watcher import ChainWatcher
             self.chain_watcher = ChainWatcher(
                 self._tasks_store_ref, self._deliver_chain_outcome,
+                milestones_enabled=self._milestone_pings_enabled,
             )
 
             def run_chain_watcher():

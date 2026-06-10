@@ -5498,6 +5498,27 @@ class TestWorkplaceTabRoutes:
         assert resp.status_code == 200
         assert len(resp.json()["pipelines"]) <= _MAX_PIPELINE_ROOTS
 
+    def test_milestone_pings_toggle_roundtrip(self, tmp_path, monkeypatch):
+        # The settings helpers read a RELATIVE config/settings.json at request
+        # time. Build the client at repo-root cwd (so its construction reads
+        # real config), then chdir into a tmp dir so the toggle read/write
+        # lands in an isolated config/settings.json — never the repo's.
+        client = self._client_with_v2(True)
+        (tmp_path / "config").mkdir()
+        monkeypatch.chdir(tmp_path)
+        # Default off.
+        r = client.get("/dashboard/api/milestone-pings")
+        assert r.status_code == 200 and r.json()["enabled"] is False
+        # Turn on → persisted.
+        r = client.post("/dashboard/api/milestone-pings", json={"enabled": True})
+        assert r.status_code == 200 and r.json()["enabled"] is True
+        assert client.get(
+            "/dashboard/api/milestone-pings").json()["enabled"] is True
+        # Turn back off.
+        r = client.post(
+            "/dashboard/api/milestone-pings", json={"enabled": False})
+        assert r.json()["enabled"] is False
+
     def test_workplace_pending_lists_open_nonces(self):
         # No need for v2 — pending list is independent of orchestration.
         client = self._client_with_v2(False)

@@ -50,6 +50,10 @@ _DEFAULT_WATCH_WINDOW_S = 7 * 24 * 3600.0
 # A chain parked in a waiting state (blocked / pending / accepted, nothing
 # working) with no progress for this long earns one stall nudge to the user.
 _DEFAULT_STALL_AFTER_S = 600.0
+# Opt-in milestone pings fire only for stages that completed within this
+# window — so toggling the feature on mid-pipeline doesn't retro-ping every
+# already-done stage, and a sweep only ever pings a just-finished one.
+_MILESTONE_RECENT_S = 120.0
 
 
 class ChainWatcher:
@@ -73,6 +77,7 @@ class ChainWatcher:
         sweep_s: float = _DEFAULT_SWEEP_S,
         watch_window_s: float = _DEFAULT_WATCH_WINDOW_S,
         stall_after_s: float = _DEFAULT_STALL_AFTER_S,
+        milestones_enabled: Callable[[], bool] = lambda: False,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
     ) -> None:
@@ -82,6 +87,9 @@ class ChainWatcher:
         self._sweep_s = sweep_s
         self._watch_window_s = watch_window_s
         self._stall_after_s = stall_after_s
+        # Read each sweep — an opt-in toggle (default off); only when on do we
+        # do the extra per-stage snapshot + milestone pings.
+        self._milestones_enabled = milestones_enabled
         self._clock = clock          # monotonic — for the terminal settle debounce
         self._wall_clock = wall_clock  # wall-clock — for stall age vs stored updated_at
         # root_task_id -> monotonic timestamp first observed terminal.
@@ -125,6 +133,7 @@ class ChainWatcher:
                 # Still active (or a new hop just appeared) — reset settle.
                 self._settling.pop(root_id, None)
                 await self._maybe_nudge_stall(root, root_id)
+                await self._maybe_ping_milestones(root, root_id)
                 continue
 
             kind, summary = verdict
@@ -174,6 +183,45 @@ class ChainWatcher:
             return
         if self._tasks.claim_chain_stall(root_id):
             await self._run_deliver(root, "stall", "")
+
+    async def _maybe_ping_milestones(self, root: dict, root_id: str) -> None:
+        """Opt-in: ping the user once per *recently-completed* stage of an
+        in-flight chain (play-by-play progress). Gated by the live toggle —
+        off by default, so the extra per-stage snapshot only runs when on.
+        Claim-then-deliver (advisory, at-most-once per stage)."""
+        try:
+            if not self._milestones_enabled():
+                return
+        except Exception:
+            return
+        try:
+            snap = self._tasks.workflow_snapshot(root_id)
+        except Exception as e:
+            logger.warning(
+                "chain watcher: milestone snapshot failed for %s: %s",
+                root_id, e,
+            )
+            return
+        if not snap:
+            return
+        for st in snap.get("stages", []):
+            if st.get("status") != "done":
+                continue
+            # Only just-finished stages — flipping the toggle on mid-pipeline
+            # must not retro-ping every already-done stage.
+            if (st.get("age_in_state_seconds") or 0) > _MILESTONE_RECENT_S:
+                continue
+            tid = st.get("task_id")
+            if not tid:
+                continue
+            if self._tasks.claim_milestone_ping(tid):
+                assignee = st.get("assignee") or "an agent"
+                stage_title = (st.get("title") or "").strip()
+                msg = (
+                    f"{assignee} finished: {stage_title}"
+                    if stage_title else f"{assignee} finished a stage"
+                )
+                await self._run_deliver(root, "milestone", msg)
 
     async def _run_deliver(self, root: dict, kind: str, summary: str) -> bool:
         try:
