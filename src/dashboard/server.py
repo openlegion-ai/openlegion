@@ -74,6 +74,9 @@ _HERE = Path(__file__).resolve().parent
 _TEMPLATES_DIR = _HERE / "templates"
 _STATIC_DIR = _HERE / "static"
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Cap on in-flight chains the live pipeline card examines per request. Bounds
+# the per-task-event cost (each root runs a recursive workflow_snapshot).
+_MAX_PIPELINE_ROOTS = 40
 
 
 async def _fetch_browser_metrics_upstream(
@@ -7662,6 +7665,14 @@ def create_dashboard_router(
             roots = tasks_store.list_watchable_human_roots(
                 since=_t.time() - window_s,
             )
+            # Bound the per-root snapshot work: only the most-recent
+            # _MAX_PIPELINE_ROOTS are examined. This endpoint runs on every
+            # task lifecycle event (WS-debounced), and each root costs a
+            # recursive workflow_snapshot — without a cap a busy fleet could
+            # turn each event into O(many roots × CTE). In-flight chains are
+            # recent, so the newest N cover the realistic card.
+            roots.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+            roots = roots[:_MAX_PIPELINE_ROOTS]
             for root in roots:
                 snap = tasks_store.workflow_snapshot(root["id"])
                 if not snap:

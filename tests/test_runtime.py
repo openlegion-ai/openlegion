@@ -2219,3 +2219,28 @@ class TestChannelPushRetry:
             stub, self._origin(), "msg", "agent", attempts=3, backoff_s=0,
         )
         assert stub.calls == 1
+
+    @pytest.mark.asyncio
+    async def test_hung_send_times_out_and_gives_up(self):
+        # A wedged adapter (await never completes) must not hang the loop or
+        # leak the task — each attempt is bounded by timeout_s.
+        import asyncio as _a
+
+        from src.cli.runtime import RuntimeContext
+
+        class _Stub:
+            def __init__(self):
+                self.calls = 0
+            async def _handle_notify_origin(self, origin, message, agent_name):
+                self.calls += 1
+                await _a.sleep(3600)  # hang
+
+        stub = _Stub()
+        await _a.wait_for(
+            RuntimeContext._channel_push_with_retry(
+                stub, self._origin(), "msg", "agent",
+                attempts=3, backoff_s=0, timeout_s=0.01,
+            ),
+            timeout=5,  # the whole call must finish well under this
+        )
+        assert stub.calls == 3  # each attempt timed out → gave up

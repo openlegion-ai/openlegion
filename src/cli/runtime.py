@@ -1045,15 +1045,27 @@ class RuntimeContext:
 
     async def _channel_push_with_retry(
         self, origin: "MessageOrigin", message: str, agent_name: str,
-        *, attempts: int = 3, backoff_s: float = 3.0,
+        *, attempts: int = 3, backoff_s: float = 3.0, timeout_s: float = 30.0,
     ) -> None:
         """Deliver a chain-outcome push to a chat channel, retrying transient
         failures. Best-effort: the dashboard bell is the durable guarantee, so
-        after the attempts are exhausted we log and stop (no hot loop)."""
+        after the attempts are exhausted we log and stop (no hot loop).
+
+        Each attempt is bounded by ``timeout_s`` (mirrors the lane's
+        ``_NOTIFY_FORWARD_TIMEOUT``) so a wedged channel adapter can't hang the
+        loop forever — without it the retry count is meaningless and this
+        background task (held by a strong ref) would leak for the process life.
+        """
         for i in range(attempts):
             try:
-                if await self._handle_notify_origin(origin, message, agent_name):
+                ok = await asyncio.wait_for(
+                    self._handle_notify_origin(origin, message, agent_name),
+                    timeout=timeout_s,
+                )
+                if ok:
                     return
+            except asyncio.TimeoutError:
+                logger.debug("chain outcome channel push attempt timed out")
             except Exception as e:
                 logger.debug("chain outcome channel push attempt failed: %s", e)
             if i < attempts - 1:
