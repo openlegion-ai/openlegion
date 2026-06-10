@@ -108,14 +108,18 @@ def test_heartbeat_tools_constant():
       per-task execution summary (tokens, LLM calls, thinking, trace
       errors) so the rate-stale-deliverables step can look at HOW a
       task ran before grading it.
+    * v6 (A5 heartbeat consistency): + ``read_file``. The heartbeat
+      prompt says "re-read GOALS.json fresh each cycle" but the
+      allowlist denied the prompted call. Read-only.
     """
     assert _HEARTBEAT_TOOLS == frozenset({
         "list_agents", "get_agent_profile", "get_system_status",
         "notify_user",
         "check_inbox", "workflow_snapshot", "await_task_event",
         "rate_delivery", "manage_goals",
-        "inspect_agents", "inspect_task_run",
+        "inspect_agents", "inspect_task_run", "read_file",
     })
     # v3 main was 9 tools (no save_observations — removed pre-merge);
-    # v4 added inspect_agents = 10; v5 added inspect_task_run = 11.
-    assert len(_HEARTBEAT_TOOLS) == 11
+    # v4 added inspect_agents = 10; v5 added inspect_task_run = 11;
+    # v6 added read_file = 12.
+    assert len(_HEARTBEAT_TOOLS) == 12

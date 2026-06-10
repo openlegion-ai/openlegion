@@ -1814,6 +1814,9 @@ _OPERATOR_HEARTBEAT_TOOLS: list[str] = [
     # B5 — read-only per-task run diagnostics (tokens, LLM calls,
     # thinking, trace errors) so rating decisions can be informed.
     "inspect_task_run",
+    # A5 — the heartbeat procedure says "re-read GOALS.json fresh each
+    # cycle"; without read_file the prompted call was denied.
+    "read_file",
 ]
 
 _OPERATOR_SOUL = """\
@@ -1834,6 +1837,7 @@ _OPERATOR_HEARTBEAT = """\
 <!-- heartbeat_v2_workflow_aware -->
 <!-- heartbeat_v3_rate_delivery -->
 <!-- heartbeat_v4_goal_seeding -->
+<!-- heartbeat_v5_fleet_health -->
 You are running an autonomous fleet health check. You have access ONLY to monitoring tools.
 
 Step budget: stay at or under 8 tool calls per cycle (HEARTBEAT_MAX_ITERATIONS=12
@@ -1846,15 +1850,17 @@ in the loop; 8 leaves headroom for the final assistant turn).
    - For each event whose task is part of an orchestration you started, drop a
      ``workflow_snapshot(root_task_id)`` call (step 3) to see chain state.
 
-2. Call get_system_status() for fleet-wide metrics:
-   - Total cost, cost trend vs yesterday
-   - Per-agent cost (per_agent_cost_today_usd, per_agent_cost_vs_yesterday_ratio)
-   - Per-agent task health: outcome_rejected_24h_count, execution_failures_24h_count,
-     stale_tasks_24h_count, chain_breaks_24h_count
-   - If inbox_stale_count > 0, triage the oldest operator-inbox handoffs first
-     via check_inbox — that count is YOUR own untriaged backlog.
-   - Agent health counts and pre-computed agents_needing_attention list
-   - Plan limits and current usage
+2. Read the ## Fleet Health block already in your context (refreshed every
+   ~5 min) — it carries the non-zero failure / rejected / stale / chain-break
+   counts, your own stale-inbox depth, and the top cost outliers. Call
+   get_system_status() ONLY when you need to drill past the digest (full
+   per-agent breakdowns, plan limits, cost trend vs yesterday).
+   - If the digest (or get_system_status's inbox_stale_count) shows stale
+     inbox tasks, triage the oldest operator-inbox handoffs first via
+     check_inbox — that count is YOUR own untriaged backlog.
+   - Before rating a suspicious delivery or re-dispatching failed work, call
+     inspect_task_run(task_id) to see HOW it ran (tokens, LLM calls, thinking,
+     trace errors).
 
 3. Workflow awareness — for any active orchestration you kicked off (a task you
    created as a root that fanned out via hand_off), call
@@ -1877,6 +1883,8 @@ in the loop; 8 leaves headroom for the final assistant turn).
    - Candidates are agents that appear in agents_needing_attention OR have
      per_agent_cost_vs_yesterday_ratio is not None AND > 2.0 OR
      outcome_rejected_24h_count[agent] > 5 OR
+     outcome_rework_24h_count[agent] >= 3 (a rework streak means the agent's
+     instructions or briefs need tightening — offer the user a tune-up) OR
      execution_failures_24h_count[agent] > 3 OR
      chain_breaks_24h_count[agent] > 0.
    - If more than 3 agents trigger any of the above thresholds, focus on
@@ -1903,11 +1911,13 @@ Do not hallucinate data you could not retrieve.
 Each heartbeat, rate up to 10 oldest unrated done tasks via
 `rate_delivery`. Prefer keeping one team's tasks contiguous if it
 helps focus. Outcomes:
-- accepted: matches the ask cleanly → reinforcement memory written
-- acknowledged: unsure or low-confidence → NO memory write (the
-  safe default when you can't confidently defend the judgment)
-- rework: fixable miss → spawns follow-up task; feedback required
-- rejected: needs starting over → feedback required, no spawn
+- accepted: matches the ask cleanly → rating signal only
+- acknowledged: unsure or low-confidence (the safe default when you
+  can't confidently defend the judgment)
+- rework: fixable miss → spawns follow-up task; your feedback is
+  pushed into the agent's learnings; feedback required
+- rejected: needs starting over → feedback pushed to the agent's
+  learnings; feedback required, no spawn
 
 DEFAULT TO `acknowledged` WHEN UNCERTAIN. Never guess.
 

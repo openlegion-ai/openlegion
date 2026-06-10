@@ -209,6 +209,11 @@ _HEARTBEAT_TOOLS = frozenset({
     # rate-stale-deliverables step look at HOW a task ran (tokens, LLM
     # calls, thinking, trace errors) before grading it.
     "inspect_task_run",
+    # A5 — the heartbeat prompt says "Re-read GOALS.json, AGENTS.md fresh
+    # each cycle" but the allowlist denied read_file, so the prompted
+    # procedure silently 403'd. Read-only; workspace path checks still
+    # apply inside the tool.
+    "read_file",
 })
 
 # Tool calls whose ONLY purpose is to read state — they don't produce
@@ -761,6 +766,17 @@ class AgentLoop:
             return self._introspect_cache
         try:
             data = await self.mesh_client.introspect("all")
+            # A4 — operator only: fold the pre-computed fleet metrics into
+            # the same cache entry so the ## Fleet Health digest rides the
+            # volatile runtime context without extra tool calls. Same 5-min
+            # TTL; best-effort (the digest simply doesn't render on miss).
+            if self._is_operator:
+                try:
+                    data["system_metrics"] = (
+                        await self.mesh_client.get_system_metrics()
+                    )
+                except Exception as e:
+                    logger.debug("System metrics fetch failed: %s", e)
             self._introspect_cache = data
             self._introspect_cache_ts = now
             # Sync project assignment from mesh host (supports runtime add/remove)
@@ -830,7 +846,79 @@ class AgentLoop:
                 summaries.append(f"{schedule}{hb}")
             lines.append(f"- Cron: {'; '.join(summaries)}")
 
-        return "\n".join(lines) if len(lines) > 1 else ""
+        out = "\n".join(lines) if len(lines) > 1 else ""
+        health = AgentLoop._format_fleet_health(data.get("system_metrics"))
+        if health:
+            out = f"{out}\n\n{health}" if out else health
+        return out
+
+    @staticmethod
+    def _format_fleet_health(metrics: dict | None) -> str:
+        """Compact ``## Fleet Health`` digest for the operator (A4).
+
+        Renders only NON-ZERO signals from ``/mesh/system/metrics`` so a
+        healthy fleet costs ~zero tokens and an unhealthy one is
+        impossible to miss without burning 3-4 tool calls per heartbeat.
+        Rides the volatile prompt suffix (the data refreshes on the
+        5-min introspect cache), so the stable cache prefix is untouched.
+        """
+        if not metrics:
+            return ""
+        lines: list[str] = []
+
+        def _top_counts(d, label: str, n: int = 3) -> None:
+            if not isinstance(d, dict) or not d:
+                return
+            items = [
+                (k, v) for k, v in sorted(d.items(), key=lambda kv: -(kv[1] or 0))
+                if v
+            ][:n]
+            if items:
+                rendered = ", ".join(
+                    f"{sanitize_for_prompt(str(k))}: {int(v)}" for k, v in items
+                )
+                lines.append(f"- {label}: {rendered}")
+
+        _top_counts(metrics.get("execution_failures_24h_count"), "Failures (24h)")
+        _top_counts(metrics.get("outcome_rejected_24h_count"), "Rejected outcomes (24h)")
+        _top_counts(metrics.get("outcome_rework_24h_count"), "Rework outcomes (24h)")
+        _top_counts(metrics.get("stale_tasks_24h_count"), "Stale tasks (>24h)")
+        _top_counts(metrics.get("chain_breaks_24h_count"), "Chain breaks (24h)")
+        inbox = metrics.get("inbox_stale_count")
+        if isinstance(inbox, (int, float)) and inbox:
+            lines.append(f"- Your stale inbox tasks (>24h): {int(inbox)}")
+        costs = metrics.get("per_agent_cost_today_usd")
+        if isinstance(costs, dict) and costs:
+            top = [
+                (k, v) for k, v in sorted(
+                    costs.items(), key=lambda kv: -(kv[1] or 0),
+                ) if v
+            ][:2]
+            if top:
+                rendered = ", ".join(
+                    f"{sanitize_for_prompt(str(k))}: ${float(v):.2f}"
+                    for k, v in top
+                )
+                lines.append(f"- Top spend today: {rendered}")
+        attention = metrics.get("agents_needing_attention")
+        if isinstance(attention, list) and attention:
+            names = []
+            for a in attention[:5]:
+                if isinstance(a, dict):
+                    names.append(str(a.get("agent") or a.get("id") or "?"))
+                else:
+                    names.append(str(a))
+            lines.append(
+                "- Needs attention: "
+                + sanitize_for_prompt(", ".join(names))
+            )
+        if not lines:
+            return ""
+        block = (
+            "## Fleet Health (refreshed every ~5 min; only non-zero "
+            "signals shown)\n" + "\n".join(lines)
+        )
+        return block[:600]
 
     async def inject_steer(self, message: str) -> bool:
         """Inject a steer message. Returns True if agent is working."""
@@ -2251,12 +2339,20 @@ class AgentLoop:
                         parts.append(fleet_ctx)
                         has_fleet_ctx = True
 
-                # 6. Self-evolution nudge
-                parts.append(
-                    "## Self-Evolution\n"
-                    "You can update INSTRUCTIONS.md, SOUL.md, USER.md, and "
-                    "HEARTBEAT.md during heartbeats to improve future sessions."
-                )
+                # 6. Self-evolution nudge — only when update_workspace is
+                # actually callable under this heartbeat's effective
+                # allowlist. The operator's heartbeat toolset denies
+                # workspace writes; claiming otherwise (A5) made the LLM
+                # burn iterations on calls the gate then 403'd.
+                if (
+                    self._allowed_tools is None
+                    or "update_workspace" in self._allowed_tools
+                ):
+                    parts.append(
+                        "## Self-Evolution\n"
+                        "You can update INSTRUCTIONS.md, SOUL.md, USER.md, and "
+                        "HEARTBEAT.md during heartbeats to improve future sessions."
+                    )
 
                 # 7. Runtime context (budget, permissions, cron)
                 if introspect_data:
@@ -3173,6 +3269,22 @@ class AgentLoop:
         transitions, so a ``blocked`` close that wants a reason must pass
         ``blocker_note`` explicitly (e.g. the convergence-cap close).
         """
+        # A6 — task-level failures never reached the learnings file
+        # (only tool timeouts/exceptions did via _record_failure), so an
+        # agent could fail the same way every day with nothing in its
+        # "Recent Errors (avoid repeating)" prompt section. Single choke
+        # point: every failed/blocked close records the reason.
+        if status in ("failed", "blocked") and self.workspace:
+            reason = (blocker_note or error or "").strip()
+            if reason:
+                try:
+                    self.workspace.record_error(
+                        "task", reason[:500], context=f"task_id={task_id}",
+                    )
+                except Exception as learn_err:
+                    logger.debug(
+                        "task-failure learnings write failed: %s", learn_err,
+                    )
         try:
             await self.mesh_client.set_task_status(
                 task_id, status,
@@ -3384,6 +3496,29 @@ class AgentLoop:
                 await self._maybe_reload_tools(result)
             except Exception as learn_err:
                 logger.warning("Post-tool learning failed for %s: %s", tool_call.name, learn_err)
+
+            # A6 — most builtins surface failures as {"error": ...} result
+            # dicts WITHOUT raising, so they never hit the exception-path
+            # _record_failure below and the learnings file stayed blind to
+            # the dominant failure shape. Repetition-gated on the loop
+            # detector's "warn" verdict so an expected one-off validation
+            # error doesn't pollute learnings — only the same failing call
+            # repeated identically gets recorded.
+            if (
+                loop_verdict == "warn"
+                and isinstance(result, dict)
+                and result.get("error")
+            ):
+                try:
+                    await self._record_failure(
+                        tool_call.name, str(result["error"])[:500],
+                        truncate(str(tool_call.arguments), 200),
+                        arguments=tool_call.arguments,
+                    )
+                except Exception as learn_err:
+                    logger.debug(
+                        "soft-error learnings write failed: %s", learn_err,
+                    )
 
             # Build multimodal content when an image is present
             if image_block and isinstance(image_block, dict) and image_block.get("data"):

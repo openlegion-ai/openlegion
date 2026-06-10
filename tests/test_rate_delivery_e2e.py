@@ -158,8 +158,11 @@ async def test_rate_delivery_rework_spawns_linked_task_end_to_end(
     # Title prefix is the contract the dashboard's rework-card UI relies
     # on (see ``test_workplace_outcome.py::test_outcome_rework_spawns_linked_task``).
     assert spawned["title"].startswith("Rework: ")
-    # The feedback becomes the new task's description so the assignee
-    # has the brief without a round-trip.
-    assert spawned["description"] == (
+    # A3: the rework brief leads with the feedback (never trimmed) and
+    # carries the original ask so the assignee isn't guessing what the
+    # first attempt was supposed to do.
+    assert spawned["description"].startswith(
         "please redo with deeper legal sourcing"
     )
+    assert "## Original brief" in spawned["description"]
+    assert "initial brief" in spawned["description"]

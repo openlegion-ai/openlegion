@@ -257,10 +257,10 @@ class TestBackEdgeHelperEligibility:
         assert len(lane.calls) == 1
         assert lane.calls[0]["args"][0] == "scout"
 
-    def test_human_origin_skipped(self, mesh_app_with_back_edge):
-        """``origin.kind=human`` callers (channels, web chat) don't get
-        a mesh-side back-edge — humans are served by the lane-worker
-        auto-notify path instead."""
+    def test_human_origin_failure_wakes_operator(self, mesh_app_with_back_edge):
+        """A2: ``origin.kind=human`` failures don't back-edge the human
+        (ChainWatcher informs the user) — they wake the OPERATOR into a
+        recovery turn, with the event written to the operator's inbox."""
         app, blackboard, lane, _loop = mesh_app_with_back_edge
         rec = _record(
             "task_human_1",
@@ -273,11 +273,87 @@ class TestBackEdgeHelperEligibility:
         )
         _settle()
 
+        # The human user gets no mesh-side back-edge event...
         rows = blackboard.list_by_prefix("inbox/9999/task_event/")
         assert not any(
             r.value.get("task_id") == "task_human_1" for r in rows
         )
+        # ...but the operator gets the event + a recovery wake.
+        op_rows = blackboard.list_by_prefix("inbox/operator/task_event/")
+        assert any(
+            r.value.get("task_id") == "task_human_1" for r in op_rows
+        )
+        assert len(lane.calls) == 1
+        assert lane.calls[0]["args"][0] == "operator"
+        wake_msg = lane.calls[0]["args"][1]
+        assert "task_human_1" in wake_msg
+        assert "already informed" in wake_msg
+        # No task_id threading — the operator's turn is ABOUT the task,
+        # not an execution of it; auto-close must not touch the row.
+        assert lane.calls[0]["kwargs"].get("task_id") is None
+        assert lane.calls[0]["kwargs"].get("auto_notify") is False
+
+    def test_human_origin_completion_does_not_wake_operator(
+        self, mesh_app_with_back_edge,
+    ):
+        """Successful human-origin chains stay quiet — recovery wakes are
+        for failed/blocked only."""
+        app, blackboard, lane, _loop = mesh_app_with_back_edge
+        rec = _record(
+            "task_human_2", status="done",
+            origin={"kind": "human", "channel": "telegram", "user": "9999"},
+        )
+
+        app._write_task_event_back_edge(
+            rec, event_kind="task_completed",
+            payload_extras={"summary": "ok"},
+        )
+        _settle()
+
+        op_rows = blackboard.list_by_prefix("inbox/operator/task_event/")
+        assert not any(
+            r.value.get("task_id") == "task_human_2" for r in op_rows
+        )
         assert lane.calls == []
+
+    def test_human_origin_operator_assignee_not_self_woken(
+        self, mesh_app_with_back_edge,
+    ):
+        """The operator's own failed tasks don't trigger a self-wake."""
+        app, _blackboard, lane, _loop = mesh_app_with_back_edge
+        rec = _record(
+            "task_human_3", assignee="operator",
+            origin={"kind": "human", "channel": "web", "user": "u1"},
+        )
+
+        app._write_task_event_back_edge(
+            rec, event_kind="task_failed",
+            payload_extras={"error": "boom"},
+        )
+        _settle()
+
+        assert lane.calls == []
+
+    def test_human_origin_wake_rate_limited_per_task(
+        self, mesh_app_with_back_edge,
+    ):
+        """Burst coalescing: lane timeout + sweep retry on the same task
+        produce ONE operator wake inside the 60s window."""
+        app, _blackboard, lane, _loop = mesh_app_with_back_edge
+        rec = _record(
+            "task_human_4",
+            origin={"kind": "human", "channel": "web", "user": "u1"},
+        )
+
+        app._write_task_event_back_edge(
+            rec, event_kind="task_failed", payload_extras={"error": "boom"},
+        )
+        app._write_task_event_back_edge(
+            rec, event_kind="task_failed", payload_extras={"error": "boom"},
+        )
+        _settle()
+
+        assert len(lane.calls) == 1
 
 
 class TestBackEdgeTTLSplit:
@@ -351,3 +427,38 @@ class TestBackEdgeTTLSplit:
             if r.value.get("task_id") == "task_ttl_block"
         )
         assert entry.ttl == 604800  # 7 days
+
+
+class TestOperatorRecoveryWakeGlobalThrottle:
+    def test_mass_failure_storm_caps_wakes_but_writes_all_events(
+        self, mesh_app_with_back_edge,
+    ):
+        """A2 hardening: a provider outage failing many user chains at
+        once produces at most _OPERATOR_RECOVERY_WAKE_MAX wakes in the
+        window — every event is still written so the heartbeat's
+        check_inbox catches up on the suppressed remainder."""
+        app, blackboard, lane, _loop = mesh_app_with_back_edge
+        n = 8
+        for i in range(n):
+            rec = _record(
+                f"task_storm_{i}",
+                origin={"kind": "human", "channel": "web", "user": "u1"},
+            )
+            app._write_task_event_back_edge(
+                rec, event_kind="task_failed",
+                payload_extras={"error": "provider outage"},
+            )
+        _settle()
+
+        # All 8 events landed in the operator's inbox...
+        op_rows = blackboard.list_by_prefix("inbox/operator/task_event/")
+        storm_ids = {
+            r.value.get("task_id") for r in op_rows
+            if str(r.value.get("task_id", "")).startswith("task_storm_")
+        }
+        assert len(storm_ids) == n
+        # ...but only the capped number of wakes fired.
+        operator_wakes = [
+            c for c in lane.calls if c["args"][0] == "operator"
+        ]
+        assert len(operator_wakes) == 5  # _OPERATOR_RECOVERY_WAKE_MAX
