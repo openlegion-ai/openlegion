@@ -11274,6 +11274,7 @@ function dashboard() {
         compose_work_summary: 'composing a work summary',
         workflow_snapshot: 'mapping the workflow',
         await_task_event: 'waiting on a task',
+        inspect_task_run: 'diagnosing a task run',
         skills_list: 'browsing its skills',
         skill_view: 'reading a skill',
         install_skill: 'installing a skill',

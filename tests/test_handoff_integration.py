@@ -69,7 +69,8 @@ async def test_hand_off_creates_task_visible_to_recipient_inbox(monkeypatch):
     async def fake_create_task(*, assignee, title, description=None,
                                project=None, parent_task_id=None,
                                priority=0, dependencies=None,
-                               artifact_refs=None, origin=None):
+                               artifact_refs=None, origin=None,
+                               thinking=None):
         return store.create(
             creator=mc.agent_id,
             assignee=assignee,
@@ -81,6 +82,7 @@ async def test_hand_off_creates_task_visible_to_recipient_inbox(monkeypatch):
             dependencies=dependencies,
             artifact_refs=artifact_refs,
             origin=None,
+            thinking=thinking,
         )
     mc.create_task = AsyncMock(side_effect=fake_create_task)
 
