@@ -50,11 +50,6 @@ _DEFAULT_WATCH_WINDOW_S = 7 * 24 * 3600.0
 # A chain parked in a waiting state (blocked / pending / accepted, nothing
 # working) with no progress for this long earns one stall nudge to the user.
 _DEFAULT_STALL_AFTER_S = 600.0
-# Opt-in milestone pings fire only for stages that completed within this
-# window — so toggling the feature on mid-pipeline doesn't retro-ping every
-# already-done stage, and a sweep only ever pings a just-finished one.
-_MILESTONE_RECENT_S = 120.0
-
 
 class ChainWatcher:
     """Sweeps user chains and delivers one terminal outcome each.
@@ -77,7 +72,6 @@ class ChainWatcher:
         sweep_s: float = _DEFAULT_SWEEP_S,
         watch_window_s: float = _DEFAULT_WATCH_WINDOW_S,
         stall_after_s: float = _DEFAULT_STALL_AFTER_S,
-        milestones_enabled: Callable[[], bool] = lambda: False,
         clock: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
     ) -> None:
@@ -87,9 +81,6 @@ class ChainWatcher:
         self._sweep_s = sweep_s
         self._watch_window_s = watch_window_s
         self._stall_after_s = stall_after_s
-        # Read each sweep — an opt-in toggle (default off); only when on do we
-        # do the extra per-stage snapshot + milestone pings.
-        self._milestones_enabled = milestones_enabled
         self._clock = clock          # monotonic — for the terminal settle debounce
         self._wall_clock = wall_clock  # wall-clock — for stall age vs stored updated_at
         # root_task_id -> monotonic timestamp first observed terminal.
@@ -121,14 +112,6 @@ class ChainWatcher:
             logger.warning("chain watcher: listing roots failed: %s", e)
             return
 
-        # Read the opt-in milestone toggle ONCE per sweep, not per chain —
-        # otherwise the default-off common case re-reads + parses
-        # config/settings.json for every in-flight chain on every sweep.
-        try:
-            milestones_on = bool(self._milestones_enabled())
-        except Exception:
-            milestones_on = False
-
         live_ids: set[str] = set()
         for root in roots:
             root_id = root.get("id")
@@ -138,10 +121,10 @@ class ChainWatcher:
 
             # Per-root isolation: a failure deriving the verdict or claiming a
             # delivery for ONE root must not abort the rest of the sweep (the
-            # stall/milestone helpers already self-isolate; this guards the
+            # stall helper already self-isolates; this guards the
             # terminal path the same way). A poison root self-heals next sweep.
             try:
-                await self._process_root(root, root_id, milestones_on)
+                await self._process_root(root, root_id)
             except Exception as e:
                 logger.warning(
                     "chain watcher: processing root %s failed: %s", root_id, e,
@@ -151,9 +134,7 @@ class ChainWatcher:
         for stale in [r for r in self._settling if r not in live_ids]:
             self._settling.pop(stale, None)
 
-    async def _process_root(
-        self, root: dict, root_id: str, milestones_on: bool,
-    ) -> None:
+    async def _process_root(self, root: dict, root_id: str) -> None:
         """Deliver/settle/nudge a single watchable root. Raises on store
         errors so :meth:`sweep_once` can isolate one bad root from the rest."""
         verdict = self._tasks.chain_terminal_verdict(root_id)
@@ -161,8 +142,6 @@ class ChainWatcher:
             # Still active (or a new hop just appeared) — reset settle.
             self._settling.pop(root_id, None)
             await self._maybe_nudge_stall(root, root_id)
-            if milestones_on:
-                await self._maybe_ping_milestones(root, root_id)
             return
 
         kind, summary = verdict
@@ -208,47 +187,6 @@ class ChainWatcher:
             return
         if self._tasks.claim_chain_stall(root_id):
             await self._run_deliver(root, "stall", "")
-
-    async def _maybe_ping_milestones(self, root: dict, root_id: str) -> None:
-        """Ping the user once per *recently-completed* stage of an in-flight
-        chain (play-by-play progress). Only called when the opt-in toggle is on
-        (checked once per sweep by the caller), so the extra per-stage snapshot
-        runs only then. Claim-then-deliver (advisory, at-most-once per stage).
-
-        Contract: milestones fire only while the chain is non-terminal, so the
-        FINAL stage is never a milestone (it's the terminal delivery), and a
-        chain that completes *between* sweeps (e.g. two fast stages inside one
-        ~10s window) surfaces only as the terminal outcome — intermediate pings
-        for such a chain may be skipped. Acceptable for an advisory feature; the
-        guaranteed result/failure/stall delivery is unaffected."""
-        try:
-            snap = self._tasks.workflow_snapshot(root_id)
-        except Exception as e:
-            logger.warning(
-                "chain watcher: milestone snapshot failed for %s: %s",
-                root_id, e,
-            )
-            return
-        if not snap:
-            return
-        for st in snap.get("stages", []):
-            if st.get("status") != "done":
-                continue
-            # Only just-finished stages — flipping the toggle on mid-pipeline
-            # must not retro-ping every already-done stage.
-            if (st.get("age_in_state_seconds") or 0) > _MILESTONE_RECENT_S:
-                continue
-            tid = st.get("task_id")
-            if not tid:
-                continue
-            if self._tasks.claim_milestone_ping(tid):
-                assignee = st.get("assignee") or "an agent"
-                stage_title = (st.get("title") or "").strip()
-                msg = (
-                    f"{assignee} finished: {stage_title}"
-                    if stage_title else f"{assignee} finished a stage"
-                )
-                await self._run_deliver(root, "milestone", msg)
 
     async def _run_deliver(self, root: dict, kind: str, summary: str) -> bool:
         try:

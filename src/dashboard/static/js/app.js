@@ -281,9 +281,6 @@ function dashboard() {
     // System settings
     systemSettings: null,
     systemSettingsLoading: false,
-    // Opt-in: per-stage milestone pings (default off). Toggle in Settings.
-    milestonePings: false,
-    milestonePingsSaving: false,
     _systemSettingsDebounce: null,
     _restartingAll: false,
     _defaultModelSearch: '',
@@ -2525,7 +2522,6 @@ function dashboard() {
         if (this.systemTab === 'settings') {
           this.fetchBrowserSettings();
           this.fetchSystemSettings();
-          this.fetchMilestonePings();
         }
         if (this.systemTab === 'browser') {
           this.fetchBrowserSettings();
@@ -4791,7 +4787,6 @@ function dashboard() {
           storage: ['fetchStorage', 'fetchDatabaseDetails'],
           uploads: ['fetchUploads'],
           skills: ['loadSkillsCatalog'],
-          milestone_pings: ['fetchMilestonePings'],
         };
         for (const fn of (_configLoaders[evt.data?.scope] || [])) {
           if (typeof this[fn] === 'function') this[fn]();
@@ -7764,34 +7759,6 @@ function dashboard() {
         }
       } catch (e) { console.warn('fetchBrowserSettings failed:', e); }
       this.browserSettingsLoading = false;
-    },
-
-    async fetchMilestonePings() {
-      try {
-        const resp = await fetch(`${window.__config.apiBase}/milestone-pings`);
-        if (resp.ok) this.milestonePings = !!(await resp.json()).enabled;
-      } catch (e) { console.warn('fetchMilestonePings failed:', e); }
-    },
-
-    async saveMilestonePings(enabled) {
-      // Optimistic; revert on failure. CSRF header is auto-injected globally.
-      const prev = this.milestonePings;
-      this.milestonePings = !!enabled;
-      this.milestonePingsSaving = true;
-      try {
-        const resp = await fetch(`${window.__config.apiBase}/milestone-pings`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ enabled: !!enabled }),
-        });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        this.milestonePings = !!(await resp.json()).enabled;
-      } catch (e) {
-        console.warn('saveMilestonePings failed:', e);
-        this.milestonePings = prev;  // revert
-      } finally {
-        this.milestonePingsSaving = false;
-      }
     },
 
     saveBrowserSpeed(value) {
