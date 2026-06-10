@@ -5,7 +5,7 @@ Covers the three layers:
 * ``ConnectorStore`` — persistence, atomicity, fail-closed loading,
   assignment resolution, pending-restart tracking.
 * ``RuntimeBackend`` integration — the catalog is the single source of
-  MCP servers at agent start (``_mcp_servers_for``), degrading to no
+  MCP servers at agent start (``_mcp_snapshot_for``), degrading to no
   servers when the store is unwired or unreadable.
 * Dashboard API — ``GET/PUT/DELETE /api/connectors`` and
   ``POST /api/agents/restart-batch``.
@@ -475,3 +475,52 @@ class TestConnectorEndpoints:
         app.include_router(router)
         with _CSRFClient(app) as client:
             assert client.get("/dashboard/api/connectors").status_code == 503
+
+
+# ── Deletion-path cleanup ────────────────────────────────────
+#
+# Every permanent agent-deletion path must strip the agent from
+# connector assignments, or a future agent recreated under the same
+# name silently inherits the deleted agent's MCP connectors (and
+# their $CRED-bearing env). The dashboard delete path is pinned in
+# the endpoint tests above; these pin the mesh confirm-delete path
+# (via ``app.cleanup_agent``) and the CLI REPL remove path.
+
+
+class TestDeletionPathCleanup:
+    def test_mesh_cleanup_agent_strips_connector_assignments(self, tmp_path):
+        from src.host.mesh import Blackboard, MessageRouter, PubSub
+        from src.host.permissions import PermissionMatrix
+        from src.host.server import create_mesh_app
+
+        store = ConnectorStore(str(tmp_path / "connectors.json"))
+        store.upsert(MCPConnector(name="fs", command="c", agents=["worker", "other"]))
+        store.mark_dirty(["worker"])
+        bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+        perms = PermissionMatrix.__new__(PermissionMatrix)
+        perms.permissions = {}
+        app = create_mesh_app(
+            bb, PubSub(), MessageRouter(permissions=perms, agent_registry={}),
+            perms, connector_store=store,
+        )
+        app.cleanup_agent("worker")
+        assert store.get("fs").agents == ["other"]
+        assert "worker" not in store.pending_restart()
+        bb.close()
+
+    def test_repl_remove_strips_connector_assignments(self, tmp_path, monkeypatch):
+        import click
+
+        from src.cli.repl import REPLSession
+
+        store = ConnectorStore(str(tmp_path / "connectors.json"))
+        store.upsert(MCPConnector(name="fs", command="c", agents=["worker", "other"]))
+        sess = REPLSession.__new__(REPLSession)
+        sess.ctx = MagicMock()
+        sess.ctx.agents = {"worker": "http://x"}
+        sess.ctx.connector_store = store
+        sess.current = None
+        monkeypatch.setattr(click, "confirm", lambda *a, **k: True)
+        monkeypatch.setattr("src.cli.config._remove_agent", lambda *a, **k: None)
+        sess._cmd_remove("worker")
+        assert store.get("fs").agents == ["other"]

@@ -1495,6 +1495,16 @@ class REPLSession:
         if self.ctx.lane_manager:
             self.ctx.lane_manager.remove_lane(name)
 
+        # Strip the id from connector assignments + pending-restart
+        # stamps — otherwise a future agent recreated under the same
+        # name silently inherits this agent's MCP connectors (and
+        # their $CRED-bearing env). Mirrors the dashboard delete path.
+        if getattr(self.ctx, "connector_store", None) is not None:
+            try:
+                self.ctx.connector_store.remove_agent(name)
+            except Exception as e:
+                click.echo(f"  Warning: connector cleanup failed: {e}")
+
         # Remove from config, permissions, and any project membership
         from src.cli.config import _remove_agent
 

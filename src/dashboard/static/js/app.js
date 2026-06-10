@@ -6657,6 +6657,11 @@ function dashboard() {
     },
 
     connectorStartAdd() {
+      // No form until the catalog GET has landed: the duplicate-name
+      // guard in saveConnector diffs against connectorsData, and an
+      // unknowing "create" over an existing name is a silent
+      // overwrite that wipes its env (new drafts replace env).
+      if (!this.connectorsData) return;
       this.connectorErrors = {};
       this.connectorGlobalError = null;
       const agentIds = [...(this.connectorsData?.agents || [])];

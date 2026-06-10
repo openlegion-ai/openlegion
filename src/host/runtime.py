@@ -224,7 +224,7 @@ class RuntimeBackend(abc.ABC):
         """Start an agent. Returns a URL or identifier for reaching it.
 
         MCP servers come from the wired connector catalog
-        (:meth:`set_connector_store` → :meth:`_mcp_servers_for`), not
+        (:meth:`set_connector_store` → :meth:`_mcp_snapshot_for`), not
         from the caller. ``env_overrides`` are per-agent environment
         variables that are merged on top of the shared ``extra_env``
         dict for this call only, without mutating ``extra_env``.

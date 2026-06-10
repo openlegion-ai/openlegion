@@ -1149,6 +1149,7 @@ class RuntimeContext:
             wallet_service_ref=wallet_ref,
             api_key_manager=self._api_key_manager,
             cfg=self.cfg,
+            connector_store=self.connector_store,
         )
         app.include_router(webhook_manager.create_router())
         self.health_monitor._cleanup_agent = app.cleanup_agent  # type: ignore[attr-defined]

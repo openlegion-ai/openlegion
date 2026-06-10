@@ -39,7 +39,7 @@ MCP servers are **connectors**: fleet-level records in `config/connectors.json`,
 }
 ```
 
-At every agent (re)start, the runtime asks the catalog for the agent's assigned set (`RuntimeBackend._mcp_servers_for` in `src/host/runtime.py`) and serializes it as JSON into the `MCP_SERVERS` container environment variable. `MCP_SERVERS` is startup-only by design — **catalog edits apply on the next restart of the affected agents** (the dashboard prompts for it; nothing restarts automatically). Catalog order is meaningful: it feeds the first-server-wins tool-name conflict policy.
+At every agent (re)start, the runtime asks the catalog for the agent's assigned set (`RuntimeBackend._mcp_snapshot_for` in `src/host/runtime.py`) and serializes it as JSON into the `MCP_SERVERS` container environment variable. `MCP_SERVERS` is startup-only by design — **catalog edits apply on the next restart of the affected agents** (the dashboard prompts for it; nothing restarts automatically). Catalog order is meaningful: it feeds the first-server-wins tool-name conflict policy.
 
 A missing or corrupt `connectors.json` fails **closed to an empty catalog** (error logged, agents start with no MCP servers); a store read error at start degrades the same way rather than blocking the agent.
 
@@ -144,7 +144,7 @@ Validation errors from the backend (regex failures, oversize fields, `$CRED` in 
 
 ### Startup Sequence
 
-1. The runtime layer (`DockerBackend` / `SandboxBackend` in `src/host/runtime.py`) asks the connector catalog for the agent's assigned set (`self._mcp_servers_for(agent_id)`) and serializes it as JSON into the `MCP_SERVERS` environment variable passed to the agent container (`environment["MCP_SERVERS"] = self._build_mcp_servers_env(...)`). Any `$CRED{name}` handles in `env` values or `args` strings are resolved here against the mesh credential vault — the agent container receives plaintext values; the persisted catalog retains the handle.
+1. The runtime layer (`DockerBackend` / `SandboxBackend` in `src/host/runtime.py`) asks the connector catalog for the agent's assigned set (`self._mcp_snapshot_for(agent_id)`) and serializes it as JSON into the `MCP_SERVERS` environment variable passed to the agent container (`environment["MCP_SERVERS"] = self._build_mcp_servers_env(...)`). Any `$CRED{name}` handles in `env` values or `args` strings are resolved here against the mesh credential vault — the agent container receives plaintext values; the persisted catalog retains the handle.
 2. Agent container starts; `src/agent/__main__.py` reads `MCP_SERVERS`
 3. `MCPClient` is created and passed to `ToolRegistry`
 4. During lifespan startup, `MCPClient.start()` launches each server:

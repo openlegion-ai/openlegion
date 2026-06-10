@@ -5345,7 +5345,8 @@
             </div>
           </div>
           <button x-show="!connectorDraft" type="button" @click="connectorStartAdd()"
-                  class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">+ Connect MCP server</button>
+                  :disabled="!connectorsData"
+                  class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors disabled:opacity-50">+ Connect MCP server</button>
         </div>
 
         <!-- Connected services (OAuth) — let agents act on your accounts -->
