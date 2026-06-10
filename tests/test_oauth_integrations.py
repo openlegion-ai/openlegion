@@ -15,7 +15,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import src.host.credentials as cred_mod
-from src.host.credentials import CONNECTION_PREFIX, CredentialVault
+from src.host.credentials import (
+    CONNECTION_PREFIX,
+    ConnectionRefreshError,
+    CredentialVault,
+)
 from src.host.oauth_providers import GOOGLE, generate_pkce, get_provider
 from src.host.oauth_state import OAuthStateStore
 
@@ -332,6 +336,195 @@ async def test_exchange_account_fetch_failure_is_nonfatal(captured_env):
     )
     assert conn["access_token"] == "at"
     assert conn["account"] == ""  # best-effort, swallowed
+
+
+# ── Hard refresh-failure caching + operator surfacing ────────────────────
+
+def _expired_google_conn(v: CredentialVault) -> None:
+    v.system_credentials["google_client_id"] = "cid"
+    v.system_credentials["google_client_secret"] = "csec"
+    v.connections["g"] = {
+        "provider": "google", "access_token": "old",
+        "refresh_token": "rt", "expires_at": int(time.time()) - 10,
+    }
+
+
+@pytest.mark.asyncio
+async def test_hard_4xx_refresh_cached_within_ttl(captured_env):
+    post = AsyncMock(return_value=_fake_response(status=400, text="invalid_grant"))
+    v = _vault_with_fake_http(post=post)
+    _expired_google_conn(v)
+
+    with pytest.raises(ConnectionRefreshError) as first:
+        await v.resolve_credential_async("g")
+    assert first.value.first_failure is True
+    assert first.value.connection == "g"
+    assert first.value.provider == "google"
+    assert post.await_count == 1
+
+    # Second resolve within the TTL: same error re-raised from the cache —
+    # the provider's token endpoint is NOT re-hit, and it's the same episode.
+    with pytest.raises(ConnectionRefreshError) as second:
+        await v.resolve_credential_async("g")
+    assert str(second.value) == str(first.value)
+    assert second.value.first_failure is False
+    assert post.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_transient_5xx_refresh_not_cached(captured_env):
+    post = AsyncMock(return_value=_fake_response(status=503, text="upstream down"))
+    v = _vault_with_fake_http(post=post)
+    _expired_google_conn(v)
+
+    for _ in range(2):
+        with pytest.raises(RuntimeError) as exc:
+            await v.resolve_credential_async("g")
+        assert not isinstance(exc.value, ConnectionRefreshError)
+    # Retried both times — transient provider blips must not be cached.
+    assert post.await_count == 2
+    assert "g" not in v._connection_refresh_failures
+
+
+@pytest.mark.asyncio
+async def test_network_error_refresh_not_cached(captured_env):
+    import httpx
+    post = AsyncMock(side_effect=httpx.ConnectError("boom"))
+    v = _vault_with_fake_http(post=post)
+    _expired_google_conn(v)
+
+    for _ in range(2):
+        with pytest.raises(RuntimeError) as exc:
+            await v.resolve_credential_async("g")
+        assert not isinstance(exc.value, ConnectionRefreshError)
+    assert post.await_count == 2
+    assert "g" not in v._connection_refresh_failures
+
+
+@pytest.mark.asyncio
+async def test_refresh_success_after_ttl_clears_failure_state(captured_env):
+    post = AsyncMock(side_effect=[
+        _fake_response(status=400, text="invalid_grant"),
+        _fake_response(payload={"access_token": "new-at", "expires_in": 3600}),
+        _fake_response(status=400, text="invalid_grant again"),
+    ])
+    v = _vault_with_fake_http(post=post)
+    _expired_google_conn(v)
+
+    with pytest.raises(ConnectionRefreshError):
+        await v.resolve_credential_async("g")
+    # Age the cached failure past the TTL so the provider is re-tried
+    # (the operator may have restored access on the provider side).
+    v._connection_refresh_failures["g"]["ts"] -= (
+        cred_mod._CONNECTION_REFRESH_FAILURE_TTL + 1
+    )
+    assert await v.resolve_credential_async("g") == "new-at"
+    assert "g" not in v._connection_refresh_failures  # episode over
+
+    # A later hard failure starts a NEW episode → notifies again.
+    v.connections["g"]["expires_at"] = int(time.time()) - 10
+    with pytest.raises(ConnectionRefreshError) as exc:
+        await v.resolve_credential_async("g")
+    assert exc.value.first_failure is True
+
+
+@pytest.mark.asyncio
+async def test_refailure_after_ttl_stays_in_same_episode(captured_env):
+    post = AsyncMock(return_value=_fake_response(status=400, text="invalid_grant"))
+    v = _vault_with_fake_http(post=post)
+    _expired_google_conn(v)
+
+    with pytest.raises(ConnectionRefreshError) as e1:
+        await v.resolve_credential_async("g")
+    assert e1.value.first_failure is True
+    v._connection_refresh_failures["g"]["ts"] -= (
+        cred_mod._CONNECTION_REFRESH_FAILURE_TTL + 1
+    )
+    with pytest.raises(ConnectionRefreshError) as e2:
+        await v.resolve_credential_async("g")
+    assert post.await_count == 2            # provider re-tried after the TTL
+    assert e2.value.first_failure is False  # still the same episode — no re-notify
+
+
+def test_reconnect_clears_failure_episode(captured_env):
+    v = CredentialVault()
+    v._connection_refresh_failures["g"] = {
+        "ts": 0.0, "provider": "google", "error": "x", "message": "m",
+    }
+    v.store_connection("g", {
+        "provider": "google", "access_token": "at", "refresh_token": "rt",
+        "expires_at": 9999999999, "scopes": [], "account": "a@b.com",
+    })
+    assert "g" not in v._connection_refresh_failures
+
+
+def test_remove_connection_clears_failure_episode(captured_env, monkeypatch):
+    monkeypatch.setenv(f"{CONNECTION_PREFIX}G", json.dumps({
+        "provider": "google", "access_token": "at",
+    }))
+    v = CredentialVault()
+    v._connection_refresh_failures["g"] = {
+        "ts": 0.0, "provider": "google", "error": "x", "message": "m",
+    }
+    assert v.remove_credential("g") is True
+    assert "g" not in v._connection_refresh_failures
+
+
+def test_vault_resolve_hard_failure_502_and_single_operator_event(
+    captured_env, tmp_path,
+):
+    """Mesh-endpoint flow: a dead OAuth grant keeps returning 502 to agents
+    (unchanged contract) but (a) the provider is hit only once within the
+    failure-cache TTL and (b) the operator gets exactly ONE redacted
+    ``connection_refresh_failed`` event per episode."""
+    from fastapi.testclient import TestClient
+
+    from src.dashboard.events import EventBus
+    from src.host.mesh import Blackboard, MessageRouter, PubSub
+    from src.host.permissions import PermissionMatrix
+    from src.host.server import create_mesh_app
+    from src.shared.types import AgentPermissions
+
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {
+        "trusted": AgentPermissions(
+            agent_id="trusted", can_message=["mesh"],
+            allowed_credentials=["*"],
+        ),
+    }
+    post = AsyncMock(return_value=_fake_response(
+        status=400, text="invalid_grant token=sk-secretsecret1234567890123456",
+    ))
+    vault = _vault_with_fake_http(post=post)
+    _expired_google_conn(vault)
+
+    bus = EventBus()
+    events: list[dict] = []
+
+    def _capture(evt: dict) -> None:
+        if evt.get("type") == "connection_refresh_failed":
+            events.append(evt)
+
+    bus.add_listener(_capture)
+    app = create_mesh_app(
+        Blackboard(db_path=str(tmp_path / "bb.db")), PubSub(),
+        MessageRouter(permissions=perms, agent_registry={}), perms,
+        credential_vault=vault, event_bus=bus,
+    )
+    client = TestClient(app)
+
+    r1 = client.post("/mesh/vault/resolve", json={"agent_id": "trusted", "name": "g"})
+    r2 = client.post("/mesh/vault/resolve", json={"agent_id": "trusted", "name": "g"})
+    assert r1.status_code == 502
+    assert r2.status_code == 502
+    assert post.await_count == 1  # second resolve served from the failure cache
+    assert len(events) == 1       # operator notified once per episode
+    data = events[0]["data"]
+    assert data["connection"] == "g"
+    assert data["provider"] == "google"
+    # Provider error text is untrusted — token shapes must be redacted.
+    assert "sk-secret" not in json.dumps(data)
+    assert "invalid_grant" in data["error"]
 
 
 # ── End-to-end: the agent's http_request resolver path ───────────────────

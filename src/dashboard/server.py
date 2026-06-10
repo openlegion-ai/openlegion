@@ -1088,6 +1088,38 @@ def create_dashboard_router(
                 )
                 _emit_notification_added(nid, "alert", title, body, agent_id, payload)
                 return
+
+            if event_type == "connection_refresh_failed":
+                # A third-party OAuth connection's refresh was hard-rejected
+                # by the provider (e.g. the user revoked access). Emitted at
+                # most once per failure episode by the mesh vault_resolve
+                # catch site — no extra dedup needed here.
+                conn_name = (data.get("connection") or "connection").strip()
+                provider = (data.get("provider") or "").strip()
+                provider_label = provider.capitalize() if provider else "OAuth"
+                title = (
+                    f"{provider_label} connection '{conn_name}' needs reconnecting"
+                )[:200]
+                err = (data.get("error") or "").strip()
+                body = (
+                    "Token refresh was rejected by the provider — open "
+                    "Settings → Integrations and reconnect."
+                    + (f" ({err})" if err else "")
+                )[:200]
+                payload = {
+                    "connection": data.get("connection"),
+                    "provider": data.get("provider"),
+                    "error": data.get("error"),
+                }
+                nid = notification_store.add(
+                    kind="credential",
+                    title=title,
+                    body=body,
+                    agent_id=agent_id,
+                    payload=payload,
+                )
+                _emit_notification_added(nid, "credential", title, body, agent_id, payload)
+                return
         except Exception as e:
             # Notifications are a polish surface — never let a write
             # failure break the broadcast path or starve other

@@ -58,6 +58,41 @@ _OPENAI_TOKEN_URL = "https://auth.openai.com/oauth/token"
 _OPENAI_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 _OPENAI_OAUTH_REDIRECT_URI = "http://localhost:1455/auth/callback"
 
+# ── OAuth connection refresh failure caching ─────────────────
+# When a third-party OAuth provider HARD-rejects a refresh (4xx, e.g.
+# ``invalid_grant`` after the user revokes access), re-hitting the token
+# endpoint on every agent resolve is pure waste — the grant is dead until
+# the operator reconnects. Cache the failure for this many seconds and
+# re-raise it immediately. Transient errors (network, 5xx) are NOT cached;
+# retrying those is correct.
+_CONNECTION_REFRESH_FAILURE_TTL = 60.0
+
+
+class ConnectionRefreshError(RuntimeError):
+    """Hard (4xx) OAuth connection-refresh failure.
+
+    Raised by :meth:`CredentialVault.ensure_connection_token` when the
+    provider rejects the refresh outright. Carries structure so the mesh
+    catch site (``/mesh/vault/resolve``) can emit a
+    ``connection_refresh_failed`` DashboardEvent without re-parsing the
+    message. ``first_failure`` is True only on the first hard failure of an
+    episode — it resets when a refresh succeeds or the connection is
+    removed/re-stored — so the operator is notified exactly once per episode.
+    Subclasses RuntimeError so existing "refresh failed" handling is
+    unaffected.
+    """
+
+    def __init__(
+        self, message: str, *, connection: str, provider: str,
+        provider_error: str, first_failure: bool,
+    ) -> None:
+        super().__init__(message)
+        self.connection = connection
+        self.provider = provider
+        self.provider_error = provider_error
+        self.first_failure = first_failure
+
+
 # ── Anthropic prompt caching (OAuth path) ────────────────────
 _PROMPT_CACHE_ENABLED = os.environ.get(
     "OPENLEGION_PROMPT_CACHING", "1"
@@ -565,6 +600,14 @@ class CredentialVault:
         self.connections: dict[str, dict] = {}
         self._connection_locks: dict[str, asyncio.Lock] = {}
         self._connection_locks_guard = asyncio.Lock()
+        # Hard refresh-failure cache: ``name`` → {ts (monotonic), provider,
+        # error, message}. Within ``_CONNECTION_REFRESH_FAILURE_TTL`` of
+        # ``ts`` the cached ``ConnectionRefreshError`` is re-raised without
+        # touching the provider. The entry outlives the TTL on purpose — its
+        # PRESENCE marks an ongoing failure episode (notify-once dedup);
+        # only a successful refresh, removal, or re-store clears it.
+        # Mutated only under the per-name connection lock.
+        self._connection_refresh_failures: dict[str, dict] = {}
         # ``_auth_failure_recorder`` (Fix 4 in seam follow-up): optional
         # callback ``(agent_id, provider, model, http_status) -> None``
         # invoked when an LLM call raises ``LLMAuthError`` during
@@ -796,6 +839,7 @@ class CredentialVault:
         if cred_key in self.connections:
             self.connections.pop(cred_key, None)
             self._connection_locks.pop(cred_key, None)
+            self._connection_refresh_failures.pop(cred_key, None)
             _remove_from_env(f"{CONNECTION_PREFIX}{name.upper()}")
             logger.info("Connection removed: %s", cred_key)
             return True
@@ -947,6 +991,9 @@ class CredentialVault:
         if not data.get("access_token"):
             raise ValueError("connection requires access_token")
         self.connections[name] = data
+        # A (re)connect supersedes any cached refresh failure — fresh tokens,
+        # fresh episode.
+        self._connection_refresh_failures.pop(name, None)
         _persist_to_env(f"{CONNECTION_PREFIX}{name.upper()}", json.dumps(data))
         logger.info("Connection stored: %s (%s)", name, data.get("provider", ""))
         return f"$CRED{{{name}}}"
@@ -959,6 +1006,28 @@ class CredentialVault:
                 self._connection_locks[name] = lock
             return lock
 
+    def _raise_if_refresh_recently_failed(self, name: str) -> None:
+        """Re-raise a cached hard refresh failure if it is still fresh.
+
+        Called under the per-name connection lock. Entries older than
+        ``_CONNECTION_REFRESH_FAILURE_TTL`` fall through so the provider is
+        re-tried (the operator may have restored access on the provider
+        side); the entry itself is kept so the failure episode — and its
+        notify-once dedup — survives until a refresh actually succeeds.
+        """
+        cached = self._connection_refresh_failures.get(name)
+        if cached is None:
+            return
+        if time.monotonic() - cached["ts"] >= _CONNECTION_REFRESH_FAILURE_TTL:
+            return
+        raise ConnectionRefreshError(
+            cached["message"],
+            connection=name,
+            provider=cached["provider"],
+            provider_error=cached["error"],
+            first_failure=False,
+        )
+
     async def ensure_connection_token(self, name: str) -> str:
         """Return a valid access token for a connection, refreshing if needed.
 
@@ -967,6 +1036,12 @@ class CredentialVault:
         token (offline access not granted, or a long-lived token), returns the
         current token — a 401 then surfaces naturally to the agent rather than
         failing the resolve.
+
+        Hard provider rejections (4xx) raise :class:`ConnectionRefreshError`
+        and are cached for ``_CONNECTION_REFRESH_FAILURE_TTL`` seconds so a
+        dead grant doesn't get hammered on every agent resolve. Transient
+        errors (network, 5xx) keep raising plain ``RuntimeError`` and are
+        never cached.
         """
         name = name.lower()
         conn = self.connections.get(name)
@@ -984,6 +1059,7 @@ class CredentialVault:
             now = int(time.time())
             if conn.get("expires_at", 0) > now + 300:
                 return conn["access_token"]
+            self._raise_if_refresh_recently_failed(name)
             refresh_token = conn.get("refresh_token", "")
             if not refresh_token:
                 return conn["access_token"]
@@ -1012,14 +1088,41 @@ class CredentialVault:
                     f"{provider.key} token refresh request failed: {exc}",
                 ) from exc
             if not resp.is_success:
-                raise RuntimeError(
+                msg = (
                     f"{provider.key} token refresh failed "
                     f"(HTTP {resp.status_code}): {resp.text[:200]}"
                 )
+                if 400 <= resp.status_code < 500:
+                    # Hard provider rejection (e.g. ``invalid_grant`` after
+                    # the user revokes access): the grant is dead until the
+                    # operator reconnects. Cache the failure so resolves
+                    # within the TTL re-raise immediately instead of
+                    # hammering the token endpoint. ``first_failure`` is True
+                    # only when this starts a new episode — the mesh catch
+                    # site uses it to notify the operator exactly once.
+                    first = name not in self._connection_refresh_failures
+                    self._connection_refresh_failures[name] = {
+                        "ts": time.monotonic(),
+                        "provider": provider.key,
+                        "error": resp.text[:200],
+                        "message": msg,
+                    }
+                    raise ConnectionRefreshError(
+                        msg,
+                        connection=name,
+                        provider=provider.key,
+                        provider_error=resp.text[:200],
+                        first_failure=first,
+                    )
+                # Transient (5xx) — retrying is correct; do NOT cache.
+                raise RuntimeError(msg)
             payload = resp.json()
             new_access = payload.get("access_token", "")
             if not new_access:
                 raise RuntimeError(f"{provider.key} refresh returned no access_token")
+            # Successful refresh ends any failure episode — the next hard
+            # failure (if ever) starts a new one and re-notifies.
+            self._connection_refresh_failures.pop(name, None)
             expires_in = int(payload.get("expires_in", 3600))
             updated = dict(conn)
             updated["access_token"] = new_access

@@ -28,7 +28,7 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import StreamingResponse
 
 from src.host.change_history import ChangeHistory
-from src.host.credentials import is_system_credential
+from src.host.credentials import ConnectionRefreshError, is_system_credential
 from src.host.help_requests import HelpRequests
 from src.host.orchestration import (
     MAX_FEEDBACK_CHARS,
@@ -41,7 +41,7 @@ from src.host.orchestration import (
 )
 from src.host.pending_actions import PendingActions
 from src.shared.paths import resolve_under_root
-from src.shared.redaction import redact_url
+from src.shared.redaction import redact_text_with_urls, redact_url
 from src.shared.types import (
     AGENT_ID_RE_PATTERN,
     HARD_EDIT_FIELDS,
@@ -2271,6 +2271,21 @@ def create_mesh_app(
         # credentials fall through to the in-memory lookup.
         try:
             value = await credential_vault.resolve_credential_async(name)
+        except ConnectionRefreshError as exc:
+            # Hard provider rejection (e.g. invalid_grant after the user
+            # revokes access). The vault caches the failure (no provider
+            # re-hit for the TTL); here we surface it to the operator —
+            # once per failure episode (``first_failure``) — via the same
+            # event→notification pipeline as ``credit_exhausted``. The
+            # provider error text is untrusted; redact before emitting.
+            logger.warning("Credential resolve failed for %s: %s", name, exc)
+            if event_bus is not None and exc.first_failure:
+                event_bus.emit("connection_refresh_failed", agent=agent_id, data={
+                    "connection": exc.connection,
+                    "provider": exc.provider,
+                    "error": redact_text_with_urls(str(exc.provider_error))[:200],
+                })
+            raise HTTPException(502, f"Credential resolve failed: {name}") from exc
         except Exception as exc:  # noqa: BLE001 — surface refresh failures as 502
             logger.warning("Credential resolve failed for %s: %s", name, exc)
             raise HTTPException(502, f"Credential resolve failed: {name}") from exc
