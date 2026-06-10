@@ -5321,6 +5321,17 @@ def create_mesh_app(
     _BACK_EDGE_TTL_INFORMATIONAL = 86400  # 24 hours
     _BACK_EDGE_WAKE_WINDOW_SECONDS = 60.0
     _back_edge_wake_state: dict[str, float] = {}
+    # A2 hardening — GLOBAL throttle for operator recovery wakes. The
+    # per-task 60s window coalesces retries of ONE task, but a mass
+    # failure (provider outage failing dozens of user chains at once)
+    # would still fan out one wake — one LLM turn — per task. Cap the
+    # fleet-wide recovery-wake rate; beyond the cap the inbox event is
+    # STILL written (the heartbeat's check_inbox catches up on the
+    # backlog) and the suppression is logged, so nothing is lost — the
+    # operator just stops being interrupt-driven during a storm.
+    _OPERATOR_RECOVERY_WAKE_MAX = 5
+    _OPERATOR_RECOVERY_WAKE_WINDOW_S = 600.0
+    _operator_recovery_wake_times: deque[float] = deque()
 
     def _wake_operator_for_human_chain(
         task_record: dict,
@@ -5375,7 +5386,25 @@ def create_mesh_app(
         now = time.time()
         if now - _back_edge_wake_state.get(task_id, 0.0) < _BACK_EDGE_WAKE_WINDOW_SECONDS:
             return
+        # Global sliding-window throttle (storm guard). Checked BEFORE
+        # the per-task stamp so a suppressed task can still wake once
+        # the window drains.
+        while (
+            _operator_recovery_wake_times
+            and now - _operator_recovery_wake_times[0] > _OPERATOR_RECOVERY_WAKE_WINDOW_S
+        ):
+            _operator_recovery_wake_times.popleft()
+        if len(_operator_recovery_wake_times) >= _OPERATOR_RECOVERY_WAKE_MAX:
+            logger.warning(
+                "operator recovery wake for task %s suppressed: global "
+                "cap (%d wakes / %ds) reached — event written, heartbeat "
+                "check_inbox will catch up",
+                task_id, _OPERATOR_RECOVERY_WAKE_MAX,
+                int(_OPERATOR_RECOVERY_WAKE_WINDOW_S),
+            )
+            return
         _back_edge_wake_state[task_id] = now
+        _operator_recovery_wake_times.append(now)
         title = task_record.get("title") or "(no title)"
         wake_msg = (
             f"User-originated task {task_id} ({title}) assigned to "
