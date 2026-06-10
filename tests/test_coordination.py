@@ -1700,3 +1700,48 @@ class TestHandOffBrief:
         kwargs = mc.create_task.call_args.kwargs
         assert kwargs["title"] == "quick ping"
         assert kwargs["description"] == "quick ping"
+
+
+class TestHandOffThinking:
+    """B4: hand_off can pin a per-task reasoning depth for the recipient."""
+
+    @pytest.mark.asyncio
+    async def test_thinking_passes_through_to_create_task(self):
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="operator")
+        mc.list_agents.return_value = {"analyst": {}}
+
+        result = await hand_off(
+            to="analyst", summary="deep audit", thinking="high",
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        assert mc.create_task.call_args.kwargs["thinking"] == "high"
+
+    @pytest.mark.asyncio
+    async def test_omitted_thinking_sends_none(self):
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.list_agents.return_value = {"analyst": {}}
+
+        await hand_off(to="analyst", summary="quick ping", mesh_client=mc)
+
+        assert mc.create_task.call_args.kwargs["thinking"] is None
+
+    @pytest.mark.asyncio
+    async def test_invalid_thinking_rejected_before_any_write(self):
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.list_agents.return_value = {"analyst": {}}
+
+        result = await hand_off(
+            to="analyst", summary="x", thinking="ultra", mesh_client=mc,
+        )
+
+        assert "error" in result
+        mc.create_task.assert_not_called()
+        mc.write_blackboard.assert_not_called()

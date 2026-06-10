@@ -2867,6 +2867,10 @@ class AgentLoop:
                 # it handles any auto-transition, not just terminal ones.
                 if task_id:
                     await self._auto_close_task(task_id, "working")
+                    # B4: honour a per-task reasoning depth carried on the
+                    # task record (hand_off thinking="high"). Cleared in
+                    # the outer finally so it never outlives this turn.
+                    await self._apply_task_thinking(task_id)
                 try:
                     try:
                         result = await self._chat_inner(user_message)
@@ -3126,6 +3130,24 @@ class AgentLoop:
         finally:
             current_origin.reset(origin_token)
             current_task_id.reset(task_id_token)
+            self.llm.thinking_override = None
+
+    async def _apply_task_thinking(self, task_id: str) -> None:
+        """B4: read the task's ``thinking`` column and pin it as the LLM
+        reasoning level for this turn. Best-effort — a lookup failure or
+        an absent/invalid level just keeps the agent's configured default.
+        """
+        try:
+            record = await self.mesh_client.get_task(task_id)
+        except Exception as e:
+            logger.debug("task thinking lookup failed for %s: %s", task_id, e)
+            return
+        level = (record or {}).get("thinking")
+        if level and level in self.llm.VALID_THINKING_LEVELS:
+            self.llm.thinking_override = level
+            logger.info(
+                "Applying per-task thinking=%s for task %s", level, task_id,
+            )
 
     async def _auto_close_task(
         self, task_id: str, status: str, *,

@@ -173,10 +173,21 @@ _RESERVED_ENVELOPE_KEYS: frozenset[str] = frozenset(
             ),
             "default": "",
         },
+        "thinking": {
+            "type": "string",
+            "description": (
+                "Optional reasoning depth for this task: 'high' for deep "
+                "analysis/research/audits, 'medium', 'low', or 'off'. "
+                "Omit to use the recipient's configured default. Use "
+                "'high' whenever the deliverable needs depth, not speed."
+            ),
+            "default": "",
+        },
     },
 )
 async def hand_off(
-    to: str, summary: str, brief: str = "", data: str = "", *, mesh_client=None,
+    to: str, summary: str, brief: str = "", data: str = "",
+    thinking: str = "", *, mesh_client=None,
 ) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
@@ -187,6 +198,14 @@ async def hand_off(
 
     summary = sanitize_for_prompt(summary)
     brief = sanitize_for_prompt(brief)[:_MAX_BRIEF_CHARS] if brief.strip() else ""
+    thinking = (thinking or "").strip().lower()
+    if thinking and thinking not in ("off", "low", "medium", "high"):
+        return {
+            "error": (
+                f"Invalid thinking level {thinking!r} — use "
+                "'off', 'low', 'medium', or 'high' (or omit it)."
+            ),
+        }
     # The handoff ``summary`` carries the headline (becomes the task
     # title); the full instruction belongs in ``brief`` (becomes the
     # description, and the mesh delivers it inline in the recipient's
@@ -344,6 +363,7 @@ async def hand_off(
             parent_task_id=parent_task_id,
             artifact_refs=[artifact_ref] if artifact_ref else None,
             origin=origin,
+            thinking=thinking or None,
         )
     except Exception as e:
         # Bug H: operator hit a live case where seo-strategist called

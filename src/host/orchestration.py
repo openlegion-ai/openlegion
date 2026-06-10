@@ -398,6 +398,9 @@ class Tasks:
                 ("feedback_text", "TEXT"),
                 ("previous_task_id", "TEXT"),
                 ("result_summary", "TEXT"),
+                # B4 — per-task reasoning depth ("off"/"low"/"medium"/
+                # "high", NULL = use the assignee's configured default).
+                ("thinking", "TEXT"),
             )
             for col_name, col_type in outcome_columns:
                 if col_name not in existing:
@@ -726,6 +729,7 @@ class Tasks:
             "previous_task_id": row[21],
             "outcome_set_at": row[22],
             "result_summary": row[23],
+            "thinking": row[24],
         }
 
     # ``{team_col}`` is filled in at query time from ``self._team_col``
@@ -738,7 +742,7 @@ class Tasks:
         "blocker_note, origin_kind, origin_channel, origin_user, "
         "created_at, updated_at, completed_at, retention_until, "
         "outcome, feedback_text, previous_task_id, outcome_set_at, "
-        "result_summary"
+        "result_summary, thinking"
     )
 
     @property
@@ -811,6 +815,7 @@ class Tasks:
         artifact_refs: list[str] | None = None,
         origin: dict | None = None,
         task_id: str | None = None,
+        thinking: str | None = None,
     ) -> dict:
         """Insert a task. Returns the public record dict.
 
@@ -819,7 +824,16 @@ class Tasks:
         same shape :class:`MessageOrigin` produces; passing the typed
         Pydantic model is the caller's responsibility (use
         ``model_dump()`` or unpack as needed).
+        ``thinking`` (B4) pins a per-task reasoning depth for the
+        assignee's LLM calls while executing this task; NULL means the
+        assignee's configured default applies.
         """
+        if thinking is not None and thinking not in (
+            "off", "low", "medium", "high",
+        ):
+            raise ValueError(
+                f"thinking must be off/low/medium/high, got {thinking!r}"
+            )
         # Strip leading/trailing whitespace before any further checks so
         # a whitespace-only title (audit edge case: 200 spaces) is
         # rejected the same way as an empty string. Without this the
@@ -878,16 +892,16 @@ class Tasks:
                 f"creator, assignee, status, priority, dependencies_json, "
                 f"artifact_refs_json, blocker_note, origin_kind, "
                 f"origin_channel, origin_user, created_at, updated_at, "
-                f"completed_at, retention_until) "
+                f"completed_at, retention_until, thinking) "
                 f"VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, NULL, "
-                f"?, ?, ?, ?, ?, NULL, NULL)",
+                f"?, ?, ?, ?, ?, NULL, NULL, ?)",
                 (
                     tid, project_id, parent_task_id, title, description,
                     creator, assignee, priority,
                     json.dumps(dependencies) if dependencies else None,
                     json.dumps(artifact_refs) if artifact_refs else None,
                     kind, channel, user,
-                    now, now,
+                    now, now, thinking,
                 ),
             )
             self._emit_event(

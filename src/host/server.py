@@ -5511,6 +5511,12 @@ def create_mesh_app(
         priority = int(body.get("priority", 0) or 0)
         dependencies = body.get("dependencies") or None
         artifact_refs = body.get("artifact_refs") or None
+        # B4 — optional per-task reasoning depth for the assignee.
+        thinking = body.get("thinking") or None
+        if thinking is not None and thinking not in ("off", "low", "medium", "high"):
+            raise HTTPException(
+                400, f"thinking must be off/low/medium/high, got {thinking!r}",
+            )
         if not title:
             raise HTTPException(400, "title is required")
         if not assignee or not _AGENT_ID_RE.match(assignee):
@@ -5567,6 +5573,7 @@ def create_mesh_app(
                 dependencies=dependencies if isinstance(dependencies, list) else None,
                 artifact_refs=artifact_refs if isinstance(artifact_refs, list) else None,
                 origin=origin_dict,
+                thinking=thinking,
             )
         except TaskLimitExceeded as e:
             # H5 — per-assignee backlog cap or runaway/cyclic parent

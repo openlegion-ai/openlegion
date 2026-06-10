@@ -2509,3 +2509,29 @@ def test_unknown_parent_allowed(tmp_path):
         parent_task_id="task_doesnotexist",
     )
     assert rec["parent_task_id"] == "task_doesnotexist"
+
+
+# ── B4: per-task thinking ─────────────────────────────────────────
+
+
+class TestTaskThinking:
+    def test_create_with_thinking_persists(self, tmp_path):
+        store = _make_store(tmp_path)
+        rec = store.create(
+            creator="operator", assignee="analyst",
+            title="deep audit", thinking="high",
+        )
+        assert rec["thinking"] == "high"
+        assert store.get(rec["id"])["thinking"] == "high"
+
+    def test_create_default_thinking_is_null(self, tmp_path):
+        store = _make_store(tmp_path)
+        rec = store.create(creator="op", assignee="a", title="quick")
+        assert rec["thinking"] is None
+
+    def test_create_invalid_thinking_rejected(self, tmp_path):
+        store = _make_store(tmp_path)
+        with pytest.raises(ValueError, match="thinking"):
+            store.create(
+                creator="op", assignee="a", title="t", thinking="ultra",
+            )

@@ -5110,3 +5110,33 @@ async def test_chat_self_heal_reraises_when_prune_cannot_help():
 
     with pytest.raises(LLMContextOverflowError):
         await loop._chat_call_self_healing(system="sys", tools=None)
+
+
+@pytest.mark.asyncio
+async def test_apply_task_thinking_sets_validates_and_survives_errors():
+    """B4: the loop pins the task's thinking level as the LLM override,
+    ignores invalid levels, and treats lookup failures as best-effort."""
+    loop = _make_loop()
+    loop.llm.VALID_THINKING_LEVELS = {"off", "low", "medium", "high"}
+    loop.llm.thinking_override = None
+
+    loop.mesh_client.get_task = AsyncMock(
+        return_value={"id": "t1", "thinking": "high"},
+    )
+    await loop._apply_task_thinking("t1")
+    assert loop.llm.thinking_override == "high"
+
+    loop.llm.thinking_override = None
+    loop.mesh_client.get_task = AsyncMock(
+        return_value={"id": "t2", "thinking": "bogus"},
+    )
+    await loop._apply_task_thinking("t2")
+    assert loop.llm.thinking_override is None
+
+    loop.mesh_client.get_task = AsyncMock(side_effect=RuntimeError("down"))
+    await loop._apply_task_thinking("t3")
+    assert loop.llm.thinking_override is None
+
+    loop.mesh_client.get_task = AsyncMock(return_value=None)
+    await loop._apply_task_thinking("t4")
+    assert loop.llm.thinking_override is None
