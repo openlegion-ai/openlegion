@@ -746,7 +746,7 @@ class ContextManager:
             return self._hard_prune(messages)
         if len(chunks) > _SUMMARIZATION_MAX_CHUNKS:
             # Pathological volume: keep the first chunk (original ask / early
-            # framing) plus the newest chunks, and say so in the summary.
+            # framing) plus the newest chunks; the omission is logged only.
             omitted = len(chunks) - _SUMMARIZATION_MAX_CHUNKS
             logger.warning(
                 f"Compaction input spans {len(chunks)} chunks; "
