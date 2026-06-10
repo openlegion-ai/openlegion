@@ -102,24 +102,61 @@ def pytest_configure(config: pytest.Config) -> None:
     )
 
 
-@pytest.fixture(autouse=True)
-def _isolate_default_env_file(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Redirect the credential vault's default .env writes to a temp file.
+# Credential-bearing env prefixes (see src/host/credentials.py). Snapshotted
+# and restored around every test by ``_isolate_credential_env`` below.
+_CREDENTIAL_ENV_PREFIXES = (
+    "OPENLEGION_SYSTEM_", "OPENLEGION_CRED_", "OPENLEGION_CONN_",
+)
 
-    Tests must never touch the developer's real .env — it holds real
+
+@pytest.fixture(autouse=True)
+def _isolate_credential_env(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    """Isolate every test from the developer's real .env — reads AND writes.
+
+    Tests must never touch the real PROJECT_ROOT/.env — it holds real
     credentials (OAuth tokens, wallet seed), and a crash mid-test
-    corrupts it. ``_persist_to_env`` / ``_remove_from_env`` default to
-    PROJECT_ROOT/.env when called without an explicit ``env_file``, so
-    any test exercising the vault's persistence paths with the default
-    would rewrite the real file. Patching ``_default_env_file`` sends
-    those writes to a per-test temp file instead; tests that pass an
-    explicit ``env_file`` are unaffected.
+    corrupts it. Three seams:
+
+    1. ``_default_env_file`` — ``_persist_to_env`` / ``_remove_from_env``
+       default to PROJECT_ROOT/.env when called without an explicit
+       ``env_file``; redirect to a per-test temp file. Tests that pass an
+       explicit ``env_file`` are unaffected.
+    2. ``ENV_FILE`` — the CLI group callback (``src/cli/main.py``) calls
+       ``load_dotenv(cli_config.ENV_FILE)`` on EVERY CliRunner invocation
+       that reaches a subcommand, loading the developer's real .env into
+       ``os.environ`` mid-run and flipping later credential/template tests
+       (the LITELLM_MODE guard above only covers litellm's import-time
+       load). ``cli/config.py`` also WRITES through ``str(ENV_FILE)``.
+       Patched on BOTH modules that bind it — ``src.cli.config`` and
+       ``src.cli.runtime`` (``from``-import copies the binding).
+    3. Belt-and-braces: snapshot the credential-prefixed ``os.environ``
+       keys before the test and restore after, so any pollution path not
+       covered above (e.g. ``_persist_to_env`` setting ``os.environ``)
+       stays confined to the test that caused it. Ambient pre-session
+       values (a developer's deliberate exports) are preserved.
     """
+    from src.cli import config as cli_config
+    from src.cli import runtime as cli_runtime
     from src.host import credentials as cred_mod
 
     monkeypatch.setattr(
         cred_mod, "_default_env_file", lambda: str(tmp_path / "test.env")
     )
+    fake_env_file = tmp_path / "cli.env"
+    monkeypatch.setattr(cli_config, "ENV_FILE", fake_env_file)
+    monkeypatch.setattr(cli_runtime, "ENV_FILE", fake_env_file)
+
+    saved = {
+        k: v for k, v in os.environ.items()
+        if k.startswith(_CREDENTIAL_ENV_PREFIXES)
+    }
+    yield
+    for key in [
+        k for k in os.environ if k.startswith(_CREDENTIAL_ENV_PREFIXES)
+    ]:
+        if key not in saved:
+            os.environ.pop(key, None)
+    os.environ.update(saved)
 
 
 @pytest.fixture(autouse=True)
