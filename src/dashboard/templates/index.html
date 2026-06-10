@@ -4276,6 +4276,11 @@
               <span class="text-[11px] text-gray-500"
                     x-text="workplacePipelines.length + (workplacePipelines.length === 1 ? ' pipeline' : ' pipelines')"></span>
             </div>
+            <!-- Cap the in-flight list height so a busy fleet's pipelines
+                 scroll internally instead of pushing the daily summaries far
+                 down the page. With few cards the height collapses under the
+                 cap and no scrollbar shows. -->
+            <div class="space-y-2 max-h-96 overflow-y-auto custom-scrollbar pr-0.5">
             <!-- Pipeline card. Collapsed: title + status badge + a condensed
                  stage-dot flow and the current stage. Click the header to
                  expand the full per-stage detail (assignee, age, title,
@@ -4358,6 +4363,7 @@
                 </div>
               </div>
             </template>
+            </div>
           </div>
         </template>
 
