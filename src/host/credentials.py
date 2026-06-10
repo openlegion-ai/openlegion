@@ -290,6 +290,17 @@ def _extract_content(raw_content) -> tuple[str, str | None]:
     return "".join(text_parts), "".join(thinking_parts) if thinking_parts else None
 
 
+def _default_env_file() -> str:
+    """Default .env path (PROJECT_ROOT/.env) used when callers pass no env_file.
+
+    Module-level indirection (rather than inlining the path in
+    ``_persist_to_env`` / ``_remove_from_env``) so the test suite can
+    monkeypatch a single seam and redirect default-path writes away from
+    the developer's real .env.
+    """
+    return str(Path(__file__).resolve().parent.parent.parent / ".env")
+
+
 def _persist_to_env(env_key: str, value: str, env_file: str = "") -> None:
     """Persist an environment variable to .env and os.environ.
 
@@ -306,7 +317,7 @@ def _persist_to_env(env_key: str, value: str, env_file: str = "") -> None:
         raise ValueError(f"Invalid env key name: {env_key}")
 
     if not env_file:
-        env_file = str(Path(__file__).resolve().parent.parent.parent / ".env")
+        env_file = _default_env_file()
 
     # Quote to prevent python-dotenv from mangling values.
     # Single quotes: no interpolation, no escape processing — safest.
@@ -359,7 +370,7 @@ def _persist_to_env(env_key: str, value: str, env_file: str = "") -> None:
 def _remove_from_env(env_key: str, env_file: str = "") -> None:
     """Remove an environment variable from .env and os.environ."""
     if not env_file:
-        env_file = str(Path(__file__).resolve().parent.parent.parent / ".env")
+        env_file = _default_env_file()
 
     env_path = Path(env_file)
     if env_path.exists():
