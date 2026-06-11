@@ -89,8 +89,7 @@ Only modules with non-obvious behavior are listed. The rest are visible by readi
 | `src/browser/flags.py` | Centralized flag loader. `_ENV_ONLY_FLAGS` strips solver creds from `config/settings.json` at load (env-only by design). |
 | `src/browser/stealth.py` | `BROWSER_DEVICE_PROFILE` rewrites UA, but the underlying Camoufox engine is unchanged — server-side TLS/JA3 may still read desktop. |
 | `src/browser/server.py` | Raises on startup if `MESH_AUTH_TOKEN` set but `BROWSER_AUTH_TOKEN` missing. Session persistence is opt-in via `BROWSER_SESSION_PERSISTENCE_ENABLED` (default false). |
-| `src/dashboard/server.py` | Alpine.js SPA, Jinja autoescape, CSP, CSRF via `X-Requested-With`, VNC URL injection. Four top-nav tabs with frozen IDs (Constraint #5). |
-| `src/dashboard/notifications.py` | Top-nav bell store; `_KNOWN_KINDS` is frozen. No automatic per-task-completion notifications — the operator authors genuinely user-facing ones via `notify_user`. |
+| `src/dashboard/server.py` | Alpine.js SPA, Jinja autoescape, CSP, CSRF via `X-Requested-With`, VNC URL injection. Four top-nav tabs with frozen IDs (Constraint #5). The notifications bell was REMOVED (2026-06-11 chat-native delivery): chain outcomes land in the operator chat as `notification`-role transcript rows via agent `POST /chat/note` (the ChainWatcher's deliver-then-claim durability point — the ack must never lie) + live `notification` events; formerly bell-only signals (`connection_refresh_failed`, quarantine) reroute via `runtime._system_signal_producer`; desktop pings fan in from the underlying WS events in `onWsEvent`. |
 | `src/dashboard/telemetry.py` | Telemetry sink (`dashboard_telemetry` table) with retention cap + per-session rate limit. |
 | `src/channels/whatsapp.py` | WhatsApp Cloud API (`X-Hub-Signature-256` verification, warns when disabled). |
 | `src/templates/` | YAML fleet templates (starter, devteam, deep-research, monitor, sales, …). |

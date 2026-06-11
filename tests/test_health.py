@@ -332,19 +332,23 @@ class TestQuarantine:
         ]
         assert len(quarantine_emit) == 1
 
-    def test_quarantine_writes_notification(self):
+    def test_quarantine_emit_carries_reason_for_reroute(self):
+        """The bell store is gone — the runtime's system-signal reroute
+        consumes the health_change emit, so the quarantined transition
+        must carry the remediation reason in its payload."""
         monitor = _make_monitor({})
-        notif_store = MagicMock()
-        monitor.set_notifications_store(notif_store)
         monitor.register("agent-a")
         for _ in range(3):
             monitor.record_auth_failure(
                 "agent-a", provider="openai", model="openai/gpt-5", http_status=401,
             )
-        notif_store.add.assert_called_once()
-        kwargs = notif_store.add.call_args.kwargs
-        assert kwargs["kind"] == "credential"
-        assert kwargs["agent_id"] == "agent-a"
+        quarantine_emit = [
+            c for c in monitor._event_bus.emit.call_args_list
+            if c.args and c.args[0] == "health_change"
+            and c.kwargs.get("data", {}).get("current") == "quarantined"
+        ]
+        assert len(quarantine_emit) == 1
+        assert quarantine_emit[0].kwargs["data"].get("reason")
 
     def test_is_quarantined_query(self):
         monitor = _make_monitor({})

@@ -50,7 +50,7 @@ class OpenedConversationsStore:
     Single connection, WAL mode, ``check_same_thread=False`` so the
     FastAPI request handlers (which run on the asyncio loop's default
     executor) can share it. Mirrors the conventions used by
-    :class:`NotificationStore` and :class:`DashboardTelemetry`.
+    :class:`DashboardTelemetry`.
     """
 
     def __init__(self, db_path: str | Path = "data/dashboard_conversations.db") -> None:

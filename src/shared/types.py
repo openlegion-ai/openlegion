@@ -983,10 +983,6 @@ class DashboardEvent(BaseModel):
         "operator_action_receipt",
         "operator_action_receipt_undone",
         "operator_action_receipt_superseded",
-        # Live notification bell — emitted by ``_notifications_producer``
-        # immediately after each ``notification_store.add`` call so the
-        # bell badge updates without waiting for the 60s poll.
-        "notification_added",
         # Agent / project lifecycle — archive/unarchive emit so the SPA
         # refreshes the relevant list without a full reload.
         "agent_archived",

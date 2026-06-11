@@ -104,8 +104,6 @@ function dashboard() {
     // Per-agent visible message count for "Load older →" pagination
     // (Phase 1 Decision 12). Default 50; click appends 50 more.
     _chatVisibleLimit: {},
-    // Notifications dropdown — top-right bell. Subtle gray indicator.
-    notificationsOpen: false,
     connected: false,
     loading: true,
     lastRefresh: 0,
@@ -784,13 +782,6 @@ function dashboard() {
     // for plain-English summaries.
     showTechDetail: false,
 
-    // Phase 2 Board UX overhaul — notifications bell.
-    notifications: [],
-    notificationsUnreadCount: 0,
-    notificationsOpen: false,
-    notificationsLoading: false,
-    _notificationsRefreshTimer: null,
-
     // Per-agent "restarting" pulse — populated by ``agent_restarting``
     // events and cleared by ``agent_restarted`` / ``agent_state``
     // ``restart_failed``. Bound by templates as
@@ -808,10 +799,6 @@ function dashboard() {
     // Triple-redundant gate keeps us from spamming the user.
     browserNotifyEnabled: false,
     browserNotifyPermission: 'default',
-    // Track the highest notification id we've seen so the 60s
-    // fetchNotifications poll only fires browser notifications for
-    // genuinely new arrivals.
-    _lastNotifiedId: 0,
     _browserNotifyKinds: ['approval', 'credential', 'alert', 'blocker', 'delivered'],
 
     // WebSocket
@@ -1504,15 +1491,6 @@ function dashboard() {
       if (typeof Notification !== 'undefined' && Notification && Notification.permission) {
         this.browserNotifyPermission = Notification.permission;
       }
-
-      // Phase 2 Board UX — initial notifications fetch + 60s poll.
-      // Fetched lazily on bell open as well; the poll keeps the
-      // unread badge fresh without forcing the dropdown to open.
-      this.fetchNotifications();
-      this._notificationsRefreshTimer = setInterval(
-        () => this.fetchNotifications(),
-        60_000,
-      );
 
       // Command palette: Cmd+K / Ctrl+K + tab shortcuts 1/2/3
       this._cmdPaletteHandler = (e) => {
@@ -4436,6 +4414,52 @@ function dashboard() {
         }
       }
 
+      // Desktop-ping fan-in (bell removed): synthesize the row shape
+      // _maybeFireBrowserNotification expects from the underlying
+      // events, preserving the old bell coverage (approval / credential
+      // / health alert / credit) — chain outcomes + notify_user ping
+      // via the `notification` handler below. Replays are already
+      // filtered by the event-id dedupe above; the hook itself gates on
+      // opt-in + permission + tab-hidden.
+      try {
+        const fanAgent = evt.agent || '';
+        const d = evt.data || {};
+        if (evt.type === 'pending_action_created') {
+          this._maybeFireBrowserNotification({
+            kind: 'approval',
+            id: 'pa-' + (d.action_id || d.id || Date.now()),
+            title: 'Approval needed',
+            body: (d.description || d.summary || '').slice(0, 200),
+            payload: {},
+          });
+        } else if (evt.type === 'credential_request' || evt.type === 'browser_login_request') {
+          this._maybeFireBrowserNotification({
+            kind: 'credential',
+            id: 'cr-' + (d.request_id || Date.now()),
+            title: (fanAgent || 'An agent') + ' needs a credential',
+            body: (d.service || d.name || '').slice(0, 200),
+            payload: { agent_id: fanAgent },
+          });
+        } else if (evt.type === 'health_change'
+                   && ['degraded', 'unhealthy', 'failed', 'quarantined'].includes(d.current)) {
+          this._maybeFireBrowserNotification({
+            kind: 'alert',
+            id: 'hc-' + fanAgent + '-' + d.current,
+            title: (fanAgent || 'An agent') + ' is ' + d.current,
+            body: (d.reason || '').slice(0, 200),
+            payload: { agent_id: fanAgent },
+          });
+        } else if (evt.type === 'credit_exhausted') {
+          this._maybeFireBrowserNotification({
+            kind: 'alert',
+            id: 'ce-' + fanAgent,
+            title: (fanAgent || 'An agent') + ' is out of credit',
+            body: (d.error || '').slice(0, 200),
+            payload: { agent_id: fanAgent },
+          });
+        }
+      } catch (_) { /* polish surface — never break event routing */ }
+
       // Append to event feed (newest first, cap at 500). queue_changed is a
       // high-frequency, contentless refetch trigger (≈3 per task) with no
       // human-readable rendering — keep it out of the bounded activity buffer
@@ -4601,41 +4625,6 @@ function dashboard() {
               }
             }
           }
-        }
-      }
-
-      // Live notification bell — emitted right after the
-      // ``_notifications_producer`` writes a row to the persistent
-      // notifications store. We optimistically prepend the row to
-      // the in-memory ``notifications`` list so the bell badge ticks
-      // up live; the existing 60s poll still acts as a safety net
-      // for any in-flight events that landed before the WS
-      // subscription resumed after a reconnect.
-      if (evt.type === 'notification_added') {
-        const data = evt.data || {};
-        const nid = typeof data.id === 'number' ? data.id : 0;
-        // Skip dupes (the 60s poll may race with the live event).
-        const exists = nid > 0 && (this.notifications || []).some(n => n.id === nid);
-        if (!exists) {
-          const row = {
-            id: nid,
-            kind: data.kind || 'info',
-            title: data.title || '',
-            body: data.body || '',
-            agent_id: data.agent_id || null,
-            read_at: null,
-            ts: evt.timestamp || (Date.now() / 1000),
-            payload: data.payload || {},
-          };
-          this.notifications = [row, ...(this.notifications || [])];
-          this.notificationsUnreadCount = (this.notificationsUnreadCount || 0) + 1;
-          // Keep ``_lastNotifiedId`` in sync so the next poll skips
-          // browser-notification replay for this row.
-          if (nid > (this._lastNotifiedId || 0)) {
-            this._lastNotifiedId = nid;
-          }
-          // Best-effort browser notification hook (gated by user opt-in).
-          try { this._maybeFireBrowserNotification && this._maybeFireBrowserNotification(row); } catch (_) {}
         }
       }
 
@@ -11216,46 +11205,6 @@ function dashboard() {
     },
 
     // ── Phase 2 Board UX — Notifications bell ───────────────
-    async fetchNotifications() {
-      this.notificationsLoading = true;
-      try {
-        const resp = await fetch(`${window.__config.apiBase}/notifications`);
-        if (!resp.ok) {
-          this.notifications = [];
-          this.notificationsUnreadCount = 0;
-          return;
-        }
-        const data = await resp.json();
-        const fresh = data.notifications || [];
-        const previousLastId = this._lastNotifiedId;
-        // Track the high-water mark across the merged set so the next
-        // poll can identify genuinely-new entries.
-        let highestId = previousLastId;
-        for (const n of fresh) {
-          if (typeof n.id === 'number' && n.id > highestId) highestId = n.id;
-        }
-        this.notifications = fresh;
-        this.notificationsUnreadCount = data.unread_count || 0;
-        // Fire browser notifications only for entries newer than the
-        // last poll. Skip on the very first fetch (previousLastId === 0)
-        // so reloading the page doesn't replay the inbox.
-        if (previousLastId > 0) {
-          for (const n of fresh) {
-            if (n.id && n.id > previousLastId && !n.read_at) {
-              this._maybeFireBrowserNotification(n);
-            }
-          }
-        }
-        this._lastNotifiedId = highestId;
-      } catch (e) {
-        // Silent failure; the bell is a polish surface.
-        this.notifications = [];
-        this.notificationsUnreadCount = 0;
-      } finally {
-        this.notificationsLoading = false;
-      }
-    },
-
     // ── Browser Notification API ─────────────────────────────
     //
     // Off-tab signal for users without a messaging channel configured.
@@ -11265,8 +11214,9 @@ function dashboard() {
     // "Enable browser notifications" in the wizard first-output card
     // (or the equivalent settings affordance).
     //
-    // This consumes ``notifications`` produced by the existing notification
-    // bell fetch (PR-B). We don't manufacture our own queue.
+    // Fed by the live-event fan-in in onWsEvent (notification /
+    // pending_action_created / credential_request / browser_login_request /
+    // health_change / credit_exhausted) — rows are synthesized per event.
     async requestBrowserNotificationPermission() {
       if (typeof Notification === 'undefined' || !Notification) {
         return 'unsupported';
@@ -11451,87 +11401,19 @@ function dashboard() {
       return this._rollupActivityEvents(this.filteredEvents);
     },
 
-    toggleNotifications() {
-      this.notificationsOpen = !this.notificationsOpen;
-      if (this.notificationsOpen) this.fetchNotifications();
-    },
-
-    async markNotificationRead(notification) {
-      if (!notification || !notification.id) return;
-      if (notification.read_at) return;
-      // Optimistic update — flip the row in-place so the dropdown
-      // doesn't flicker. Rollback only if the request errors.
-      const prevReadAt = notification.read_at;
-      notification.read_at = Date.now() / 1000;
-      this.notificationsUnreadCount = Math.max(0, this.notificationsUnreadCount - 1);
-      try {
-        const resp = await fetch(`${window.__config.apiBase}/notifications/${notification.id}/read`, {
-          method: 'POST',
-        });
-        if (!resp.ok) {
-          notification.read_at = prevReadAt;
-          this.notificationsUnreadCount += 1;
-        }
-      } catch (e) {
-        notification.read_at = prevReadAt;
-        this.notificationsUnreadCount += 1;
-      }
-    },
-
-    async markAllNotificationsRead() {
-      // Optimistic update.
-      const previous = this.notifications.map(n => n.read_at);
-      const now = Date.now() / 1000;
-      for (const n of this.notifications) {
-        if (!n.read_at) n.read_at = now;
-      }
-      const previousUnread = this.notificationsUnreadCount;
-      this.notificationsUnreadCount = 0;
-      try {
-        const resp = await fetch(`${window.__config.apiBase}/notifications/read-all`, {
-          method: 'POST',
-        });
-        if (!resp.ok) {
-          this.notifications.forEach((n, i) => { n.read_at = previous[i]; });
-          this.notificationsUnreadCount = previousUnread;
-        }
-      } catch (e) {
-        this.notifications.forEach((n, i) => { n.read_at = previous[i]; });
-        this.notificationsUnreadCount = previousUnread;
-      }
-    },
-
-    // Click handler for a notification row. Marks read; if the
-    // payload includes a click-through target (agent / task id),
-    // navigates accordingly.
+    // Click-through for a desktop notification: navigate to the agent
+    // or task it references (used by _maybeFireBrowserNotification).
     onNotificationClick(notification) {
-      this.markNotificationRead(notification);
       const payload = notification && notification.payload;
       if (!payload) return;
       try {
         if (payload.agent_id) {
-          this.notificationsOpen = false;
           this.drillDown(payload.agent_id);
         } else if (payload.task_id && typeof this.openTaskDrillIn === 'function') {
-          this.notificationsOpen = false;
           this.openTaskDrillIn(payload.task_id);
         }
       } catch (_) {
-        // Best-effort navigation — failures shouldn't block the read.
-      }
-    },
-
-    // Icon glyph for the notification kind. Plain text glyphs keep
-    // the markup emoji-free.
-    notificationKindIcon(kind) {
-      switch (kind) {
-        case 'delivered': return '★';
-        case 'approval': return '?';
-        case 'alert': return '⚠';
-        case 'blocker': return '⚠';
-        case 'credential': return 'K';
-        case 'info':
-        default: return '•';
+        // Best-effort navigation.
       }
     },
 

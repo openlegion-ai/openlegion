@@ -2576,3 +2576,128 @@ class TestSystemNoteCallSites:
     def test_direct_dispatch_emits_header(self):
         src = self._src("src/cli/runtime.py")
         assert 'extra_headers["x-system-wake"] = "1"' in src
+
+
+class TestSystemSignalReroute:
+    """The two formerly bell-only signals reroute into the operator
+    thread: connection_refresh_failed and health_change→quarantined.
+    Listener is sync on the emitter's thread; the note POST marshals
+    onto the dispatch loop fire-and-forget with bounded retry."""
+
+    def _stub(self):
+        import asyncio as _asyncio
+        import threading
+
+        from src.cli.runtime import RuntimeContext
+
+        class _Transport:
+            def __init__(self):
+                self.calls = []
+
+            async def request(self, agent, method, path, json=None, **kw):
+                self.calls.append((agent, method, path, json))
+                return {"ok": True}
+
+        class _Bus:
+            def __init__(self):
+                self.events = []
+
+            def emit(self, type_, agent="", data=None):
+                self.events.append((type_, agent, data))
+
+        loop = _asyncio.new_event_loop()
+        t = threading.Thread(target=loop.run_forever, daemon=True)
+        t.start()
+
+        class _Stub:
+            transport = _Transport()
+            event_bus = _Bus()
+            _dispatch_loop = loop
+            _system_signal_producer = RuntimeContext._system_signal_producer
+            _operator_note_with_retry = RuntimeContext._operator_note_with_retry
+
+        return _Stub(), loop
+
+    def _drain(self, loop, until):
+        import concurrent.futures
+        import time as _t
+        for _ in range(150):
+            done = concurrent.futures.Future()
+            loop.call_soon_threadsafe(lambda: done.set_result(True))
+            done.result(timeout=5)
+            if until():
+                return
+            _t.sleep(0.02)
+
+    def test_connection_refresh_failed_writes_operator_note(self):
+        stub, loop = self._stub()
+        try:
+            stub._system_signal_producer({
+                "type": "connection_refresh_failed",
+                "data": {"connection": "gdrive", "provider": "google",
+                         "error": "invalid_grant"},
+            })
+            self._drain(loop, until=lambda: stub.transport.calls)
+            agent, method, path, payload = stub.transport.calls[0]
+            assert (agent, method, path) == ("operator", "POST", "/chat/note")
+            assert "gdrive" in payload["message"]
+            assert "reconnect" in payload["message"].lower()
+            self._drain(loop, until=lambda: stub.event_bus.events)
+            assert stub.event_bus.events[0][0] == "notification"
+            assert stub.event_bus.events[0][1] == "operator"
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+
+    def test_quarantined_health_change_writes_operator_note(self):
+        stub, loop = self._stub()
+        try:
+            stub._system_signal_producer({
+                "type": "health_change", "agent": "scout",
+                "data": {"previous": "healthy", "current": "quarantined",
+                         "reason": "3 consecutive auth failures"},
+            })
+            self._drain(loop, until=lambda: stub.transport.calls)
+            payload = stub.transport.calls[0][3]
+            assert "scout" in payload["message"]
+            assert "quarantined" in payload["message"]
+            assert "auth failures" in payload["message"]
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+
+    def test_non_quarantine_health_change_ignored(self):
+        stub, loop = self._stub()
+        try:
+            stub._system_signal_producer({
+                "type": "health_change", "agent": "scout",
+                "data": {"previous": "healthy", "current": "degraded"},
+            })
+            stub._system_signal_producer({"type": "task_created", "data": {}})
+            self._drain(loop, until=lambda: True)
+            assert stub.transport.calls == []
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+
+    @pytest.mark.asyncio
+    async def test_note_retry_gives_up_without_raising(self):
+        """After bounded retries the signal is accepted-lost (logged) —
+        the listener must never raise into EventBus.emit."""
+        from src.cli.runtime import RuntimeContext
+
+        class _Transport:
+            def __init__(self):
+                self.calls = 0
+
+            async def request(self, *a, **kw):
+                self.calls += 1
+                return {"error": "Connection failed"}
+
+        class _Stub:
+            transport = _Transport()
+            event_bus = None
+            _operator_note_with_retry = RuntimeContext._operator_note_with_retry
+
+        stub = _Stub()
+        await RuntimeContext._operator_note_with_retry(
+            stub, "x", attempts=3, backoff_s=0,
+        )
+        assert stub.transport.calls == 3
