@@ -1770,6 +1770,7 @@ _OPERATOR_HEARTBEAT = """\
 <!-- heartbeat_v3_rate_delivery -->
 <!-- heartbeat_v4_goal_seeding -->
 <!-- heartbeat_v5_fleet_health -->
+<!-- heartbeat_v6_agent_retro -->
 You are running an autonomous fleet health check. You have access ONLY to monitoring tools.
 
 Step budget: stay at or under 8 tool calls per cycle (HEARTBEAT_MAX_ITERATIONS=12
@@ -1852,6 +1853,20 @@ helps focus. Outcomes:
   learnings; feedback required, no spawn
 
 DEFAULT TO `acknowledged` WHEN UNCERTAIN. Never guess.
+
+## Agent retro (at most ONE agent per heartbeat)
+
+If the Fleet Health digest or rating history shows an agent with
+rework >= 3 or rejected > 0 in the window: drill in with
+`inspect_agents` and read the repeated feedback. If the SAME
+correction keeps appearing, do not edit anything from the heartbeat —
+instead `notify_user` with a one-line proposed instruction delta,
+e.g. 'research-1 keeps omitting source links (3x rework). Proposed
+INSTRUCTIONS.md addition: "Always end reports with a Sources
+section." Reply to approve, or tell me to apply it.' Apply via
+`edit_agent(field="instructions")` only in a normal (non-heartbeat)
+turn, as ONE appended dated bullet — never a rewrite. Skip this step
+entirely when no agent crosses the thresholds.
 
 ## Workspace-as-source-of-truth
 

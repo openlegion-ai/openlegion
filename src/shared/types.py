@@ -103,6 +103,7 @@ HEARTBEAT_SENTINELS: tuple[str, ...] = (
     "heartbeat_v3_rate_delivery",
     "heartbeat_v4_goal_seeding",
     "heartbeat_v5_fleet_health",
+    "heartbeat_v6_agent_retro",
 )
 
 # Same contract for the operator's INSTRUCTIONS playbook
