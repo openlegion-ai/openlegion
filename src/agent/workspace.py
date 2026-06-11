@@ -1039,6 +1039,7 @@ class WorkspaceManager:
         tools: list[dict] | None = None,
         turn_id: str | None = None,
         partial: bool = False,
+        raise_on_error: bool = False,
     ) -> None:
         """Append a message to the persistent chat transcript (JSONL).
 
@@ -1053,6 +1054,11 @@ class WorkspaceManager:
         when the turn closes. ``load_chat_transcript`` dedupes by
         ``turn_id`` and keeps the latest occurrence — legacy entries
         without ``turn_id`` are passed through unchanged.
+
+        ``raise_on_error=True`` re-raises write failures instead of the
+        default swallow-and-log. Required wherever the caller acks the
+        write to a durability contract (``/chat/note`` — the mesh claims
+        a chain delivery on that ack, so it must never lie).
         """
         path = self.root / self.CHAT_TRANSCRIPT
         entry: dict = {"role": role, "content": content, "ts": time.time()}
@@ -1073,6 +1079,8 @@ class WorkspaceManager:
                 half = len(lines) // 2
                 path.write_text("\n".join(lines[half:]) + "\n")
         except Exception as e:
+            if raise_on_error:
+                raise
             logger.debug("Failed to write chat transcript: %s", e)
 
     def load_chat_transcript(self, limit: int = 200) -> list[dict]:

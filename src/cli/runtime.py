@@ -855,6 +855,17 @@ class RuntimeContext:
                     self.event_bus.emit("message_sent", agent=agent_name,
                         data={"message": message[:200], "response_length": len(response),
                               "source": "dispatch"})
+                    # Lane-dispatched turn (wake/cron/webhook) finished
+                    # OUTSIDE any dashboard stream — the reply is already
+                    # in the transcript but no open chat view knows.
+                    # source="dispatch" tells the JS to do a debounced
+                    # history reload only (skip the remote-stream
+                    # finalize logic; never bypass the 5s debounce — a
+                    # wake burst must not stampede full refetches).
+                    self.event_bus.emit(
+                        "chat_done", agent=agent_name,
+                        data={"source": "dispatch"},
+                    )
                 return response
             # NOTE: ``except Exception`` (NOT ``BaseException``/bare) is
             # deliberate — ``asyncio.CancelledError`` MUST propagate so the
@@ -992,73 +1003,103 @@ class RuntimeContext:
             )
             return False
 
-    def _deliver_chain_outcome(self, root: dict, kind: str, summary: str) -> bool:
+    async def _deliver_chain_outcome(
+        self, root: dict, kind: str, summary: str,
+    ) -> bool:
         """Deliver one terminal outcome for a user chain to its originator.
 
-        The durable dashboard bell is the guarantee surface — the watcher
-        only claims the delivery when this returns True, so a failed write
-        is retried rather than silently lost. A paired chat channel
+        The durable surface is a ``notification``-role row in the
+        operator's chat transcript (written via the agent's ``/chat/note``
+        endpoint) — the watcher only claims the delivery when this returns
+        True, so a failed write is retried rather than silently lost. The
+        live surface is the existing ``notification`` DashboardEvent (amber
+        bubble + toast in the operator thread). A paired chat channel
         (telegram/discord/slack/whatsapp) additionally gets a best-effort
         push so a non-dashboard originator hears back in their own channel.
         Targeting uses ONLY the root's first-party human origin.
+
+        Async on purpose: it runs on the ChainWatcher's own event loop
+        (``_run_deliver`` awaits coroutine delivers) and the transport
+        keeps one httpx client per loop, so awaiting here is safe.
         """
         origin = root.get("origin") or {}
         channel = origin.get("channel") or "dashboard"
         user = origin.get("user") or ""
         root_id = root.get("id") or ""
         assignee = root.get("assignee") or ""
-        # Raw worker output — bound it so a large result_summary can't bloat
-        # the bell row or the channel message. (Display surfaces are
-        # autoescaped; this is a size guard, not a safety one.)
+        # Raw worker output — bound it so a large result_summary can't
+        # bloat the transcript note or the channel message. (Display
+        # surfaces are autoescaped; this is a size guard, not a safety
+        # one.)
         summary = (summary or "").strip()[:1500]
         root_title = (root.get("title") or "your request").strip()[:80]
         if kind == "done":
             title = "✅ Task complete"
             body = summary or "Your request finished."
-            bell_kind = "delivered"
         elif kind == "stall":
             title = "⏳ Taking longer than expected"
             body = (
                 f"No progress on '{root_title}' for a while — it may be stuck. "
                 "Want me to check in?"
             )
-            bell_kind = "alert"
         else:
             title = "⚠️ Task failed"
             body = summary or "Your request hit a failure and stopped."
-            # Failure rings the warning bell, not the success/delivery one —
-            # same kind the stall branch and degradation notifications use.
-            bell_kind = "alert"
-        payload = {
-            "root_task_id": root_id,
-            "outcome": kind,
-            "origin_channel": channel,
-        }
-
-        # 1. Durable surface — the dashboard bell. This IS the guarantee.
-        if self._notification_store is None:
+        # 1. Durable surface — a notification-role row in the operator's
+        #    chat transcript. This IS the guarantee: the watcher claims
+        #    the delivery only on a positive ack, so any failure here
+        #    returns False and the next sweep retries. The transport
+        #    NEVER raises for the failures that matter (HTTP errors,
+        #    timeouts, connect failures come back as {"error": ...}
+        #    dicts), so success is judged on the returned dict + the
+        #    endpoint's explicit {"ok": true}.
+        if self.transport is None:
             return False
+        note_text = f"{title}\n{body}"
         try:
-            nid = self._notification_store.add(
-                kind=bell_kind, title=title, body=body,
-                agent_id=assignee or None, payload=payload,
+            result = await self.transport.request(
+                "operator", "POST", "/chat/note",
+                json={"message": note_text}, timeout=15,
             )
         except Exception as e:
             logger.warning(
-                "chain outcome bell write failed for %s: %s", root_id, e,
+                "chain outcome note write failed for %s: %s", root_id, e,
             )
             return False
+        if not isinstance(result, dict) or result.get("error") or not result.get("ok"):
+            status_code = result.get("status_code") if isinstance(result, dict) else None
+            if status_code == 404:
+                # The deploy trap: host updated, agent image not rebuilt —
+                # /chat/note doesn't exist in the running container and
+                # delivery would retry silently forever. Make it loud.
+                logger.error(
+                    "chain outcome delivery for %s got 404 from /chat/note "
+                    "— the operator agent image predates this endpoint. "
+                    "Rebuild it (docker build -t openlegion-agent:latest "
+                    "-f Dockerfile.agent .) and restart; delivery retries "
+                    "until then.", root_id,
+                )
+            else:
+                logger.warning(
+                    "chain outcome note rejected for %s: %s", root_id, result,
+                )
+            return False
+        # Live surface — the chat UI renders this as the amber
+        # notification bubble + toast in the operator thread (same
+        # handler notify_user uses). Best-effort: the durable row above
+        # already guarantees the user sees it on next history load.
         if self.event_bus is not None:
             try:
                 self.event_bus.emit(
-                    "notification_added", agent=assignee or "",
+                    "notification", agent="operator",
                     data={
-                        "id": nid, "kind": bell_kind, "title": title,
-                        "body": body, "agent_id": assignee, "payload": payload,
+                        "message": note_text,
+                        "root_task_id": root_id,
+                        "outcome": kind,
                     },
                 )
             except Exception as e:
-                logger.debug("notification_added emit failed: %s", e)
+                logger.debug("chain outcome notification emit failed: %s", e)
 
         # 1b. Post-completion verification wake (success path only). The
         #     user already has the result (bell above); the operator gets
@@ -1076,9 +1117,10 @@ class RuntimeContext:
         # 2. Push to a paired chat channel for non-dashboard originators, with
         #    bounded retry so a transient channel failure (network blip, rate
         #    limit) doesn't silently drop it. Runs as a background task so it
-        #    never blocks the watcher sweep; the durable bell (above) remains
-        #    the cross-restart guarantee, so a channel down past the retries
-        #    still leaves the user the bell.
+        #    never blocks the watcher sweep; the durable transcript note
+        #    (above) remains the cross-restart guarantee, so a channel down
+        #    past the retries still leaves the outcome in the operator
+        #    thread.
         if channel and channel != "dashboard" and user:
             try:
                 from src.shared.types import MessageOrigin
@@ -1105,8 +1147,9 @@ class RuntimeContext:
         *, attempts: int = 3, backoff_s: float = 3.0, timeout_s: float = 30.0,
     ) -> None:
         """Deliver a chain-outcome push to a chat channel, retrying transient
-        failures. Best-effort: the dashboard bell is the durable guarantee, so
-        after the attempts are exhausted we log and stop (no hot loop).
+        failures. Best-effort: the operator-thread transcript note is the
+        durable guarantee, so after the attempts are exhausted we log and
+        stop (no hot loop).
 
         Each attempt is bounded by ``timeout_s`` (mirrors the lane's
         ``_NOTIFY_FORWARD_TIMEOUT``) so a wedged channel adapter can't hang the
@@ -1129,7 +1172,7 @@ class RuntimeContext:
                 await asyncio.sleep(backoff_s * (i + 1))
         logger.warning(
             "chain outcome channel push to %s/%s gave up after %d attempts "
-            "(bell delivered as fallback)",
+            "(operator-thread note delivered as fallback)",
             origin.channel, origin.user, attempts,
         )
 
@@ -1637,7 +1680,7 @@ class RuntimeContext:
         # Start chain watcher — delivers a guaranteed terminal outcome for
         # user-originated task chains so the operator can hand off and
         # release instead of block-watching a multi-hop pipeline.
-        if self._tasks_store_ref is not None and self._notification_store is not None:
+        if self._tasks_store_ref is not None and self.transport is not None:
             from src.host.chain_watcher import ChainWatcher
             self.chain_watcher = ChainWatcher(
                 self._tasks_store_ref, self._deliver_chain_outcome,

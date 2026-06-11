@@ -2208,53 +2208,117 @@ class TestDispatchErrorSurfacing:
 # ── Chain-outcome bell kinds ──────────────────────────────────
 
 
-class TestDeliverChainOutcomeBellKind:
-    """The dashboard-bell `kind` chosen per chain outcome. Bound to a stub
-    `self` (same pattern as TestChannelPushRetry); a dashboard origin keeps
-    the channel-push branch out of play, so only the bell write runs."""
+class TestDeliverChainOutcomeNote:
+    """Chain outcomes deliver as a notification-role row in the operator's
+    transcript via /chat/note — the deliver-then-claim durability point —
+    plus a live `notification` event. Bound to a stub `self` (same pattern
+    as TestChannelPushRetry); a dashboard origin keeps the channel-push
+    branch out of play. The transport contract matters here: it NEVER
+    raises for HTTP/timeout/connect failures (error dicts instead), so
+    these tests pin the dict-based success judgement."""
 
-    def _deliver(self, kind):
+    def _stub(self, response):
         from src.cli.runtime import RuntimeContext
 
-        class _Store:
+        class _Transport:
             def __init__(self):
-                self.adds = []
-            def add(self, **kw):
-                self.adds.append(kw)
-                return "n1"
+                self.calls = []
+
+            async def request(self, agent, method, path, json=None, **kw):
+                self.calls.append((agent, method, path, json))
+                if isinstance(response, Exception):
+                    raise response
+                return response
+
+        class _Bus:
+            def __init__(self):
+                self.events = []
+
+            def emit(self, type_, agent="", data=None):
+                self.events.append((type_, agent, data))
 
         class _Stub:
-            _notification_store = _Store()
-            event_bus = None
+            transport = _Transport()
+            event_bus = _Bus()
             lane_manager = None
             _dispatch_loop = None
             _maybe_wake_operator_verification = (
                 RuntimeContext._maybe_wake_operator_verification
             )
 
-        stub = _Stub()
-        root = {
+        return _Stub()
+
+    def _root(self):
+        return {
             "id": "t-root", "assignee": "worker", "title": "do thing",
             "origin": {"kind": "human", "channel": "dashboard", "user": "u1"},
         }
-        ok = RuntimeContext._deliver_chain_outcome(stub, root, kind, "summary")
-        assert ok is True
-        assert len(stub._notification_store.adds) == 1
-        return stub._notification_store.adds[0]
 
-    def test_failed_chain_rings_alert_not_delivered(self):
-        # A failure must NOT ride the success/delivery bell kind — `alert`
-        # is what the stall branch and degradation notifications use.
-        add = self._deliver("failed")
-        assert add["kind"] == "alert"
+    async def _deliver(self, stub, kind):
+        from src.cli.runtime import RuntimeContext
+        return await RuntimeContext._deliver_chain_outcome(
+            stub, self._root(), kind, "summary",
+        )
 
-    def test_done_chain_rings_delivered(self):
-        add = self._deliver("done")
-        assert add["kind"] == "delivered"
+    @pytest.mark.asyncio
+    async def test_done_writes_note_and_emits_notification(self):
+        stub = self._stub({"ok": True})
+        assert await self._deliver(stub, "done") is True
+        agent, method, path, payload = stub.transport.calls[0]
+        assert (agent, method, path) == ("operator", "POST", "/chat/note")
+        assert payload["message"].startswith("✅ Task complete")
+        notifs = [e for e in stub.event_bus.events if e[0] == "notification"]
+        assert len(notifs) == 1
+        assert notifs[0][1] == "operator"
+        assert "✅ Task complete" in notifs[0][2]["message"]
+        assert notifs[0][2]["root_task_id"] == "t-root"
 
-    def test_stall_chain_rings_alert(self):
-        add = self._deliver("stall")
-        assert add["kind"] == "alert"
+    @pytest.mark.asyncio
+    async def test_failed_and_stall_note_titles(self):
+        stub = self._stub({"ok": True})
+        assert await self._deliver(stub, "failed") is True
+        assert await self._deliver(stub, "stall") is True
+        assert stub.transport.calls[0][3]["message"].startswith("⚠️ Task failed")
+        assert stub.transport.calls[1][3]["message"].startswith(
+            "⏳ Taking longer than expected"
+        )
+
+    @pytest.mark.asyncio
+    async def test_error_dict_fails_delivery_without_emit(self):
+        """Transport returns {"error": ...} instead of raising — that MUST
+        read as failure (False → watcher retries), and the live event must
+        not fire for an undelivered note."""
+        stub = self._stub({"error": "Connection failed: boom"})
+        assert await self._deliver(stub, "done") is False
+        assert stub.event_bus.events == []
+
+    @pytest.mark.asyncio
+    async def test_missing_ack_fails_delivery(self):
+        """A 2xx body without the explicit {"ok": true} ack is not a
+        delivery — the agent-side write path may have been bypassed."""
+        stub = self._stub({})
+        assert await self._deliver(stub, "done") is False
+
+    @pytest.mark.asyncio
+    async def test_404_fails_loudly(self, caplog):
+        """Stale agent image (no /chat/note) must be loud — the default
+        deploy trap is git-pull without an image rebuild."""
+        import logging
+        stub = self._stub({"error": "HTTP 404", "status_code": 404})
+        with caplog.at_level(logging.ERROR):
+            assert await self._deliver(stub, "done") is False
+        assert any("Rebuild" in r.message for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_transport_exception_fails_delivery(self):
+        stub = self._stub(RuntimeError("loop torn down"))
+        assert await self._deliver(stub, "done") is False
+
+    @pytest.mark.asyncio
+    async def test_no_transport_fails_delivery(self):
+        stub = self._stub({"ok": True})
+        stub.transport = None
+        assert await self._deliver(stub, "done") is False
 
 
 # ── Chain-outcome channel push retry ──────────────────────────
@@ -2361,9 +2425,9 @@ class TestVerificationWake:
 
         from src.cli.runtime import RuntimeContext
 
-        class _Store:
-            def add(self, **kw):
-                return "n1"
+        class _Transport:
+            async def request(self, agent, method, path, json=None, **kw):
+                return {"ok": True}
 
         class _Lane:
             def __init__(self):
@@ -2378,7 +2442,7 @@ class TestVerificationWake:
         t.start()
 
         class _Stub:
-            _notification_store = _Store()
+            transport = _Transport()
             event_bus = None
             lane_manager = _Lane()
             _dispatch_loop = loop
@@ -2414,10 +2478,11 @@ class TestVerificationWake:
                 return
             _t.sleep(0.02)
 
-    def test_done_chain_wakes_operator_for_verification(self):
+    @pytest.mark.asyncio
+    async def test_done_chain_wakes_operator_for_verification(self):
         RuntimeContext, stub, loop = self._ctx_stub()
         try:
-            ok = RuntimeContext._deliver_chain_outcome(
+            ok = await RuntimeContext._deliver_chain_outcome(
                 stub, self._root(), "done", "summary",
             )
             assert ok is True
@@ -2433,11 +2498,12 @@ class TestVerificationWake:
         finally:
             loop.call_soon_threadsafe(loop.stop)
 
-    def test_failed_and_stall_do_not_wake(self):
+    @pytest.mark.asyncio
+    async def test_failed_and_stall_do_not_wake(self):
         RuntimeContext, stub, loop = self._ctx_stub()
         try:
             for kind in ("failed", "stall"):
-                RuntimeContext._deliver_chain_outcome(
+                await RuntimeContext._deliver_chain_outcome(
                     stub, self._root(), kind, "summary",
                 )
             self._drain(loop)
@@ -2445,7 +2511,8 @@ class TestVerificationWake:
         finally:
             loop.call_soon_threadsafe(loop.stop)
 
-    def test_wake_rate_cap_suppresses_burst(self):
+    @pytest.mark.asyncio
+    async def test_wake_rate_cap_suppresses_burst(self):
         import time as _time
 
         RuntimeContext, stub, loop = self._ctx_stub()
@@ -2453,7 +2520,7 @@ class TestVerificationWake:
             now = _time.time()
             for _ in range(stub._VERIFY_WAKE_MAX):
                 stub._verify_wake_times.append(now)
-            RuntimeContext._deliver_chain_outcome(
+            await RuntimeContext._deliver_chain_outcome(
                 stub, self._root(), "done", "summary",
             )
             self._drain(loop)
@@ -2461,14 +2528,15 @@ class TestVerificationWake:
         finally:
             loop.call_soon_threadsafe(loop.stop)
 
-    def test_wake_failure_does_not_flip_delivery(self):
+    @pytest.mark.asyncio
+    async def test_wake_failure_does_not_flip_delivery(self):
         RuntimeContext, stub, loop = self._ctx_stub()
         try:
             stub._dispatch_loop = None  # wake guard path
-            ok = RuntimeContext._deliver_chain_outcome(
+            ok = await RuntimeContext._deliver_chain_outcome(
                 stub, self._root(), "done", "summary",
             )
-            assert ok is True  # bell already written — delivery stands
+            assert ok is True  # note already written — delivery stands
         finally:
             loop.call_soon_threadsafe(loop.stop)
 

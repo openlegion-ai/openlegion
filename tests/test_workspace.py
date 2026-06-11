@@ -1462,3 +1462,31 @@ class TestPlaybookV5VerificationWakeMigration:
         assert text.count("<!-- playbook_v5_verification_wake -->") == 1
         assert "Post-Completion Verification" in text
         assert "# Mine" in text
+
+
+class TestAppendChatMessageRaiseOnError:
+    """Default swallow-and-log stays; raise_on_error=True re-raises so a
+    durability-acking caller (/chat/note) can refuse to lie."""
+
+    def test_default_swallows_write_failure(self, tmp_path, monkeypatch):
+        from src.agent.workspace import WorkspaceManager
+        ws = WorkspaceManager(workspace_dir=str(tmp_path))
+
+        def _boom(*a, **kw):
+            raise OSError("disk full")
+
+        monkeypatch.setattr("pathlib.Path.open", _boom)
+        ws.append_chat_message("notification", "x")  # must not raise
+
+    def test_raise_on_error_propagates(self, tmp_path, monkeypatch):
+        import pytest as _pytest
+
+        from src.agent.workspace import WorkspaceManager
+        ws = WorkspaceManager(workspace_dir=str(tmp_path))
+
+        def _boom(*a, **kw):
+            raise OSError("disk full")
+
+        monkeypatch.setattr("pathlib.Path.open", _boom)
+        with _pytest.raises(OSError):
+            ws.append_chat_message("notification", "x", raise_on_error=True)
