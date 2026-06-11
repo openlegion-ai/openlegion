@@ -350,6 +350,21 @@ class WorkspaceManager:
                 f.write("\n" + _PLAYBOOK_V4_ADDENDUM + "\n")
             logger.info("Appended watch-mode guidance to operator instructions (v4)")
 
+        # Migration v5 (verification wake): the system wakes the operator
+        # once per completed chain to verify side effects; promise nothing
+        # beyond that. Same append-only contract as v2-v4.
+        if (
+            instructions_file.exists()
+            and self._initial_instructions
+            and "<!-- playbook_v5_verification_wake -->" in self._initial_instructions
+            and "<!-- playbook_v5_verification_wake -->"
+            not in instructions_file.read_text(errors="replace")
+        ):
+            from src.shared.operator_playbooks import _PLAYBOOK_V5_ADDENDUM
+            with open(instructions_file, "a") as f:
+                f.write("\n" + _PLAYBOOK_V5_ADDENDUM + "\n")
+            logger.info("Appended verification-wake guidance to operator instructions (v5)")
+
         for filename, default_content in _SCAFFOLD_FILES.items():
             path = self.root / filename
             if not path.exists():
