@@ -609,3 +609,27 @@ def resolve_slot_model(
     if not isinstance(tmpl_model, str) or not tmpl_model.strip():
         tmpl_model = default_model
     return tmpl_model.replace("{default_model}", default_model)
+
+
+def missing_provider_key_message(model: str, provider: str, available) -> str:
+    """Canonical BYOK rejection text for a model whose provider has no key.
+
+    The CHECKS deliberately stay at each trust zone with their own data
+    source (CLI reads env via ``get_available_providers()``, host reads
+    the live vault) — only the message text is single-sourced here so
+    the hand-copied wording can't drift. ``available`` is the caller's
+    provider set/list (falsy renders as ``none``).
+    """
+    available_list = sorted(available) if available else "none"
+    return (
+        f"Model '{model}' requires '{provider}' credentials, "
+        f"but no {provider.upper()} key is configured. "
+        f"Available providers: {available_list}. "
+        f"Set OPENLEGION_SYSTEM_{provider.upper()}_API_KEY or "
+        "pick a different model."
+    )
+
+
+def model_not_compatible_message(model: str) -> str:
+    """Canonical fallback when ``is_model_compatible`` returns no reason."""
+    return f"Model '{model}' is not compatible."

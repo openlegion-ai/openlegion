@@ -90,6 +90,26 @@ DASHBOARD_GLOBAL_KEYS: tuple[str, ...] = (
 )
 
 
+# ── Shared validation values ─────────────────────────────────────────
+# These rules are deliberately enforced in MULTIPLE trust zones (agent
+# container + mesh host + CLI — defense in depth). The enforcement sites
+# stay where they are; only the VALUES live here so the copies can't
+# drift.
+
+# Per-agent LLM output-token cap bounds. Enforced identically by the
+# agent ``/config`` endpoint, the host ``/edit-soft`` route and
+# ``operator_tools._validate_edit``, and used as the clamp range for the
+# ``LLM_MAX_TOKENS`` env read in ``src/agent/__main__.py``.
+MAX_OUTPUT_TOKENS_MIN = 256
+MAX_OUTPUT_TOKENS_MAX = 200_000
+
+# Valid agent "thinking" levels, in display order (the CLI interactive
+# editor renders them 1..N in this order). Consumers wrap in set()/
+# list() as needed; ``LLMClient.VALID_THINKING_LEVELS`` derives from
+# this.
+THINKING_LEVELS: tuple[str, ...] = ("off", "low", "medium", "high")
+
+
 def clamp(key: str, value: int) -> int:
     """Clamp ``value`` into the spec range for ``key`` (logs if it moved)."""
     _default, lo, hi = LIMIT_SPECS[key]

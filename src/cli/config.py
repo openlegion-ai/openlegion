@@ -17,6 +17,7 @@ from pathlib import Path
 import click
 import yaml
 
+from src.shared.limits import THINKING_LEVELS
 from src.shared.operator_playbooks import _OPERATOR_CORE
 from src.shared.types import RESERVED_AGENT_IDS
 from src.shared.utils import truncate
@@ -1389,18 +1390,18 @@ def _create_agent_from_template(
     # has no credentials in env. Mirrors the mesh-side check in
     # ``create_custom_agent`` so ``apply_template`` doesn't silently
     # mint dead-on-arrival agents (Bug 5).
-    from src.shared.models import get_available_providers, resolve_provider_for_model
+    from src.shared.models import (
+        get_available_providers,
+        missing_provider_key_message,
+        model_not_compatible_message,
+        resolve_provider_for_model,
+    )
     provider = resolve_provider_for_model(resolved_model)
     if provider:
         available = get_available_providers()
         if provider not in available:
-            available_list = sorted(available) if available else "none"
             raise ValueError(
-                f"Model '{resolved_model}' requires '{provider}' "
-                f"credentials, but no {provider.upper()} key is "
-                f"configured. Available providers: {available_list}. "
-                f"Set OPENLEGION_SYSTEM_{provider.upper()}_API_KEY or "
-                "pick a different model.",
+                missing_provider_key_message(resolved_model, provider, available),
             )
 
     # Credential-kind-aware check (Fix 2 in seam follow-up): OAuth-only
@@ -1413,7 +1414,7 @@ def _create_agent_from_template(
         _vault._load_credentials()
         _compatible, _reason = _vault.is_model_compatible(resolved_model)
         if not _compatible:
-            raise ValueError(_reason or f"Model '{resolved_model}' is not compatible.")
+            raise ValueError(_reason or model_not_compatible_message(resolved_model))
     except ImportError:
         # ``host`` package may not be importable in trimmed test harnesses;
         # the mesh-side check still fires on the create_agent path.
@@ -1481,7 +1482,7 @@ def _update_network_config(field: str, value) -> None:
         yaml.dump(data, f, default_flow_style=False)
 
 
-_THINKING_LEVELS = ["off", "low", "medium", "high"]
+_THINKING_LEVELS = list(THINKING_LEVELS)
 _THINKING_LABELS = {
     "off": "off",
     "low": "low (5K tokens)",

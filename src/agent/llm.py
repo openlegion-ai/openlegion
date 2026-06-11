@@ -44,7 +44,7 @@ class LLMClient:
     """LLM interface that routes all calls through the mesh API proxy."""
 
     _THINKING_BUDGETS = {"low": 5_000, "medium": 10_000, "high": 25_000}
-    VALID_THINKING_LEVELS = {"off", "low", "medium", "high"}
+    VALID_THINKING_LEVELS = set(limits.THINKING_LEVELS)
 
     def __init__(
         self,

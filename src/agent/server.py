@@ -774,13 +774,16 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
                 400,
                 f"thinking must be one of: {sorted(LLMClient.VALID_THINKING_LEVELS)}",
             )
+        from src.shared.limits import MAX_OUTPUT_TOKENS_MAX, MAX_OUTPUT_TOKENS_MIN
         if "max_tokens" in body and (
             not isinstance(max_tokens, int)
             or isinstance(max_tokens, bool)
-            or not (256 <= max_tokens <= 200_000)
+            or not (MAX_OUTPUT_TOKENS_MIN <= max_tokens <= MAX_OUTPUT_TOKENS_MAX)
         ):
             raise HTTPException(
-                400, "max_tokens must be an integer between 256 and 200000",
+                400,
+                f"max_tokens must be an integer between "
+                f"{MAX_OUTPUT_TOKENS_MIN} and {MAX_OUTPUT_TOKENS_MAX}",
             )
         if "internet_access_enabled" in body and not isinstance(internet, bool):
             raise HTTPException(
