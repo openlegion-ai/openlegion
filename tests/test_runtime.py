@@ -2401,8 +2401,8 @@ class TestVerificationWake:
         # run_coroutine_threadsafe queues task CREATION as one callback and
         # the task's first step as a later one — a single round-trip lands
         # between them. Poll briefly so the enqueue body has actually run.
-        import time as _t
         import concurrent.futures
+        import time as _t
         for _ in range(100):
             done = concurrent.futures.Future()
             loop.call_soon_threadsafe(lambda: done.set_result(True))
