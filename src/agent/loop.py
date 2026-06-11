@@ -1898,15 +1898,20 @@ class AgentLoop:
         # Acceptance instrument for the self-improvement loop (issue #1012):
         # surfaces "same tool, same args, failing repeatedly" as a grep-able
         # signal (journalctl | grep repeat_failure) so reflection efficacy is
-        # measurable on deployed fleets. No behavior change.
-        repeats = len(self.memory.get_tool_history(
-            tool_name=tool_name,
-            params_hash=self.memory._compute_params_hash(arguments or {}),
-            limit=5,
-            success=False,
-        ))
-        if repeats >= 3:
-            logger.warning("repeat_failure tool=%s count=%d", tool_name, repeats)
+        # measurable on deployed fleets. Best-effort: two of the three call
+        # sites run inside the tool-execution except handlers, where a raise
+        # here would replace the error envelope the LLM needs to see.
+        try:
+            repeats = len(self.memory.get_tool_history(
+                tool_name=tool_name,
+                params_hash=self.memory._compute_params_hash(arguments or {}),
+                limit=5,
+                success=False,
+            ))
+            if repeats >= 3:
+                logger.warning("repeat_failure tool=%s count=%d", tool_name, repeats)
+        except Exception:
+            logger.debug("repeat_failure count failed", exc_info=True)
 
     async def _maybe_reload_tools(self, result: Any) -> None:
         """If a tool returned reload_requested, hot-reload the tool registry.
