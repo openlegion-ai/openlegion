@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
+.DS_Store
 *$py.class
 *.egg-info/
 dist/
