@@ -257,6 +257,7 @@ class RuntimeContext:
         trace_id: str | None = None,
         origin: "MessageOrigin | None" = None,
         auto_notify: bool = False,
+        system_note: bool = False,
     ) -> str:
         """Thread-safe synchronous message dispatch.
 
@@ -267,6 +268,7 @@ class RuntimeContext:
             self.lane_manager.enqueue(
                 agent, message, mode=mode, trace_id=trace_id,
                 origin=origin, auto_notify=auto_notify,
+                system_note=system_note,
             ),
             self._dispatch_loop,
         )
@@ -277,12 +279,14 @@ class RuntimeContext:
         trace_id: str | None = None,
         origin: "MessageOrigin | None" = None,
         auto_notify: bool = False,
+        system_note: bool = False,
     ) -> str:
         """Async dispatch: schedules onto the dedicated dispatch loop."""
         future = asyncio.run_coroutine_threadsafe(
             self.lane_manager.enqueue(
                 agent, message, mode=mode, trace_id=trace_id,
                 origin=origin, auto_notify=auto_notify,
+                system_note=system_note,
             ),
             self._dispatch_loop,
         )
@@ -785,6 +789,7 @@ class RuntimeContext:
             agent_name: str, message: str,
             origin: "MessageOrigin | None" = None,
             task_id: str | None = None,
+            system_note: bool = False,
             **_kwargs,
         ) -> str:
             from src.shared.trace import (
@@ -820,6 +825,11 @@ class RuntimeContext:
             # specific task once its loop returns.
             if task_id:
                 extra_headers["x-task-id"] = task_id
+            # System-composed message (wake/cron/webhook — no human typed
+            # it): the agent persists it with transcript role ``system``
+            # so the dashboard never renders it as the user's own bubble.
+            if system_note:
+                extra_headers["x-system-wake"] = "1"
             effective_cap = (
                 self.lane_manager.timeout_for(agent_name)
                 if self.lane_manager is not None
@@ -877,10 +887,18 @@ class RuntimeContext:
                     await self._close_task_on_dispatch_error(task_id, e)
                 return note
 
-        async def _direct_steer(agent_name: str, message: str) -> dict:
+        async def _direct_steer(
+            agent_name: str, message: str, system_note: bool = False,
+        ) -> dict:
             try:
+                # Same marker as _direct_dispatch: a system-composed steer
+                # (e.g. blackboard watch hitting a BUSY agent) must drain
+                # from the steer queue as a ``system`` transcript row, not
+                # a "[steer]" user bubble.
+                headers = {"x-system-wake": "1"} if system_note else None
                 return await self.transport.request(
                     agent_name, "POST", "/chat/steer", json={"message": message},
+                    headers=headers,
                 )
             except Exception as e:
                 return {"injected": False, "error": str(e)}
@@ -1176,6 +1194,7 @@ class RuntimeContext:
                 self.lane_manager.enqueue(
                     "operator", msg, mode="followup",
                     origin=wake_origin, auto_notify=False,
+                    system_note=True,
                 ),
                 self._dispatch_loop,
             )
@@ -1373,6 +1392,7 @@ class RuntimeContext:
                 agent_name, message,
                 trace_id=new_trace_id(),
                 origin=origin,
+                system_note=True,
             )
             return result
 

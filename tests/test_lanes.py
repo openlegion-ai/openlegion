@@ -1035,3 +1035,72 @@ async def test_lane_unbounded_when_maxsize_zero():
     release.set()
     await asyncio.gather(*pending)
     await lm.stop()
+
+
+# ── system_note threading (PR: system wakes render as system rows) ──
+
+
+@pytest.mark.asyncio
+async def test_followup_system_note_threads_to_dispatch():
+    """Flagged followups pass system_note=True to the dispatch fn."""
+    dispatch = AsyncMock(return_value="ok")
+    lm = LaneManager(dispatch_fn=dispatch)
+
+    await lm.enqueue("agent1", "wake msg", system_note=True)
+    dispatch.assert_awaited_once_with("agent1", "wake msg", system_note=True)
+
+
+@pytest.mark.asyncio
+async def test_followup_unflagged_keeps_legacy_signature():
+    """Unflagged dispatches must not pass the kwarg (legacy dispatch fns
+    accept only (agent, message))."""
+    dispatch = AsyncMock(return_value="ok")
+    lm = LaneManager(dispatch_fn=dispatch)
+
+    await lm.enqueue("agent1", "hi")
+    dispatch.assert_awaited_once_with("agent1", "hi")
+
+
+@pytest.mark.asyncio
+async def test_steer_system_note_reaches_steer_fn():
+    """Flagged steers pass system_note to steer_fn so a busy agent's
+    steer queue records the honest role."""
+    steer = AsyncMock(return_value={"injected": True})
+    lm = LaneManager(dispatch_fn=AsyncMock(), steer_fn=steer)
+
+    await lm.enqueue("agent1", "watch update", mode="steer", system_note=True)
+    steer.assert_awaited_once_with("agent1", "watch update", system_note=True)
+
+
+@pytest.mark.asyncio
+async def test_steer_unflagged_uses_legacy_two_arg_call():
+    """Human steers keep the legacy (agent, message) steer_fn call."""
+    steer = AsyncMock(return_value={"injected": True})
+    lm = LaneManager(dispatch_fn=AsyncMock(), steer_fn=steer)
+
+    await lm.enqueue("agent1", "user steer", mode="steer")
+    steer.assert_awaited_once_with("agent1", "user steer")
+
+
+@pytest.mark.asyncio
+async def test_steer_idle_fallback_carries_system_note():
+    """The idle-agent steer→followup conversion must not drop the flag —
+    a blackboard wake to an idle operator would otherwise render as a
+    fake user bubble."""
+    dispatch = AsyncMock(return_value="ok")
+    steer = AsyncMock(return_value={"injected": False})
+    lm = LaneManager(dispatch_fn=dispatch, steer_fn=steer)
+
+    await lm.enqueue("agent1", "watch update", mode="steer", system_note=True)
+    dispatch.assert_awaited_once_with("agent1", "watch update", system_note=True)
+
+
+@pytest.mark.asyncio
+async def test_steer_error_fallback_carries_system_note():
+    """The steer-error followup fallback must not drop the flag either."""
+    dispatch = AsyncMock(return_value="ok")
+    steer = AsyncMock(side_effect=RuntimeError("boom"))
+    lm = LaneManager(dispatch_fn=dispatch, steer_fn=steer)
+
+    await lm.enqueue("agent1", "watch update", mode="steer", system_note=True)
+    dispatch.assert_awaited_once_with("agent1", "watch update", system_note=True)

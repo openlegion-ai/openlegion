@@ -61,6 +61,7 @@ class QueuedTask:
     origin: MessageOrigin | None = None
     auto_notify: bool = False
     task_id: str | None = None
+    system_note: bool = False
     future: asyncio.Future = field(default_factory=asyncio.Future)
 
 
@@ -259,6 +260,7 @@ class LaneManager:
         origin: MessageOrigin | None = None,
         auto_notify: bool = False,
         task_id: str | None = None,
+        system_note: bool = False,
     ) -> str:
         """Queue a message for an agent with the specified mode.
 
@@ -274,15 +276,22 @@ class LaneManager:
         call so the recipient agent's loop can auto-close the task on
         completion. Only honoured for ``followup`` mode; steer
         intentionally doesn't wire it (it isn't single-task semantics).
+
+        ``system_note=True`` marks a SYSTEM-composed message (mesh wakes,
+        cron, webhooks — anything no human typed). It rides the dispatch
+        to the agent so the chat transcript records it with role
+        ``system`` instead of impersonating the user. Threaded through
+        BOTH modes: steer needs it because its idle-agent/error paths
+        fall back to a full followup dispatch.
         """
         self._ensure_lane(agent)
 
         if mode == "steer":
-            return await self._handle_steer(agent, message)
+            return await self._handle_steer(agent, message, system_note=system_note)
         return await self._handle_followup(
             agent, message, trace_id=trace_id,
             origin=origin, auto_notify=auto_notify,
-            task_id=task_id,
+            task_id=task_id, system_note=system_note,
         )
 
     async def _handle_followup(
@@ -290,6 +299,7 @@ class LaneManager:
         origin: MessageOrigin | None = None,
         auto_notify: bool = False,
         task_id: str | None = None,
+        system_note: bool = False,
     ) -> str:
         """Standard FIFO enqueue."""
         task = QueuedTask(
@@ -301,6 +311,7 @@ class LaneManager:
             origin=origin,
             auto_notify=auto_notify,
             task_id=task_id,
+            system_note=system_note,
         )
         # H7 — non-blocking put so a full lane surfaces backpressure
         # (LaneQueueFull → HTTP 429) instead of silently awaiting forever
@@ -323,18 +334,30 @@ class LaneManager:
         self._emit_queue_changed(agent)
         return await task.future
 
-    async def _handle_steer(self, agent: str, message: str) -> str:
+    async def _handle_steer(
+        self, agent: str, message: str, *, system_note: bool = False,
+    ) -> str:
         """Inject a steer message into the agent's active conversation.
 
         If a steer_fn is available, calls it directly (bypasses queue).
         Falls back to followup if no steer_fn is configured.
+
+        ``system_note`` must survive every exit: the direct steer_fn call
+        (so the agent's steer queue records the honest role) AND all three
+        followup fallbacks — dropping it on the idle-agent wakeup path
+        would render a system wake as a fake user bubble.
         """
         if self._steer_fn is None:
             logger.debug(f"No steer_fn configured, falling back to followup for '{agent}'")
-            return await self._handle_followup(agent, message)
+            return await self._handle_followup(agent, message, system_note=system_note)
 
         try:
-            result = await self._steer_fn(agent, message)
+            # Conditional kwarg — mirrors the worker's lazy dispatch_kwargs:
+            # legacy steer_fn signatures accept only (agent, message).
+            if system_note:
+                result = await self._steer_fn(agent, message, system_note=True)
+            else:
+                result = await self._steer_fn(agent, message)
             injected = result.get("injected", False) if isinstance(result, dict) else False
             if injected:
                 return f"Steered: message injected into {agent}'s active conversation"
@@ -343,12 +366,12 @@ class LaneManager:
                 # Rate-limited to prevent event storms from draining budget.
                 if self._check_steer_wakeup_rate(agent):
                     logger.debug(f"Waking idle agent '{agent}' via followup (steer not injected)")
-                    return await self._handle_followup(agent, message)
+                    return await self._handle_followup(agent, message, system_note=system_note)
                 logger.debug(f"Steer wakeup rate-limited for idle agent '{agent}', dropping")
                 return SILENT_REPLY_TOKEN
         except Exception as e:
             logger.warning(f"Steer to '{agent}' failed, falling back to followup: {e}")
-            return await self._handle_followup(agent, message)
+            return await self._handle_followup(agent, message, system_note=system_note)
 
     def _check_steer_wakeup_rate(self, agent: str) -> bool:
         """Return True if the agent hasn't exceeded the steer-wakeup rate limit."""
@@ -449,6 +472,8 @@ class LaneManager:
                     dispatch_kwargs["origin"] = task.origin
                 if task.task_id is not None:
                     dispatch_kwargs["task_id"] = task.task_id
+                if task.system_note:
+                    dispatch_kwargs["system_note"] = True
                 # Bug 4: per-task wall-clock cap. A hung LLM stream or
                 # stuck tool previously blocked the lane forever — every
                 # subsequent task for this agent would queue forever.

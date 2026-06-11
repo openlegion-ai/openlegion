@@ -465,7 +465,7 @@ async def test_chat_without_task_id_while_busy_still_queues_for_chat_ux():
     # No task to close (no task_id).
     loop.mesh_client.set_task_status.assert_not_awaited()
     # And the queue WAS exercised.
-    loop._steer_queue.put.assert_awaited_once_with("hey can you also do X?")
+    loop._steer_queue.put.assert_awaited_once_with(("hey can you also do X?", False))
 
 
 # ── 4c. _auto_close_task log-severity discriminates 4xx vs 5xx ────
