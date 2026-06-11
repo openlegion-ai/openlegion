@@ -10263,10 +10263,14 @@ function dashboard() {
 
     // ── Agent drill-down ──────────────────────────────────
 
-    drillDown(agentId) {
+    drillDown(agentId, { advanced = false } = {}) {
       // Operator is a system agent — route to its dedicated settings page instead of the generic agent detail panel.
       // Centralizes operator routing for all callers (card clicks, URL routes, search results).
-      if (agentId === 'operator') {
+      // ``advanced: true`` is the deliberate escape hatch (the "Advanced settings" button on the
+      // Operator settings page): skip the reroute and open the full agent detail panel — tools,
+      // skills, memory, files, activity — which already self-defends for the operator (warning
+      // banner, SOUL/INSTRUCTIONS confirm gate, hidden Restart/Delete menu items).
+      if (agentId === 'operator' && !advanced) {
         // Suppress switchTab's URL push so the back button returns to the source page, not the intermediate /system/<previous-tab>.
         // Save/restore _skipPush so we don't clobber the outer invariant (e.g. _applyRoute holds _skipPush=true).
         const prevSkip = this._skipPush;
