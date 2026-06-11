@@ -186,6 +186,35 @@ class TestEnsureOperatorModelSync(_TempConfigMixin):
         mtime_after = self._agents_path.stat().st_mtime
         assert mtime_before == mtime_after
 
+    def test_prior_sentinel_heartbeat_rolls_forward_to_latest(self):
+        """A stored heartbeat carrying only a prior sentinel (e.g. a
+        deployed v5 operator after we ship v6) must be rewritten from
+        the canonical template on next ``_ensure`` — this is how the
+        agent-retro step reaches existing fleets on restart."""
+        from src.cli.config import _OPERATOR_HEARTBEAT
+
+        agents_cfg = {"agents": {"operator": {
+            "role": "Existing operator",
+            "model": "openai/gpt-4o-mini",
+            "heartbeat": (
+                "<!-- heartbeat_v5_fleet_health -->\n"
+                "Old v5 revision text\n"
+            ),
+        }}}
+        with open(self._agents_path, "w") as f:
+            yaml.dump(agents_cfg, f)
+
+        with self._mock_config():
+            from src.cli.config import _ensure_operator_agent
+            _ensure_operator_agent(default_model="openai/gpt-4o-mini")
+
+        with open(self._agents_path) as f:
+            result = yaml.safe_load(f)
+        refreshed = result["agents"]["operator"]["heartbeat"]
+        assert refreshed == _OPERATOR_HEARTBEAT
+        assert "<!-- heartbeat_v6_agent_retro -->" in refreshed
+        assert "Old v5 revision text" not in refreshed
+
     def test_empty_heartbeat_is_bootstrapped_to_canonical_template(self):
         """Codex r3 (PR 972) catch — the WARN for no-sentinel files
         instructs operators to clear ``heartbeat:`` in agents.yaml to
@@ -531,6 +560,29 @@ class TestOperatorConstants:
             "Cap at 3 snapshot calls" in _OPERATOR_HEARTBEAT
             or "cap at 3 snapshot calls" in _OPERATOR_HEARTBEAT
         )
+
+    def test_heartbeat_v6_mentions_agent_retro(self):
+        """v6 — threshold-gated agent retro is propose-don't-apply: the
+        heartbeat may PROPOSE an instruction delta via notify_user but
+        must never apply it. ``edit_agent`` stays OUT of the heartbeat
+        allowlist (unsupervised instruction edits are the Misevolution
+        failure mode — the recovery-wake brief authorizes edit_agent in
+        full chat turns instead)."""
+        from src.cli.config import (
+            _OPERATOR_HEARTBEAT,
+            _OPERATOR_HEARTBEAT_TOOLS,
+        )
+        assert "Agent retro" in _OPERATOR_HEARTBEAT
+        assert "at most ONE agent per heartbeat" in _OPERATOR_HEARTBEAT
+        assert (
+            "`notify_user` with a one-line proposed instruction delta"
+            in _OPERATOR_HEARTBEAT
+        )
+        assert "do not edit anything from the heartbeat" in _OPERATOR_HEARTBEAT
+        assert "never a rewrite" in _OPERATOR_HEARTBEAT
+        # The propose-don't-apply boundary: edit_agent must NOT be
+        # heartbeat-reachable.
+        assert "edit_agent" not in _OPERATOR_HEARTBEAT_TOOLS
 
     def test_core_has_key_sections(self):
         from src.shared.operator_playbooks import _OPERATOR_CORE
