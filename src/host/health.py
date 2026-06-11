@@ -85,7 +85,6 @@ class HealthMonitor:
         cleanup_agent_fn=None,
         blackboard=None,
         queue_depth_fn: Callable[[str], int] | None = None,
-        notifications_store=None,
     ):
         self.runtime = runtime
         self.transport = transport
@@ -99,10 +98,6 @@ class HealthMonitor:
         # detect a dead inner loop with a live FastAPI thread. Without it
         # the staleness check is a no-op (reachability behaviour unchanged).
         self._queue_depth_fn = queue_depth_fn
-        # ``notifications_store`` (Fix 4) — optional dashboard notifications
-        # sink. When wired, quarantine transitions emit a ``credential`` kind
-        # notification so the bell + Work tab surface it to the operator.
-        self._notifications_store = notifications_store
         self.agents: dict[str, AgentHealth] = {}
         self._agent_lock: asyncio.Lock | None = None
         self._agent_lock_loop: asyncio.AbstractEventLoop | None = None
@@ -129,15 +124,6 @@ class HealthMonitor:
         constructed. ``None`` disables the staleness branch.
         """
         self._queue_depth_fn = fn
-
-    def set_notifications_store(self, store) -> None:
-        """Wire (or unwire) the dashboard notifications sink after construction.
-
-        Mirrors the ``set_queue_depth_fn`` injection pattern (PR #918) —
-        notifications store can be constructed after ``HealthMonitor``
-        in the bootstrap path. ``None`` disables quarantine notifications.
-        """
-        self._notifications_store = store
 
     # ── Quarantine API (Fix 4 in seam follow-up) ──────────────
 
@@ -172,23 +158,9 @@ class HealthMonitor:
                 "model via edit_agent",
                 agent_id, h.quarantine_reason,
             )
-            if self._notifications_store is not None:
-                try:
-                    self._notifications_store.add(
-                        kind="credential",
-                        title=f"Agent '{agent_id}' quarantined: credential broken",
-                        body=(
-                            (h.quarantine_reason or "") + ". Lane has stopped "
-                            "dispatching new work. Rotate the credential or "
-                            "run edit_agent to pick a compatible model."
-                        ),
-                        agent_id=agent_id,
-                    )
-                except Exception as notif_err:
-                    logger.warning(
-                        "Failed to write quarantine notification: %s",
-                        notif_err,
-                    )
+            # The health_change emit below carries the remediation
+            # signal — the runtime's system-signal reroute turns the
+            # quarantined transition into an operator-thread note.
             if self._event_bus:
                 try:
                     self._event_bus.emit("health_change", agent=agent_id, data={

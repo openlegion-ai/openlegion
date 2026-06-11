@@ -386,60 +386,46 @@ class TestEmptyStateCTAs:
         assert "No summaries yet" in _INDEX_HTML
 
 
-# ── Notifications bell ────────────────────────────────────────────────
+# ── Notifications bell (REMOVED — chat-native delivery) ───────────────
 
 
-class TestNotificationsBellMarkup:
-    def test_bell_button_in_template(self):
-        # The bell sits in the top-nav, identifiable by its toggle.
-        assert "toggleNotifications()" in _INDEX_HTML
+class TestNotificationsBellRemoved:
+    """The bell subsystem was removed end-to-end (2026-06-11
+    chat-native-delivery plan): chain outcomes land in the operator chat,
+    formerly-bell-only signals reroute to operator notes, and desktop
+    pings fan in from the underlying WS events."""
 
-    def test_bell_unread_dot_renders_when_count_above_zero(self):
-        # The unread dot is gated on notificationsUnreadCount > 0.
-        assert 'x-show="notificationsUnreadCount > 0"' in _INDEX_HTML
-
-    def test_dropdown_hidden_when_empty(self):
-        # Per Phase 2 §4, the dropdown hides entirely when no
-        # notifications exist (empty placeholder is a no-no).
-        assert (
-            'x-show="notificationsOpen && notifications.length > 0"'
-            in _INDEX_HTML
+    def test_no_bell_markup(self):
+        assert "toggleNotifications()" not in _INDEX_HTML
+        assert "notificationsUnreadCount" not in _INDEX_HTML
+        assert "markAllNotificationsRead()" not in _INDEX_HTML
+        bells = re.findall(
+            r'M18 8A6 6 0\s*0?\s*0?6 8c0 7-3 9-3 9h18s-3-2-3-9', _INDEX_HTML,
         )
+        assert bells == []
 
-    def test_mark_all_read_link(self):
-        assert "markAllNotificationsRead()" in _INDEX_HTML
+    def test_no_bell_js(self):
+        js = _read(_APP_JS)
+        for marker in (
+            "fetchNotifications", "toggleNotifications",
+            "markNotificationRead", "markAllNotificationsRead",
+            "notificationKindIcon", "notification_added",
+            "_notificationsRefreshTimer",
+        ):
+            assert marker not in js, marker
 
-    def test_legacy_notifications_bell_removed(self):
-        # The Phase 1 placeholder bell read its dropdown items from the
-        # in-memory ``events`` array (mirrored the activity feed). It
-        # competed visually with the Phase 2 persistent bell — both
-        # rendered side-by-side in the top nav. Removing it is the
-        # whole point of this fix; assert the unique markers from the
-        # legacy block are gone.
-        # 1) Legacy used `notificationsOpen = !notificationsOpen` for
-        #    its toggle (Phase 2 uses `toggleNotifications()`).
-        assert "notificationsOpen = !notificationsOpen" not in _INDEX_HTML
-        # 2) Legacy listed `(events || []).slice(0, 10)` in its
-        #    dropdown. The Phase 2 bell iterates `notifications` instead.
-        assert "(events || []).slice(0, 10)" not in _INDEX_HTML
-        # 3) Legacy showed a "No recent activity" placeholder; Phase 2
-        #    hides the dropdown entirely when empty.
-        assert "No recent activity" not in _INDEX_HTML
-
-    def test_notifications_bell_renders_once_per_breakpoint(self):
-        # The shell folds the desktop top bar into the sidebar, so the
-        # Phase-2 bell now renders TWICE: once in the mobile/tablet top
-        # bar (visible <md) and once in the desktop sidebar tray (visible
-        # md+). Only one is ever visible — the other's container is
-        # display:none — but both are in the DOM. The legacy Phase-1 bell
-        # is still guarded separately (test_legacy_notifications_bell_removed),
-        # so two here means "one per breakpoint", not a legacy regression.
-        # Match the bell-shape path with whitespace-tolerance (Phase 1
-        # used ``A6 6 0 0 0`` while Phase 2 collapsed to ``A6 6 0 006``).
-        bells = re.findall(r'M18 8A6 6 0\s*0?\s*0?6 8c0 7-3 9-3 9h18s-3-2-3-9', _INDEX_HTML)
-        assert len(bells) == 2, (
-            f"Expected exactly two notifications bells (one per breakpoint), found {len(bells)}"
-        )
+    def test_desktop_ping_fan_in_present(self):
+        """The Browser-Notification hook survives the bell, fed by the
+        live-event fan-in (old bell coverage preserved + completions)."""
+        js = _read(_APP_JS)
+        assert "_maybeFireBrowserNotification" in js
+        idx = js.index("Desktop-ping fan-in (bell removed)")
+        block = js[idx:idx + 2600]
+        for evt in (
+            "pending_action_created", "credential_request",
+            "browser_login_request", "health_change", "credit_exhausted",
+        ):
+            assert evt in block, evt
 
 
 # ── Activity translation (formatActivityForUser) ──────────────────────
@@ -2201,120 +2187,6 @@ class TestBootstrapGreetingChips:
         assert "bootstrap_greeting" in body
 
 
-# ── Notifications bell coverage gaps (PR-B coordination) ─────────
-
-
-def _has_legacy_notifications_bell(html: str) -> bool:
-    """The Phase 1 placeholder bell mirrors ``events`` rather than the
-    persistent ``/notifications`` endpoint. PR-B removes it."""
-    # The legacy bell is the one whose dropdown iterates over `events`;
-    # the Phase 2 bell iterates over `notifications`. We detect the
-    # legacy variant via a unique substring.
-    return 'events || []).slice(0, 10)' in html
-
-
-class TestNotificationsBellSingleton:
-    """After PR-B (legacy bell removed) the only bells are the Phase-2
-    bell rendered once per responsive breakpoint (mobile top bar + desktop
-    sidebar tray) — see the shell fold-down. The legacy Phase-1 bell must
-    stay gone."""
-
-    @pytest.mark.skipif(
-        _has_legacy_notifications_bell(_INDEX_HTML),
-        reason="depends on PR-B: legacy phase-1 notifications bell still present",
-    )
-    def test_legacy_notifications_bell_removed(self):
-        """The Phase 1 placeholder bell that mirrors ``events`` is gone."""
-        # The unique fingerprint of the legacy bell is the dropdown
-        # binding to ``events`` rather than ``notifications``.
-        assert "events || []).slice(0, 10)" not in _INDEX_HTML, (
-            "legacy phase-1 notifications bell still present — PR-B "
-            "should remove it before this test runs"
-        )
-
-    @pytest.mark.skipif(
-        _has_legacy_notifications_bell(_INDEX_HTML),
-        reason="depends on PR-B: only one bell after legacy is removed",
-    )
-    def test_notifications_bell_renders_once_per_breakpoint(self):
-        """Exactly two Phase-2 bells: mobile top bar + desktop sidebar."""
-        # The bell SVG path is unique enough to count occurrences. The
-        # shell renders the bell once per responsive nav container (the
-        # mobile/tablet top bar and the desktop sidebar tray), only one
-        # of which is ever visible. The legacy Phase-1 bell is guarded by
-        # test_legacy_notifications_bell_removed above.
-        bell_path = 'M18 8A6 6 0 0'
-        count = _INDEX_HTML.count(bell_path)
-        assert count == 2, (
-            f"expected exactly 2 notifications bells (one per breakpoint), got {count}"
-        )
-
-
-class TestNotificationsProducer:
-    """PR-B wires producers for each event type into NotificationStore."""
-
-    def test_notifications_producer_emits_for_each_event_type(self):
-        """Each PR-B event type creates a corresponding notifications row.
-
-        Coordinates with PR-B which adds the producer hooks. We test
-        the contract by importing the wiring module and firing each
-        event type through its dispatch entrypoint. When PR-B hasn't
-        landed the test skips gracefully.
-        """
-        try:
-            from src.dashboard.notifications import NotificationStore
-        except ImportError:  # pragma: no cover
-            pytest.skip("notifications module not present")
-
-        # PR-B's contract: the wiring module exposes a function that
-        # given an event payload + a NotificationStore, inserts the
-        # right row. Until PR-B lands the symbol is absent.
-        wiring_callable = None
-        for module_name in (
-            "src.dashboard.notifications",
-            "src.dashboard.events",
-            "src.dashboard.server",
-        ):
-            try:
-                mod = __import__(module_name, fromlist=["dispatch_event_to_notifications"])
-                if hasattr(mod, "dispatch_event_to_notifications"):
-                    wiring_callable = getattr(mod, "dispatch_event_to_notifications")
-                    break
-            except ImportError:
-                continue
-        if wiring_callable is None:
-            pytest.skip(
-                "depends on PR-B: dispatch_event_to_notifications not yet wired"
-            )
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            store = NotificationStore(db_path=os.path.join(tmpdir, "n.db"))
-            try:
-                # Six event types per PR-B spec: each should produce
-                # one row when dispatched.
-                payloads = [
-                    {"type": "task_outcome", "agent": "writer",
-                     "data": {"outcome": "delivered", "title": "Draft"}},
-                    {"type": "pending_action_created", "agent": "researcher",
-                     "data": {"action_label": "publish"}},
-                    {"type": "credential_request", "agent": "scout",
-                     "data": {"credential_label": "API key"}},
-                    {"type": "browser_login_request", "agent": "scout",
-                     "data": {"service": "example.com"}},
-                    {"type": "browser_captcha_help_request", "agent": "scout",
-                     "data": {"service": "example.com"}},
-                    {"type": "credit_exhausted", "agent": "writer", "data": {}},
-                ]
-                for payload in payloads:
-                    wiring_callable(payload, store)
-                rows = store.list_recent(limit=50)
-                assert len(rows) == len(payloads), (
-                    f"expected {len(payloads)} rows, got {len(rows)}"
-                )
-            finally:
-                store.close()
-
-
 # ── Conversations isolation (PR-D coordination) ──────────────────
 
 
@@ -2405,24 +2277,6 @@ class TestActionChipDuringStream:
 class TestPolishFixesApplied:
     """Verify each polish fix from the user-journey audit is in place."""
 
-    def test_credential_notification_icon_is_plain_text(self):
-        """The 'credential' kind icon is 'K' — markup is emoji-free."""
-        # The comment near the helper says "Plain text glyphs keep the
-        # markup emoji-free"; emoji slipped in for the credential row.
-        m = re.search(
-            r"notificationKindIcon\(kind\)\s*\{(.*?)\n    \},",
-            _APP_JS_TEXT,
-            re.DOTALL,
-        )
-        assert m, "notificationKindIcon body missing"
-        body = m.group(1)
-        assert "case 'credential': return 'K'" in body, (
-            "credential icon should be plain 'K' (emoji-free)"
-        )
-        assert "'\U0001f511'" not in body and "🔑" not in body, (
-            "key emoji should be gone"
-        )
-
     def test_load_older_caption_shows_total(self):
         """The 'Load older' button shows visible-vs-total when known."""
         # The helper formats "Load 50 older (340 of 500)" when total >
@@ -2502,10 +2356,9 @@ class TestPolishFixesApplied:
     def test_claudemd_documents_dashboard_support_modules(self):
         """CLAUDE.md gains rows for notifications/telemetry/platform_success."""
         claude_md = (_REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
-        # Notifications module is documented.
-        assert "notifications.py" in claude_md, (
-            "CLAUDE.md should document src/dashboard/notifications.py"
-        )
+        # The bell store was removed (2026-06-11 chat-native delivery);
+        # its CLAUDE.md row must be gone too.
+        assert "src/dashboard/notifications.py" not in claude_md
         # Telemetry module is documented.
         assert "telemetry.py" in claude_md and "dashboard_telemetry" in claude_md, (
             "CLAUDE.md should document src/dashboard/telemetry.py"
@@ -2534,12 +2387,11 @@ class TestOnWsEventHandlersForLiveCoverage:
     ``app.js`` because we can't run Alpine in pytest — but the wiring
     is what we want to guard against silent regressions."""
 
-    def test_notification_added_handler_present(self):
-        # The handler prepends to ``notifications`` and bumps the
-        # unread count so the bell badge updates live.
-        assert "evt.type === 'notification_added'" in _APP_JS_TEXT
-        assert "this.notifications = [row, ...(this.notifications || [])]" in _APP_JS_TEXT
-        assert "this.notificationsUnreadCount" in _APP_JS_TEXT
+    def test_notification_added_handler_removed(self):
+        # The bell (and its notification_added event) is gone — live
+        # delivery is the `notification` chat bubble + the desktop-ping
+        # fan-in (TestNotificationsBellRemoved pins the rest).
+        assert "evt.type === 'notification_added'" not in _APP_JS_TEXT
 
     def test_credential_stored_handler_flips_card(self):
         # Matches by ``request_id`` (new flow) with name as fallback.

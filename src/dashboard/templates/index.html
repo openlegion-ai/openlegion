@@ -183,46 +183,6 @@
       <div class="px-4 py-4 flex items-center gap-2.5 shrink-0">
         <img src="/dashboard/static/logo.png" alt="OpenLegion" width="24" height="24" class="rounded-full">
         <span class="text-base font-bold text-white tracking-tight">OpenLegion</span>
-        <!-- Notifications bell — tucked into the brand row (top-of-app
-             convention), so it reads as part of the chrome rather than
-             floating by the search box. Dropdown opens downward. The
-             mobile top bar keeps its own copy (sidebar hidden below md). -->
-        <div class="relative ml-auto" @click.away="if ($el.offsetParent !== null) notificationsOpen = false">
-          <button @click="toggleNotifications()"
-            class="relative flex items-center justify-center w-8 h-8 rounded-md text-gray-400 hover:text-gray-200 hover:bg-gray-800/60 transition-colors cursor-pointer"
-            :title="notificationsUnreadCount > 0 ? notificationsUnreadCount + ' new notifications' : 'Notifications'"
-            :aria-label="notificationsUnreadCount > 0 ? notificationsUnreadCount + ' unread notifications' : 'Notifications'"
-            aria-haspopup="true" :aria-expanded="notificationsOpen">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/>
-            </svg>
-            <span x-show="notificationsUnreadCount > 0" x-cloak class="absolute top-1 right-1 w-2 h-2 rounded-full bg-indigo-400 ring-2 ring-gray-900" aria-hidden="true"></span>
-          </button>
-          <div x-show="notificationsOpen && notifications.length > 0" x-cloak
-            class="absolute left-0 top-full mt-2 w-72 max-w-[calc(100vw-2rem)] bg-gray-900 border border-gray-700 rounded-lg shadow-2xl z-50" role="menu">
-            <div class="flex items-center justify-between px-4 py-2 border-b border-gray-800">
-              <span class="text-xs text-gray-400 font-medium">Notifications</span>
-              <button x-show="notificationsUnreadCount > 0" @click="markAllNotificationsRead()" class="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">Mark all as read</button>
-            </div>
-            <div class="max-h-96 overflow-y-auto custom-scrollbar">
-              <template x-for="notification in notifications" :key="notification.id">
-                <button @click="onNotificationClick(notification)" type="button"
-                  class="w-full text-left px-4 py-2.5 flex items-start gap-3 border-b border-gray-800/40 last:border-b-0 hover:bg-gray-800/40 transition-colors"
-                  :class="!notification.read_at && 'bg-indigo-900/10'">
-                  <span class="shrink-0 mt-0.5 text-sm w-5 text-center text-gray-400" x-text="notificationKindIcon(notification.kind)"></span>
-                  <div class="flex-1 min-w-0">
-                    <div class="flex items-center justify-between gap-2">
-                      <span class="text-sm text-gray-100 font-medium truncate" x-text="notification.title"></span>
-                      <span class="text-[11px] text-gray-400 shrink-0" x-text="timeAgo(notification.ts)"></span>
-                    </div>
-                    <p x-show="notification.body" class="text-xs text-gray-400 mt-0.5 line-clamp-2" x-text="notification.body"></p>
-                  </div>
-                  <span x-show="!notification.read_at" class="shrink-0 mt-1.5 w-2 h-2 rounded-full bg-indigo-400" aria-label="Unread"></span>
-                </button>
-              </template>
-            </div>
-          </div>
-        </div>
       </div>
       <nav class="flex-1 px-2 py-2 flex flex-col gap-1 overflow-y-auto" role="tablist" aria-label="Primary">
         <template x-for="tab in tabs" :key="tab.id">
@@ -410,62 +370,6 @@
             <template x-for="m in modelHealth.filter(x => !x.available)" :key="m.model">
               <div class="text-[11px] text-red-400 py-0.5 truncate" x-text="m.model + ' (cooldown)'"></div>
             </template>
-          </div>
-        </div>
-        <!-- Phase 2 Board UX — notifications bell. Subtle gray by
-             default; small indigo dot when unread items exist. Click
-             toggles the dropdown with the last 10 notifications. -->
-        <div class="relative" @click.away="if ($el.offsetParent !== null) notificationsOpen = false">
-          <button
-            @click="toggleNotifications()"
-            class="relative flex items-center justify-center w-8 h-8 rounded-md text-gray-400 hover:text-gray-200 hover:bg-gray-800/60 transition-colors cursor-pointer"
-            :title="notificationsUnreadCount > 0 ? notificationsUnreadCount + ' new notifications' : 'Notifications'"
-            :aria-label="notificationsUnreadCount > 0 ? notificationsUnreadCount + ' unread notifications' : 'Notifications'"
-            aria-haspopup="true"
-            :aria-expanded="notificationsOpen"
-          >
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/>
-              <path d="M13.73 21a2 2 0 01-3.46 0"/>
-            </svg>
-            <span x-show="notificationsUnreadCount > 0" x-cloak
-              class="absolute top-1 right-1 w-2 h-2 rounded-full bg-indigo-400 ring-2 ring-gray-900"
-              aria-hidden="true"></span>
-          </button>
-          <!-- Dropdown — last 10 notifications. Hidden entirely
-               when empty (per Phase 2 §4 empty-state CTA: notifications
-               dropdown shows nothing rather than "no notifications"). -->
-          <div x-show="notificationsOpen && notifications.length > 0" x-cloak
-            class="absolute right-0 mt-2 w-80 max-w-[calc(100vw-2rem)] bg-gray-900 border border-gray-700 rounded-lg shadow-2xl z-50"
-            role="menu">
-            <div class="flex items-center justify-between px-4 py-2 border-b border-gray-800">
-              <span class="text-xs text-gray-400 font-medium">Notifications</span>
-              <button x-show="notificationsUnreadCount > 0"
-                @click="markAllNotificationsRead()"
-                class="text-xs text-indigo-400 hover:text-indigo-300 transition-colors">
-                Mark all as read
-              </button>
-            </div>
-            <div class="max-h-96 overflow-y-auto custom-scrollbar">
-              <template x-for="notification in notifications" :key="notification.id">
-                <button @click="onNotificationClick(notification)" type="button"
-                  class="w-full text-left px-4 py-2.5 flex items-start gap-3 border-b border-gray-800/40 last:border-b-0 hover:bg-gray-800/40 transition-colors"
-                  :class="!notification.read_at && 'bg-indigo-900/10'">
-                  <span class="shrink-0 mt-0.5 text-sm w-5 text-center text-gray-400"
-                    x-text="notificationKindIcon(notification.kind)"></span>
-                  <div class="flex-1 min-w-0">
-                    <div class="flex items-center justify-between gap-2">
-                      <span class="text-sm text-gray-100 font-medium truncate" x-text="notification.title"></span>
-                      <span class="text-[11px] text-gray-400 shrink-0" x-text="timeAgo(notification.ts)"></span>
-                    </div>
-                    <p x-show="notification.body" class="text-xs text-gray-400 mt-0.5 line-clamp-2" x-text="notification.body"></p>
-                  </div>
-                  <span x-show="!notification.read_at"
-                    class="shrink-0 mt-1.5 w-2 h-2 rounded-full bg-indigo-400"
-                    aria-label="Unread"></span>
-                </button>
-              </template>
-            </div>
           </div>
         </div>
         <!-- Connection status pill — desktop hides this (duplicated

@@ -407,17 +407,11 @@ class RuntimeContext:
         # Only register() is called here; start() happens in _start_background().
         from src.host.health import HealthMonitor
 
-        # Notifications store: instantiated up-front so the HealthMonitor can
-        # emit quarantine notifications (Fix 4). The dashboard router also
-        # uses a NotificationStore — when not supplied it auto-constructs
-        # one against the same default path, so both pointers reference the
-        # same SQLite file.
-        self._notification_store = None
-        try:
-            from src.dashboard.notifications import NotificationStore
-            self._notification_store = NotificationStore()
-        except Exception as e:
-            logger.warning("Failed to instantiate NotificationStore: %s", e)
+        # System-signal reroute (bell removal): the two formerly
+        # bell-only signals (dead OAuth connection, agent quarantine)
+        # now land in the operator chat thread as durable notes + live
+        # notification events.
+        self.event_bus.add_listener(self._system_signal_producer)
 
         # Chain watcher (delegate-and-subscribe terminal delivery). Wired in
         # _start_background once the mesh app's tasks_store is available.
@@ -431,7 +425,6 @@ class RuntimeContext:
             runtime=self.runtime, transport=self.transport, router=self.router,
             event_bus=self.event_bus,
             blackboard=self.blackboard,
-            notifications_store=self._notification_store,
         )
 
         # Fix 4 (seam follow-up): wire the credential vault's auth-failure
@@ -1142,6 +1135,100 @@ class RuntimeContext:
                 )
         return True
 
+    def _system_signal_producer(self, evt: dict) -> None:
+        """Reroute formerly bell-only system signals into the operator
+        thread (durable /chat/note row + live notification event).
+
+        Two signals qualify (everything else the bell carried has its own
+        surface — chat cards, Needs-You panel, fleet badges):
+
+        - ``connection_refresh_failed`` — a third-party OAuth connection's
+          refresh was hard-rejected (user revoked access).
+        - ``health_change`` → ``quarantined`` — repeated auth failures
+          stopped the lane; carries the remediation text.
+
+        EventBus listeners run synchronously on the emitter's thread, so
+        the note POST is marshalled onto the dispatch loop fire-and-forget.
+        Unlike chain delivery there is no claim/retry sweep behind this —
+        after the bounded retries the signal is accepted-lost to the
+        transcript (the Connectors page / fleet badges remain).
+        """
+        try:
+            etype = evt.get("type")
+            data = evt.get("data") or {}
+            if etype == "connection_refresh_failed":
+                conn = (data.get("connection") or "connection").strip()
+                provider = (data.get("provider") or "").strip()
+                label = provider.capitalize() if provider else "OAuth"
+                err = (data.get("error") or "").strip()
+                text = (
+                    f"🔌 {label} connection '{conn}' needs reconnecting\n"
+                    "Token refresh was rejected by the provider — open the "
+                    "Connectors page and reconnect."
+                    + (f" ({err[:200]})" if err else "")
+                )
+            elif etype == "health_change":
+                if (data.get("current") or "") != "quarantined":
+                    return
+                agent = (evt.get("agent") or "agent").strip()
+                reason = (data.get("reason") or "").strip()
+                text = (
+                    f"⛔ Agent '{agent}' quarantined: credential broken\n"
+                    + (f"{reason}. " if reason else "")
+                    + "The lane has stopped dispatching new work. Rotate "
+                    "the credential or run edit_agent to pick a compatible "
+                    "model, then restart the agent."
+                )
+            else:
+                return
+            if self._dispatch_loop is None or self.transport is None:
+                return
+            asyncio.run_coroutine_threadsafe(
+                self._operator_note_with_retry(text), self._dispatch_loop,
+            )
+        except Exception as e:
+            logger.debug("system signal reroute failed: %s", e)
+
+    async def _operator_note_with_retry(
+        self, text: str, *, attempts: int = 3, backoff_s: float = 3.0,
+    ) -> None:
+        """Write a system-signal note to the operator transcript, retrying
+        transient failures, then emit the live notification event. Same
+        success contract as chain delivery: error-dict-aware + explicit
+        {ok: true} ack (the transport never raises for HTTP failures)."""
+        for i in range(attempts):
+            try:
+                result = await asyncio.wait_for(
+                    self.transport.request(
+                        "operator", "POST", "/chat/note",
+                        json={"message": text}, timeout=15,
+                    ),
+                    timeout=30,
+                )
+                if (
+                    isinstance(result, dict)
+                    and result.get("ok")
+                    and not result.get("error")
+                ):
+                    if self.event_bus is not None:
+                        try:
+                            self.event_bus.emit(
+                                "notification", agent="operator",
+                                data={"message": text},
+                            )
+                        except Exception as e:
+                            logger.debug("system note emit failed: %s", e)
+                    return
+                logger.debug("system note write rejected: %s", result)
+            except Exception as e:
+                logger.debug("system note attempt failed: %s", e)
+            if i < attempts - 1:
+                await asyncio.sleep(backoff_s * (i + 1))
+        logger.warning(
+            "operator note for system signal gave up after %d attempts: %s",
+            attempts, text.splitlines()[0][:120],
+        )
+
     async def _channel_push_with_retry(
         self, origin: "MessageOrigin", message: str, agent_name: str,
         *, attempts: int = 3, backoff_s: float = 3.0, timeout_s: float = 30.0,
@@ -1384,7 +1471,6 @@ class RuntimeContext:
             tasks_store=getattr(app, "tasks_store", None),
             help_requests_store=getattr(app, "help_requests_store", None),
             summaries_store=getattr(app, "summaries_store", None),
-            notification_store=self._notification_store,
             connector_store=self.connector_store,
             mcp_gateway=self.mcp_gateway,
         )
