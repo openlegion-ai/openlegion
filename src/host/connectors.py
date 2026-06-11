@@ -20,9 +20,21 @@ they are assigned to, persisted in ``config/connectors.json``::
           "args": [],
           "env": null,
           "agents": ["*"]
+        },
+        {
+          "name": "linear",
+          "transport": "http",
+          "url": "https://mcp.linear.app/mcp",
+          "auth": {"kind": "bearer", "cred": "linear_token"},
+          "agents": ["*"]
         }
       ]
     }
+
+Two transports: ``stdio`` records become in-container subprocesses via
+``MCP_SERVERS`` (``snapshot_for_agent`` — stdio ONLY, by design);
+``http`` records are mesh-gateway-proxied (``http_for_agent``) and
+never enter a container.
 
 Catalog order is operator-meaningful: it feeds the first-server-wins
 tool-name conflict policy in :class:`src.agent.mcp_client.MCPClient`.
@@ -61,19 +73,20 @@ import json
 import threading
 from pathlib import Path
 
-from src.shared.types import MCPConnector
+from src.shared.types import CONNECTOR_ADAPTER, HttpConnector, MCPConnector
 from src.shared.utils import atomic_write_text, setup_logging
 
 logger = setup_logging("host.connectors")
 
 
 class ConnectorStore:
-    """Thread-safe catalog of :class:`MCPConnector` records."""
+    """Thread-safe catalog of connector records (stdio
+    :class:`MCPConnector` and remote :class:`HttpConnector`)."""
 
     def __init__(self, config_path: str = "config/connectors.json") -> None:
         self._path = Path(config_path)
         self._lock = threading.RLock()
-        self._connectors: list[MCPConnector] = []
+        self._connectors: list[MCPConnector | HttpConnector] = []
         # (st_mtime_ns, st_size) of the file as last loaded; None = no file.
         self._loaded_stat: tuple[int, int] | None = None
         # Monotonic catalog generation. Bumped on every mutation
@@ -113,7 +126,7 @@ class ConnectorStore:
         seen: set[str] = set()
         for raw in data.get("connectors", []) or []:
             try:
-                c = MCPConnector.model_validate(raw)
+                c = CONNECTOR_ADAPTER.validate_python(raw)
             except Exception as e:
                 name = raw.get("name") if isinstance(raw, dict) else "<?>"
                 logger.error(
@@ -161,12 +174,12 @@ class ConnectorStore:
 
     # ── catalog access ───────────────────────────────────────────
 
-    def list(self) -> list[MCPConnector]:
+    def list(self) -> list[MCPConnector | HttpConnector]:
         with self._lock:
             self._maybe_reload()
             return list(self._connectors)
 
-    def get(self, name: str) -> MCPConnector | None:
+    def get(self, name: str) -> MCPConnector | HttpConnector | None:
         lower = name.lower()
         with self._lock:
             self._maybe_reload()
@@ -175,19 +188,43 @@ class ConnectorStore:
                     return c
         return None
 
-    def upsert(self, connector: MCPConnector) -> None:
+    def upsert(self, connector: MCPConnector | HttpConnector) -> bool:
         """Insert or replace by case-insensitive name (insertion order
-        preserved on replace)."""
+        preserved on replace).
+
+        Returns whether the edit is **restart-relevant** (the dirty
+        matrix, plan D12): False only when an existing http connector
+        changed nothing but ``auth`` — remote auth is resolved per call
+        on the mesh, so the caller must skip ``mark_dirty`` / the
+        restart prompt and instead invalidate the gateway's discovery
+        cache. Every other mutation (any stdio change, http
+        URL/assignment change, insert) returns True.
+        """
         lower = connector.name.lower()
         with self._lock:
             self._maybe_reload()
+            previous: MCPConnector | HttpConnector | None = None
             for i, c in enumerate(self._connectors):
                 if c.name.lower() == lower:
+                    previous = c
                     self._connectors[i] = connector
                     break
             else:
                 self._connectors.append(connector)
             self._save()
+            return not self._auth_only_change(previous, connector)
+
+    @staticmethod
+    def _auth_only_change(
+        old: MCPConnector | HttpConnector | None,
+        new: MCPConnector | HttpConnector,
+    ) -> bool:
+        """True when ``old`` → ``new`` is an http-connector edit that
+        touches nothing outside ``auth`` (a no-op also qualifies — not
+        touching generations for it is equally correct)."""
+        if not isinstance(old, HttpConnector) or not isinstance(new, HttpConnector):
+            return False
+        return old.model_dump(exclude={"auth"}) == new.model_dump(exclude={"auth"})
 
     def remove(self, name: str) -> bool:
         """Remove by case-insensitive name. Returns True if present."""
@@ -226,16 +263,23 @@ class ConnectorStore:
     # ── assignment resolution ────────────────────────────────────
 
     def snapshot_for_agent(self, agent_id: str) -> tuple[list[dict], int]:
-        """``MCP_SERVERS``-shaped dicts for every connector assigned to
-        this agent (catalog order) plus the catalog generation they
-        were read at — taken under one lock so the pair is consistent.
-        The runtime passes the generation back via
-        :meth:`record_agent_start` after a successful start."""
+        """``MCP_SERVERS``-shaped dicts for every **stdio** connector
+        assigned to this agent (catalog order) plus the catalog
+        generation they were read at — taken under one lock so the pair
+        is consistent. The runtime passes the generation back via
+        :meth:`record_agent_start` after a successful start.
+
+        The stdio filter is a security boundary, not a convenience:
+        an :class:`HttpConnector` here would serialize its ``auth``
+        into the container env — the exact exposure the mesh gateway
+        exists to prevent. The generation still covers the WHOLE
+        catalog, so pending-restart works for http-only edits too.
+        """
         with self._lock:
             self._maybe_reload()
             servers = [
                 c.server_dict() for c in self._connectors
-                if c.applies_to(agent_id)
+                if isinstance(c, MCPConnector) and c.applies_to(agent_id)
             ]
             return servers, self._generation
 
@@ -243,6 +287,17 @@ class ConnectorStore:
         """Server dicts only — convenience for display surfaces that
         don't participate in pending-restart tracking."""
         return self.snapshot_for_agent(agent_id)[0]
+
+    def http_for_agent(self, agent_id: str) -> list[HttpConnector]:
+        """Remote connectors assigned to this agent, catalog order.
+        The mesh gateway's input; never serialized into container
+        env."""
+        with self._lock:
+            self._maybe_reload()
+            return [
+                c for c in self._connectors
+                if isinstance(c, HttpConnector) and c.applies_to(agent_id)
+            ]
 
     # ── pending-restart derivation ───────────────────────────────
 

@@ -524,3 +524,299 @@ class TestDeletionPathCleanup:
         monkeypatch.setattr("src.cli.config._remove_agent", lambda *a, **k: None)
         sess._cmd_remove("worker")
         assert store.get("fs").agents == ["other"]
+
+
+# ── Phase 2a: HttpConnector / Connector union ────────────────
+
+
+class TestHttpConnectorModel:
+    def _http(self, **kw):
+        from src.shared.types import HttpConnector
+        base = {"transport": "http", "name": "linear",
+                "url": "https://mcp.linear.app/mcp"}
+        base.update(kw)
+        return HttpConnector(**base)
+
+    def test_https_url_accepted(self):
+        assert self._http().url == "https://mcp.linear.app/mcp"
+
+    def test_plain_http_rejected_except_localhost(self):
+        with pytest.raises(ValueError):
+            self._http(url="http://example.com/mcp")
+        # Self-hosted/dev MCP on the mesh host itself is legitimate.
+        assert self._http(url="http://localhost:9000/mcp")
+        assert self._http(url="http://127.0.0.1:9000/mcp")
+
+    def test_url_requires_host_and_known_scheme(self):
+        for bad in ("https://", "ftp://x.com/mcp", "not-a-url"):
+            with pytest.raises(ValueError):
+                self._http(url=bad)
+
+    def test_model_layer_is_not_the_ssrf_layer(self):
+        # Private https origins validate HERE by design — the gateway's
+        # resolved-IP blocklist (plan D16) is the SSRF boundary, not
+        # this config-shape check.
+        assert self._http(url="https://169.254.169.254/mcp")
+
+    def test_bearer_requires_cred(self):
+        from src.shared.types import ConnectorAuth
+        with pytest.raises(ValueError):
+            ConnectorAuth(kind="bearer")
+        assert ConnectorAuth(kind="bearer", cred="tok").cred == "tok"
+
+    def test_agents_validation_shared_with_stdio(self):
+        with pytest.raises(ValueError):
+            self._http(agents=["*", "a"])
+        with pytest.raises(ValueError):
+            self._http(agents=["bad id!"])
+        c = self._http(agents=["b", "a", "b"])
+        assert c.agents == ["b", "a"]
+        assert c.applies_to("a") and not c.applies_to("ghost")
+
+    def test_no_server_dict_fails_loud(self):
+        # HttpConnector must never be treated as a container server; the
+        # absence of server_dict() turns any such path into a loud
+        # AttributeError instead of a credential leak.
+        assert not hasattr(self._http(), "server_dict")
+
+    def test_adapter_defaults_missing_transport_to_stdio(self):
+        from src.shared.types import CONNECTOR_ADAPTER
+        c = CONNECTOR_ADAPTER.validate_python(
+            {"name": "fs", "command": "mcp-fs"},
+        )
+        assert isinstance(c, MCPConnector)
+
+    def test_adapter_discriminates_and_rejects_unknown(self):
+        from src.shared.types import CONNECTOR_ADAPTER, HttpConnector
+        h = CONNECTOR_ADAPTER.validate_python(
+            {"name": "x", "transport": "http", "url": "https://x.dev/mcp"},
+        )
+        assert isinstance(h, HttpConnector)
+        with pytest.raises(Exception):
+            CONNECTOR_ADAPTER.validate_python(
+                {"name": "x", "transport": "websocket", "url": "https://x"},
+            )
+
+
+class TestConnectorStoreUnion:
+    def _store(self, tmp_path) -> ConnectorStore:
+        return ConnectorStore(str(tmp_path / "connectors.json"))
+
+    def _http(self, **kw):
+        from src.shared.types import HttpConnector
+        base = {"transport": "http", "name": "linear",
+                "url": "https://mcp.linear.app/mcp", "agents": ["*"]}
+        base.update(kw)
+        return HttpConnector(**base)
+
+    def test_snapshot_excludes_http(self, tmp_path):
+        # THE leak pin (plan §8-1): an http record in MCP_SERVERS would
+        # carry its auth into the container env.
+        s = self._store(tmp_path)
+        s.upsert(MCPConnector(name="fs", command="mcp-fs", agents=["*"]))
+        s.upsert(self._http())
+        servers, _ = s.snapshot_for_agent("anyone")
+        assert [d["name"] for d in servers] == ["fs"]
+        assert all("url" not in d and "auth" not in d for d in servers)
+
+    def test_generation_covers_http_edits(self, tmp_path):
+        # An agent with ONLY http connectors still gets pending-restart
+        # when its connector's URL/assignment changes.
+        s = self._store(tmp_path)
+        s.upsert(self._http(agents=["a"]))
+        _, gen = s.snapshot_for_agent("a")
+        s.record_agent_start("a", gen)
+        s.mark_dirty(["a"])
+        assert s.pending_restart() == ["a"]
+
+    def test_http_for_agent_assignment_and_order(self, tmp_path):
+        s = self._store(tmp_path)
+        s.upsert(self._http(name="one", agents=["a"]))
+        s.upsert(MCPConnector(name="mid", command="c", agents=["a"]))
+        s.upsert(self._http(name="two", agents=["*"]))
+        assert [c.name for c in s.http_for_agent("a")] == ["one", "two"]
+        assert [c.name for c in s.http_for_agent("b")] == ["two"]
+
+    def test_upsert_auth_only_not_restart_relevant(self, tmp_path):
+        from src.shared.types import ConnectorAuth
+        s = self._store(tmp_path)
+        assert s.upsert(self._http()) is True  # insert
+        gen = s._generation
+        rotated = s.get("linear").model_copy(
+            update={"auth": ConnectorAuth(kind="bearer", cred="tok2")},
+        )
+        assert s.upsert(rotated) is False
+        assert s._generation == gen  # no touch — no pending-restart nag
+        # ...but the change IS persisted.
+        assert self._store(tmp_path).get("linear").auth.cred == "tok2"
+
+    def test_upsert_url_or_assignment_is_restart_relevant(self, tmp_path):
+        s = self._store(tmp_path)
+        s.upsert(self._http())
+        moved = s.get("linear").model_copy(
+            update={"url": "https://mcp2.linear.app/mcp"},
+        )
+        assert s.upsert(moved) is True
+        narrowed = s.get("linear").model_copy(update={"agents": ["a"]})
+        assert s.upsert(narrowed) is True
+
+    def test_upsert_stdio_always_restart_relevant(self, tmp_path):
+        s = self._store(tmp_path)
+        s.upsert(MCPConnector(name="fs", command="c", agents=["a"]))
+        same = s.get("fs").model_copy()
+        assert s.upsert(same) is True
+
+    def test_mixed_catalog_roundtrips(self, tmp_path):
+        from src.shared.types import HttpConnector
+        s = self._store(tmp_path)
+        s.upsert(MCPConnector(name="fs", command="c", agents=["a"]))
+        s.upsert(self._http())
+        s2 = self._store(tmp_path)
+        assert isinstance(s2.get("fs"), MCPConnector)
+        assert isinstance(s2.get("linear"), HttpConnector)
+        assert s2.get("linear").auth.kind == "none"
+
+
+class TestRuntimeHttpExclusion:
+    def test_http_connector_never_reaches_container_env(self, tmp_path):
+        # Non-regression contract §8-1, runtime layer: the snapshot the
+        # backends serialize into MCP_SERVERS contains no http record.
+        from src.host.runtime import DockerBackend
+        from src.shared.types import HttpConnector
+        b = DockerBackend.__new__(DockerBackend)
+        store = ConnectorStore(str(tmp_path / "c.json"))
+        store.upsert(HttpConnector(
+            transport="http", name="linear",
+            url="https://mcp.linear.app/mcp",
+            auth={"kind": "bearer", "cred": "tok"}, agents=["*"],
+        ))
+        store.upsert(MCPConnector(name="fs", command="mcp-fs", agents=["*"]))
+        b.set_connector_store(store)
+        servers, _ = b._mcp_snapshot_for("anyone")
+        flat = json.dumps(servers)
+        assert [d["name"] for d in servers] == ["fs"]
+        assert "linear" not in flat and "auth" not in flat and "url" not in flat
+
+
+class TestConnectorEndpointsHttp:
+    _BODY = {
+        "transport": "http",
+        "url": "https://mcp.linear.app/mcp",
+        "auth": {"kind": "bearer", "cred": "linear_token"},
+        "agents": ["*"],
+    }
+
+    def test_create_returns_names_never_values(self, connector_env):
+        client, store, *_ = connector_env
+        resp = client.put("/dashboard/api/connectors/linear", json=self._BODY)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["restart_required"] is True
+        assert data["affected_agents"] == ["alpha", "beta"]
+        c = data["connector"]
+        assert c["transport"] == "http"
+        assert c["url"] == self._BODY["url"]
+        assert c["auth"] == {"kind": "bearer", "cred": "linear_token",
+                             "connection": None}
+        # The vault mock resolves to "secret-value"; it must never
+        # appear in any connector API response.
+        assert "secret-value" not in resp.text
+        listed = client.get("/dashboard/api/connectors").json()
+        assert "secret-value" not in json.dumps(listed)
+        assert listed["connectors"][0]["transport"] == "http"
+
+    def test_bearer_check_is_existence_only(self, connector_env):
+        # Plan D14: the token is mesh-held — per-agent
+        # can_access_credential must NOT gate http auth.
+        client, _, permissions, *_ = connector_env
+        resp = client.put("/dashboard/api/connectors/linear", json=self._BODY)
+        assert resp.status_code == 200
+        permissions.can_access_credential.assert_not_called()
+
+    def test_bearer_cred_must_exist_in_vault(self, connector_env):
+        client, _, _, vault, _ = connector_env
+        vault.resolve_credential.return_value = None
+        resp = client.put("/dashboard/api/connectors/linear", json=self._BODY)
+        assert resp.status_code == 400
+        assert "linear_token" in resp.json()["detail"]
+
+    def test_auth_only_edit_no_restart(self, connector_env):
+        client, store, *_ = connector_env
+        client.put("/dashboard/api/connectors/linear", json=self._BODY)
+        for agent in ("alpha", "beta"):
+            _, gen = store.snapshot_for_agent(agent)
+            store.record_agent_start(agent, gen)
+        store.mark_dirty([])  # no-op; pending should be empty now
+        resp = client.put("/dashboard/api/connectors/linear", json={
+            **self._BODY, "auth": {"kind": "none"},
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["restart_required"] is False
+        assert data["affected_agents"] == []
+        assert store.pending_restart() == []
+        # ...and the auth change IS live in the catalog.
+        assert store.get("linear").auth.kind == "none"
+
+    def test_url_edit_requires_restart(self, connector_env):
+        client, store, *_ = connector_env
+        client.put("/dashboard/api/connectors/linear", json=self._BODY)
+        resp = client.put("/dashboard/api/connectors/linear", json={
+            **self._BODY, "url": "https://mcp2.linear.app/mcp",
+        })
+        data = resp.json()
+        assert data["restart_required"] is True
+        assert data["affected_agents"] == ["alpha", "beta"]
+
+    def test_auth_absent_preserved(self, connector_env):
+        client, store, *_ = connector_env
+        client.put("/dashboard/api/connectors/linear", json=self._BODY)
+        body = {k: v for k, v in self._BODY.items() if k != "auth"}
+        resp = client.put("/dashboard/api/connectors/linear", json=body)
+        assert resp.status_code == 200
+        assert store.get("linear").auth.cred == "linear_token"
+
+    def test_http_noop_returns_no_restart(self, connector_env):
+        client, *_ = connector_env
+        client.put("/dashboard/api/connectors/linear", json=self._BODY)
+        resp = client.put("/dashboard/api/connectors/linear", json=self._BODY)
+        data = resp.json()
+        assert data["restart_required"] is False
+        assert data["affected_agents"] == []
+
+    def test_http_validation_error_shape(self, connector_env):
+        client, *_ = connector_env
+        resp = client.put("/dashboard/api/connectors/bad", json={
+            "transport": "http", "url": "http://example.com/mcp",
+        })
+        assert resp.status_code == 400
+        detail = resp.json()["detail"]
+        assert detail["field"] == "connector"
+        assert any("url" in e["loc"] for e in detail["errors"])
+
+    def test_cross_transport_replace(self, connector_env):
+        # Same name, stdio → http: a full replace, restart-relevant,
+        # nothing transport-specific preserved across the boundary.
+        client, store, *_ = connector_env
+        client.put("/dashboard/api/connectors/x", json={
+            "command": "c", "env": {"K": "v"}, "agents": ["alpha"],
+        })
+        resp = client.put("/dashboard/api/connectors/x", json={
+            "transport": "http", "url": "https://x.dev/mcp",
+        })
+        assert resp.status_code == 200, resp.text
+        from src.shared.types import HttpConnector
+        replaced = store.get("x")
+        assert isinstance(replaced, HttpConnector)
+        assert replaced.auth.kind == "none"
+        # agents (transport-agnostic) preserved by the absent-field rule
+        assert replaced.agents == ["alpha"]
+        assert resp.json()["restart_required"] is True
+
+    def test_delete_http_marks_dirty(self, connector_env):
+        client, store, *_ = connector_env
+        client.put("/dashboard/api/connectors/linear", json=self._BODY)
+        resp = client.request("DELETE", "/dashboard/api/connectors/linear")
+        assert resp.status_code == 200
+        assert resp.json()["affected_agents"] == ["alpha", "beta"]
+        assert store.get("linear") is None

@@ -3120,15 +3120,18 @@
                             <div>
                               <div class="flex items-center gap-3 text-xs py-1.5">
                                 <span class="w-2 h-2 rounded-full shrink-0"
-                                      :class="mcpStatusDotClass(mcpStatusFor(srv.name).state)"
-                                      :title="mcpStatusFor(srv.name).error || mcpStatusFor(srv.name).state"></span>
+                                      :class="srv.transport === 'http' ? 'bg-gray-600' : mcpStatusDotClass(mcpStatusFor(srv.name).state)"
+                                      :title="srv.transport === 'http' ? 'Remote connector — activates when the mesh gateway update lands' : (mcpStatusFor(srv.name).error || mcpStatusFor(srv.name).state)"></span>
                                 <span class="text-gray-200 font-mono font-medium shrink-0" x-text="srv.name"></span>
+                                <span x-show="srv.transport === 'http'"
+                                      class="text-[10px] px-1.5 py-0.5 rounded font-medium leading-none uppercase tracking-wide bg-indigo-900/40 text-indigo-300 border border-indigo-800/40 shrink-0"
+                                      title="Remote server — calls proxied by the mesh">remote</span>
                                 <span x-show="(srv.agents || []).includes('*')"
                                       class="text-[11px] px-1.5 py-0.5 rounded font-medium leading-none bg-indigo-900/50 text-indigo-300 border border-indigo-800/50 shrink-0"
                                       title="Assigned fleet-wide (all agents)">fleet</span>
                                 <span class="text-gray-500 shrink-0">&rarr;</span>
                                 <span class="text-gray-400 text-[11px] font-mono flex-1 truncate"
-                                      x-text="(srv.command || '') + (srv.args && srv.args.length ? ' ' + srv.args.join(' ') : '')"></span>
+                                      x-text="srv.transport === 'http' ? (srv.url || '') : ((srv.command || '') + (srv.args && srv.args.length ? ' ' + srv.args.join(' ') : ''))"></span>
                                 <span x-show="mcpStatusFor(srv.name).state === 'running'"
                                       class="text-[11px] px-1.5 py-0.5 rounded font-medium leading-none bg-amber-900/50 text-amber-400 border border-amber-800/50 shrink-0"
                                       x-text="mcpStatusFor(srv.name).toolsCount + ' tools'"></span>
@@ -5094,7 +5097,7 @@
         <div x-show="systemTab === 'integrations'">
 
         <!-- MCP connectors — fleet catalog: connect a server once, assign it to all agents or specific ones -->
-        <div class="text-xs text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">MCP connectors<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Connect MCP (Model Context Protocol) tool servers once and enable them for your whole fleet or specific agents. Servers run inside each assigned agent's container; credential values come from the vault via $CRED handles. Changes apply when the affected agents restart.</span></span></div>
+        <div class="text-xs text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">MCP connectors<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Connect MCP (Model Context Protocol) tool servers once and enable them for your whole fleet or specific agents. Remote servers are reached through the mesh — credentials stay in the vault and never enter a container. Local commands run inside each assigned agent's container with $CRED values resolved into it. Server and assignment changes apply when the affected agents restart; remote auth changes apply immediately.</span></span></div>
         <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-6">
           <!-- Post-save restart prompt (explicit — catalog edits never auto-restart) -->
           <div x-show="connectorRestartPrompt" x-cloak
@@ -5137,14 +5140,21 @@
                 <div x-show="!(connectorDraft && !connectorDraft._isNew && connectorDraft.name === c.name)"
                      class="flex items-center gap-3 text-xs group py-2 px-2 -mx-2 rounded-md hover:bg-gray-800/40 transition-colors border-b border-gray-800/30 last:border-0">
                   <span class="text-gray-200 font-mono font-medium shrink-0" x-text="c.name"></span>
+                  <span class="text-[10px] px-1.5 py-0.5 rounded font-medium leading-none shrink-0 uppercase tracking-wide"
+                        :class="c.transport === 'http' ? 'bg-indigo-900/40 text-indigo-300 border border-indigo-800/40' : 'bg-gray-800 text-gray-500 border border-gray-700'"
+                        :title="c.transport === 'http' ? 'Remote server — calls proxied by the mesh; credentials stay in the vault' : 'Local command — runs inside each assigned agent\'s container'"
+                        x-text="c.transport === 'http' ? 'Remote' : 'Local'"></span>
                   <span class="text-[11px] px-1.5 py-0.5 rounded font-medium leading-none shrink-0"
                         :class="(c.agents || []).includes('*') ? 'bg-indigo-900/50 text-indigo-300 border border-indigo-800/50' : 'bg-gray-800 text-gray-400 border border-gray-700'"
                         :title="(c.agents || []).includes('*') ? 'Assigned to every agent' : (c.agents || []).join(', ') || 'Not assigned to any agent'"
                         x-text="connectorAssignmentLabel(c)"></span>
                   <span class="text-gray-500 shrink-0">&rarr;</span>
                   <span class="text-gray-400 text-[11px] font-mono flex-1 truncate"
-                        x-text="(c.command || '') + (c.args && c.args.length ? ' ' + c.args.join(' ') : '')"></span>
-                  <span x-show="(c.env_keys || []).length"
+                        x-text="c.transport === 'http' ? (c.url || '') : ((c.command || '') + (c.args && c.args.length ? ' ' + c.args.join(' ') : ''))"></span>
+                  <span x-show="c.transport === 'http'"
+                        class="text-[11px] px-1.5 py-0.5 rounded leading-none bg-amber-900/20 text-amber-400/80 border border-amber-800/30 shrink-0"
+                        title="Remote connectors are saved but not yet live — the mesh gateway that proxies their calls ships in the next update.">not active yet</span>
+                  <span x-show="c.transport !== 'http' && (c.env_keys || []).length"
                         class="text-[11px] px-1.5 py-0.5 rounded leading-none bg-gray-800 text-gray-500 border border-gray-700 shrink-0"
                         :title="'Env vars: ' + (c.env_keys || []).join(', ')"
                         x-text="(c.env_keys || []).length + ' env'"></span>
@@ -5159,6 +5169,29 @@
           <!-- Add / edit form -->
           <div x-show="connectorDraft" x-cloak x-transition
                class="bg-gray-800/30 border border-gray-800 rounded-lg p-3 mt-1 mb-2 space-y-2.5">
+            <!-- Type chooser: new drafts only — transport is fixed once
+                 created (a cross-transport change is remove + re-add).
+                 Remote is pre-selected: it's the ecosystem-default flow
+                 and the security copy states the real difference (D6). -->
+            <template x-if="connectorDraft?._isNew">
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <button type="button" @click="connectorDraft._transport = 'http'"
+                        class="text-left p-2.5 rounded-lg border transition-colors"
+                        :class="connectorDraft._transport === 'http' ? 'border-indigo-600 bg-indigo-900/20' : 'border-gray-700 hover:border-gray-600 bg-gray-900/40'">
+                  <div class="flex items-center gap-2 mb-0.5">
+                    <span class="text-xs font-medium text-gray-200">Remote server</span>
+                    <span class="text-[10px] px-1.5 py-0.5 rounded bg-indigo-900/50 text-indigo-300 border border-indigo-800/50 leading-none">Recommended</span>
+                  </div>
+                  <div class="text-[11px] text-gray-500">Paste a server URL. Credentials stay in the vault; calls are proxied by the mesh.</div>
+                </button>
+                <button type="button" @click="connectorDraft._transport = 'stdio'"
+                        class="text-left p-2.5 rounded-lg border transition-colors"
+                        :class="connectorDraft._transport === 'stdio' ? 'border-indigo-600 bg-indigo-900/20' : 'border-gray-700 hover:border-gray-600 bg-gray-900/40'">
+                  <div class="text-xs font-medium text-gray-200 mb-0.5">Local command</div>
+                  <div class="text-[11px] text-gray-500">Runs inside each agent's container; credentials are exposed to that agent.</div>
+                </button>
+              </div>
+            </template>
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
               <div>
                 <label class="text-[11px] text-gray-400 block mb-0.5">Name</label>
@@ -5166,15 +5199,46 @@
                        class="dash-input w-full disabled:opacity-60" placeholder="linear">
                 <div x-show="connectorErrors.name" class="text-[11px] text-red-400 mt-1" x-text="connectorErrors.name"></div>
               </div>
-              <div>
+              <div x-show="connectorDraft?._transport === 'stdio'">
                 <label class="text-[11px] text-gray-400 block mb-0.5">Command</label>
                 <input type="text" x-model="connectorDraft.command" class="dash-input w-full" placeholder="mcp-server-linear">
                 <div x-show="connectorDraft && mcpDetectJsRuntime(connectorDraft.command)"
                      class="text-[11px] text-amber-400 mt-1">Default agent image is Python-only. Node-based MCP servers need a custom image — see docs.</div>
                 <div x-show="connectorErrors.command" class="text-[11px] text-red-400 mt-1" x-text="connectorErrors.command"></div>
               </div>
+              <div x-show="connectorDraft?._transport === 'http'">
+                <label class="text-[11px] text-gray-400 block mb-0.5">Server URL</label>
+                <input type="text" x-model="connectorDraft.url" class="dash-input w-full" placeholder="https://mcp.linear.app/mcp">
+                <div x-show="connectorErrors.url" class="text-[11px] text-red-400 mt-1" x-text="connectorErrors.url"></div>
+              </div>
             </div>
-            <div>
+            <!-- Remote auth: vault credential by NAME — the mesh injects
+                 the value per call; it never enters a container. -->
+            <div x-show="connectorDraft?._transport === 'http'">
+              <label class="text-[11px] text-gray-400 block mb-0.5">Authentication</label>
+              <div class="flex items-center gap-1.5 flex-wrap">
+                <select x-model="connectorDraft._authKind" class="dash-select text-[11px]"
+                        :disabled="connectorDraft?._authKind === 'oauth'">
+                  <option value="none">None</option>
+                  <option value="bearer">API key (vault credential)</option>
+                  <option value="oauth" disabled>OAuth — coming soon</option>
+                </select>
+                <template x-if="connectorDraft?._authKind === 'bearer'">
+                  <select x-model="connectorDraft._authCred" class="dash-select flex-1 min-w-40">
+                    <option value="">— pick credential —</option>
+                    <template x-for="cName in (connectorsData?.available_credentials || [])" :key="cName">
+                      <option :value="cName" x-text="cName"></option>
+                    </template>
+                  </select>
+                </template>
+                <template x-if="connectorDraft?._authKind === 'oauth'">
+                  <span class="text-[11px] text-gray-400">Connection: <span class="font-mono" x-text="connectorDraft?._authConnection || '—'"></span> (managed by the Connect flow)</span>
+                </template>
+              </div>
+              <div class="text-[11px] text-gray-500 italic mt-1">The key stays in the vault — the mesh sends it per call; agents never see it. Auth changes apply immediately, no restart.</div>
+              <div x-show="connectorErrors.auth" class="text-[11px] text-red-400 mt-1" x-text="connectorErrors.auth"></div>
+            </div>
+            <div x-show="connectorDraft?._transport === 'stdio'">
               <label class="text-[11px] text-gray-400 block mb-0.5">Args (one per row)</label>
               <template x-for="(arg, aidx) in (connectorDraft?._argRows || [])" :key="aidx">
                 <div class="flex items-center gap-1.5 mb-1">
@@ -5185,7 +5249,7 @@
               <button type="button" @click="connectorAddArgRow()" class="text-[11px] text-gray-400 hover:text-gray-300 transition-colors">+ Add arg</button>
               <div x-show="connectorErrors.args" class="text-[11px] text-red-400 mt-1" x-text="connectorErrors.args"></div>
             </div>
-            <div>
+            <div x-show="connectorDraft?._transport === 'stdio'">
               <div class="flex items-center gap-2 mb-0.5">
                 <label class="text-[11px] text-gray-400">Env</label>
                 <button type="button" x-show="connectorDraft && !connectorDraft._isNew" @click="connectorToggleReplaceEnv()"
@@ -5274,12 +5338,15 @@
                  class="p-2 rounded bg-red-900/20 border border-red-800/50 text-[11px] text-red-300"
                  x-text="connectorGlobalError"></div>
             <div class="flex items-center justify-between gap-2 pt-1">
-              <span class="text-[11px] text-gray-500">Applies after the affected agents restart — you'll be prompted.</span>
+              <span class="text-[11px] text-gray-500"
+                    x-text="connectorDraft?._transport === 'http'
+                      ? 'Server & assignment changes apply after the affected agents restart; auth changes apply immediately.'
+                      : 'Applies after the affected agents restart — you\'ll be prompted.'"></span>
               <div class="flex items-center gap-2">
                 <button type="button" @click="connectorCancelDraft()"
                         class="text-xs px-3 py-1.5 rounded border border-gray-700 hover:border-gray-600 text-gray-400 hover:text-gray-300 transition-colors">Cancel</button>
                 <button type="button" @click="saveConnector()"
-                        :disabled="connectorSaving || !connectorDraft?.name || !connectorDraft?.command"
+                        :disabled="connectorSaving || !connectorDraft?.name || (connectorDraft?._transport === 'http' ? !connectorDraft?.url : !connectorDraft?.command)"
                         class="text-xs px-3 py-1.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors disabled:opacity-50"
                         x-text="connectorSaving ? 'Saving…' : (connectorDraft?._isNew ? 'Connect' : 'Save')"></button>
               </div>

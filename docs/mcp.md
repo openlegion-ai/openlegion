@@ -34,10 +34,51 @@ MCP servers are **connectors**: fleet-level records in `config/connectors.json`,
       "args": ["--db", "/data/analytics.db"],
       "env": { "DB_KEY": "$CRED{analytics_db_key}" },
       "agents": ["researcher", "analyst"]
+    },
+    {
+      "name": "linear",
+      "transport": "http",
+      "url": "https://mcp.linear.app/mcp",
+      "auth": { "kind": "bearer", "cred": "linear_token" },
+      "agents": ["*"]
     }
   ]
 }
 ```
+
+### Two transports
+
+A connector is either **local** (`transport: "stdio"`, the default when the
+key is omitted) or **remote** (`transport: "http"`):
+
+- **Local** — `command`/`args`/`env`: a subprocess inside each assigned
+  agent's container. `$CRED{...}` handles resolve to plaintext in the
+  container env at start (inherent to stdio: the subprocess needs the
+  secret).
+- **Remote** — `url` + `auth`: a streamable-HTTP MCP server reached
+  through the **mesh-side gateway**. `auth.kind` is `none`, `bearer`
+  (`auth.cred` names a vault credential injected as
+  `Authorization: Bearer` per call), or `oauth` (`auth.connection` names
+  a vault connection, set by the Connect flow). The secret never enters
+  a container and never appears in any API response — the dashboard
+  shows credential *names* only. Auth changes apply on the gateway's
+  next call with **no agent restart**; URL and assignment changes apply
+  on restart like everything else.
+
+Remote records validate via the `Connector` discriminated union
+(`src.shared.types.CONNECTOR_ADAPTER`) and are **excluded from
+`MCP_SERVERS` by construction** (`snapshot_for_agent` serializes stdio
+records only — pinned by test). Status: the data model and dashboard
+surface are live; the mesh gateway that proxies remote calls ships next
+(plan `docs/plans/2026-06-10-mcp-connectors-global-catalog.md`, Phase
+2b) — until then remote connectors are storable but inert, and the UI
+marks them "not active yet".
+
+**Downgrade note:** an older engine version loads a catalog containing
+`http` records by dropping them per-record with an error log (stdio
+connectors are unaffected). If that older version then *saves* the
+catalog (any connector edit), the dropped `http` records are permanently
+removed from the file — re-add them after rolling forward.
 
 At every agent (re)start, the runtime asks the catalog for the agent's assigned set (`RuntimeBackend._mcp_snapshot_for` in `src/host/runtime.py`) and serializes it as JSON into the `MCP_SERVERS` container environment variable. `MCP_SERVERS` is startup-only by design — **catalog edits apply on the next restart of the affected agents** (the dashboard prompts for it; nothing restarts automatically). Catalog order is meaningful: it feeds the first-server-wins tool-name conflict policy.
 
@@ -53,7 +94,7 @@ A missing or corrupt `connectors.json` fails **closed to an empty catalog** (err
 | `env` | dict[string, string] | No | Environment variables for the server process (defaults to `None`, max 32 entries × 4096-char values). Values may contain `$CRED{name}` handles. |
 | `agents` | list[string] | No | Assignment: `["*"]` = every agent (exclusive — cannot be combined with explicit ids), or explicit agent ids. Defaults to `[]` (staged, reaches nobody). |
 
-Records are validated by `src.shared.types.MCPConnector` (which inherits every `MCPServerConfig` validator) at store load time and at dashboard PUT time.
+The table above covers local (stdio) connectors; remote ones replace `command`/`args`/`env` with `url` (https required; plain http allowed for localhost only) and `auth`. All records are validated through the `Connector` discriminated union (`src.shared.types.CONNECTOR_ADAPTER` — stdio variant `MCPConnector`, remote variant `HttpConnector`) at store load time and at dashboard PUT time; records with an unknown `transport` are dropped per-record with an error log.
 
 ### Credential handles in `env` and `args`
 
