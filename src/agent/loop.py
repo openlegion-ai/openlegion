@@ -134,7 +134,7 @@ def _last_message_is_user_origin(messages: list[dict]) -> bool:
 # Files already injected via bootstrap — skip in first-message auto-search
 # to avoid duplicate content.  Matches WorkspaceManager._BOOTSTRAP_FILES.
 _BOOTSTRAP_SEARCH_EXCLUDE = frozenset({
-    "TEAM.md", "PROJECT.md", "SYSTEM.md", "INSTRUCTIONS.md",
+    "TEAM.md", "SYSTEM.md", "INSTRUCTIONS.md",
     "SOUL.md", "USER.md", "MEMORY.md",
 })
 _MAX_STEER_INTERRUPTS = 3  # max times a steer can interrupt a final answer per turn

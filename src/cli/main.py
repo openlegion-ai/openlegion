@@ -644,7 +644,7 @@ def _mesh_post(port: int, path: str, body: dict | None = None) -> dict:
 
 
 def _run_teams_list(port: int, as_json: bool) -> None:
-    """List active teams. Shared implementation for ``teams`` / ``projects``."""
+    """List active teams. Implementation for the ``teams`` command."""
     data = _mesh_get(port, "/dashboard/api/workplace/teams")
     teams = data.get("teams", []) if isinstance(data, dict) else []
     if as_json:
@@ -667,7 +667,7 @@ def _run_teams_list(port: int, as_json: bool) -> None:
 
 
 def _run_team_show(team_id: str, port: int, as_json: bool) -> None:
-    """Show a single team. Shared implementation for ``team`` / ``project``."""
+    """Show a single team. Implementation for the ``team`` command."""
     data = _mesh_get(port, "/dashboard/api/workplace/teams")
     teams = data.get("teams", []) if isinstance(data, dict) else []
     match = next((p for p in teams if p.get("name") == team_id), None)
@@ -705,19 +705,6 @@ def teams_cmd(port: int, as_json: bool):
     _run_teams_list(port, as_json)
 
 
-@cli.command("projects")
-@click.option("--port", default=8420, type=int, help="Mesh host port")
-@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def projects_cmd(port: int, as_json: bool):
-    """[deprecated] List active teams. Use ``teams`` instead."""
-    as_json = as_json or _json_mode
-    # Suppress the deprecation hint in JSON mode so downstream consumers
-    # get clean parseable output.
-    if not as_json:
-        click.echo("ℹ️ 'projects' is now 'teams'", err=True)
-    _run_teams_list(port, as_json)
-
-
 @cli.command("team")
 @click.argument("team_id")
 @click.option("--port", default=8420, type=int, help="Mesh host port")
@@ -726,20 +713,6 @@ def team_cmd(team_id: str, port: int, as_json: bool):
     """Show status for a single team."""
     as_json = as_json or _json_mode
     _run_team_show(team_id, port, as_json)
-
-
-@cli.command("project")
-@click.argument("project_id")
-@click.option("--port", default=8420, type=int, help="Mesh host port")
-@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def project_cmd(project_id: str, port: int, as_json: bool):
-    """[deprecated] Show status for a single team. Use ``team`` instead."""
-    as_json = as_json or _json_mode
-    # Suppress the deprecation hint in JSON mode so downstream consumers
-    # get clean parseable output.
-    if not as_json:
-        click.echo("ℹ️ 'project' is now 'team'", err=True)
-    _run_team_show(project_id, port, as_json)
 
 
 @cli.command("tasks")

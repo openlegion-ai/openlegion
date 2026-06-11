@@ -280,14 +280,6 @@ class TestKnownBrowserActionsSet:
         assert "solve_captcha" in KNOWN_BROWSER_ACTIONS
         assert "request_captcha_help" in KNOWN_BROWSER_ACTIONS
 
-    def test_legacy_alias_still_exported(self):
-        """Back-compat alias for callers that imported the old name."""
-        from src.host.permissions import (
-            KNOWN_BROWSER_ACTIONS,
-            LEGACY_BROWSER_ACTIONS,
-        )
-        assert LEGACY_BROWSER_ACTIONS is KNOWN_BROWSER_ACTIONS
-
 
 class TestDefaultFallbackPropagatesBrowserActions:
     """The 'default' template's browser_actions must flow into fallback perms

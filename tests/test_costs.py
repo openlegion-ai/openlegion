@@ -251,14 +251,14 @@ class TestProjectCostAggregation:
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_project_spend_aggregates_members(self):
-        """get_project_spend sums spend across all member agents."""
-        self.tracker.set_project_budget(
+        """get_team_spend sums spend across all member agents."""
+        self.tracker.set_team_budget(
             "teamA", members=["alice", "bob"], daily_usd=50.0, monthly_usd=500.0,
         )
         self.tracker.track("alice", "openai/gpt-4o-mini", 1000, 500)
         self.tracker.track("bob", "openai/gpt-4o-mini", 2000, 1000)
 
-        result = self.tracker.get_project_spend("teamA", "today")
+        result = self.tracker.get_team_spend("teamA", "today")
         assert result["project"] == "teamA"
         assert result["total_tokens"] == 4500
         assert result["total_cost"] > 0
@@ -269,16 +269,16 @@ class TestProjectCostAggregation:
         assert bob_spend["tokens"] == 3000
 
     def test_project_spend_no_budget_configured(self):
-        """get_project_spend returns error when no budget is set."""
-        result = self.tracker.get_project_spend("unknown", "today")
+        """get_team_spend returns error when no budget is set."""
+        result = self.tracker.get_team_spend("unknown", "today")
         assert "error" in result
 
     def test_project_budget_limits(self):
-        """set_project_budget stores limits correctly."""
-        self.tracker.set_project_budget(
+        """set_team_budget stores limits correctly."""
+        self.tracker.set_team_budget(
             "proj", members=["a1"], daily_usd=100.0, monthly_usd=2000.0,
         )
-        result = self.tracker.get_project_spend("proj", "today")
+        result = self.tracker.get_team_spend("proj", "today")
         assert result["daily_limit"] == 100.0
         assert result["monthly_limit"] == 2000.0
 

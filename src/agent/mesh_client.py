@@ -1086,11 +1086,8 @@ class MeshClient:
 
     # === Team management (mesh proxy endpoints) ===
     #
-    # The ``*_team`` methods are the canonical names; the legacy
-    # ``*_project`` methods are preserved as thin no-cost shims that
-    # proxy through the canonical name. Every method hits the
-    # ``/mesh/teams/*`` route — PR 3 removed the legacy
-    # ``/mesh/projects/*`` mirror endpoints.
+    # Every method hits the ``/mesh/teams/*`` route — PR 3 removed the
+    # legacy ``/mesh/projects/*`` mirror endpoints.
 
     async def list_teams(self) -> dict:
         """List all teams via mesh proxy."""
@@ -1099,10 +1096,6 @@ class MeshClient:
         )
         _raise_with_body(response)
         return response.json()
-
-    async def list_projects(self) -> dict:
-        """DEPRECATED: alias for :meth:`list_teams`."""
-        return await self.list_teams()
 
     async def create_team(
         self, name: str, description: str, members: list[str] | None = None,
@@ -1121,12 +1114,6 @@ class MeshClient:
         _raise_with_body(response)
         return response.json()
 
-    async def create_project(
-        self, name: str, description: str, members: list[str] | None = None,
-    ) -> dict:
-        """DEPRECATED: alias for :meth:`create_team`."""
-        return await self.create_team(name, description, members)
-
     async def add_agent_to_team(self, team_name: str, agent_id: str) -> dict:
         """Add an agent to a team via mesh proxy."""
         client = await self._get_client()
@@ -1137,10 +1124,6 @@ class MeshClient:
         )
         _raise_with_body(response)
         return response.json()
-
-    async def add_agent_to_project(self, project_name: str, agent_id: str) -> dict:
-        """DEPRECATED: alias for :meth:`add_agent_to_team`."""
-        return await self.add_agent_to_team(project_name, agent_id)
 
     async def remove_agent_from_team(
         self, team_name: str, agent_id: str,
@@ -1154,12 +1137,6 @@ class MeshClient:
         _raise_with_body(response)
         return response.json()
 
-    async def remove_agent_from_project(
-        self, project_name: str, agent_id: str,
-    ) -> dict:
-        """DEPRECATED: alias for :meth:`remove_agent_from_team`."""
-        return await self.remove_agent_from_team(project_name, agent_id)
-
     async def update_team_context(
         self, team_name: str, context: str,
     ) -> dict:
@@ -1172,12 +1149,6 @@ class MeshClient:
         )
         _raise_with_body(response)
         return response.json()
-
-    async def update_project_context(
-        self, project_name: str, context: str,
-    ) -> dict:
-        """DEPRECATED: alias for :meth:`update_team_context`."""
-        return await self.update_team_context(project_name, context)
 
     async def set_team_goal(
         self,
@@ -1197,15 +1168,6 @@ class MeshClient:
         )
         _raise_with_body(response)
         return response.json()
-
-    async def set_project_goal(
-        self,
-        project_name: str,
-        north_star: str | None,
-        success_criteria: list[str] | None = None,
-    ) -> dict:
-        """DEPRECATED: alias for :meth:`set_team_goal`."""
-        return await self.set_team_goal(project_name, north_star, success_criteria)
 
     async def set_task_outcome(
         self,
@@ -1469,10 +1431,6 @@ class MeshClient:
         data = response.json()
         return data.get("tasks", []) if isinstance(data, dict) else []
 
-    async def list_project_tasks(self, project_id: str) -> list[dict]:
-        """DEPRECATED: alias for :meth:`list_team_tasks`."""
-        return await self.list_team_tasks(project_id)
-
     async def set_task_status(
         self, task_id: str, status: str,
         blocker_note: str | None = None,
@@ -1585,10 +1543,6 @@ class MeshClient:
         _raise_with_body(response)
         return response.json()
 
-    async def project_status(self, project_id: str) -> dict:
-        """DEPRECATED: alias for :meth:`team_status`."""
-        return await self.team_status(project_id)
-
     async def all_teams_status(self) -> dict:
         """Status rollup across every visible team."""
         response = await self._get_with_retry(
@@ -1596,10 +1550,6 @@ class MeshClient:
         )
         _raise_with_body(response)
         return response.json()
-
-    async def all_projects_status(self) -> dict:
-        """DEPRECATED: alias for :meth:`all_teams_status`."""
-        return await self.all_teams_status()
 
     async def agent_queue(self, agent_id: str, limit: int = 10) -> dict:
         """Recent tasks for an agent grouped by status."""
@@ -1619,10 +1569,6 @@ class MeshClient:
         )
         _raise_with_body(response)
         return response.json()
-
-    async def project_outputs(self, project_id: str, since: str = "") -> dict:
-        """DEPRECATED: alias for :meth:`team_outputs`."""
-        return await self.team_outputs(project_id, since)
 
     async def update_team_brief(
         self, team_name: str, section: str, content: str,
@@ -1649,10 +1595,6 @@ class MeshClient:
         response = await self._get_with_retry(url)
         _raise_with_body(response)
         return response.json()
-
-    async def project_summary(self, project_id: str) -> dict:
-        """DEPRECATED: alias for :meth:`team_summary`."""
-        return await self.team_summary(project_id)
 
     # ---- Work summaries (PR-A) -----------------------------------------
     async def create_work_summary(
@@ -1737,10 +1679,6 @@ class MeshClient:
         _raise_with_body(response)
         return response.json()
 
-    async def archive_project(self, name: str) -> dict:
-        """DEPRECATED: alias for :meth:`archive_team`."""
-        return await self.archive_team(name)
-
     async def unarchive_team(self, name: str) -> dict:
         """Unarchive (restore) a previously archived team."""
         client = await self._get_client()
@@ -1750,10 +1688,6 @@ class MeshClient:
         )
         _raise_with_body(response)
         return response.json()
-
-    async def unarchive_project(self, name: str) -> dict:
-        """DEPRECATED: alias for :meth:`unarchive_team`."""
-        return await self.unarchive_team(name)
 
     async def archive_agent(self, agent_id: str) -> dict:
         """Archive an agent."""
@@ -1774,10 +1708,6 @@ class MeshClient:
         )
         _raise_with_body(response)
         return response.json()
-
-    async def propose_delete_project(self, name: str) -> dict:
-        """DEPRECATED: alias for :meth:`propose_delete_team`."""
-        return await self.propose_delete_team(name)
 
     async def propose_delete_agent(self, agent_id: str) -> dict:
         """Propose deletion of an archived agent. Returns nonce for human confirm."""

@@ -76,11 +76,6 @@ KNOWN_BROWSER_ACTIONS: frozenset[str] = frozenset({
     "request_browser_login",
 })
 
-# Back-compat alias — retained so `host/server.py` and test fixtures that
-# imported `LEGACY_BROWSER_ACTIONS` keep working. Prefer `KNOWN_BROWSER_ACTIONS`
-# in new code.
-LEGACY_BROWSER_ACTIONS = KNOWN_BROWSER_ACTIONS
-
 
 class PermissionMatrix:
     """Enforces agent-level permissions for mesh operations."""

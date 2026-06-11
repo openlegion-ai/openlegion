@@ -1463,7 +1463,7 @@ class TestREPLOriginStamp:
 
 
 class TestWorkplaceCLICommands:
-    """``openlegion projects / project / tasks / pending / confirm /
+    """``openlegion teams / team / tasks / pending / confirm /
     cancel`` shell out to the local mesh over httpx — patch the client
     to assert the right path and shape are returned to stdout."""
 
@@ -1486,24 +1486,21 @@ class TestWorkplaceCLICommands:
         resp.text = json.dumps(payload)
         return patch("httpx.post", return_value=resp)
 
-    def test_projects_command_renders_table(self):
+    def test_teams_command_renders_table(self):
         runner = CliRunner()
-        # The canonical response shape is ``{"teams": [...]}``; the
-        # CLI still accepts the ``projects`` command as a back-compat
-        # alias.
         with self._patched_get({"teams": [
             {"name": "research", "status": "active", "total": 3,
              "members": ["alpha", "beta"], "counts": {"working": 2}},
         ]}):
-            result = runner.invoke(cli, ["projects"])
+            result = runner.invoke(cli, ["teams"])
         assert result.exit_code == 0
         assert "research" in result.output
         assert "active" in result.output
 
-    def test_projects_command_json_mode(self):
+    def test_teams_command_json_mode(self):
         runner = CliRunner()
         with self._patched_get({"teams": [{"name": "research", "status": "active", "total": 0}]}):
-            result = runner.invoke(cli, ["--json", "projects"])
+            result = runner.invoke(cli, ["--json", "teams"])
         assert result.exit_code == 0
         payload = json.loads(result.output)
         # JSON mode emits both keys for back-compat with downstream
@@ -1511,7 +1508,7 @@ class TestWorkplaceCLICommands:
         assert payload["teams"][0]["name"] == "research"
         assert payload["projects"][0]["name"] == "research"
 
-    def test_project_command_shows_one(self):
+    def test_team_command_shows_one(self):
         runner = CliRunner()
         body = {"teams": [
             {"name": "research", "status": "active", "total": 1,
@@ -1519,15 +1516,15 @@ class TestWorkplaceCLICommands:
              "counts": {"pending": 1}, "blockers": []},
         ]}
         with self._patched_get(body):
-            result = runner.invoke(cli, ["project", "research"])
+            result = runner.invoke(cli, ["team", "research"])
         assert result.exit_code == 0
         assert "research" in result.output
         assert "deep dive" in result.output
 
-    def test_project_command_unknown_exits_1(self):
+    def test_team_command_unknown_exits_1(self):
         runner = CliRunner()
         with self._patched_get({"teams": []}):
-            result = runner.invoke(cli, ["project", "missing"])
+            result = runner.invoke(cli, ["team", "missing"])
         assert result.exit_code == 1
         assert "not found" in result.output.lower()
 

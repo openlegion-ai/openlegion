@@ -92,8 +92,8 @@ def _build_mesh(tmp_path, monkeypatch, *, auth_tokens=None):
         cost_tracker=costs, trace_store=traces, auth_tokens=auth_tokens,
     )
     # Reset the module-level counter so each test starts at zero.
-    server_module._blackboard_xproject_count["read"] = 0
-    server_module._blackboard_xproject_count["write"] = 0
+    server_module._blackboard_xteam_count["read"] = 0
+    server_module._blackboard_xteam_count["write"] = 0
     # Stash teardown handles on the app for the test caller.
     app.state._test_bb = bb
     app.state._test_costs = costs
@@ -126,7 +126,7 @@ async def test_cross_project_read_increments_counter(tmp_path, monkeypatch):
                     params={"agent_id": "agent-b"},
                 )
         assert resp.status_code == 200
-        assert server_module._blackboard_xproject_count == {"read": 1, "write": 0}
+        assert server_module._blackboard_xteam_count == {"read": 1, "write": 0}
     finally:
         _teardown(app, monkeypatch, server_module)
 
@@ -147,7 +147,7 @@ async def test_cross_project_write_against_existing_increments(tmp_path, monkeyp
                     json={"v": 2},
                 )
         assert resp.status_code == 200
-        assert server_module._blackboard_xproject_count == {"read": 0, "write": 1}
+        assert server_module._blackboard_xteam_count == {"read": 0, "write": 1}
     finally:
         _teardown(app, monkeypatch, server_module)
 
@@ -181,7 +181,7 @@ async def test_same_project_does_not_increment(tmp_path, monkeypatch):
                 )
         assert resp.status_code == 200
         assert resp2.status_code == 200
-        assert server_module._blackboard_xproject_count == {"read": 0, "write": 0}
+        assert server_module._blackboard_xteam_count == {"read": 0, "write": 0}
     finally:
         _teardown(app, monkeypatch, server_module)
 
@@ -207,7 +207,7 @@ async def test_operator_caller_does_not_increment(tmp_path, monkeypatch):
                 )
         assert resp.status_code == 200
         assert resp2.status_code == 200
-        assert server_module._blackboard_xproject_count == {"read": 0, "write": 0}
+        assert server_module._blackboard_xteam_count == {"read": 0, "write": 0}
     finally:
         _teardown(app, monkeypatch, server_module)
 
@@ -237,7 +237,7 @@ async def test_internal_caller_does_not_increment(tmp_path, monkeypatch):
                 )
         assert resp.status_code == 200
         assert resp2.status_code == 200
-        assert server_module._blackboard_xproject_count == {"read": 0, "write": 0}
+        assert server_module._blackboard_xteam_count == {"read": 0, "write": 0}
     finally:
         _teardown(app, monkeypatch, server_module)
 
@@ -257,7 +257,7 @@ async def test_new_key_write_does_not_increment(tmp_path, monkeypatch):
                     json={"v": 1},
                 )
         assert resp.status_code == 200
-        assert server_module._blackboard_xproject_count == {"read": 0, "write": 0}
+        assert server_module._blackboard_xteam_count == {"read": 0, "write": 0}
     finally:
         _teardown(app, monkeypatch, server_module)
 
@@ -318,7 +318,7 @@ async def test_delete_existing_cross_project_increments_write(tmp_path, monkeypa
                     params={"agent_id": "agent-b"},
                 )
         assert resp.status_code == 200
-        assert server_module._blackboard_xproject_count == {"read": 0, "write": 1}
+        assert server_module._blackboard_xteam_count == {"read": 0, "write": 1}
     finally:
         _teardown(app, monkeypatch, server_module)
 
@@ -343,7 +343,7 @@ async def test_claim_existing_cross_project_increments_write(tmp_path, monkeypat
                     },
                 )
         assert resp.status_code == 200
-        assert server_module._blackboard_xproject_count == {"read": 0, "write": 1}
+        assert server_module._blackboard_xteam_count == {"read": 0, "write": 1}
     finally:
         _teardown(app, monkeypatch, server_module)
 
@@ -364,6 +364,6 @@ async def test_standalone_agent_does_not_increment(tmp_path, monkeypatch):
                     params={"agent_id": "agent-c"},
                 )
         assert resp.status_code == 200
-        assert server_module._blackboard_xproject_count == {"read": 0, "write": 0}
+        assert server_module._blackboard_xteam_count == {"read": 0, "write": 0}
     finally:
         _teardown(app, monkeypatch, server_module)

@@ -565,8 +565,6 @@ def _record_scope_warn() -> None:
 # model — restarts are roughly daily-ish in practice and a true 24h
 # window would need a separate ledger.
 _blackboard_xteam_count: dict[str, int] = {"read": 0, "write": 0}
-# Back-compat alias — keep until PR 3.
-_blackboard_xproject_count = _blackboard_xteam_count
 
 
 def _record_blackboard_xteam(kind: str) -> None:
@@ -574,11 +572,6 @@ def _record_blackboard_xteam(kind: str) -> None:
     if kind not in _blackboard_xteam_count:
         return
     _blackboard_xteam_count[kind] += 1
-
-
-def _record_blackboard_xproject(kind: str) -> None:
-    """DEPRECATED: alias for :func:`_record_blackboard_xteam`."""
-    _record_blackboard_xteam(kind)
 
 
 # Maps the legacy ``project_*`` lifecycle event names (callers still
@@ -1728,7 +1721,7 @@ def create_mesh_app(
         if not _is_internal_caller(request) and _is_blackboard_cross_project(
             agent_id, entry.written_by
         ):
-            _record_blackboard_xproject("read")
+            _record_blackboard_xteam("read")
         return entry.model_dump(mode="json")
 
     @app.put("/mesh/blackboard/{key:path}")
@@ -1761,7 +1754,7 @@ def create_mesh_app(
             if existing is not None and _is_blackboard_cross_project(
                 agent_id, existing.written_by
             ):
-                _record_blackboard_xproject("write")
+                _record_blackboard_xteam("write")
         entry = blackboard.write(key, value, written_by=agent_id, ttl=ttl)
         if trace_store:
             req_trace_id = request.headers.get("x-trace-id")
@@ -1802,7 +1795,7 @@ def create_mesh_app(
             if existing is not None and _is_blackboard_cross_project(
                 agent_id, existing.written_by
             ):
-                _record_blackboard_xproject("write")
+                _record_blackboard_xteam("write")
         try:
             blackboard.delete(key, deleted_by=agent_id)
         except ValueError as e:
@@ -1857,7 +1850,7 @@ def create_mesh_app(
             if existing is not None and _is_blackboard_cross_project(
                 agent_id, existing.written_by
             ):
-                _record_blackboard_xproject("write")
+                _record_blackboard_xteam("write")
         expected_version = body.expected_version
         value = body.value
         entry = blackboard.write_if_version(
@@ -3170,8 +3163,8 @@ def create_mesh_app(
             result["budget"] = cost_tracker.check_budget(agent_id)
             # Include project budget if agent belongs to a project
             agent_proj = _agent_projects.get(agent_id)
-            if agent_proj and hasattr(cost_tracker, "get_project_spend"):
-                project_spend = cost_tracker.get_project_spend(agent_proj, "today")
+            if agent_proj:
+                project_spend = cost_tracker.get_team_spend(agent_proj, "today")
                 if "error" not in project_spend:
                     result["project_budget"] = project_spend
 
@@ -3285,9 +3278,7 @@ def create_mesh_app(
         _require_any_auth(request)
         if cost_tracker is None:
             raise HTTPException(503, "Cost tracker not available")
-        if not hasattr(cost_tracker, "get_project_spend"):
-            raise HTTPException(503, "Team cost tracking not available")
-        return cost_tracker.get_project_spend(team, period)
+        return cost_tracker.get_team_spend(team, period)
 
     # === Cron CRUD ===
 
@@ -8141,8 +8132,7 @@ def create_mesh_app(
             raise HTTPException(400, "The operator agent cannot be edited via soft-edit")
 
         # Validate runtime-critical values for hard fields before they
-        # can be persisted. Mirrors the validation block in the now-
-        # deprecated /propose endpoint.
+        # can be persisted.
         if field == "model":
             if not isinstance(new_value, str) or not new_value:
                 raise HTTPException(400, "model must be a non-empty string")

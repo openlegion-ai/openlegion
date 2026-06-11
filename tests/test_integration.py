@@ -1364,8 +1364,8 @@ def test_project_cost_endpoint(tmp_path):
     perms.permissions = {}
     router = MessageRouter(permissions=perms, agent_registry={})
     tracker = CostTracker(db_path=str(tmp_path / "costs.db"))
-    tracker.set_project_budget("teamA", members=["alice", "bob"],
-                               daily_usd=50.0, monthly_usd=500.0)
+    tracker.set_team_budget("teamA", members=["alice", "bob"],
+                            daily_usd=50.0, monthly_usd=500.0)
     tracker.track("alice", "openai/gpt-4o-mini", 1000, 500)
     tracker.track("bob", "openai/gpt-4o-mini", 2000, 1000)
 
