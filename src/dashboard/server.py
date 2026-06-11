@@ -2421,15 +2421,20 @@ def create_dashboard_router(
         except ValidationError as ve:
             # Structured per-field errors for inline UI rendering.
             # ``ctx``/``input`` stripped — they can contain raw objects
-            # FastAPI's JSON encoder rejects.
-            safe_errors = [
-                {
-                    "loc": [str(p) for p in e.get("loc", ())],
+            # FastAPI's JSON encoder rejects. The union prefixes loc
+            # with the discriminator tag (('http', 'url')) — strip it,
+            # because the UI keys inline errors off loc[0] and a tag
+            # there would orphan every field error.
+            safe_errors = []
+            for e in ve.errors(include_url=False):
+                loc = [str(p) for p in e.get("loc", ())]
+                if loc and loc[0] in ("stdio", "http"):
+                    loc = loc[1:]
+                safe_errors.append({
+                    "loc": loc,
                     "msg": e.get("msg", ""),
                     "type": e.get("type", ""),
-                }
-                for e in ve.errors(include_url=False)
-            ]
+                })
             raise HTTPException(
                 400, detail={"field": "connector", "errors": safe_errors},
             )
@@ -2443,8 +2448,8 @@ def create_dashboard_router(
         # degradation in ``_build_mcp_servers_env``: the connector is
         # dropped for that agent with an error log, never blocking the
         # agent from booting.
-        check_agents = _expand_assignment(connector.agents)
         if isinstance(connector, MCPConnector):
+            check_agents = _expand_assignment(connector.agents)
             handles: set[str] = set()
             for arg in connector.args:
                 handles.update(CRED_HANDLE_RE.findall(arg))

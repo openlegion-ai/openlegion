@@ -362,7 +362,9 @@ class TestConnectorEndpoints:
         assert resp.status_code == 400
         detail = resp.json()["detail"]
         assert detail["field"] == "connector"
-        assert any("command" in e["loc"] for e in detail["errors"])
+        # loc[0] must be the FIELD name, not the union discriminator
+        # tag — the UI keys inline errors off loc[0].
+        assert any(e["loc"][0] == "command" for e in detail["errors"])
 
     def test_upsert_name_mismatch_rejected(self, connector_env):
         client, *_ = connector_env
@@ -650,6 +652,19 @@ class TestConnectorStoreUnion:
         # ...but the change IS persisted.
         assert self._store(tmp_path).get("linear").auth.cred == "tok2"
 
+    def test_auth_only_with_agent_order_diff_still_not_restart(self, tmp_path):
+        # Assignment is set-semantic; the dashboard sorts the list it
+        # sends. An order-only diff against a hand-edited file must not
+        # turn an auth rotation into a spurious restart prompt.
+        from src.shared.types import ConnectorAuth
+        s = self._store(tmp_path)
+        s.upsert(self._http(agents=["b", "a"]))
+        rotated = s.get("linear").model_copy(update={
+            "auth": ConnectorAuth(kind="bearer", cred="tok"),
+            "agents": ["a", "b"],
+        })
+        assert s.upsert(rotated) is False
+
     def test_upsert_url_or_assignment_is_restart_relevant(self, tmp_path):
         s = self._store(tmp_path)
         s.upsert(self._http())
@@ -792,7 +807,9 @@ class TestConnectorEndpointsHttp:
         assert resp.status_code == 400
         detail = resp.json()["detail"]
         assert detail["field"] == "connector"
-        assert any("url" in e["loc"] for e in detail["errors"])
+        # loc[0] must be the FIELD name, not the union discriminator
+        # tag — the UI keys inline errors off loc[0].
+        assert any(e["loc"][0] == "url" for e in detail["errors"])
 
     def test_cross_transport_replace(self, connector_env):
         # Same name, stdio → http: a full replace, restart-relevant,

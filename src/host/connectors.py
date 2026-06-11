@@ -224,7 +224,16 @@ class ConnectorStore:
         touching generations for it is equally correct)."""
         if not isinstance(old, HttpConnector) or not isinstance(new, HttpConnector):
             return False
-        return old.model_dump(exclude={"auth"}) == new.model_dump(exclude={"auth"})
+        # agents compared as a SET: assignment is set-semantic (only
+        # connector order is meaningful, not agent-id order), and the
+        # dashboard sorts the list it sends — an order-only diff against
+        # a hand-edited file must not turn an auth rotation into a
+        # spurious restart prompt.
+        return (
+            old.model_dump(exclude={"auth", "agents"})
+            == new.model_dump(exclude={"auth", "agents"})
+            and set(old.agents) == set(new.agents)
+        )
 
     def remove(self, name: str) -> bool:
         """Remove by case-insensitive name. Returns True if present."""
