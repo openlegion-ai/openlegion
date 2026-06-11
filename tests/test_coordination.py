@@ -1745,3 +1745,29 @@ class TestHandOffThinking:
         assert "error" in result
         mc.create_task.assert_not_called()
         mc.write_blackboard.assert_not_called()
+
+
+class TestToolDescriptions:
+    """Contract tests pinning the pushback-protocol prose in the
+    LLM-visible tool descriptions. The transport for blocked-task
+    back-edges (blocker_note → inbox/{creator}/task_event/ →
+    check_inbox events[]) shipped without telling workers it exists;
+    these pins keep future description edits from silently dropping
+    the protocol documentation.
+    """
+
+    @staticmethod
+    def _description(name: str) -> str:
+        import src.agent.builtins.coordination_tool  # noqa: F401
+        from src.agent.tools import _tool_staging
+
+        return _tool_staging[name]["description"]
+
+    def test_update_status_description_mentions_pushback(self):
+        assert "pushback" in self._description("update_status")
+
+    def test_check_inbox_description_mentions_events(self):
+        assert "events[]" in self._description("check_inbox")
+
+    def test_hand_off_description_mentions_blocked_followup(self):
+        assert "re-hand-off" in self._description("hand_off")
