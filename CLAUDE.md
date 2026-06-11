@@ -1,156 +1,21 @@
 # CLAUDE.md — engine
 
-## Overview
-
 OpenLegion Engine is a container-isolated multi-agent runtime. LLM-powered agents run in Docker containers, coordinated through a central mesh host. Users interact via CLI REPL, messaging channels (Telegram/Discord/Slack/WhatsApp/Webhook), or a web dashboard.
 
-## Architecture
+Deeper docs: `docs/README.md` (architecture, security, configuration, mcp, memory, development). Active design docs live in `docs/plans/` (dated) — check there before re-deriving a design that may already be decided.
 
-### System Layout
+## Commands & Testing
 
+```bash
+make test                        # fast suite: pytest minus e2e files (same invocation as CI)
+make lint                        # ruff check + ruff format
+pytest tests/test_loop.py -x -v  # single file
 ```
-User (CLI REPL / Telegram / Discord / Slack / WhatsApp / Webhook)
-  → Mesh Host (FastAPI :8420) — routes messages, enforces permissions, proxies APIs, VNC proxy
-    → Agent Containers (FastAPI :8400 each) — isolated execution with private memory
-    → Browser Service Container (FastAPI :8500) — per-agent Camoufox + per-agent Xvnc/Openbox/unclutter on displays :100..:163 paired with KasmVNC ports 6100..6163
-```
 
-Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agents** (untrusted, sandboxed). All cross-zone communication is HTTP + JSON with Pydantic contracts from `src/shared/types.py`.
-
-### Entry Points
-
-| Entry Point | File | What It Starts |
-|---|---|---|
-| `openlegion` CLI | `src/cli/__main__.py` → `src/cli/main.py` | CLI commands: start, stop, status, chat, wallet, version |
-| Agent container | `src/agent/__main__.py` → `src/agent/server.py` | Agent FastAPI server on :8400 |
-| Browser service | `src/browser/__main__.py` → `src/browser/server.py` | FastAPI on :8500 (per-agent X stack spawned lazily) |
-| Mesh host | `src/host/server.py` | FastAPI app on :8420 (started by CLI) |
-| Dashboard | `src/dashboard/server.py` | Mounted as router on mesh host |
-
-### Module Responsibilities
-
-Only modules with non-obvious quirks worth flagging are listed. The rest are visible by reading the tree.
-
-| Path | Responsibility |
-|---|---|
-| `src/shared/types.py` | THE cross-component contract (Pydantic). `HARD_EDIT_FIELDS` / `SOFT_EDIT_FIELDS` drive the undo-receipt TTL split (5 min soft / 30 min hard); all edits apply immediately, TTL is just the Undo window. `DashboardEvent.type` enumerates WebSocket event names. |
-| `src/shared/utils.py` | `sanitize_for_prompt()`, `setup_logging()` |
-| `src/shared/redaction.py` | Central credential/URL redactor (`redact_url`, `deep_redact`) |
-| `src/agent/loop.py` | Agent execution loop (task + chat). Auto-closes handed-off tasks when `x-task-id` rides the wake chain. |
-| `src/agent/server.py` | Agent FastAPI server. `_FILE_CAPS` enforced on workspace writes; `_WORKSPACE_ALLOWLIST` gates reads/writes. |
-| `src/agent/llm.py` | LLM client — routes through mesh proxy, never holds keys |
-| `src/agent/context.py` | Context window management (write-then-compact); empty summary falls back to hard prune |
-| `src/agent/workspace.py` | Persistent markdown workspace. Bootstrap files include TEAM.md (legacy `PROJECT.md` resolves read-only), SOUL/USER/INSTRUCTIONS/MEMORY/INTERFACE/HEARTBEAT. |
-| `src/agent/mesh_client.py` | Agent-side HTTP client. `wake_agent` / `create_task` accept optional `origin: MessageOrigin` and merge `origin_header(origin)` into headers. |
-| `src/agent/builtins/coordination_tool.py` | `hand_off` / `check_inbox` / `update_status` / `complete_task`. `hand_off` propagates `MessageOrigin` and forwards `task_id` so recipient's loop auto-closes. `check_inbox` surfaces back-edge `events[]` from `inbox/{agent}/task_event/`. |
-| `src/agent/builtins/file_tool.py` | File I/O with two-stage path traversal protection (`lstat()` for symlink safety) |
-| `src/agent/builtins/http_tool.py` | HTTP with CRED handles, SSRF protection, cross-origin auth header stripping |
-| `src/agent/builtins/tool_authoring.py` | Self-authoring with AST validation (`_FORBIDDEN_IMPORTS` / `_FORBIDDEN_CALLS` / `_FORBIDDEN_ATTRS`). The AST check is authoring HYGIENE, not a sandbox — the Docker container is the real boundary (agents already have `run_command`). Marketplace tools load without load-time AST validation (trusted because the dir is operator-populated + read-only). |
-| `src/agent/builtins/fleet_tool.py` | Operator-only `list_templates` / `apply_template`. Validates upfront; create loop is per-slot, not atomic (Constraint #3). |
-| `src/agent/builtins/operator_tools.py` | Operator-only orchestration. `edit_agent` is the unified edit surface (all fields apply immediately + undo receipt). `read_agent_config` is its inverse. `_OPERATOR_PERMISSION_CEILING` blocks `can_spawn` / `can_use_wallet`. |
-| `src/host/server.py` | Mesh FastAPI app — 109 endpoints, all permission-checked. `_RATE_LIMITS` enforces per-category limits. `_require_operator_or_internal` is a permission tier between standard agent auth and loopback-only `x-mesh-internal`. `pending_actions` is now delete-confirmations only. |
-| `src/host/runtime.py` | RuntimeBackend ABC → DockerBackend / SandboxBackend. Container hardening enforced here. MCP servers come from the wired `ConnectorStore` (`_mcp_servers_for(agent_id)` at every start) — `start_agent` has no `mcp_servers` param. |
-| `src/host/connectors.py` | `ConnectorStore` — fleet MCP connector catalog (`config/connectors.json`). THE single source of MCP servers: `MCPConnector` = stdio server definition + `agents: ["*"] \| [ids]` assignment; an agent-specific server is a connector assigned to one agent (no per-agent `mcp_servers` config exists). Edits apply on restart only — the dashboard Connectors page (sub-tab ID `integrations`, label "Connectors") returns `affected_agents` and prompts; never auto-restarts (`/api/agents/restart-batch` runs in the background, progress via restart events). Pending-restart is a generation derivation (`mark_dirty` touch-gen vs runtime `record_agent_start` snapshot-gen) — immune to the edit-during-container-build race. Per-connector degradation at start: a missing/denied `$CRED` drops THAT connector with an error log, never blocks the agent from booting. Fail-closed load, mtime auto-reload for hand-edited files, `remove_agent` lifecycle hook on agent delete. Connector writes are human/dashboard-only (operator agent reads via capabilities). |
-| `src/host/credentials.py` | Two-tier credential vault (SYSTEM_*/CRED_*) + LLM API proxy. OpenAI OAuth support. |
-| `src/host/permissions.py` | Per-agent ACL (glob patterns, deny-all default). `browser_actions: list[str] \| None` narrows per-action surface (`None` = all allowed, `[]` = deny all). |
-| `src/host/mesh.py` | Blackboard (SQLite WAL), PubSub, MessageRouter, `audit_log` with `undoable` + `archived` |
-| `src/host/lanes.py` | `LaneManager` per-agent FIFO task queues (followup/steer modes). `QueuedTask.task_id` field threads through `_direct_dispatch` to make auto-close work (Constraint #6). |
-| `src/host/cron.py` | Persistent cron scheduler. `_UPDATABLE_FIELDS` frozenset allowlist. `CronScheduler.ensure_summary_job` / `find_summary_job` bootstrap per-team daily summary jobs at `DEFAULT_SUMMARY_SCHEDULE = "0 9 * * *"`. |
-| `src/host/summaries.py` | `WorkSummariesStore` (SQLite WAL, 30-day reap). One row per `(scope_kind, scope_id, period_start)` — `scope_kind ∈ {team, solo}`. Ratings (`accepted`/`acknowledged`/`rework`) lock after `RATING_EDIT_WINDOW_SECONDS=86400`. |
-| `src/browser/service.py` | BrowserManager with per-agent Camoufox + X11 WID tracking. Fingerprint health monitor with burn detection; operator clears burn manually. |
-| `src/browser/captcha.py` | 2captcha + capsolver. Behavioral kinds rejected via `request_captcha_help` handoff. Millicent cost accounting, per-agent + per-tenant caps, kill switch, circuit breaker. |
-| `src/browser/flags.py` | Centralized flag loader. `_ENV_ONLY_FLAGS` strips solver creds from `config/settings.json` at load (env-only by design). |
-| `src/browser/stealth.py` | Anti-bot fingerprint. `BROWSER_DEVICE_PROFILE` rewrites UA, but underlying Camoufox engine unchanged — server-side TLS/JA3 may still read desktop. |
-| `src/browser/server.py` | Raises on startup if `MESH_AUTH_TOKEN` set but `BROWSER_AUTH_TOKEN` missing |
-| `src/browser/session_persistence.py` | Session continuity; opt-in via `BROWSER_SESSION_PERSISTENCE_ENABLED` (default false) |
-| `src/dashboard/server.py` | FastAPI router + ~141 endpoints + VNC URL injection. Alpine.js SPA, Jinja autoescape, CSP, CSRF via `X-Requested-With`. Four top-nav tabs (`chat`/`workplace`/`fleet`/`system`) — IDs frozen for URL stability (Constraint #5). Work tab lands directly on summary cards (PR 3 of Work-tab rewrite retired `/api/workplace/outputs` + `/api/workplace/feed` and the legacy team-status / team-outputs / activity-feed sub-surfaces). |
-| `src/dashboard/notifications.py` | Persistent notifications store (`dashboard_notifications` SQLite, WAL). Frozen `_KNOWN_KINDS = {delivered, approval, alert, info, blocker, credential}` for the top-nav bell. `delivered` is accepted by the store (historical rows still render) but PR 3 of the Work-tab rewrite removed the only producer that minted them on `task_status_changed`→`done` — the bell no longer dings per task completion; operator authors notifications explicitly via `notify_user` for genuinely user-facing events. Producers in `dashboard/server.py:_notifications_producer` are now: `approval` (pending_action_created), `alert` (health_change degradation, credit_exhausted), `credential` (credential_request, browser_login_request). |
-| `src/dashboard/telemetry.py` | Telemetry sink (`dashboard_telemetry` table) with `_MAX_EVENTS=100_000` retention cap and per-session rate limit. |
-| `src/channels/whatsapp.py` | WhatsApp Cloud API (`X-Hub-Signature-256` verification, warns when disabled) |
-| `src/templates/` | YAML fleet templates (starter, content, deep-research, devteam, monitor, sales, etc.) |
-
-## Cross-Repo Integration
-
-### Engine is standalone
-
-The engine has NO direct dependencies on app/ or provisioner/. No imports, no calls, no shared code. Integration is handled by provisioner and app externally.
-
-### Provisioner → Engine
-
-Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
-- Deploys code via `git clone` in cloud-init. Live update path in `provisioner/app/services/ssh.py:run_update()` runs git pull + Docker rebuild + `systemctl restart openlegion` over SSH.
-- Writes `.env` via SSH (base64 encoded to prevent injection).
-- Health checks by SSH-ing to localhost and hitting `GET /mesh/agents` with `x-mesh-internal: 1`.
-- Starts/stops via `systemctl restart openlegion`.
-
-### App → Engine (SSO)
-
-1. App generates HMAC token: `HMAC-SHA256(access_token, "{subdomain}:{expiry}")` → `{expiry}.{signature}`
-2. Redirects user to `https://{subdomain}.engine.openlegion.ai/__auth/callback?token=...`
-3. Auth gate (deployed via cloud-init) verifies HMAC, sets `ol_session` cookie (one-time-use, replay protection)
-4. Caddy reverse proxy uses `forward_auth` to check cookie on every request
-
-### Exposed Endpoints
-
-- `/mesh/agents` — health check target (provisioner hits via SSH + localhost)
-- `/__auth/callback` — SSO callback (handled by auth gate behind Caddy, not engine code)
-- Dashboard UI on :8420 — user-facing after SSO
-- `/agent-vnc/{agent_id}/{path}` — per-agent reverse proxy to that agent's KasmVNC port
-- `/ws/events` — WebSocket for real-time dashboard updates
-
-## Patterns & Conventions
-
-- `@tool` decorator for agent capabilities. `setup_logging("component.module")` for loggers.
-- All untrusted text passes through `sanitize_for_prompt()` at input boundaries before reaching the LLM.
-- Async by default (FastAPI + asyncio); blocking calls wrapped in `run_in_executor`.
-
-### Config & Environment
-- `.env` loaded via python-dotenv at CLI startup.
-- `OPENLEGION_SYSTEM_<PROVIDER>_API_KEY` — LLM provider keys (mesh-only). Agent creation validates that the chosen model's provider has credentials configured — `create_agent` / `apply_template` reject with HTTP 400 if e.g. you ask for `openai/gpt-4o-mini` but only the Anthropic key is set.
-- `OPENLEGION_CRED_<NAME>` — agent-tier credentials (distinct from SYSTEM tier above).
-- `OPENLEGION_MAX_AGENTS`, `OPENLEGION_MAX_TEAMS` — plan limits.
-- `OPENLEGION_BROWSER_MAX_CONCURRENT` (legacy alias `MAX_BROWSERS`) — per-service Camoufox cap. Startup-only; restart browser service to apply.
-
-### State
-- All SQLite with WAL mode — blackboard, memory, costs, cron, traces. No Redis, no external databases.
-
-### Security Boundaries
-
-- **Agents never hold API keys.** All LLM/API calls go through the mesh credential vault.
-- **AST validation on tool self-authoring is authoring HYGIENE, not a sandbox.** The `tool_authoring` AST checks (`_FORBIDDEN_IMPORTS` / `_FORBIDDEN_CALLS` / `_FORBIDDEN_ATTRS`, forgotten-`await` detection) catch obvious footguns in self-authored code; they do NOT contain a malicious agent. Agents already have `run_command` (in-container code execution by design), so the AST validator is not — and was never — a security boundary. **The Docker container hardening is the real boundary.** Marketplace tools (`/app/marketplace_tools`) are loaded WITHOUT load-time AST validation; they are trusted because that directory is operator-populated and read-only. If a remote / agent-reachable marketplace install path is ever added, pin installs to a verified commit SHA. See `docs/security-remediation-review-2026-05-29.md` (M1, H15).
-- **Permission checks default-deny** on every mesh endpoint; rate limits on state-mutating endpoints.
-- **SSRF protection** = `http_tool` DNS pin + IP blocklist (RFC1918, loopback, CGNAT, 6to4, Teredo, IPv4-mapped IPv6) for agent traffic, plus the browser-container iptables egress filter (see `docker/browser-entrypoint.sh`; operator override via `BROWSER_EGRESS_ALLOWLIST`). For browser traffic the iptables filter is the AUTHORITATIVE anti-rebinding layer in the default bridge deployment — the mesh-side `_resolve_and_pin()` URL check on `navigate`/`open_tab` is best-effort only and covers just those two paths (M20). See `docs/security-remediation-review-2026-05-29.md`.
-- **All untrusted text sanitized** via `sanitize_for_prompt()` at input boundaries.
-- **Path traversal protection** — two-stage check in `file_tool.py` (`lstat()` for symlinks), workspace uses `resolve` + `is_relative_to`.
-- **CSRF** via required `X-Requested-With` header on dashboard state-changing endpoints.
-- **Container hardening** — non-root UID 1000, `cap_drop=[ALL]`, `no-new-privileges`, `read_only=True`, `tmpfs=/tmp`, mem 384m, 0.15 CPU, `pids_limit=256`. Browser container is similar but has a writable `/home/browser`.
-- **Chain-break observability counter.** `chain_breaks_24h_count` on `/mesh/system/metrics` counts `done` tasks per assignee with no child task referencing them via `parent_task_id` and no outcome set, within the trailing 24h window. Surfaces silent workflow terminations (agent finished work without handing off to a successor) to the operator's heartbeat without manual `workflow_snapshot` polling. Paired with the `task_completed_without_handoff` `DashboardEvent` literal emitted by `Tasks.update_status` at the `done` transition. Observability-only — NO enforcement. Operator's own tasks are excluded at the ``/mesh/system/metrics`` layer (matches the existing convention used by ``outcome_rejected_24h_count`` / ``execution_failures_24h_count`` / ``stale_tasks_24h_count``); ``Tasks.chain_breaks_24h`` itself returns the unfiltered per-assignee count.
-- **Model allowlist validation at config-write time.** `create_agent` (POST `/mesh/agents/create`), `edit_agent` (PUT `/mesh/agents/{id}/edit-soft` when `field == "model"`), and `apply_template` (POST `/mesh/templates/apply` — top-level `model` override + each `agent_overrides[].model` + each slot's template-default model) reject HTTP 400 when `CredentialVault.is_model_compatible(model)` returns false — same gate the LLM proxy runs at call time. Surfaces OAuth-allowlist rejections (e.g. the OpenAI OAuth subset is `{gpt-5, gpt-5-mini, gpt-5-pro, gpt-5.3-codex}` — see `_OAUTH_ALLOWED_MODELS` in `credentials.py`) BEFORE the bad config persists. Mirrored on the CLI path in `cli/config.py:_create_agent_from_template` so `apply_template` doesn't silently mint dead-on-arrival agents from either side. Single source of truth: `credentials.py:is_model_compatible` returning `(bool, reason_str | None)`.
-- **Failure reason surfacing.** `tasks.blocker_note` is the non-success status-reason column — covers `blocked` (recoverable, original semantic) AND `failed` (terminal failure, Bug 3 "silent model rejection"). `cancelled` deliberately stays None (manual user action, no error to surface); `done` clears the column. The mesh endpoint `/mesh/tasks/{task_id}/status` promotes `body["error"]` to `blocker_note` (truncated 500 chars) on failed transitions when no explicit `blocker_note` was passed — covers the agent loop's `set_task_status(task_id, "failed", error=...)` auto-close path. The lane manager passes `blocker_note=` directly on quarantine + timeout transitions. The dashboard task drill-in modal renders the note as a coloured banner (amber for `blocked`, red for `failed`). `workflow_snapshot` surfaces `blocker_note` per stage for operator heartbeat inspection.
-
-## Dependencies & Infrastructure
-
-- **Runtime**: Python 3.10+, FastAPI, asyncio.
-- **Isolation**: Docker containers per agent, bridge network (`openlegion_agents`). `Dockerfile.agent` and `Dockerfile.browser` in repo root.
-- **Browser**: Shared container running one Camoufox + Xvnc + Openbox + unclutter stack per agent (displays 100..163, KasmVNC ports 6100..6163).
-- **Dashboard**: Alpine.js SPA — no React, no build step (Tailwind via CDN).
-- **CI**: GitHub Actions — ruff lint + pytest on Python 3.11 and 3.12.
-- **Dependencies**: `pyproject.toml` uses minimum version bounds (`>=`), no lock file. See `pyproject.toml` for the dep list.
-
-## Known Constraints & Decisions
-
-1. **Fleet model, not hierarchy.** No CEO agent. Users talk to agents directly. Agents coordinate through blackboard.
-2. **Tools over features.** New agent capabilities go in as `@tool`-decorated functions, not loop changes.
-3. **`apply_template` is per-slot, not atomic.** Mesh validates upfront, but the create loop is not transactional — a mid-loop failure leaves earlier-created agents in place. Verify the returned `created` list matches the requested slot set.
-4. **`MessageOrigin` propagation.** `wake_agent` and `create_task` both accept optional `origin: MessageOrigin`. New cross-agent paths producing work for another agent should read `current_origin` once and forward it to both calls — otherwise the receiving lane worker can't auto-notify the originating channel/user on handoff completion.
-5. **Tab IDs are frozen for URL stability.** The four top-nav tab IDs (`chat`, `fleet`, `workplace`, `system`) appear in URL paths, JS state, and dashboard endpoints. Labels diverge (`fleet`→"Teams", `workplace`→"Work", `system`→"Settings") but renaming the IDs would break deep-links and persisted prefs.
-6. **Auto-close requires task_id plumbing.** Handed-off tasks auto-transition to terminal status only when the wake chain carries `x-task-id` (via `wake_agent(task_id=...)`, threaded through `LaneManager.QueuedTask.task_id` and the `_direct_dispatch` header). Wake calls without a task_id (heartbeats, manual chats) won't auto-close — intentional. Back-edge events go to `inbox/{agent}/task_event/{id}` with a 7-day TTL; surfaced via `check_inbox`.
-7. **LLM tool-calling roles must alternate.** `user → assistant(tool_calls) → tool(result) → assistant`. `_trim_context` merges summary into first user message to preserve this invariant.
-8. **Module-level globals.** `_tool_staging` in `tools.py` (threading-lock protected), `_client` in `http_tool.py` (connection pool). Avoid adding more.
-9. **Project→team rename completed 2026-05.** Remaining shims: `MeshClient.*_project` proxies + `AgentPermissions.can_manage_projects` validator (internal callers, deferred); `tasks.project_id` dict-key emission alongside `team_id` (pending external-consumer audit). Internal namespaces unchanged: blackboard `projects/{name}/` prefix, `target_kind="project"` on `pending_actions`. `src/host/team_migration.py` startup migrator scheduled for removal next release.
-10. **Coordination-tool failure envelopes.** Errors from `hand_off` / `update_status` / `complete_task` wrap exceptions via `_failed_transition_envelope` so the LLM sees `handed_off=False` + a directive `error` ("MUST NOT report success") + `recovery_hint`. Sentinel keys merge AFTER caller `extras` to prevent shadowing. Without this shape, LLMs silently report success when handoffs fail post-commit.
-11. **Wizard state machine: `idle | ask | confirming | building | first-output | build_failed`.** Persisted to `localStorage.ol_wizard`; resets to `idle` on unknown values. Wizard mounts only when `step !== 'idle'`. Mutually exclusive with the "What's new" tour (existing-fleet users only, in-memory state).
-12. **Operator trust-tier carve-out.** `_caller_is_operator` short-circuits 14 coordination/management gates (`can_message`, `can_publish`, `can_subscribe`, `can_use_api`, `can_manage_cron`, `can_manage_fleet`, `can_route_tasks`, `can_spawn`, blackboard read/write/list/watch/claim/delete). Still gated like any worker: `can_use_wallet*`, `can_access_credential`, `can_manage_vault`, `can_browser_action`. `test_operator_still_gated_surfaces_not_in_bypass_grep` pins the boundary. Boot fail-closed: empty `auth_tokens` under `enforce` mode → `SystemExit` (X-Agent-ID would be forgeable).
+- ALWAYS run tests in a subagent — keeps test output out of the main context window.
+- Mock LLM responses, not the loop — see `tests/test_loop.py:_make_loop()`. Use `AsyncMock` for async methods; SQLite in-memory or `tmp_path` for DB paths.
+- E2E tests (`tests/test_e2e*.py`) skip gracefully without Docker + an API key.
+- Ruff: py310 target, line length 120 (config in `pyproject.toml`). CI: GitHub Actions — ruff + pytest on 3.11/3.12, sharded 3 ways with `--dist=loadfile`.
 
 ## Git Workflow
 
@@ -163,20 +28,127 @@ Provisioner manages engine instances via Docker/systemd on Hetzner VPS:
 
 ## Work Patterns
 
-- **Use subagents to parallelize independent work.** Dispatch concurrent subagents rather than working sequentially.
-- **Always run tests in a subagent.** Keeps test output out of the main context window.
-- **Use Explore subagents for broad codebase research.** Reserve direct Glob/Grep for targeted, known-location searches.
+- Dispatch concurrent subagents for independent work rather than working sequentially.
+- Use Explore subagents for broad codebase research; reserve direct Glob/Grep for targeted, known-location searches.
 
-## Testing
+## Architecture
 
-```bash
-# Unit + integration (fast, no Docker needed)
-pytest tests/ --ignore=tests/test_e2e.py --ignore=tests/test_e2e_chat.py --ignore=tests/test_e2e_memory.py --ignore=tests/test_e2e_triggering.py -x
-
-# Single test file
-pytest tests/test_loop.py -x -v
+```
+User (CLI REPL / Telegram / Discord / Slack / WhatsApp / Webhook)
+  → Mesh Host (FastAPI :8420) — routes messages, enforces permissions, proxies APIs, VNC proxy
+    → Agent Containers (FastAPI :8400 each) — isolated execution with private memory
+    → Browser Service Container (FastAPI :8500) — per-agent Camoufox + Xvnc/Openbox stacks
 ```
 
-- Mock LLM responses, not the loop. See `tests/test_loop.py:_make_loop()`.
-- `AsyncMock` for async methods, SQLite in-memory or `tmp_path` for DB paths.
-- E2E tests skip gracefully without Docker + API key.
+Three trust zones: **User** (full trust), **Mesh** (trusted coordinator), **Agents** (untrusted, sandboxed). All cross-zone communication is HTTP + JSON with Pydantic contracts from `src/shared/types.py`.
+
+Stack: Python 3.10+, FastAPI, asyncio. Docker isolation (`Dockerfile.agent` / `Dockerfile.browser`, bridge network `openlegion_agents`). Dashboard is an Alpine.js SPA — no React, no build step. Deps in `pyproject.toml` (`>=` bounds, no lock file).
+
+### Entry Points
+
+| Entry Point | File | What It Starts |
+|---|---|---|
+| `openlegion` CLI | `src/cli/__main__.py` → `src/cli/main.py` | CLI commands (start/stop/chat/status/tasks/wallet/… — see `main.py` for the full set) |
+| Agent container | `src/agent/__main__.py` → `src/agent/server.py` | Agent FastAPI server on :8400 |
+| Browser service | `src/browser/__main__.py` → `src/browser/server.py` | FastAPI on :8500 (per-agent X stack spawned lazily) |
+| Mesh host | `src/host/server.py` | FastAPI app on :8420 (started by CLI) |
+| Dashboard | `src/dashboard/server.py` | Mounted as router on mesh host |
+
+### Module Quirks
+
+Only modules with non-obvious behavior are listed. The rest are visible by reading the tree.
+
+| Path | Quirk |
+|---|---|
+| `src/shared/types.py` | THE cross-component contract (Pydantic). `HARD_EDIT_FIELDS` / `SOFT_EDIT_FIELDS` drive the undo-receipt TTL split — all edits apply immediately, TTL is just the Undo window. `DashboardEvent.type` enumerates WebSocket event names. |
+| `src/shared/utils.py`, `redaction.py` | `sanitize_for_prompt()`, `setup_logging()`; central credential/URL redactor (`redact_url`, `deep_redact`). |
+| `src/agent/loop.py` | Agent execution loop (task + chat). Auto-closes handed-off tasks when `x-task-id` rides the wake chain. |
+| `src/agent/server.py` | `_FILE_CAPS` enforced on workspace writes; `_WORKSPACE_ALLOWLIST` gates reads/writes. |
+| `src/agent/context.py` | Context window management (write-then-compact); empty summary falls back to hard prune. |
+| `src/agent/workspace.py` | Persistent markdown workspace. Bootstrap files: TEAM.md (legacy `PROJECT.md` resolves read-only), SOUL/USER/INSTRUCTIONS/MEMORY/INTERFACE/HEARTBEAT. |
+| `src/agent/mesh_client.py` | `wake_agent` / `create_task` accept optional `origin: MessageOrigin` and merge it into headers (Constraint #4). |
+| `src/agent/builtins/coordination_tool.py` | `hand_off` propagates origin and forwards `task_id` so the recipient's loop auto-closes. `check_inbox` surfaces back-edge `events[]` from `inbox/{agent}/task_event/`. Failure envelopes: Constraint #10. |
+| `src/agent/builtins/file_tool.py` | Two-stage path-traversal protection (`lstat()` for symlink safety). |
+| `src/agent/builtins/http_tool.py` | CRED handles, SSRF protection, cross-origin auth header stripping. |
+| `src/agent/builtins/tool_authoring.py` | Self-authoring with AST validation (`_FORBIDDEN_IMPORTS` / `_FORBIDDEN_CALLS` / `_FORBIDDEN_ATTRS`) — hygiene, not a sandbox (see Deliberate Tradeoffs). |
+| `src/agent/builtins/fleet_tool.py` | Operator-only `list_templates` / `apply_template`. Validates upfront; create loop is per-slot, not atomic (Constraint #3). |
+| `src/agent/builtins/operator_tools.py` | Operator-only orchestration. `edit_agent` is the unified edit surface (immediate apply + undo receipt); `read_agent_config` is its inverse. `_OPERATOR_PERMISSION_CEILING` blocks `can_spawn` / `can_use_wallet`. |
+| `src/host/server.py` | Mesh FastAPI app — every endpoint permission-checked. `_RATE_LIMITS` enforces per-category limits. `_require_operator_or_internal` sits between standard agent auth and loopback-only `x-mesh-internal`. `pending_actions` is delete-confirmations only. |
+| `src/host/runtime.py` | RuntimeBackend ABC → DockerBackend / SandboxBackend. Container hardening enforced here. MCP servers come from the wired `ConnectorStore` at every start — `start_agent` has no `mcp_servers` param. |
+| `src/host/connectors.py` | `ConnectorStore` (`config/connectors.json`) — THE single source of MCP servers. `MCPConnector` = stdio server definition + `agents: ["*"] \| [ids]`; an agent-specific server is just a connector assigned to one agent. Edits apply on restart only — the dashboard Connectors page returns `affected_agents` and prompts; it never auto-restarts. Pending-restart is a generation derivation (immune to the edit-during-container-build race). A missing/denied `$CRED` drops that one connector with an error log — never blocks agent boot. Connector writes are human/dashboard-only. |
+| `src/host/credentials.py` | Two-tier vault (SYSTEM_*/CRED_*) + LLM API proxy + OAuth. `is_model_compatible` is the single source of truth for model-allowlist checks (OAuth model subsets are env-overridable — read the code, not stale lists). |
+| `src/host/permissions.py` | Per-agent ACL (glob patterns, deny-all default). `browser_actions: list[str] \| None` narrows per-action surface (`None` = all allowed, `[]` = deny all). |
+| `src/host/mesh.py` | Blackboard (SQLite WAL), PubSub, MessageRouter, `audit_log` with `undoable` + `archived`. |
+| `src/host/lanes.py` | `LaneManager` per-agent FIFO task queues (followup/steer). `QueuedTask.task_id` threads through `_direct_dispatch` to make auto-close work (Constraint #6). |
+| `src/host/chain_watcher.py` | Delegate-and-subscribe machinery: durable chain watcher, stall watchdog, opt-in milestone pings. Delivers only to the chain-root first-party human origin. |
+| `src/host/cron.py` | Persistent cron scheduler. `_UPDATABLE_FIELDS` frozenset allowlist. Bootstraps per-team daily summary jobs (`ensure_summary_job`). |
+| `src/host/summaries.py` | `WorkSummariesStore` — one row per `(scope_kind, scope_id, period_start)`, `scope_kind ∈ {team, solo}`. Ratings lock after a 24h edit window. `feedback_push.py` closes the rating→learning loop. |
+| `src/browser/service.py` | Per-agent Camoufox + X11 WID tracking. Fingerprint burn detection; operator clears burn manually. `display_allocator.py` owns the display/VNC-port ranges. |
+| `src/browser/captcha.py` | 2captcha + capsolver. Behavioral kinds rejected via `request_captcha_help` handoff. Millicent cost accounting, per-agent + per-tenant caps, kill switch, circuit breaker. |
+| `src/browser/flags.py` | Centralized flag loader. `_ENV_ONLY_FLAGS` strips solver creds from `config/settings.json` at load (env-only by design). |
+| `src/browser/stealth.py` | `BROWSER_DEVICE_PROFILE` rewrites UA, but the underlying Camoufox engine is unchanged — server-side TLS/JA3 may still read desktop. |
+| `src/browser/server.py` | Raises on startup if `MESH_AUTH_TOKEN` set but `BROWSER_AUTH_TOKEN` missing. Session persistence is opt-in via `BROWSER_SESSION_PERSISTENCE_ENABLED` (default false). |
+| `src/dashboard/server.py` | Alpine.js SPA, Jinja autoescape, CSP, CSRF via `X-Requested-With`, VNC URL injection. Four top-nav tabs with frozen IDs (Constraint #5). |
+| `src/dashboard/notifications.py` | Top-nav bell store; `_KNOWN_KINDS` is frozen. No automatic per-task-completion notifications — the operator authors genuinely user-facing ones via `notify_user`. |
+| `src/channels/whatsapp.py` | WhatsApp Cloud API (`X-Hub-Signature-256` verification, warns when disabled). |
+| `src/templates/` | YAML fleet templates (starter, devteam, deep-research, monitor, sales, …). |
+
+## Cross-Repo Integration
+
+Engine is standalone — NO imports, calls, or shared code with app/ or provisioner/. Integration happens externally:
+
+- **Provisioner → Engine**: manages instances via Docker/systemd on Hetzner VPS. Deploys via `git clone` cloud-init; live updates run git pull + Docker rebuild + `systemctl restart openlegion` over SSH (`provisioner/app/services/ssh.py:run_update()`). Writes `.env` via SSH (base64-encoded). Health-checks `GET /mesh/agents` with `x-mesh-internal: 1` from localhost.
+- **App → Engine (SSO)**: app generates `HMAC-SHA256(access_token, "{subdomain}:{expiry}")`, redirects to `https://{subdomain}.engine.openlegion.ai/__auth/callback?token=...`; the auth gate (deployed via cloud-init, not engine code) verifies and sets a one-time `ol_session` cookie; Caddy `forward_auth` checks it on every request.
+- **Exposed surfaces**: `/mesh/agents` (health), `/__auth/callback` (SSO), dashboard on :8420, `/agent-vnc/{agent_id}/{path}` (per-agent KasmVNC proxy), `/ws/events` (dashboard WebSocket).
+
+## Patterns & Conventions
+
+- `@tool` decorator for agent capabilities. `setup_logging("component.module")` for loggers.
+- Pass ALL untrusted text through `sanitize_for_prompt()` at input boundaries before it reaches the LLM.
+- Async by default (FastAPI + asyncio); wrap blocking calls in `run_in_executor`.
+- All state is SQLite with WAL mode — blackboard, memory, costs, cron, traces. No Redis, no external databases.
+
+### Config & Environment
+
+- `.env` loaded via python-dotenv at CLI startup.
+- `OPENLEGION_SYSTEM_<PROVIDER>_API_KEY` — LLM provider keys (mesh-only). `create_agent` / `apply_template` reject HTTP 400 if the chosen model's provider has no credentials configured.
+- `OPENLEGION_CRED_<NAME>` — agent-tier credentials (distinct from SYSTEM tier).
+- `OPENLEGION_MAX_AGENTS`, `OPENLEGION_MAX_TEAMS` — plan limits.
+- `OPENLEGION_BROWSER_MAX_CONCURRENT` — per-service Camoufox cap. Startup-only; restart browser service to apply.
+
+## Security Boundaries
+
+Security-first posture with deliberate UX tradeoffs (next section). Before changing anything security-shaped, read `docs/security-audit-2026-05-29.md` and `docs/security-remediation-review-2026-05-29.md`.
+
+- **Agents never hold API keys.** All LLM/API calls go through the mesh credential vault and proxy (`src/agent/llm.py` routes through the mesh).
+- **Permission checks default-deny** on every mesh endpoint; rate limits on state-mutating endpoints.
+- **Container hardening is the real agent sandbox**: non-root UID 1000, `cap_drop=[ALL]`, `no-new-privileges`, `read_only=True`, `tmpfs=/tmp`, memory/CPU/pids limits — enforced in `runtime.py` (operator container gets tighter limits than workers; browser container is similar but with a writable `/home/browser`).
+- **SSRF**: agent HTTP = `http_tool` DNS pin + IP blocklist (RFC1918, loopback, CGNAT, 6to4, Teredo, IPv4-mapped IPv6). Browser traffic = the container iptables egress filter (`docker/browser-entrypoint.sh`, operator override via `BROWSER_EGRESS_ALLOWLIST`) is the AUTHORITATIVE anti-rebinding layer; the mesh-side `_resolve_and_pin()` check covers only `navigate`/`open_tab` and is best-effort (M20).
+- **Model allowlist at config-write time**: `create_agent`, `edit_agent` (model field), and `apply_template` (every model field, including per-slot template defaults) reject HTTP 400 when `credentials.py:is_model_compatible` fails — the same gate the LLM proxy runs at call time. Mirrored on the CLI path (`cli/config.py:_create_agent_from_template`).
+- **Failure reasons must surface**: `tasks.blocker_note` carries the status reason for `blocked` (recoverable) and `failed` (terminal); `cancelled` deliberately stays None; `done` clears it. The mesh status endpoint promotes `body["error"]` to `blocker_note` on failed transitions; the dashboard renders it as a banner; `workflow_snapshot` exposes it per stage.
+- **Chain-break observability**: `chain_breaks_24h_count` on `/mesh/system/metrics` counts done tasks with no successor task and no outcome (silent workflow terminations), paired with the `task_completed_without_handoff` event. Observability only — NO enforcement; operator's own tasks are excluded at the metrics layer.
+- **Path traversal**: two-stage check in `file_tool.py`; workspace uses `resolve` + `is_relative_to`. **CSRF**: required `X-Requested-With` header on dashboard state-changing endpoints.
+
+## Deliberate Tradeoffs — do NOT "fix" these
+
+Intentional product decisions that can look like security gaps. Do not revert or "harden" them without an explicit user decision:
+
+- **Operator internet access.** `can_use_internet` defaults to False for workers, but the operator agent is granted it by default (`_ensure_operator_agent`). Intentional UX tradeoff.
+- **Dashboard permission edits have NO operator ceiling** (`PUT /api/agents/{id}/permissions`). That path is the human's deliberate escalation surface; `_OPERATOR_PERMISSION_CEILING` applies only to the LLM/mesh edit path. Don't add a ceiling or a config toggle to the dashboard path (audit H1).
+- **The blackboard is shared by design** (audit H10). Don't naively enforce per-team key prefixes — it breaks the default agent and template coordination. Team scoping goes through team wiring.
+- **AST validation on self-authored tools is hygiene, not a sandbox.** Agents already have `run_command` (in-container code execution by design); the Docker container is the boundary. Marketplace tools (`/app/marketplace_tools`) load WITHOUT AST validation — trusted because the dir is operator-populated and read-only. If a remote/agent-reachable install path is ever added, pin installs to a verified commit SHA (M1, H15).
+- **Operator trust-tier carve-out.** `_caller_is_operator` short-circuits the coordination/management gates (messaging, pubsub, cron, fleet, task routing, spawn, blackboard ops) by design. Still gated like any worker: `can_use_wallet*`, `can_access_credential`, `can_manage_vault`, `can_browser_action`. `test_operator_still_gated_surfaces_not_in_bypass_grep` pins the boundary. Boot fail-closed: empty `auth_tokens` under `enforce` mode → `SystemExit` (X-Agent-ID would be forgeable).
+
+## Known Constraints & Decisions
+
+1. **Fleet model, not hierarchy.** No CEO agent. Users talk to agents directly; agents coordinate through the blackboard.
+2. **Tools over features.** New agent capabilities go in as `@tool`-decorated functions, not loop changes.
+3. **`apply_template` is per-slot, not atomic.** Mesh validates upfront, but a mid-loop failure leaves earlier-created agents in place — verify the returned `created` list matches the requested slot set.
+4. **Propagate `MessageOrigin`.** New cross-agent paths producing work for another agent must read `current_origin` once and forward it to both `wake_agent` and `create_task` — otherwise the receiving lane worker can't auto-notify the originating channel/user on handoff completion.
+5. **Tab IDs are frozen for URL stability.** The four top-nav tab IDs (`chat`, `fleet`, `workplace`, `system`) appear in URL paths, JS state, and dashboard endpoints. Labels may diverge (`fleet`→"Teams", `workplace`→"Work", `system`→"Settings") but never rename the IDs.
+6. **Auto-close requires task_id plumbing.** Handed-off tasks auto-transition to terminal status only when the wake chain carries `x-task-id`. Wakes without one (heartbeats, manual chats) won't auto-close — intentional. Back-edge events go to `inbox/{agent}/task_event/{id}` (7-day TTL), surfaced via `check_inbox`.
+7. **LLM tool-calling roles must alternate** (`user → assistant(tool_calls) → tool(result) → assistant`). `_trim_context` merges the summary into the first user message to preserve this invariant.
+8. **Avoid new module-level globals.** Existing exceptions: `_tool_staging` in `tools.py` (lock-protected), `_client` in `http_tool.py` (connection pool).
+9. **Project→team rename (2026-05) shims remain**: `MeshClient.*_project` proxies, `can_manage_projects` validator, `tasks.project_id` emitted alongside `team_id` (pending external-consumer audit). Internal namespaces unchanged: blackboard `projects/{name}/` prefix, `target_kind="project"` on `pending_actions`. `src/host/team_migration.py` is a startup migrator pending removal.
+10. **Coordination-tool failure envelopes.** Errors from `hand_off` / `update_status` / `complete_task` wrap via `_failed_transition_envelope` so the LLM sees `handed_off=False` + a directive `error` + `recovery_hint`; sentinel keys merge AFTER caller `extras`. Without this shape, LLMs silently report success when handoffs fail post-commit.
+11. **Wizard state machine** `idle | ask | confirming | building | first-output | build_failed`, persisted to `localStorage.ol_wizard`; resets to `idle` on unknown values; mounts only when `step !== 'idle'`; mutually exclusive with the "What's new" tour.
