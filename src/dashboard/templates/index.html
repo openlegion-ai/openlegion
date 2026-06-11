@@ -5202,6 +5202,10 @@
                         :class="connectorProbeResult[c.name]?.ok ? 'bg-emerald-900/30 text-emerald-400 border border-emerald-800/40' : 'bg-red-900/20 text-red-400 border border-red-800/30'"
                         :title="connectorProbeResult[c.name]?.ok ? (connectorProbeResult[c.name].tools_count + ' tools discovered') : (connectorProbeResult[c.name]?.error || 'Connection failed')"
                         x-text="connectorProbeResult[c.name]?.ok ? (connectorProbeResult[c.name].tools_count + ' tools') : 'failed'"></span>
+                  <a x-show="c.transport === 'http' && ((c.auth?.kind === 'oauth' && !c.auth?.connection) || connectorProbeResult[c.name]?.needs_auth)"
+                     :href="'/dashboard/integrations/mcp/' + encodeURIComponent(c.name) + '/connect'"
+                     class="text-[11px] px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors shrink-0"
+                     title="Authorize via the server's OAuth flow — endpoints are auto-discovered">Connect</a>
                   <button type="button" x-show="c.transport === 'http'" @click="probeConnector(c.name)"
                           :disabled="connectorProbing === c.name"
                           class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[11px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-all shrink-0 disabled:opacity-50"
@@ -5269,11 +5273,10 @@
             <div x-show="connectorDraft?._transport === 'http'">
               <label class="text-[11px] text-gray-400 block mb-0.5">Authentication</label>
               <div class="flex items-center gap-1.5 flex-wrap">
-                <select x-model="connectorDraft._authKind" class="dash-select text-[11px]"
-                        :disabled="connectorDraft?._authKind === 'oauth'">
+                <select x-model="connectorDraft._authKind" class="dash-select text-[11px]">
                   <option value="none">None</option>
                   <option value="bearer">API key (vault credential)</option>
-                  <option value="oauth" disabled>OAuth — coming soon</option>
+                  <option value="oauth">OAuth (auto-discover)</option>
                 </select>
                 <template x-if="connectorDraft?._authKind === 'bearer'">
                   <select x-model="connectorDraft._authCred" class="dash-select flex-1 min-w-40">
@@ -5284,7 +5287,10 @@
                   </select>
                 </template>
                 <template x-if="connectorDraft?._authKind === 'oauth'">
-                  <span class="text-[11px] text-gray-400">Connection: <span class="font-mono" x-text="connectorDraft?._authConnection || '—'"></span> (managed by the Connect flow)</span>
+                  <span class="text-[11px] text-gray-400"
+                        x-text="connectorDraft?._authConnection
+                          ? 'Connected as: ' + connectorDraft._authConnection
+                          : 'Save, then click Connect on the connector row — endpoints are auto-discovered from the server.'"></span>
                 </template>
               </div>
               <div class="text-[11px] text-gray-500 italic mt-1">The key stays in the vault — the mesh sends it per call; agents never see it. Auth changes apply immediately, no restart.</div>

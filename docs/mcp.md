@@ -83,8 +83,27 @@ authorization gate — deny-all default, **operator included** (the
 trust-tier carve-out does not extend here; pinned by an HTTP-level
 test). The dashboard's **Test** button calls
 `POST /api/connectors/{name}/probe` for a fresh initialize + discovery;
-`needs_auth: true` marks connectors awaiting the OAuth Connect flow
-(Phase 3).
+`needs_auth: true` renders the **Connect** affordance.
+
+**OAuth (paste URL → Connect):** for `auth.kind: "oauth"`, the Connect
+button starts `GET /dashboard/integrations/mcp/{name}/connect` —
+endpoint discovery (RFC 9728 protected-resource metadata →
+`authorization_servers[0]` → RFC 8414 AS metadata), Dynamic Client
+Registration (RFC 7591; falls back from `client_secret_post` to a
+public client; **no bring-your-own-client fallback** — a server
+without DCR gets an error naming the failed step), then PKCE S256 +
+`resource` (RFC 8707) through the existing single-use, session-bound
+state store. The callback exchanges the code (public-client capable),
+stores the connection with the **discovered token endpoint + client
+identity embedded in the blob** — `ensure_connection_token` prefers
+blob fields over the static provider registry, so refresh works with
+no registry entry — and binds `auth.connection` to the connector as an
+auth-only edit (no restart; gateway cache invalidated). Connections
+without a refresh token are accepted: expiry surfaces as `needs_auth`
+on probe → reconnect. Everything discovery returns is server-controlled
+input and passes the same SSRF posture as the gateway
+(`src/host/mcp_oauth.py`: https-only, resolved-IP blocklist, no
+redirects, 64 KB caps).
 
 **Downgrade note:** an older engine version loads a catalog containing
 `http` records by dropping them per-record with an error log (stdio

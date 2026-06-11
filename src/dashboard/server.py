@@ -4946,6 +4946,152 @@ def create_dashboard_router(
         _emit_config_changed("integrations", name=pending.connection_name, provider=provider)
         return _back(f"integration_connected={pending.connection_name}")
 
+    # ── MCP connector OAuth (paste URL → Connect) ─────────────
+    #
+    # Same dance as the provider flow above, but the endpoints are
+    # DISCOVERED from the remote MCP server (RFC 9728 → 8414) and the
+    # client identity is minted via Dynamic Client Registration (RFC
+    # 7591) — there is no registry entry and no BYO client-id fallback
+    # (plan §11-Q4: a server without DCR gets a diagnosable error).
+    # Everything discovery returns is server-controlled input and goes
+    # through the D16 SSRF posture in src/host/mcp_oauth.py. The
+    # discovered token endpoint + client identity ride the single-use
+    # state entry (server-side) and end up EMBEDDED in the connection
+    # blob so refresh-on-resolve works with no registry (plan §7.1).
+
+    @api_router.get("/integrations/mcp/{name}/connect")
+    async def mcp_connector_connect(name: str, request: Request):
+        """Begin the OAuth dance for a remote MCP connector."""
+        from fastapi.responses import RedirectResponse
+
+        from src.host.mcp_oauth import MCPOAuthError, discover, register_client
+        from src.host.oauth_providers import generate_pkce
+        from src.shared.types import HttpConnector
+        if credential_vault is None or connector_store is None:
+            raise HTTPException(503, "Connector catalog or vault not available")
+        c = connector_store.get(name)
+        if not isinstance(c, HttpConnector):
+            raise HTTPException(404, f"Unknown remote connector: {name}")
+        redirect_uri = (
+            f"{_public_base_url(request)}/dashboard/integrations/mcp/"
+            f"{c.name}/callback"
+        )
+        try:
+            disco = await discover(c.url)
+            if disco.registration_endpoint is None:
+                raise MCPOAuthError(
+                    "client registration",
+                    "the authorization server does not support Dynamic "
+                    "Client Registration — one-click Connect is not "
+                    "possible for this server",
+                )
+            client_id, client_secret = await register_client(
+                disco.registration_endpoint, redirect_uri,
+            )
+        except MCPOAuthError as exc:
+            raise HTTPException(
+                502, f"OAuth setup failed at {exc.step}: {exc}",
+            ) from exc
+        verifier, challenge = generate_pkce()
+        conn_name = re.sub(r"[^a-z0-9_]", "_", f"mcp_{c.name.lower()}")[:64]
+        state = _oauth_state_store.create(
+            provider=f"mcp:{c.name.lower()}",
+            connection_name=conn_name,
+            scopes=(),  # AS defaults; MCP servers scope via `resource`
+            code_verifier=verifier,
+            redirect_uri=redirect_uri,
+            session_hash=_oauth_session_hash(request),
+            extra={
+                "token_endpoint": disco.token_endpoint,
+                "client_id": client_id,
+                "client_secret": client_secret or "",
+                "resource": c.url,
+            },
+        )
+        from urllib.parse import urlencode
+        params = urlencode({
+            "response_type": "code",
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "state": state,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "resource": c.url,  # RFC 8707
+        })
+        sep = "&" if "?" in disco.authorization_endpoint else "?"
+        return RedirectResponse(
+            f"{disco.authorization_endpoint}{sep}{params}", status_code=302,
+        )
+
+    @api_router.get("/integrations/mcp/{name}/callback")
+    async def mcp_connector_callback(
+        name: str, request: Request,
+        code: str = "", state: str = "", error: str = "",
+    ):
+        """AS redirect target for a remote MCP connector."""
+        from fastapi.responses import RedirectResponse
+
+        from src.shared.types import ConnectorAuth, HttpConnector
+
+        def _back(params: str):
+            return RedirectResponse(f"/dashboard/?{params}", status_code=302)
+
+        if error:
+            return _back(
+                f"integration_error={re.sub(r'[^a-zA-Z0-9_-]', '', error)[:64]}",
+            )
+        if credential_vault is None or connector_store is None:
+            return _back("integration_error=unavailable")
+        pending = _oauth_state_store.consume(
+            state, session_hash=_oauth_session_hash(request),
+        )
+        if (
+            pending is None
+            or pending.provider != f"mcp:{name.lower()}"
+            or not code
+        ):
+            return _back("integration_error=invalid_state")
+        extra = pending.extra
+        try:
+            conn = await credential_vault.exchange_code_dynamic(
+                token_endpoint=extra["token_endpoint"],
+                client_id=extra["client_id"],
+                client_secret=extra.get("client_secret") or None,
+                code=code,
+                redirect_uri=pending.redirect_uri,
+                code_verifier=pending.code_verifier,
+                resource=extra.get("resource") or None,
+                provider_label=pending.provider,
+            )
+            # §11-Q3 (deliberate divergence from the Google flow's
+            # refresh_required rejection): many MCP authorization
+            # servers issue short-lived tokens with NO refresh token.
+            # Accept them — expiry surfaces as needs_auth on probe,
+            # which renders the reconnect affordance.
+            credential_vault.store_connection(pending.connection_name, conn)
+        except Exception as exc:  # noqa: BLE001 — surface as a UI banner
+            logger.warning("MCP OAuth exchange failed for %s: %s", name, exc)
+            return _back("integration_error=exchange_failed")
+        # Bind the connection to the connector. This is an auth-only
+        # edit by construction (plan D12): no pending-restart, but the
+        # gateway's discovery cache must drop so a previously-401
+        # connector re-discovers with the new auth.
+        c = connector_store.get(name)
+        if isinstance(c, HttpConnector):
+            bound = c.model_copy(update={
+                "auth": ConnectorAuth(
+                    kind="oauth", connection=pending.connection_name,
+                ),
+            })
+            connector_store.upsert(bound)
+            if mcp_gateway is not None:
+                mcp_gateway.invalidate(c.name)
+        logger.info(
+            "MCP connector connected: %s → %s", name, pending.connection_name,
+        )
+        _emit_config_changed("connectors", name=name)
+        return _back(f"integration_connected={pending.connection_name}")
+
     @api_router.post("/api/integrations/{name}/disconnect")
     async def api_disconnect_integration(name: str, request: Request) -> dict:
         """Revoke (best-effort) and remove an OAuth connection."""
