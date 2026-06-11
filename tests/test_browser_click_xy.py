@@ -9,7 +9,9 @@ canned dicts and verify the manager's classification + dispatch path.
 
 from __future__ import annotations
 
+import atexit
 import json
+import shutil
 import tempfile
 from unittest.mock import AsyncMock, MagicMock
 
@@ -20,6 +22,7 @@ import pytest
 # is a machine-global write that lets two concurrent pytest runs (e.g.
 # from different checkouts) collide. mkdtemp gives each run its own root.
 _PROFILES_ROOT = tempfile.mkdtemp(prefix="ol_test_profiles_")
+atexit.register(shutil.rmtree, _PROFILES_ROOT, ignore_errors=True)
 
 
 

@@ -318,14 +318,6 @@ def _remove_residue(slot: Slot) -> bool:
     return removed
 
 
-# Convenience for tests / debugging — clear the env so a fresh allocator
-# pass observes a pristine /tmp.  NOT used in production.
-def _force_clear_residue_for_tests(display_start: int, display_end: int) -> None:
-    for display in range(display_start, display_end):
-        slot = Slot(display=display, vnc_port=port_for_display(display))
-        _remove_residue(slot)
-
-
 def _read_lock_pid(path: Path) -> int | None:
     """Read the PID from an X11 lock file.
 

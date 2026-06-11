@@ -17,7 +17,9 @@ proxy's well-exercised pattern.
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import tempfile
 from unittest.mock import patch
 
@@ -26,6 +28,7 @@ from unittest.mock import patch
 # is a machine-global write that lets two concurrent pytest runs (e.g.
 # from different checkouts) collide. mkdtemp gives each run its own root.
 _PROFILES_ROOT = tempfile.mkdtemp(prefix="ol_test_profiles_")
+atexit.register(shutil.rmtree, _PROFILES_ROOT, ignore_errors=True)
 
 
 

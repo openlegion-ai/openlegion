@@ -1,7 +1,9 @@
 """Tests for the shared browser service (BrowserManager, server, redaction)."""
 
 import asyncio
+import atexit
 import json
+import shutil
 import tempfile
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -17,6 +19,7 @@ from src.browser.service import BrowserManager, CamoufoxInstance
 # is a machine-global write that lets two concurrent pytest runs (e.g.
 # from different checkouts) collide. mkdtemp gives each run its own root.
 _PROFILES_ROOT = tempfile.mkdtemp(prefix="ol_test_profiles_")
+atexit.register(shutil.rmtree, _PROFILES_ROOT, ignore_errors=True)
 
 
 
