@@ -655,6 +655,48 @@ class MeshClient:
         _raise_with_body(response)
         return response.json().get("value")
 
+    async def list_connector_tools(self) -> dict:
+        """Sanitized tool schemas for every remote (http) MCP connector
+        assigned to this agent — fetched from the mesh gateway at
+        startup. Shape: ``{connector_name: {"tools": [...], "error"?}}``.
+        """
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/connectors/tools",
+            params={"agent_id": self.agent_id},
+        )
+        _raise_with_body(response)
+        return response.json().get("connectors", {})
+
+    async def call_connector_tool(
+        self, connector: str, tool: str, arguments: dict,
+    ) -> dict:
+        """Execute one remote-connector tool call through the mesh
+        gateway. Returns the stdio-MCP result contract:
+        ``{"result": text}`` or ``{"error": text}`` (+ optional
+        ``truncated``). Auth lives mesh-side; nothing secret transits
+        here."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/connectors/call",
+            json={
+                "agent_id": self.agent_id,
+                "connector": connector,
+                "tool": tool,
+                "arguments": arguments,
+            },
+            headers=self._trace_headers(),
+            timeout=90.0,  # gateway's 60s upstream cap + headroom
+        )
+        if response.status_code in (403, 404, 429, 502, 503):
+            detail = ""
+            try:
+                detail = response.json().get("detail", "")
+            except Exception:
+                detail = response.text[:200]
+            return {"error": f"Connector call failed: {detail}"}
+        _raise_with_body(response)
+        return response.json()
+
     async def introspect(self, section: str = "all") -> dict:
         """Query runtime state from the mesh (permissions, budget, fleet, etc.)."""
         response = await self._get_with_retry(

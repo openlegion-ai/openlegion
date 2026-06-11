@@ -671,6 +671,10 @@ def create_dashboard_router(
     # instance must be wired into the runtime backend via
     # ``set_connector_store`` so catalog edits apply on agent restart.
     connector_store: Any = None,
+    # Mesh-side gateway for remote (http) connectors: powers the probe
+    # ("Test connection") endpoint and the discovery-cache invalidation
+    # on auth-only edits (plan D12).
+    mcp_gateway: Any = None,
 ) -> APIRouter:
     """Create the dashboard FastAPI router."""
     # Lazy-init telemetry sink so callers (mesh CLI, tests) can opt out by
@@ -2359,8 +2363,9 @@ def create_dashboard_router(
                 a for a in connector_store.pending_restart()
                 if a in agent_registry
             ],
-            # Agent-tier vault credential names for the env-row
-            # credential picker (names only, never values).
+            # Agent-tier vault credential names for the stdio env-row
+            # picker AND the remote bearer picker (names only, never
+            # values).
             "available_credentials": sorted(
                 credential_vault.list_agent_credential_names()
             ) if credential_vault else [],
@@ -2398,6 +2403,15 @@ def create_dashboard_router(
         # Display-side artifacts a GET-replay would carry.
         raw.pop("env_keys", None)
         raw.pop("assigned_agents", None)
+        # Absent transport inherits the EXISTING record's transport —
+        # otherwise the union's stdio default would turn a partial PUT
+        # against an http connector into a confusing extra_forbidden
+        # 400 (or, with stdio fields, a silent http→stdio morph). A
+        # cross-transport replace must say so explicitly.
+        if "transport" not in body and previous is not None:
+            raw["transport"] = (
+                "http" if isinstance(previous, HttpConnector) else "stdio"
+            )
         # Absent = preserve: a partial PUT must not silently wipe the
         # persisted env / auth / assignment. Guarded per transport —
         # a cross-transport replace (same name, stdio↔http) preserves
@@ -2528,14 +2542,17 @@ def create_dashboard_router(
         # matrix (plan D12): an http auth-only edit is NOT
         # restart-relevant — it applies on the gateway's next per-call
         # auth resolve, so no agent is marked dirty and the UI gets no
-        # restart prompt. (Phase 2b adds gateway.invalidate(name) here
-        # so a previously-401 connector re-discovers its tools.)
+        # restart prompt. The gateway's discovery cache IS invalidated
+        # for it: a connector that 401'd before Connect has no tools
+        # cached and must re-discover with the new auth.
         import asyncio as _asyncio
         restart_relevant = await _asyncio.to_thread(
             connector_store.upsert, connector,
         )
         if restart_relevant:
             connector_store.mark_dirty(affected)
+        elif mcp_gateway is not None:
+            mcp_gateway.invalidate(connector.name)
         try:
             blackboard.log_audit(
                 action="edit_connector",
@@ -2570,6 +2587,8 @@ def create_dashboard_router(
         import asyncio as _asyncio
         await _asyncio.to_thread(connector_store.remove, name)
         connector_store.mark_dirty(affected)
+        if mcp_gateway is not None:
+            mcp_gateway.invalidate(name)
         try:
             blackboard.log_audit(
                 action="delete_connector",
@@ -2588,6 +2607,22 @@ def create_dashboard_router(
             "affected_agents": affected,
             "restart_required": bool(affected),
         }
+
+    @api_router.post("/api/connectors/{name}/probe")
+    async def api_connector_probe(name: str) -> dict:
+        """'Test connection' for a remote connector: fresh initialize +
+        tool discovery through the mesh gateway. Returns
+        ``{ok, tools_count}`` or ``{ok: False, error, needs_auth}`` —
+        ``needs_auth`` drives the Connect affordance (Phase 3). Covered
+        by the X-Requested-With CSRF middleware like every state-
+        adjacent route (it makes a mesh-originated outbound request)."""
+        if mcp_gateway is None:
+            raise HTTPException(503, "Connector gateway not configured")
+        from src.host.mcp_gateway import GatewayUnavailable
+        try:
+            return await mcp_gateway.probe(name)
+        except GatewayUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
 
     # Agents with a batch-initiated restart currently in flight. Guards
     # against overlapping batches interleaving stop/start on the same

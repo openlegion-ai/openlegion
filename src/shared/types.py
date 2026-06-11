@@ -623,6 +623,14 @@ class HttpConnector(BaseModel):
         p = urlparse(v)
         if not p.hostname:
             raise ValueError("Connector URL must include a host")
+        if p.username or p.password:
+            # A token in the URL would persist plaintext on disk and
+            # echo verbatim in every GET/audit row — the one surface
+            # the remote design promises secrets never appear on.
+            raise ValueError(
+                "Credentials are not allowed in the connector URL — "
+                "use the auth field (vault credential) instead.",
+            )
         if p.scheme == "https":
             return v
         # Self-hosted/dev MCP on the mesh host itself is legitimate.

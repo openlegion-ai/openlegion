@@ -3121,7 +3121,7 @@
                               <div class="flex items-center gap-3 text-xs py-1.5">
                                 <span class="w-2 h-2 rounded-full shrink-0"
                                       :class="srv.transport === 'http' ? 'bg-gray-600' : mcpStatusDotClass(mcpStatusFor(srv.name).state)"
-                                      :title="srv.transport === 'http' ? 'Remote connector — activates when the mesh gateway update lands' : (mcpStatusFor(srv.name).error || mcpStatusFor(srv.name).state)"></span>
+                                      :title="srv.transport === 'http' ? 'Remote connector — calls proxied by the mesh gateway' : (mcpStatusFor(srv.name).error || mcpStatusFor(srv.name).state)"></span>
                                 <span class="text-gray-200 font-mono font-medium shrink-0" x-text="srv.name"></span>
                                 <span x-show="srv.transport === 'http'"
                                       class="text-[10px] px-1.5 py-0.5 rounded font-medium leading-none uppercase tracking-wide bg-indigo-900/40 text-indigo-300 border border-indigo-800/40 shrink-0"
@@ -5151,9 +5151,15 @@
                   <span class="text-gray-500 shrink-0">&rarr;</span>
                   <span class="text-gray-400 text-[11px] font-mono flex-1 truncate"
                         x-text="c.transport === 'http' ? (c.url || '') : ((c.command || '') + (c.args && c.args.length ? ' ' + c.args.join(' ') : ''))"></span>
-                  <span x-show="c.transport === 'http'"
-                        class="text-[11px] px-1.5 py-0.5 rounded leading-none bg-amber-900/20 text-amber-400/80 border border-amber-800/30 shrink-0"
-                        title="Remote connectors are saved but not yet live — the mesh gateway that proxies their calls ships in the next update.">not active yet</span>
+                  <span x-show="c.transport === 'http' && connectorProbeResult[c.name]"
+                        class="text-[11px] px-1.5 py-0.5 rounded leading-none shrink-0"
+                        :class="connectorProbeResult[c.name]?.ok ? 'bg-emerald-900/30 text-emerald-400 border border-emerald-800/40' : 'bg-red-900/20 text-red-400 border border-red-800/30'"
+                        :title="connectorProbeResult[c.name]?.ok ? (connectorProbeResult[c.name].tools_count + ' tools discovered') : (connectorProbeResult[c.name]?.error || 'Connection failed')"
+                        x-text="connectorProbeResult[c.name]?.ok ? (connectorProbeResult[c.name].tools_count + ' tools') : 'failed'"></span>
+                  <button type="button" x-show="c.transport === 'http'" @click="probeConnector(c.name)"
+                          :disabled="connectorProbing === c.name"
+                          class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[11px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-all shrink-0 disabled:opacity-50"
+                          x-text="connectorProbing === c.name ? 'Testing…' : 'Test'"></button>
                   <span x-show="c.transport !== 'http' && (c.env_keys || []).length"
                         class="text-[11px] px-1.5 py-0.5 rounded leading-none bg-gray-800 text-gray-500 border border-gray-700 shrink-0"
                         :title="'Env vars: ' + (c.env_keys || []).join(', ')"
