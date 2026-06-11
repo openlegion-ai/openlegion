@@ -231,6 +231,27 @@ class TestAuthResolution:
         }
 
     @pytest.mark.asyncio
+    async def test_vault_raises_classify_as_auth_not_generic(self, tmp_path):
+        # The vault RAISES on missing/dead connections (RuntimeError
+        # "No connection", ConnectionRefreshError on revoked grants) —
+        # those must surface as needs_auth on probe, not as a masked
+        # generic upstream error, or the reconnect affordance never
+        # renders exactly when it's needed.
+        vault = MagicMock()
+        vault.ensure_connection_token = AsyncMock(
+            side_effect=RuntimeError("No connection: mcp_linear"),
+        )
+        gw, store = _gateway(tmp_path, vault=vault)
+        bound = store.get("linear").model_copy(update={
+            "auth": ConnectorAuth(kind="oauth", connection="mcp_linear"),
+        })
+        store.upsert(bound)
+        with pytest.raises(ConnectorAuthError):
+            await gw.call_tool("linear", "t", {}, agent_id="a")
+        probe = await gw.probe("linear")
+        assert probe["ok"] is False and probe["needs_auth"] is True
+
+    @pytest.mark.asyncio
     async def test_oauth_unbound_connection_is_auth_error(self, tmp_path):
         gw, store = _gateway(tmp_path, vault=self._vault())
         # Hand-built record with kind=oauth but no connection yet.

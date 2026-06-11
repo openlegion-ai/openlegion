@@ -212,10 +212,24 @@ class MCPGateway:
     async def _headers(self, c: HttpConnector) -> dict[str, str]:
         """Resolve auth from the vault — per call, so rotation and
         OAuth refresh-on-resolve apply with no restart."""
+        # ANY failure to produce the header is ConnectorAuthError — the
+        # vault RAISES on missing/dead connections (RuntimeError("No
+        # connection: …"), hard 4xx grant deaths as
+        # ConnectionRefreshError) rather than returning a falsy token,
+        # and classifying those as generic upstream errors would hide
+        # exactly the state the probe's needs_auth → Connect/reconnect
+        # affordance exists for.
         if c.auth.kind == "bearer":
             token = None
             if self._vault is not None:
-                token = await self._vault.resolve_credential_async(c.auth.cred)
+                try:
+                    token = await self._vault.resolve_credential_async(
+                        c.auth.cred,
+                    )
+                except Exception as e:
+                    raise ConnectorAuthError(
+                        f"credential {c.auth.cred!r}: {e}",
+                    ) from e
             if not token:
                 raise ConnectorAuthError(
                     f"credential {c.auth.cred!r} could not be resolved "
@@ -228,7 +242,14 @@ class MCPGateway:
                     "no OAuth connection bound — use Connect on the "
                     "Connectors page",
                 )
-            token = await self._vault.ensure_connection_token(c.auth.connection)
+            try:
+                token = await self._vault.ensure_connection_token(
+                    c.auth.connection,
+                )
+            except Exception as e:
+                raise ConnectorAuthError(
+                    f"OAuth connection {c.auth.connection!r}: {e}",
+                ) from e
             if not token:
                 raise ConnectorAuthError(
                     f"OAuth connection {c.auth.connection!r} did not "
