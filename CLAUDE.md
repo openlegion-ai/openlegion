@@ -66,7 +66,7 @@ Only modules with non-obvious behavior are listed. The rest are visible by readi
 | `src/agent/loop.py` | Agent execution loop (task + chat). Auto-closes handed-off tasks when `x-task-id` rides the wake chain. |
 | `src/agent/server.py` | `_FILE_CAPS` enforced on workspace writes; `_WORKSPACE_ALLOWLIST` gates reads/writes. |
 | `src/agent/context.py` | Context window management (write-then-compact); empty summary falls back to hard prune. |
-| `src/agent/workspace.py` | Persistent markdown workspace. Bootstrap files: TEAM.md (legacy `PROJECT.md` resolves read-only), SOUL/USER/INSTRUCTIONS/MEMORY/INTERFACE/HEARTBEAT. |
+| `src/agent/workspace.py` | Persistent markdown workspace. Bootstrap files: TEAM.md (a legacy `PROJECT.md` is renamed to TEAM.md at startup by `team_migration.py`), SOUL/USER/INSTRUCTIONS/MEMORY/INTERFACE/HEARTBEAT. |
 | `src/agent/mesh_client.py` | `wake_agent` / `create_task` accept optional `origin: MessageOrigin` and merge it into headers (Constraint #4). |
 | `src/agent/builtins/coordination_tool.py` | `hand_off` propagates origin and forwards `task_id` so the recipient's loop auto-closes. `check_inbox` surfaces back-edge `events[]` from `inbox/{agent}/task_event/`. Failure envelopes: Constraint #10. |
 | `src/agent/builtins/file_tool.py` | Two-stage path-traversal protection (`lstat()` for symlink safety). |
