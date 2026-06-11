@@ -1644,7 +1644,10 @@ class TestBrowserNotifyOptIn:
         js = _read(_APP_JS)
         # Only fire for high-signal kinds. The list lives in a single
         # place so future additions don't drift across files.
-        assert "_browserNotifyKinds: ['approval', 'credential', 'alert', 'blocker']" in js
+        # 'delivered' added with chat-native chain delivery: completions
+        # now desktop-ping (flagged product decision in the 2026-06-11
+        # chat-native-delivery plan).
+        assert "_browserNotifyKinds: ['approval', 'credential', 'alert', 'blocker', 'delivered']" in js
 
 
 class TestActivityRollup:
@@ -2631,3 +2634,41 @@ class TestSystemDividerExpandable:
         # Short markers (session-continued etc.) stay non-interactive;
         # only long content gets the pointer + toggle.
         assert _INDEX_HTML.count("(msg.content || '').length > 96") >= 4
+
+
+class TestDispatchChatDoneContract:
+    """PR-2 JS contract pins: dispatch-sourced chat_done does a debounced
+    history reload only (no remote-bubble finalize, no debounce bypass),
+    and live notification events feed the desktop-ping hook."""
+
+    def _js(self) -> str:
+        return (_REPO_ROOT / "src/dashboard/static/js/app.js").read_text(
+            encoding="utf-8",
+        )
+
+    def test_dispatch_branch_precedes_stream_finalize(self):
+        js = self._js()
+        dispatch_branch = js.index(
+            "evt.type === 'chat_done' && agent && evt.data?.source === 'dispatch'"
+        )
+        finalize_branch = js.index("// Another session's chat completed")
+        assert dispatch_branch < finalize_branch
+
+    def test_dispatch_branch_keeps_debounce(self):
+        """The legacy chat_done branch deliberately deletes _chatFetchedAt
+        to force a refetch; the dispatch branch must NOT — a wake burst
+        would stampede full history fetches in every open session."""
+        js = self._js()
+        start = js.index("evt.data?.source === 'dispatch'")
+        end = js.index("// Another session's chat completed")
+        dispatch_block = js[start:end]
+        assert "_loadChatHistory(agent)" in dispatch_block
+        assert "delete this._chatFetchedAt" not in dispatch_block
+
+    def test_notification_event_fires_desktop_ping(self):
+        js = self._js()
+        assert "'delivered'" in js.split("_browserNotifyKinds:")[1].split("]")[0]
+        # The live notification handler synthesizes the hook's row shape.
+        idx = js.index("evt.type === 'notification' && agent")
+        block = js[idx:idx + 1600]
+        assert "_maybeFireBrowserNotification" in block

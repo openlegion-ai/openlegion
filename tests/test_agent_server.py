@@ -1165,3 +1165,65 @@ class TestChatSystemNoteHeader:
             )
         assert resp.status_code == 200
         assert mock_loop.inject_steer.call_args.kwargs.get("system_note") is False
+
+
+class TestChatNote:
+    """POST /chat/note — the mesh-side chain-outcome delivery target.
+    The ChainWatcher claims a delivery on this ack, so the ack must
+    never lie: write failures surface as non-2xx, never a clean ok."""
+
+    @pytest.mark.asyncio
+    async def test_note_persists_notification_row(self, tmp_workspace):
+        app, loop = _make_app(tmp_workspace)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/chat/note", json={"message": "✅ Task complete\nAll done."},
+            )
+        assert resp.status_code == 200
+        assert resp.json() == {"ok": True}
+        rows = loop.workspace.load_chat_transcript()
+        notes = [r for r in rows if r["role"] == "notification"]
+        assert len(notes) == 1
+        assert notes[0]["content"].startswith("✅ Task complete")
+
+    @pytest.mark.asyncio
+    async def test_note_without_workspace_is_503(self):
+        app, _ = _make_app(None)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/chat/note", json={"message": "x"})
+        assert resp.status_code == 503
+        assert resp.json()["ok"] is False
+
+    @pytest.mark.asyncio
+    async def test_empty_note_rejected(self, tmp_workspace):
+        app, _ = _make_app(tmp_workspace)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/chat/note", json={"message": "   "})
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_write_failure_is_500_not_ok(self, tmp_workspace):
+        """A swallowed disk error acked as ok would silently lose the
+        chain outcome — the endpoint must surface it."""
+        app, loop = _make_app(tmp_workspace)
+
+        def _boom(*a, **kw):
+            raise OSError("disk full")
+
+        loop.workspace.append_chat_message = _boom
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post("/chat/note", json={"message": "note"})
+        assert resp.status_code == 500
+        assert resp.json()["ok"] is False
+
+    @pytest.mark.asyncio
+    async def test_long_note_truncated(self, tmp_workspace):
+        from src.agent.server import _NOTE_MAX_LEN
+        app, loop = _make_app(tmp_workspace)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/chat/note", json={"message": "x" * (_NOTE_MAX_LEN * 2)},
+            )
+        assert resp.status_code == 200
+        rows = loop.workspace.load_chat_transcript()
+        assert len(rows[-1]["content"]) <= _NOTE_MAX_LEN

@@ -812,7 +812,7 @@ function dashboard() {
     // fetchNotifications poll only fires browser notifications for
     // genuinely new arrivals.
     _lastNotifiedId: 0,
-    _browserNotifyKinds: ['approval', 'credential', 'alert', 'blocker'],
+    _browserNotifyKinds: ['approval', 'credential', 'alert', 'blocker', 'delivered'],
 
     // WebSocket
     _ws: null,
@@ -4993,6 +4993,20 @@ function dashboard() {
 
         if (!isReplay) {
           this.showToast(`${agent}: ${msg}`);
+          // Off-tab desktop ping for user-facing chat notifications
+          // (chain outcomes, notify_user). Synthesize the row shape the
+          // hook expects — live `notification` events carry only the
+          // message text. First line is the title, rest the body.
+          try {
+            const nl = msg.indexOf('\n');
+            this._maybeFireBrowserNotification({
+              kind: 'delivered',
+              id: 'live-' + agent + '-' + Math.round(evtTs),
+              title: nl > 0 ? msg.slice(0, nl) : msg.slice(0, 80),
+              body: nl > 0 ? msg.slice(nl + 1, nl + 201) : '',
+              payload: { agent_id: agent },
+            });
+          } catch (_) { /* polish surface — never break the handler */ }
         }
 
         // Push to chat history only if not already present (prevents duplicates
@@ -5294,6 +5308,15 @@ function dashboard() {
             last.tools[ti].outputPreview = this.chatToolPreview(evt.data.output);
           }
           last.phase = 'thinking';
+        }
+      } else if (evt.type === 'chat_done' && agent && evt.data?.source === 'dispatch') {
+        // A lane-dispatched turn (wake/cron/webhook) finished outside any
+        // dashboard stream — its reply is already in the transcript but no
+        // open chat view knows. Debounced reload only: no remote-bubble
+        // finalize (there is no stream), no _chatFetchedAt bypass (a wake
+        // burst must not stampede full refetches; worst case 5s staleness).
+        if (!this._chatAborts[agent]) {
+          this._loadChatHistory(agent);
         }
       } else if (evt.type === 'chat_done' && agent) {
         // Another session's chat completed — finalize bubble

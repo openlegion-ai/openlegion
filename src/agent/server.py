@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from src.shared.paths import resolve_under_root
 from src.shared.types import (
@@ -151,6 +151,11 @@ _MAX_HISTORY_LEARNINGS_CHARS = 8000
 # soon after each boot rather than never reaching a long interval.
 _MAINTENANCE_INITIAL_DELAY_S = 180
 _MAINTENANCE_TICK_S = 30 * 60
+
+# /chat/note size bound — mirrors the mesh notify path's _NOTIFY_MAX_LEN.
+# Oversized notes are truncated, not rejected: the mesh side already caps
+# its payloads, so this is a backstop against transcript-rotation churn.
+_NOTE_MAX_LEN = 2000
 
 
 def _origin_from_mesh_request(request: Request):
@@ -487,6 +492,40 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
                     current_origin.reset(_origin_token)
                     current_trace_id.reset(_tid_token)
         return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+    @app.post("/chat/note")
+    async def chat_note(msg: ChatMessage) -> JSONResponse:
+        """Append a notification-role transcript row — no LLM turn.
+
+        Mesh-side chain-outcome delivery target: the ChainWatcher claims
+        a delivery only on this endpoint's positive ack, so the write
+        path RAISES on failure (``raise_on_error=True``) — a swallowed
+        disk error acked as ok would silently lose the outcome. Renders
+        as the standard amber notification bubble (same row shape
+        ``notify_user`` persists).
+        """
+        if loop.workspace is None:
+            return JSONResponse(
+                status_code=503,
+                content={"ok": False, "error": "no workspace configured"},
+            )
+        text = sanitize_for_prompt(msg.message)[:_NOTE_MAX_LEN]
+        if not text.strip():
+            return JSONResponse(
+                status_code=400,
+                content={"ok": False, "error": "empty note"},
+            )
+        try:
+            loop.workspace.append_chat_message(
+                "notification", text, raise_on_error=True,
+            )
+        except Exception as e:
+            logger.error("chat note write failed: %s", e)
+            return JSONResponse(
+                status_code=500,
+                content={"ok": False, "error": f"transcript write failed: {e}"},
+            )
+        return JSONResponse(content={"ok": True})
 
     @app.post("/chat/reset")
     async def chat_reset() -> dict:
