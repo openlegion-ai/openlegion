@@ -1676,3 +1676,142 @@ class TestAwaitTaskEventTool:
                 ),
                 timeout=0.1,
             )
+
+
+# ── set_agent_goals tests ────────────────────────────────────
+
+
+def _goals_mesh_client(registry):
+    """MeshClient mock for set_agent_goals: roster + blackboard writes."""
+    mc = MagicMock()
+    mc.list_agents = AsyncMock(return_value=registry)
+    mc.write_blackboard = AsyncMock(
+        return_value={"key": "goals/x", "version": 1},
+    )
+    mc.delete_blackboard = AsyncMock(return_value={"deleted": True})
+    return mc
+
+
+@pytest.mark.asyncio
+async def test_set_agent_goals_writes_scoped_key():
+    """Team agent target → write under its project scope, no TTL."""
+    from src.agent.builtins.operator_tools import set_agent_goals
+
+    mc = _goals_mesh_client({"researcher": {"project": "alpha"}})
+    result = await set_agent_goals(
+        "researcher", ["Find 10 qualified leads per week."], mesh_client=mc,
+    )
+    assert result == {
+        "set": True,
+        "agent_id": "researcher",
+        "count": 1,
+        "note": (
+            "Takes effect on the agent's next prompt build (<=5 min cache)."
+        ),
+    }
+    mc.write_blackboard.assert_awaited_once()
+    args, kwargs = mc.write_blackboard.call_args
+    assert args[0] == "goals/researcher"
+    value = args[1]
+    assert value["goals"] == ["Find 10 qualified leads per week."]
+    assert value["set_by"] == "operator"
+    assert "updated_at" in value
+    assert kwargs["project"] == "alpha"
+    # Goals persist until changed — no TTL on the write.
+    assert kwargs.get("ttl") is None
+    mc.delete_blackboard.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_set_agent_goals_solo_agent_unscoped():
+    """Solo agent (no project in registry) → raw key, project=None."""
+    from src.agent.builtins.operator_tools import set_agent_goals
+
+    mc = _goals_mesh_client({"solo-bot": {}})
+    result = await set_agent_goals(
+        "solo-bot", ["Keep the changelog current."], mesh_client=mc,
+    )
+    assert result["set"] is True
+    args, kwargs = mc.write_blackboard.call_args
+    assert args[0] == "goals/solo-bot"
+    assert kwargs["project"] is None
+
+
+@pytest.mark.asyncio
+async def test_set_agent_goals_clear_deletes_key():
+    """goals=[] clears via delete_blackboard with the same scoping."""
+    from src.agent.builtins.operator_tools import set_agent_goals
+
+    mc = _goals_mesh_client({"researcher": {"project": "alpha"}})
+    result = await set_agent_goals("researcher", [], mesh_client=mc)
+    assert result == {"cleared": True, "agent_id": "researcher"}
+    mc.delete_blackboard.assert_awaited_once_with(
+        "goals/researcher", project="alpha",
+    )
+    mc.write_blackboard.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_set_agent_goals_rejects_operator_target():
+    """Operator's own goals live in manage_goals, not the blackboard."""
+    from src.agent.builtins.operator_tools import set_agent_goals
+
+    mc = _goals_mesh_client({"operator": {"scope": "global"}})
+    result = await set_agent_goals("operator", ["Run the fleet."], mesh_client=mc)
+    assert "error" in result
+    assert "manage_goals" in result["error"]
+    mc.write_blackboard.assert_not_awaited()
+    mc.delete_blackboard.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_set_agent_goals_caps_count_and_length():
+    """Max 5 goals; each goal must be a non-empty string <=300 chars."""
+    from src.agent.builtins.operator_tools import set_agent_goals
+
+    mc = _goals_mesh_client({"researcher": {"project": "alpha"}})
+
+    result = await set_agent_goals(
+        "researcher", [f"goal {i}" for i in range(6)], mesh_client=mc,
+    )
+    assert "error" in result
+    assert "max" in result["error"].lower()
+
+    result = await set_agent_goals("researcher", ["x" * 301], mesh_client=mc)
+    assert "error" in result
+    assert "300" in result["error"]
+
+    result = await set_agent_goals("researcher", ["   "], mesh_client=mc)
+    assert "error" in result
+
+    result = await set_agent_goals("researcher", [42], mesh_client=mc)
+    assert "error" in result
+
+    mc.write_blackboard.assert_not_awaited()
+    mc.delete_blackboard.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_set_agent_goals_unknown_agent_lists_available():
+    """Unknown target → error naming the available agents."""
+    from src.agent.builtins.operator_tools import set_agent_goals
+
+    mc = _goals_mesh_client({"writer": {}, "scout": {"project": "alpha"}})
+    result = await set_agent_goals("ghost", ["Do things."], mesh_client=mc)
+    assert "error" in result
+    assert "not found" in result["error"]
+    assert "scout" in result["error"]
+    assert "writer" in result["error"]
+    mc.write_blackboard.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_set_agent_goals_requires_operator(monkeypatch):
+    """Defence-in-depth: non-operator env (no ALLOWED_TOOLS) is refused."""
+    from src.agent.builtins.operator_tools import set_agent_goals
+
+    monkeypatch.delenv("ALLOWED_TOOLS", raising=False)
+    mc = _goals_mesh_client({"researcher": {"project": "alpha"}})
+    result = await set_agent_goals("researcher", ["Goal."], mesh_client=mc)
+    assert "error" in result
+    mc.write_blackboard.assert_not_awaited()

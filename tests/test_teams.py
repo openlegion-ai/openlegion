@@ -705,6 +705,7 @@ class TestMeshClientKeyScoping:
         mock_resp.raise_for_status = MagicMock()
         mock_http.get = AsyncMock(return_value=mock_resp)
         mock_http.put = AsyncMock(return_value=mock_resp)
+        mock_http.delete = AsyncMock(return_value=mock_resp)
         client._client = mock_http
         client._trace_headers = lambda: {}
         return client, mock_http
@@ -729,6 +730,24 @@ class TestMeshClientKeyScoping:
         await client.write_blackboard("goals/v1", {"objective": "test"})
         url = mock_http.put.call_args[0][0]
         assert "projects/alpha/goals/v1" in url
+
+    @pytest.mark.asyncio
+    async def test_delete_blackboard_project_scoping(self):
+        """delete_blackboard mirrors write_blackboard's three-way scoping."""
+        client, mock_http = self._mock_client("alpha", {"deleted": True})
+        # Default: caller's own project prefix.
+        await client.delete_blackboard("goals/researcher")
+        url = mock_http.delete.call_args[0][0]
+        assert "projects/alpha/goals/researcher" in url
+        # Explicit project= override (operator clearing a team agent's key).
+        await client.delete_blackboard("goals/researcher", project="beta")
+        url = mock_http.delete.call_args[0][0]
+        assert "projects/beta/goals/researcher" in url
+        # global_scope bypasses both.
+        await client.delete_blackboard("goals/researcher", global_scope=True)
+        url = mock_http.delete.call_args[0][0]
+        assert "projects/" not in url
+        assert "goals/researcher" in url
 
     @pytest.mark.asyncio
     async def test_list_blackboard_scopes_prefix_and_strips_keys(self):

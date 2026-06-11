@@ -1675,6 +1675,10 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     # /api/workplace/goals. Operator-only — _is_operator() is enforced
     # at the tool boundary as well.
     "manage_goals",
+    # Per-agent standing goals — writes the goals/{agent_id} blackboard
+    # key every worker injects into its prompts. Deliberate planning act:
+    # intentionally NOT in _OPERATOR_HEARTBEAT_TOOLS.
+    "set_agent_goals",
     # Per-task outcome rating (PR 2 of Work tab rewrite). Replaces
     # the per-task 👍/➖/👎 buttons deleted from the Work tab —
     # operator scores tasks programmatically from the heartbeat

@@ -11195,6 +11195,7 @@ function dashboard() {
         wallet_transfer: 'sending a wallet transfer',
         edit_agent: 'updating a teammate',
         read_agent_config: 'reviewing a teammate',
+        set_agent_goals: 'setting a teammate\'s goals',
         read_user_notifications: 'reviewing recent notifications',
         read_peer_artifact: 'reading a teammate\'s file',
         list_peer_artifacts: 'browsing a teammate\'s files',

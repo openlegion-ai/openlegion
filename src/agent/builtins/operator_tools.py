@@ -3056,6 +3056,138 @@ async def manage_goals(
     return {"error": f"Unknown action {action!r}"}
 
 
+# ── Per-agent standing goals (operator → worker direction) ───────────
+#
+# Writes the blackboard key every agent loop already reads
+# (``AgentLoop._fetch_goals`` → ``goals/{agent_id}``, 5-min cache) and
+# injects into all its prompts under "## Your Current Goals". Goals are
+# standing instructions in the target's persistent context, so the
+# write side is operator-only: the tool is gated here AND the
+# ``goals/`` namespace is hardened in ``host/permissions.py`` so a
+# worker's blackboard-write wildcard can never cover a peer's goals
+# key (prompt-injection channel). Scope resolution mirrors hand_off:
+# team agents read ``projects/{team}/goals/{id}``, solo/global agents
+# read the raw key.
+
+_MAX_AGENT_GOALS = 5
+_MAX_AGENT_GOAL_CHARS = 300
+
+
+@tool(
+    name="set_agent_goals",
+    operator_only=True,
+    description=(
+        "Assign standing goals to a worker agent. Goals appear in that "
+        "agent's every prompt (tasks, chats, heartbeats) under '## Your "
+        "Current Goals' and make its idle heartbeats pursue them instead "
+        "of sleeping. Replaces the agent's whole goal list (max 5 goals, "
+        "each one sentence). Pass goals=[] to clear. This is for WORKER "
+        "direction — your own fleet/business goals live in manage_goals."
+    ),
+    parameters={
+        "agent_id": {
+            "type": "string",
+            "description": "Worker agent to direct (not 'operator').",
+        },
+        "goals": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Full replacement goal list — max 5 entries, each a "
+                "single sentence (<=300 chars). Pass [] to clear the "
+                "agent's goals."
+            ),
+        },
+    },
+)
+async def set_agent_goals(
+    agent_id: str,
+    goals: list,
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Operator-only writer for a worker's ``goals/{agent_id}`` key."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if agent_id == "operator":
+        return {
+            "error": (
+                "set_agent_goals targets WORKER agents. Your own fleet/"
+                "business goals live in manage_goals."
+            ),
+        }
+    if not isinstance(goals, list):
+        return {"error": "goals must be an array of strings"}
+    if len(goals) > _MAX_AGENT_GOALS:
+        return {
+            "error": (
+                f"goals exceeds max length {_MAX_AGENT_GOALS} — keep the "
+                "list short enough to act on every prompt"
+            ),
+        }
+    cleaned: list[str] = []
+    for g in goals:
+        if not isinstance(g, str):
+            return {"error": "each goal must be a string"}
+        s = sanitize_for_prompt(g).strip()
+        if not s:
+            return {"error": "each goal must be a non-empty string"}
+        if len(s) > _MAX_AGENT_GOAL_CHARS:
+            return {
+                "error": (
+                    f"each goal must be <={_MAX_AGENT_GOAL_CHARS} chars "
+                    "(one sentence)"
+                ),
+            }
+        cleaned.append(s)
+
+    # Resolve the target's blackboard scope — mirrors hand_off: team
+    # agents read goals under projects/{team}/, solo and fleet-global
+    # agents (scope == "global") read the raw key.
+    try:
+        registry = await mesh_client.list_agents()
+    except Exception as e:
+        return {"error": f"Cannot set goals: fleet roster unavailable ({e})"}
+    if agent_id not in registry:
+        available = ", ".join(sorted(registry.keys()))
+        return {"error": f"Agent '{agent_id}' not found. Available: {available}"}
+    info = registry.get(agent_id, {})
+    project = info.get("project") if isinstance(info, dict) else None
+
+    if not cleaned:
+        try:
+            await mesh_client.delete_blackboard(
+                f"goals/{agent_id}", project=project,
+            )
+        except Exception as e:
+            return {"error": f"Failed to clear goals for {agent_id}: {e}"}
+        return {"cleared": True, "agent_id": agent_id}
+
+    try:
+        await mesh_client.write_blackboard(
+            f"goals/{agent_id}",
+            {
+                "goals": cleaned,
+                "set_by": "operator",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            project=project,
+        )
+    except Exception as e:
+        return {"error": f"Failed to set goals for {agent_id}: {e}"}
+    return {
+        "set": True,
+        "agent_id": agent_id,
+        "count": len(cleaned),
+        "note": (
+            "Takes effect on the agent's next prompt build (<=5 min cache)."
+        ),
+    }
+
+
 # ── Per-task outcome rating (PR 2 of Work tab rewrite) ───────────────
 #
 # Operator's programmatic per-task judgment. Replaces the human-driven
