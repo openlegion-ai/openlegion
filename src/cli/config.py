@@ -1970,15 +1970,29 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
         # refresh to receive the new instructions.
         op_entry = agents_cfg["agents"].get(_OPERATOR_AGENT_ID, {}) or {}
         existing_heartbeat = op_entry.get("heartbeat") or ""
+        # ``initial_heartbeat`` is the key the runtime actually consumes:
+        # cli/runtime.py builds the INITIAL_HEARTBEAT container env from it,
+        # and the workspace-side sentinel refresh fires only when that env
+        # carries the latest marker. Refreshing ``heartbeat`` alone never
+        # reaches deployed containers — the v2→v5 bumps silently missed
+        # every pre-existing operator (found live on cake 2026-06-11; same
+        # class of gap as the playbook initial_instructions roll-forward
+        # fixed in #1110). Both keys must be rolled forward together.
+        existing_initial = op_entry.get("initial_heartbeat") or ""
         from src.shared.types import HEARTBEAT_SENTINELS
         latest_sentinel = HEARTBEAT_SENTINELS[-1] if HEARTBEAT_SENTINELS else None
         new_has_latest = (
             latest_sentinel is not None
             and f"<!-- {latest_sentinel} -->" in _OPERATOR_HEARTBEAT
         )
+        # Current only when BOTH copies carry the latest marker — a stale
+        # ``initial_heartbeat`` next to a current ``heartbeat`` still needs
+        # the refresh (that exact split is what the consumed-key gap left
+        # behind on deployed boxes).
         old_has_latest = (
             latest_sentinel is not None
             and f"<!-- {latest_sentinel} -->" in existing_heartbeat
+            and f"<!-- {latest_sentinel} -->" in existing_initial
         )
         # Roll forward ONLY when the existing heartbeat carries at
         # least one prior sentinel — proves it's a system-managed
@@ -2007,6 +2021,7 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
             or existing_is_empty
         ):
             op_entry["heartbeat"] = _OPERATOR_HEARTBEAT
+            op_entry["initial_heartbeat"] = _OPERATOR_HEARTBEAT
             agents_cfg["agents"][_OPERATOR_AGENT_ID] = op_entry
             AGENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
             with open(AGENTS_FILE, "w") as f:

@@ -171,6 +171,11 @@ class TestEnsureOperatorModelSync(_TempConfigMixin):
             "role": "Existing operator",
             "model": "openai/gpt-4o-mini",
             "heartbeat": _OPERATOR_HEARTBEAT,
+            # Both heartbeat copies must be current for the no-write path:
+            # a missing/stale ``initial_heartbeat`` next to a current
+            # ``heartbeat`` is exactly the consumed-key split the refresh
+            # now repairs (one legitimate write).
+            "initial_heartbeat": _OPERATOR_HEARTBEAT,
             "initial_instructions": _OPERATOR_CORE,
         }}}
         with open(self._agents_path, "w") as f:
@@ -214,6 +219,68 @@ class TestEnsureOperatorModelSync(_TempConfigMixin):
         assert refreshed == _OPERATOR_HEARTBEAT
         assert "<!-- heartbeat_v6_agent_retro -->" in refreshed
         assert "Old v5 revision text" not in refreshed
+        # The consumed key MUST roll forward too: cli/runtime.py builds the
+        # INITIAL_HEARTBEAT container env from ``initial_heartbeat``, and
+        # the workspace-side refresh keys off that env. Refreshing only
+        # ``heartbeat`` left every deployed operator on its creation-era
+        # checklist (found live on cake 2026-06-11).
+        assert result["agents"]["operator"]["initial_heartbeat"] == _OPERATOR_HEARTBEAT
+
+    def test_stale_initial_heartbeat_refreshes_when_heartbeat_current(self):
+        """The consumed-key gap's exact residue: ``heartbeat`` already
+        carries the latest sentinel (a prior partial refresh) while
+        ``initial_heartbeat`` is stuck on an older revision. The refresh
+        must still fire and sync both keys."""
+        from src.cli.config import _OPERATOR_HEARTBEAT
+
+        agents_cfg = {"agents": {"operator": {
+            "role": "Existing operator",
+            "model": "openai/gpt-4o-mini",
+            "heartbeat": _OPERATOR_HEARTBEAT,
+            "initial_heartbeat": (
+                "<!-- heartbeat_v5_fleet_health -->\n"
+                "Old v5 revision text\n"
+            ),
+        }}}
+        with open(self._agents_path, "w") as f:
+            yaml.dump(agents_cfg, f)
+
+        with self._mock_config():
+            from src.cli.config import _ensure_operator_agent
+            _ensure_operator_agent(default_model="openai/gpt-4o-mini")
+
+        with open(self._agents_path) as f:
+            result = yaml.safe_load(f)
+        op = result["agents"]["operator"]
+        assert op["heartbeat"] == _OPERATOR_HEARTBEAT
+        assert op["initial_heartbeat"] == _OPERATOR_HEARTBEAT
+
+    def test_customised_heartbeat_field_still_skipped(self):
+        """A marker-less non-empty ``heartbeat`` is user-customised — the
+        refresh must keep skipping it even when ``initial_heartbeat``
+        carries old markers (the customisation guard stays keyed on the
+        authoritative ``heartbeat`` field)."""
+        agents_cfg = {"agents": {"operator": {
+            "role": "Existing operator",
+            "model": "openai/gpt-4o-mini",
+            "heartbeat": "My fully custom heartbeat, no markers\n",
+            "initial_heartbeat": (
+                "<!-- heartbeat_v5_fleet_health -->\n"
+                "Old v5 revision text\n"
+            ),
+        }}}
+        with open(self._agents_path, "w") as f:
+            yaml.dump(agents_cfg, f)
+
+        with self._mock_config():
+            from src.cli.config import _ensure_operator_agent
+            _ensure_operator_agent(default_model="openai/gpt-4o-mini")
+
+        with open(self._agents_path) as f:
+            result = yaml.safe_load(f)
+        op = result["agents"]["operator"]
+        assert op["heartbeat"] == "My fully custom heartbeat, no markers\n"
+        assert "Old v5 revision text" in op["initial_heartbeat"]
 
     def test_empty_heartbeat_is_bootstrapped_to_canonical_template(self):
         """Codex r3 (PR 972) catch — the WARN for no-sentinel files
