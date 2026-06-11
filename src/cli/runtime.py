@@ -1212,6 +1212,14 @@ class RuntimeContext:
         from src.host.api_keys import ApiKeyManager
         self._api_key_manager = ApiKeyManager()
 
+        # Mesh-side gateway for remote (http) MCP connectors — holds no
+        # state beyond a discovery cache; auth resolves from the vault
+        # per call (tokens never enter containers).
+        from src.host.mcp_gateway import MCPGateway
+        self.mcp_gateway = MCPGateway(
+            self.connector_store, self.credential_vault,
+        )
+
         app = create_mesh_app(
             self.blackboard, self.pubsub, self.router, self.permissions,
             self.credential_vault, self.cron_scheduler, self.runtime,
@@ -1229,6 +1237,7 @@ class RuntimeContext:
             api_key_manager=self._api_key_manager,
             cfg=self.cfg,
             connector_store=self.connector_store,
+            mcp_gateway=self.mcp_gateway,
         )
         app.include_router(webhook_manager.create_router())
         self.health_monitor._cleanup_agent = app.cleanup_agent  # type: ignore[attr-defined]
@@ -1315,6 +1324,7 @@ class RuntimeContext:
             summaries_store=getattr(app, "summaries_store", None),
             notification_store=self._notification_store,
             connector_store=self.connector_store,
+            mcp_gateway=self.mcp_gateway,
         )
         app.include_router(dashboard_router)
         app.include_router(create_spa_catchall_router())  # Must be last — SPA deep linking

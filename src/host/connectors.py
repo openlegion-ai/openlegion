@@ -308,6 +308,14 @@ class ConnectorStore:
                 if isinstance(c, HttpConnector) and c.applies_to(agent_id)
             ]
 
+    def generation(self) -> int:
+        """Current catalog generation — the gateway's tools-cache key.
+        Auth-only edits deliberately don't bump it (the dashboard calls
+        ``MCPGateway.invalidate`` for those instead)."""
+        with self._lock:
+            self._maybe_reload()
+            return self._generation
+
     # ── pending-restart derivation ───────────────────────────────
 
     def _touch(self, agents: set[str]) -> None:

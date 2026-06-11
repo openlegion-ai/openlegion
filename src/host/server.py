@@ -275,6 +275,7 @@ if TYPE_CHECKING:
     from src.host.cron import CronScheduler
     from src.host.health import HealthMonitor
     from src.host.lanes import LaneManager
+    from src.host.mcp_gateway import MCPGateway
     from src.host.mesh import Blackboard, MessageRouter, PubSub
     from src.host.permissions import PermissionMatrix
     from src.host.runtime import RuntimeBackend
@@ -766,6 +767,7 @@ def create_mesh_app(
     help_requests_db: str | None = None,
     cfg: dict | None = None,
     connector_store: "ConnectorStore | None" = None,
+    mcp_gateway: "MCPGateway | None" = None,
 ) -> FastAPI:
     """Create the FastAPI application for the mesh host process."""
     # M19: disable interactive API docs / OpenAPI schema by default to avoid
@@ -1025,6 +1027,9 @@ def create_mesh_app(
         # the real spend guardrails — these buckets should never fire in
         # normal operation.
         "api_proxy": (6000, 60),
+        # Remote MCP connector calls through the mesh gateway — same
+        # budget as api_proxy (both are LLM-paced upstream calls).
+        "connectors": (6000, 60),
         "vault_resolve": (10000, 60),
         "vault_store": (600, 60),
         "blackboard_read": (20000, 60),
@@ -2330,6 +2335,96 @@ def create_mesh_app(
         if value is None:
             raise HTTPException(404, f"Credential not found: {name}")
         return {"name": name, "value": value}
+
+    # === Remote MCP connectors (mesh gateway) ===
+    # Agents reach remote (http) MCP servers ONLY through these two
+    # endpoints — the gateway resolves auth from the vault per call, so
+    # tokens never enter a container. Assignment IS the authz gate, and
+    # the operator participates like any agent (plan D11): connectors
+    # front third-party credentials, so this surface belongs with the
+    # still-gated family (vault/wallet), NOT the operator coordination
+    # bypass. Deny-all default: unassigned (operator included) → 403.
+
+    @app.get("/mesh/connectors/tools")
+    async def connector_tools(agent_id: str, request: Request) -> dict:
+        """Sanitized tool schemas for every remote connector assigned
+        to the CALLER. Per-connector degradation: one unreachable
+        server yields an error entry, not an empty fleet."""
+        caller = _resolve_agent_id(agent_id, request)
+        if mcp_gateway is None:
+            raise HTTPException(503, "Connector gateway not configured")
+        await _check_rate_limit("connectors", caller)
+        from src.host.mcp_gateway import GatewayUnavailable
+        try:
+            connectors = await mcp_gateway.tools_for_agent(caller)
+        except GatewayUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
+        return {"connectors": connectors}
+
+    @app.post("/mesh/connectors/call")
+    async def connector_call(data: dict, request: Request) -> dict:
+        """Execute one remote connector tool call for the caller."""
+        caller = _resolve_agent_id(data.get("agent_id", ""), request)
+        connector = str(data.get("connector", ""))
+        tool = str(data.get("tool", ""))
+        arguments = data.get("arguments") or {}
+        if not connector or not tool:
+            raise HTTPException(400, "connector and tool are required")
+        if not isinstance(arguments, dict):
+            raise HTTPException(400, "arguments must be an object")
+        if mcp_gateway is None:
+            raise HTTPException(503, "Connector gateway not configured")
+        await _check_rate_limit("connectors", caller)
+        from src.host.mcp_gateway import (
+            ConnectorAuthError,
+            ConnectorSSRFError,
+            ConnectorUnreachableError,
+            GatewayUnavailable,
+            UnknownConnectorError,
+        )
+        try:
+            result = await mcp_gateway.call_tool(
+                connector, tool, arguments, agent_id=caller,
+            )
+        except PermissionError as exc:
+            _record_denial(
+                "permission", caller=caller, target=connector,
+                gate="connector_assignment",
+            )
+            raise HTTPException(403, str(exc)) from exc
+        except UnknownConnectorError:
+            raise HTTPException(404, f"Unknown connector: {connector}")
+        except GatewayUnavailable as exc:
+            raise HTTPException(503, str(exc)) from exc
+        except ConnectorSSRFError as exc:
+            # Full detail (incl. the resolved address) stays mesh-side;
+            # agents are an untrusted zone and don't get topology hints.
+            logger.warning("Connector %r SSRF rejection: %s", connector, exc)
+            raise HTTPException(
+                400, "connector URL failed security validation",
+            ) from exc
+        except (ConnectorAuthError, ConnectorUnreachableError) as exc:
+            # Operator-actionable states (reconnect / fix the URL). The
+            # detail is gateway-authored but MAY embed bounded vault
+            # error text — the agent loop sanitizes all tool output
+            # before it reaches the LLM.
+            raise HTTPException(502, str(exc)) from exc
+        except RuntimeError as exc:
+            # Gateway already masked the upstream error (full text in
+            # the mesh log).
+            raise HTTPException(502, str(exc)) from exc
+        try:
+            blackboard.log_audit(
+                action="connector_call",
+                target=f"{connector}:{tool}",
+                field="connector",
+                after_value=json.dumps(arguments, default=str)[:500],
+                actor=caller,
+                provenance="agent",
+            )
+        except Exception as e:
+            logger.warning("Audit log failed for connector call: %s", e)
+        return result
 
     # === Wallet Signing Service ===
 
