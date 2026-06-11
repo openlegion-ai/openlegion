@@ -107,6 +107,40 @@ class TestDiscovery:
         assert ei.value.step == "authorization server"
 
     @pytest.mark.asyncio
+    async def test_loopback_carve_out_not_honored_for_discovered(
+        self, monkeypatch,
+    ):
+        # B5: the explicit-loopback carve-out exists for OPERATOR-pasted
+        # connector URLs; a remote server pointing its AS at 127.0.0.1
+        # would aim the mesh's authenticated POSTs at local services.
+        def handler(request):
+            return _json({"authorization_servers": ["https://127.0.0.1:9443"]})
+        monkeypatch.setattr(mcp_oauth, "_new_client", _mock_client(handler))
+        with pytest.raises(MCPOAuthError) as ei:
+            await discover(MCP_URL)
+        assert "loopback" in str(ei.value)
+
+    @pytest.mark.asyncio
+    async def test_strict_proxy_status_falls_through_to_root(self, monkeypatch):
+        # 403/405 on the path-aware well-known location must not abort
+        # the fallback chain (strict proxies reject unknown paths).
+        def handler(request):
+            path = request.url.path
+            if path == "/.well-known/oauth-protected-resource/mcp":
+                return httpx.Response(403)
+            if path == "/.well-known/oauth-protected-resource":
+                return _json({"authorization_servers": [AS_ISSUER]})
+            if path == "/.well-known/oauth-authorization-server":
+                return _json({
+                    "authorization_endpoint": f"{AS_ISSUER}/a",
+                    "token_endpoint": f"{AS_ISSUER}/t",
+                })
+            return httpx.Response(404)
+        monkeypatch.setattr(mcp_oauth, "_new_client", _mock_client(handler))
+        d = await discover(MCP_URL)
+        assert d.token_endpoint == f"{AS_ISSUER}/t"
+
+    @pytest.mark.asyncio
     async def test_non_https_discovered_endpoint_rejected(self, monkeypatch):
         def handler(request):
             path = request.url.path
@@ -237,6 +271,34 @@ class TestDynamicExchange:
         assert conn["client_id"] == "pub"
         assert conn["uses_pkce"] is True
         assert conn["refresh_token"] == "rt"
+
+    @pytest.mark.asyncio
+    async def test_exchange_revalidates_endpoint(self, monkeypatch):
+        # B4: the discovered endpoint is validated at the POINT OF USE,
+        # not just at discovery — a private/loopback target must never
+        # receive the code-exchange POST.
+        vault = _bare_vault(monkeypatch, lambda r: _json({"access_token": "x"}))
+        for bad in ("https://10.0.0.5/token", "https://127.0.0.1/token",
+                    "http://93.184.216.50/token"):
+            with pytest.raises(RuntimeError):
+                await vault.exchange_code_dynamic(
+                    token_endpoint=bad, client_id="pub", code="c",
+                    redirect_uri="https://x/cb", code_verifier="v",
+                )
+
+    @pytest.mark.asyncio
+    async def test_refresh_revalidates_blob_endpoint(self, monkeypatch):
+        # B4: a tampered/repointed blob endpoint must not receive
+        # refresh_token POSTs on expiry.
+        vault = _bare_vault(monkeypatch, lambda r: _json({"access_token": "x"}))
+        vault.connections["mcp_evil"] = {
+            "provider": "mcp:evil", "access_token": "stale",
+            "refresh_token": "rt", "expires_at": 100,
+            "token_endpoint": "https://127.0.0.1:9443/token",
+            "client_id": "pub", "client_secret": "",
+        }
+        with pytest.raises(RuntimeError):
+            await vault.ensure_connection_token("mcp_evil")
 
     @pytest.mark.asyncio
     async def test_failed_exchange_raises_truncated(self, monkeypatch):

@@ -5083,12 +5083,24 @@ def create_dashboard_router(
                     kind="oauth", connection=pending.connection_name,
                 ),
             })
-            connector_store.upsert(bound)
+            import asyncio as _asyncio
+            await _asyncio.to_thread(connector_store.upsert, bound)
             if mcp_gateway is not None:
                 mcp_gateway.invalidate(c.name)
-        logger.info(
-            "MCP connector connected: %s → %s", name, pending.connection_name,
-        )
+            logger.info(
+                "MCP connector connected: %s → %s",
+                name, pending.connection_name,
+            )
+        else:
+            # Connector deleted (or replaced with stdio) mid-flow: the
+            # exchanged connection is stored but unbound — visible on
+            # the integrations list, removable via disconnect. Say so
+            # rather than claiming success silently.
+            logger.warning(
+                "MCP OAuth callback for %r: connector no longer exists; "
+                "connection %r stored unbound",
+                name, pending.connection_name,
+            )
         _emit_config_changed("connectors", name=name)
         return _back(f"integration_connected={pending.connection_name}")
 

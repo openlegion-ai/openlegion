@@ -20,6 +20,7 @@ second secret-entry path.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
@@ -53,51 +54,78 @@ class Discovery:
     registration_endpoint: str | None
 
 
+# Statuses treated as "this well-known location doesn't exist — try
+# the next candidate". 403/405/410 cover strict proxies and servers
+# that reject rather than 404 unknown well-known paths.
+_MISS_STATUSES = frozenset({403, 404, 405, 410})
+
+
 async def _validate_endpoint_url(step: str, url: str) -> str:
     """https + public-IP check for a DISCOVERED URL — server-controlled
-    input, full D16 posture."""
+    input, full D16 posture. ``allow_loopback=False``: the explicit
+    loopback carve-out exists for OPERATOR-pasted connector URLs; a
+    remote server pointing its token/registration endpoints at
+    127.0.0.1 would be aiming the mesh's authenticated POSTs at local
+    services."""
     p = urlparse(url)
     if p.scheme != "https" or not p.hostname:
         raise MCPOAuthError(
             step, f"{step}: discovered URL must be https:// (got {url[:120]!r})",
         )
     try:
-        await _assert_public_host(url)
+        await _assert_public_host(url, allow_loopback=False)
     except Exception as exc:
         raise MCPOAuthError(step, f"{step}: {exc}") from exc
     return url
+
+
+async def _read_capped(resp: httpx.Response, step: str) -> bytes:
+    """Drain a streamed response with the byte cap enforced DURING the
+    read — a post-read ``len(content)`` check would have already
+    buffered an arbitrarily large hostile body into mesh memory."""
+    body = b""
+    async for chunk in resp.aiter_bytes():
+        body += chunk
+        if len(body) > _MAX_METADATA_BYTES:
+            raise MCPOAuthError(step, f"{step}: response exceeds 64KB")
+    return body
 
 
 async def _fetch_json(
     client: httpx.AsyncClient, step: str, url: str,
 ) -> dict | None:
     """GET a metadata document under the D16 fetch discipline. Returns
-    None on 404 (callers try the next well-known location); raises
-    ``MCPOAuthError`` on anything else unexpected."""
+    None on a miss status (callers try the next well-known location);
+    raises ``MCPOAuthError`` on anything else unexpected."""
     await _validate_endpoint_url(step, url)
     try:
-        resp = await client.get(url, headers={"Accept": "application/json"})
+        async with client.stream(
+            "GET", url, headers={"Accept": "application/json"},
+        ) as resp:
+            if resp.status_code in _MISS_STATUSES:
+                return None
+            if resp.is_redirect:
+                # follow_redirects is off by construction; a redirect
+                # here is a server trying to bounce us to an unchecked
+                # origin.
+                raise MCPOAuthError(
+                    step, f"{step}: redirect responses are not followed",
+                )
+            if not resp.is_success:
+                raise MCPOAuthError(
+                    step, f"{step}: HTTP {resp.status_code} from {url[:120]}",
+                )
+            ctype = resp.headers.get("content-type", "")
+            if "json" not in ctype:
+                raise MCPOAuthError(
+                    step,
+                    f"{step}: expected JSON, got content-type {ctype[:60]!r}",
+                )
+            body = await _read_capped(resp, step)
     except httpx.HTTPError as exc:
         raise MCPOAuthError(step, f"{step}: fetch failed ({exc})") from exc
-    if resp.status_code == 404:
-        return None
-    if resp.is_redirect:
-        # follow_redirects is off by construction; a redirect here is a
-        # server trying to bounce us to an unchecked origin.
-        raise MCPOAuthError(step, f"{step}: redirect responses are not followed")
-    if not resp.is_success:
-        raise MCPOAuthError(
-            step, f"{step}: HTTP {resp.status_code} from {url[:120]}",
-        )
-    if len(resp.content) > _MAX_METADATA_BYTES:
-        raise MCPOAuthError(step, f"{step}: metadata document exceeds 64KB")
-    ctype = resp.headers.get("content-type", "")
-    if "json" not in ctype:
-        raise MCPOAuthError(
-            step, f"{step}: expected JSON, got content-type {ctype[:60]!r}",
-        )
     try:
-        data = resp.json()
+        data = json.loads(body)
     except ValueError as exc:
         raise MCPOAuthError(step, f"{step}: invalid JSON") from exc
     if not isinstance(data, dict):
@@ -213,51 +241,62 @@ async def register_client(
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
     }
+    step = "client registration"
+
+    async def _attempt(
+        client: httpx.AsyncClient, auth_method: str,
+    ) -> tuple[str, str | None] | str:
+        """One registration attempt. Returns the identity, or the
+        rejection reason string on HTTP 400 (metadata rejected)."""
+        try:
+            async with client.stream(
+                "POST", registration_endpoint,
+                json={**base, "token_endpoint_auth_method": auth_method},
+                headers={"Accept": "application/json"},
+            ) as resp:
+                if resp.status_code == 400:
+                    body = await _read_capped(resp, step)
+                    return f"{auth_method}: HTTP 400 {body[:160].decode('utf-8', 'ignore')}"
+                if resp.status_code not in (200, 201):
+                    raise MCPOAuthError(
+                        step,
+                        f"{step}: HTTP {resp.status_code} "
+                        f"from {registration_endpoint[:120]}",
+                    )
+                body = await _read_capped(resp, step)
+        except httpx.HTTPError as exc:
+            raise MCPOAuthError(
+                step, f"{step}: request failed ({exc})",
+            ) from exc
+        try:
+            data = json.loads(body)
+        except ValueError as exc:
+            raise MCPOAuthError(
+                step, f"{step}: registration returned invalid JSON",
+            ) from exc
+        client_id = str(data.get("client_id", "")) if isinstance(data, dict) else ""
+        if not client_id:
+            raise MCPOAuthError(step, f"{step}: registration returned no client_id")
+        secret = data.get("client_secret") or None
+        logger.info(
+            "DCR registered client for %s (auth_method=%s, secret=%s)",
+            registration_endpoint, auth_method, "yes" if secret else "no",
+        )
+        return client_id, secret
+
     async with _new_client() as client:
-        for auth_method in ("client_secret_post", "none"):
-            try:
-                resp = await client.post(
-                    registration_endpoint,
-                    json={**base, "token_endpoint_auth_method": auth_method},
-                    headers={"Accept": "application/json"},
-                )
-            except httpx.HTTPError as exc:
-                raise MCPOAuthError(
-                    "client registration",
-                    f"client registration: request failed ({exc})",
-                ) from exc
-            if resp.status_code == 400 and auth_method == "client_secret_post":
-                continue  # retry as a public client
-            if resp.status_code not in (200, 201):
-                raise MCPOAuthError(
-                    "client registration",
-                    f"client registration: HTTP {resp.status_code} "
-                    f"from {registration_endpoint[:120]}",
-                )
-            if len(resp.content) > _MAX_METADATA_BYTES:
-                raise MCPOAuthError(
-                    "client registration", "registration response exceeds 64KB",
-                )
-            try:
-                data = resp.json()
-            except ValueError as exc:
-                raise MCPOAuthError(
-                    "client registration", "registration returned invalid JSON",
-                ) from exc
-            client_id = str(data.get("client_id", ""))
-            if not client_id:
-                raise MCPOAuthError(
-                    "client registration", "registration returned no client_id",
-                )
-            secret = data.get("client_secret") or None
-            logger.info(
-                "DCR registered client for %s (auth_method=%s, secret=%s)",
-                registration_endpoint, auth_method,
-                "yes" if secret else "no",
-            )
-            return client_id, secret
+        confidential = await _attempt(client, "client_secret_post")
+        if not isinstance(confidential, str):
+            return confidential
+        # Metadata rejected — retry as a public client (PKCE is the
+        # proof of possession). Keep the FIRST rejection reason: when
+        # both fail, the confidential error (e.g. a redirect_uri the AS
+        # refuses) is usually the diagnosable one.
+        public = await _attempt(client, "none")
+        if not isinstance(public, str):
+            return public
     raise MCPOAuthError(
-        "client registration",
-        "the authorization server rejected both confidential and "
-        "public client registration",
+        step,
+        f"{step}: both confidential and public registration were "
+        f"rejected — {confidential}; {public}",
     )

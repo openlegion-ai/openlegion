@@ -93,6 +93,27 @@ class ConnectionRefreshError(RuntimeError):
         self.first_failure = first_failure
 
 
+async def _validate_dynamic_token_endpoint(url: str) -> None:
+    """SSRF gate for DISCOVERED (blob-embedded) token endpoints.
+
+    Static registry endpoints are code-fixed and need no check; dynamic
+    ones came from a remote MCP server's metadata and persist in the
+    connection blob for its lifetime — validate https + public-IP (no
+    loopback carve-out) at EVERY point of use, not just at discovery.
+    Lazy import: the gateway module is light, but credentials loads in
+    contexts (CLI) that never touch remote connectors.
+    """
+    from urllib.parse import urlparse as _urlparse
+
+    from src.host.mcp_gateway import _assert_public_host
+    parsed = _urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise RuntimeError(
+            f"dynamic token endpoint must be https:// (got {url[:120]!r})",
+        )
+    await _assert_public_host(url, allow_loopback=False)
+
+
 # ── Anthropic prompt caching (OAuth path) ────────────────────
 _PROMPT_CACHE_ENABLED = os.environ.get(
     "OPENLEGION_PROMPT_CACHING", "1"
@@ -993,6 +1014,9 @@ class CredentialVault:
         blob fields over the registry). Does NOT persist — caller
         stores via :meth:`store_connection`. Tokens never logged.
         """
+        # The endpoint is DISCOVERED (server-controlled); validate at
+        # the point of use, not just at discovery.
+        await _validate_dynamic_token_endpoint(token_endpoint)
         data = {
             "grant_type": "authorization_code",
             "code": code,
@@ -1160,6 +1184,14 @@ class CredentialVault:
                 client_secret = conn.get("client_secret", "")
                 if not client_id:
                     return conn["access_token"]
+                # Blob endpoints are re-validated on EVERY refresh, not
+                # just once at discovery: the blob persists in .env for
+                # the connection's lifetime, and a later DNS repoint of
+                # the AS host (or a tampered/restored blob) must not
+                # get the mesh delivering refresh_token POSTs to
+                # internal addresses. Same posture as discovery —
+                # https-only, public addresses, no loopback carve-out.
+                await _validate_dynamic_token_endpoint(token_url)
             else:
                 provider = get_provider(provider_key)
                 if provider is None:
