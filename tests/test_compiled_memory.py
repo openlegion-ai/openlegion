@@ -20,6 +20,7 @@ from src.agent.context import (
 )
 from src.agent.workspace import (
     _MEMORY_FILE_MAX,
+    _MEMORY_HEAD_BUDGET,
     MEMORY_COMPILED_BEGIN,
     MEMORY_COMPILED_END,
     WorkspaceManager,
@@ -353,6 +354,78 @@ class TestConsolidateMemory:
             )
             await cm._maybe_decay_salience()
             mem.decay_all.assert_not_awaited()
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_oversized_head_consolidates_without_log_material(self):
+        """An oversized head (legacy marker-less file split as all-head, or an
+        LLM-overshot compile) must consolidate even with an EMPTY log —
+        otherwise it injects clipped + stale at the head budget forever."""
+        ws = self._make_workspace(
+            due=True, log="", head="H" * (_MEMORY_HEAD_BUDGET + 1)
+        )
+        llm = MagicMock()
+        llm.chat = AsyncMock(
+            return_value=LLMResponse(content="RECOMPILED HEAD", tokens_used=10)
+        )
+        cm = ContextManager(max_tokens=1000, llm=llm, workspace=ws, memory=None)
+        await cm._maybe_consolidate_memory()
+
+        llm.chat.assert_awaited_once()
+        ws.write_compiled_memory.assert_called_once()
+        ws.mark_consolidated.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_legacy_markerless_file_consolidates_via_maintenance(self):
+        """Prod regression: a legacy MEMORY.md with no compiled markers splits
+        as ALL head + empty log, so the log-only material gate never fired and
+        the stale blob injected clipped every turn. run_maintenance() must
+        re-compile it: LLM called, file gains markers, sentinel stamped."""
+        d = tempfile.mkdtemp()
+        try:
+            body = "# Long-Term Memory\n\n" + (
+                "stale legacy fact line\n" * ((_MEMORY_HEAD_BUDGET // 23) + 50)
+            )
+            (Path(d) / "MEMORY.md").write_text(body)
+            ws = WorkspaceManager(workspace_dir=d)
+            assert len(ws.load_compiled_memory()) > _MEMORY_HEAD_BUDGET
+            assert ws.load_memory_log() == ""
+
+            llm = MagicMock()
+            llm.chat = AsyncMock(
+                return_value=LLMResponse(content="COMPILED LEGACY", tokens_used=10)
+            )
+            cm = ContextManager(max_tokens=1000, llm=llm, workspace=ws, memory=None)
+            await cm.run_maintenance()
+
+            llm.chat.assert_awaited_once()
+            raw = (Path(d) / "MEMORY.md").read_text()
+            assert MEMORY_COMPILED_BEGIN in raw
+            assert MEMORY_COMPILED_END in raw
+            assert "COMPILED LEGACY" in ws.load_compiled_memory()
+            # Sentinel stamped → not due again within the window.
+            assert ws.consolidation_due(10_000) is False
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_small_legacy_markerless_file_still_skips(self):
+        """A legacy marker-less file UNDER the head budget with no new log
+        material injects fine as-is — the gate must still skip (no LLM call)."""
+        d = tempfile.mkdtemp()
+        try:
+            (Path(d) / "MEMORY.md").write_text(
+                "# Long-Term Memory\n\nsmall legacy body\n"
+            )
+            ws = WorkspaceManager(workspace_dir=d)
+            llm = MagicMock()
+            llm.chat = AsyncMock()
+            cm = ContextManager(max_tokens=1000, llm=llm, workspace=ws, memory=None)
+            await cm._maybe_consolidate_memory()
+
+            llm.chat.assert_not_called()
+            assert ws.consolidation_due(10_000) is True  # no sentinel stamped
         finally:
             shutil.rmtree(d, ignore_errors=True)
 

@@ -133,8 +133,10 @@ class TestPlaybookConstants:
         # 6400 → 6800 for the handoff-brief rule (workers don't see the
         # conversation — carry the user's ask + deliverable depth in `brief`);
         # 6800 → 7800 for watch mode (loop await_task_event + narrate when
-        # the user explicitly asks to watch a pipeline live).
-        assert len(_OPERATOR_CORE) < 7800
+        # the user explicitly asks to watch a pipeline live);
+        # 7800 → 8400 for the post-completion verification-wake contract
+        # (system wakes you once per completed chain; promise nothing else).
+        assert len(_OPERATOR_CORE) < 8400
         assert len(_OPERATOR_CORE) > 1000
 
     def test_playbooks_have_numbered_steps(self):

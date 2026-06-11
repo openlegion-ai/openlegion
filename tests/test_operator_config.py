@@ -633,7 +633,13 @@ class TestEnsureOperatorInstructionsRefresh(_TempConfigMixin):
         assert agent["initial_instructions"] == _OPERATOR_CORE
 
     def test_current_payload_untouched(self):
-        custom = "current + user edit\n<!-- playbook_v4_watch_mode -->"
+        # Pin against the LATEST sentinel so this test means "payload is
+        # already current" forever — a hardcoded older sentinel silently
+        # turns into the roll-forward case when a new version ships.
+        from src.shared.types import PLAYBOOK_SENTINELS
+        custom = (
+            f"current + user edit\n<!-- {PLAYBOOK_SENTINELS[-1]} -->"
+        )
         self._seed_operator(custom)
         agent = self._run()
         assert agent["initial_instructions"] == custom
