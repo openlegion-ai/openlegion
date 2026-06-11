@@ -9,9 +9,17 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    Field,
+    TypeAdapter,
+    field_validator,
+    model_validator,
+)
 
 
 def _generate_id(prefix: str, length: int = 12) -> str:
@@ -503,6 +511,25 @@ agent". Matches the glob convention used by
 :attr:`AgentPermissions.can_message`."""
 
 
+def _connector_agents_shape(v: list[str]) -> list[str]:
+    """Shared ``agents`` validation for both connector transports:
+    ``'*'`` must be the sole element; ids validated and deduped with
+    order preserved."""
+    if CONNECTOR_ALL_AGENTS in v and len(v) > 1:
+        raise ValueError(
+            "agents: '*' (all agents) cannot be combined with explicit ids",
+        )
+    seen: set[str] = set()
+    out: list[str] = []
+    for a in v:
+        if a != CONNECTOR_ALL_AGENTS and not re.match(AGENT_ID_RE_PATTERN, a):
+            raise ValueError(f"agents: invalid agent id {a!r}")
+        if a not in seen:
+            seen.add(a)
+            out.append(a)
+    return out
+
+
 class MCPConnector(MCPServerConfig):
     """A fleet-level MCP connector: a stdio server definition plus its
     agent assignment. The single source of truth for which agents run
@@ -515,11 +542,10 @@ class MCPConnector(MCPServerConfig):
     Inherits every :class:`MCPServerConfig` validator (name pattern, no
     ``$CRED`` in ``command``, args/env caps) unchanged.
 
-    ``transport`` exists today only so persisted records are tolerant
-    across upgrades/rollbacks: Phase 2 (remote MCP) introduces a
-    ``transport``-discriminated union, and ``extra="forbid"`` would
-    otherwise make THIS version drop any record a newer version wrote.
-    Only ``"stdio"`` is valid here.
+    ``transport`` discriminates the :data:`Connector` union — this is
+    the stdio variant; :class:`HttpConnector` is the remote one. The
+    default lets pre-union files (and hand-written records) omit the
+    key.
     """
 
     transport: Literal["stdio"] = "stdio"
@@ -528,19 +554,7 @@ class MCPConnector(MCPServerConfig):
     @field_validator("agents")
     @classmethod
     def _agents_shape(cls, v: list[str]) -> list[str]:
-        if CONNECTOR_ALL_AGENTS in v and len(v) > 1:
-            raise ValueError(
-                "agents: '*' (all agents) cannot be combined with explicit ids",
-            )
-        seen: set[str] = set()
-        out: list[str] = []
-        for a in v:
-            if a != CONNECTOR_ALL_AGENTS and not re.match(AGENT_ID_RE_PATTERN, a):
-                raise ValueError(f"agents: invalid agent id {a!r}")
-            if a not in seen:
-                seen.add(a)
-                out.append(a)
-        return out
+        return _connector_agents_shape(v)
 
     def applies_to(self, agent_id: str) -> bool:
         """True when this connector is assigned to ``agent_id``."""
@@ -554,6 +568,101 @@ class MCPConnector(MCPServerConfig):
         ``MCPServerConfig`` can never be silently dropped from the
         container env."""
         return self.model_dump(exclude={"agents", "transport"}, exclude_none=False)
+
+
+class ConnectorAuth(BaseModel):
+    """Auth binding for a remote (http) connector.
+
+    The secret itself always lives in the vault; this only names it.
+    ``bearer`` → vault credential injected as ``Authorization: Bearer``
+    by the mesh gateway. Vault-existence is checked at dashboard PUT
+    time, but deliberately NOT per-agent ``can_access_credential`` —
+    the token is mesh-held and never enters a container (plan D14).
+    ``oauth`` → vault connection key, set by the Phase-3 connect flow
+    (refresh-on-resolve).
+    """
+
+    model_config = {"extra": "forbid"}
+
+    kind: Literal["none", "bearer", "oauth"] = "none"
+    cred: str | None = Field(default=None, max_length=128)
+    connection: str | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def _kind_fields(self) -> "ConnectorAuth":
+        if self.kind == "bearer" and not self.cred:
+            raise ValueError("auth.kind='bearer' requires auth.cred")
+        return self
+
+
+class HttpConnector(BaseModel):
+    """A fleet-level remote MCP server: a streamable-HTTP endpoint plus
+    its agent assignment. Calls are proxied by the mesh-side gateway;
+    auth is resolved from the vault per call.
+
+    NEVER serialized into ``MCP_SERVERS`` — ``ConnectorStore``
+    ``snapshot_for_agent`` filters to stdio before building container
+    env, so this record (including ``auth``) cannot enter an agent
+    container. Deliberately has no ``server_dict()``: anything that
+    tries to treat it as a container server fails loudly.
+    """
+
+    model_config = {"extra": "forbid"}
+
+    transport: Literal["http"]
+    name: str = Field(
+        min_length=1, max_length=64, pattern=MCP_SERVER_NAME_RE_PATTERN,
+    )
+    url: str = Field(min_length=1, max_length=512)
+    auth: ConnectorAuth = Field(default_factory=ConnectorAuth)
+    agents: list[str] = Field(default_factory=list, max_length=128)
+
+    @field_validator("url")
+    @classmethod
+    def _url_shape(cls, v: str) -> str:
+        p = urlparse(v)
+        if not p.hostname:
+            raise ValueError("Connector URL must include a host")
+        if p.scheme == "https":
+            return v
+        # Self-hosted/dev MCP on the mesh host itself is legitimate.
+        # This is a config-shape check only; the gateway's resolved-IP
+        # blocklist (plan D16) is the SSRF layer.
+        if p.scheme == "http" and p.hostname in ("localhost", "127.0.0.1", "::1"):
+            return v
+        raise ValueError(
+            "Connector URL must be https:// (http:// allowed for localhost only)",
+        )
+
+    @field_validator("agents")
+    @classmethod
+    def _agents_shape(cls, v: list[str]) -> list[str]:
+        return _connector_agents_shape(v)
+
+    def applies_to(self, agent_id: str) -> bool:
+        """True when this connector is assigned to ``agent_id``."""
+        return CONNECTOR_ALL_AGENTS in self.agents or agent_id in self.agents
+
+
+Connector = Annotated[MCPConnector | HttpConnector, Field(discriminator="transport")]
+"""The connector-catalog record union, discriminated on ``transport``.
+Validate untrusted records through :data:`CONNECTOR_ADAPTER` so both
+variants share one entry point (and one 400-error shape)."""
+
+
+def _default_transport(v: Any) -> Any:
+    """Tag-extraction shim: discriminated unions do not fall back to
+    field defaults for a missing tag, but pre-union catalog files (and
+    hand-written records) legitimately omit ``transport``. Inject the
+    stdio default for dict input only; model instances pass through."""
+    if isinstance(v, dict) and "transport" not in v:
+        return {**v, "transport": "stdio"}
+    return v
+
+
+CONNECTOR_ADAPTER: TypeAdapter = TypeAdapter(
+    Annotated[Connector, BeforeValidator(_default_transport)],
+)
 
 
 class AgentConfig(BaseModel):

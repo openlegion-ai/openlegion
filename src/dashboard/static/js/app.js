@@ -6678,7 +6678,16 @@ function dashboard() {
       const agentIds = [...(this.connectorsData?.agents || [])];
       this.connectorDraft = {
         _isNew: true,
+        // Remote is the default-selected type: it's the ecosystem
+        // default (URL-first connectors) and the honest one — the
+        // Python-only agent image can't run most published stdio
+        // servers anyway.
+        _transport: 'http',      // 'http' | 'stdio'
         name: '',
+        url: '',
+        _authKind: 'none',       // 'none' | 'bearer' | 'oauth' (read-only)
+        _authCred: '',
+        _authConnection: null,
         command: '',
         _argRows: [],            // [{value: string}]
         _envRows: [],            // [{key, type: 'cred'|'plain', value}]
@@ -6704,7 +6713,14 @@ function dashboard() {
       ])].sort();
       this.connectorDraft = {
         _isNew: false,
+        // Transport is fixed once created — a cross-transport replace
+        // is a remove + re-add, never a silent morph.
+        _transport: c.transport || 'stdio',
         name: c.name,
+        url: c.url || '',
+        _authKind: c.auth?.kind || 'none',
+        _authCred: c.auth?.cred || '',
+        _authConnection: c.auth?.connection || null,
         command: c.command || '',
         _argRows: (c.args || []).map(v => ({ value: v })),
         _envRows: [],
@@ -6750,9 +6766,15 @@ function dashboard() {
       const d = this.connectorDraft;
       if (!d || this.connectorSaving) return;
       const name = (d.name || '').trim();
+      const isRemote = d._transport === 'http';
       const command = (d.command || '').trim();
-      if (!name || !command) {
-        this.showToast('Name and command are required.');
+      const url = (d.url || '').trim();
+      if (!name || (isRemote ? !url : !command)) {
+        this.showToast(isRemote ? 'Name and URL are required.' : 'Name and command are required.');
+        return;
+      }
+      if (isRemote && d._authKind === 'bearer' && !(d._authCred || '').trim()) {
+        this.showToast('Pick the vault credential holding the API key.');
         return;
       }
       // The PUT is an upsert — guard the CREATE path against silently
@@ -6769,7 +6791,7 @@ function dashboard() {
           return;
         }
       }
-      if (d._replaceEnv) {
+      if (!isRemote && d._replaceEnv) {
         for (const row of (d._envRows || [])) {
           const k = (row.key || '').trim();
           if (!k) continue;
@@ -6779,21 +6801,36 @@ function dashboard() {
           }
         }
       }
-      const body = {
-        command,
-        args: d._argRows.map(r => (r.value || '')).filter(v => v !== ''),
-        agents: d._assignMode === 'all'
-          ? ['*']
-          : Object.keys(d._agentSel || {}).filter(a => d._agentSel[a]).sort(),
-      };
-      if (d._replaceEnv) {
-        const env = {};
-        for (const row of (d._envRows || [])) {
-          const k = (row.key || '').trim();
-          if (!k) continue;
-          env[k] = row.type === 'cred' ? `$CRED{${(row.value || '').trim()}}` : (row.value || '');
+      const agents = d._assignMode === 'all'
+        ? ['*']
+        : Object.keys(d._agentSel || {}).filter(a => d._agentSel[a]).sort();
+      let body;
+      if (isRemote) {
+        body = { transport: 'http', url, agents };
+        // OAuth bindings are managed by the Connect flow, not this
+        // form — omit auth so the backend preserves what's persisted.
+        if (d._authKind !== 'oauth') {
+          body.auth = {
+            kind: d._authKind,
+            cred: d._authKind === 'bearer' ? (d._authCred || '').trim() : null,
+            connection: null,
+          };
         }
-        body.env = env;
+      } else {
+        body = {
+          command,
+          args: d._argRows.map(r => (r.value || '')).filter(v => v !== ''),
+          agents,
+        };
+        if (d._replaceEnv) {
+          const env = {};
+          for (const row of (d._envRows || [])) {
+            const k = (row.key || '').trim();
+            if (!k) continue;
+            env[k] = row.type === 'cred' ? `$CRED{${(row.value || '').trim()}}` : (row.value || '');
+          }
+          body.env = env;
+        }
       }
       this.connectorSaving = true;
       this.connectorErrors = {};

@@ -2300,13 +2300,48 @@ def create_dashboard_router(
         return sorted(a for a in agents if a in agent_registry)
 
     def _connector_to_api(c: Any) -> dict:
-        """Catalog record → API shape. Env values masked to
-        ``env_keys`` (same contract as the old per-agent surface:
-        a GET→edit→PUT round-trip that omits ``env`` preserves it)."""
-        masked = _mask_mcp_servers_for_get([c.server_dict()])[0]
-        masked["agents"] = list(c.agents)
-        masked["assigned_agents"] = _expand_assignment(c.agents)
-        return masked
+        """Catalog record → API shape, per transport. stdio: env values
+        masked to ``env_keys`` (same contract as the old per-agent
+        surface: a GET→edit→PUT round-trip that omits ``env`` preserves
+        it). http: ``url`` + auth *names* only — the bearer token /
+        connection contents live in the vault and never appear in any
+        GET response."""
+        from src.shared.types import HttpConnector
+        if isinstance(c, HttpConnector):
+            shaped: dict = {
+                "name": c.name,
+                "transport": "http",
+                "url": c.url,
+                "auth": {
+                    "kind": c.auth.kind,
+                    "cred": c.auth.cred,
+                    "connection": c.auth.connection,
+                },
+            }
+        else:
+            shaped = _mask_mcp_servers_for_get([c.server_dict()])[0]
+            shaped["transport"] = "stdio"
+        shaped["agents"] = list(c.agents)
+        shaped["assigned_agents"] = _expand_assignment(c.agents)
+        return shaped
+
+    def _connector_audit_dict(c: Any) -> list[dict]:
+        """Audit-row serialization, per transport. stdio env redacted
+        via the existing helper; http carries names only by shape."""
+        from src.shared.types import HttpConnector
+        if isinstance(c, HttpConnector):
+            return [{
+                "name": c.name,
+                "transport": "http",
+                "url": c.url,
+                "auth_kind": c.auth.kind,
+                "auth_cred": c.auth.cred,
+                "auth_connection": c.auth.connection,
+                "agents": list(c.agents),
+            }]
+        return _redact_mcp_env_for_audit(
+            [{**c.server_dict(), "agents": c.agents}],
+        )
 
     @api_router.get("/api/connectors")
     async def api_connectors_list() -> dict:
@@ -2334,11 +2369,14 @@ def create_dashboard_router(
 
     @api_router.put("/api/connectors/{name}")
     async def api_connector_upsert(name: str, request: Request) -> dict:
-        """Create or replace a connector. Body: MCPConnector fields
-        (``name`` taken from the path). ``env`` absent = preserve the
-        persisted env; present (dict/``{}``/``null``) = replace
-        wholesale. Returns the affected agents so the UI can offer the
-        restart-now/later choice."""
+        """Create or replace a connector (``name`` taken from the
+        path). Body: stdio (``command``/``args``/``env``) or http
+        (``transport: "http"`` + ``url``/``auth``) connector fields.
+        Absent ``env`` (stdio) / ``auth`` (http) / ``agents`` =
+        preserve the persisted value; present = replace wholesale.
+        Returns the affected agents so the UI can offer the
+        restart-now/later choice — except http auth-only edits, which
+        apply on the next gateway call with no restart (plan D12)."""
         if connector_store is None:
             raise HTTPException(503, "Connector catalog not available")
         body = await request.json()
@@ -2349,33 +2387,54 @@ def create_dashboard_router(
             raise HTTPException(
                 400, "Connector name in body does not match URL path",
             )
-        from src.shared.types import MCPConnector
+        from src.shared.types import (
+            CONNECTOR_ADAPTER,
+            HttpConnector,
+            MCPConnector,
+        )
         previous = connector_store.get(name)
         raw = dict(body)
         raw["name"] = previous.name if previous is not None else name
         # Display-side artifacts a GET-replay would carry.
         raw.pop("env_keys", None)
         raw.pop("assigned_agents", None)
-        # Absent = preserve (same contract as env): a partial PUT must
-        # not silently wipe the persisted env or assignment.
-        if "env" not in body and previous is not None:
+        # Absent = preserve: a partial PUT must not silently wipe the
+        # persisted env / auth / assignment. Guarded per transport —
+        # a cross-transport replace (same name, stdio↔http) preserves
+        # nothing transport-specific.
+        if (
+            "env" not in body
+            and isinstance(previous, MCPConnector)
+            and raw.get("transport", "stdio") == "stdio"
+        ):
             raw["env"] = previous.env
+        if (
+            "auth" not in body
+            and isinstance(previous, HttpConnector)
+            and raw.get("transport") == "http"
+        ):
+            raw["auth"] = previous.auth.model_dump()
         if "agents" not in body and previous is not None:
             raw["agents"] = previous.agents
         try:
-            connector = MCPConnector.model_validate(raw)
+            connector = CONNECTOR_ADAPTER.validate_python(raw)
         except ValidationError as ve:
             # Structured per-field errors for inline UI rendering.
             # ``ctx``/``input`` stripped — they can contain raw objects
-            # FastAPI's JSON encoder rejects.
-            safe_errors = [
-                {
-                    "loc": [str(p) for p in e.get("loc", ())],
+            # FastAPI's JSON encoder rejects. The union prefixes loc
+            # with the discriminator tag (('http', 'url')) — strip it,
+            # because the UI keys inline errors off loc[0] and a tag
+            # there would orphan every field error.
+            safe_errors = []
+            for e in ve.errors(include_url=False):
+                loc = [str(p) for p in e.get("loc", ())]
+                if loc and loc[0] in ("stdio", "http"):
+                    loc = loc[1:]
+                safe_errors.append({
+                    "loc": loc,
                     "msg": e.get("msg", ""),
                     "type": e.get("type", ""),
-                }
-                for e in ve.errors(include_url=False)
-            ]
+                })
             raise HTTPException(
                 400, detail={"field": "connector", "errors": safe_errors},
             )
@@ -2389,46 +2448,69 @@ def create_dashboard_router(
         # degradation in ``_build_mcp_servers_env``: the connector is
         # dropped for that agent with an error log, never blocking the
         # agent from booting.
-        check_agents = _expand_assignment(connector.agents)
-        handles: set[str] = set()
-        for arg in connector.args:
-            handles.update(CRED_HANDLE_RE.findall(arg))
-        for env_val in (connector.env or {}).values():
-            handles.update(CRED_HANDLE_RE.findall(env_val))
-        for cred_name in sorted(handles):
+        if isinstance(connector, MCPConnector):
+            check_agents = _expand_assignment(connector.agents)
+            handles: set[str] = set()
+            for arg in connector.args:
+                handles.update(CRED_HANDLE_RE.findall(arg))
+            for env_val in (connector.env or {}).values():
+                handles.update(CRED_HANDLE_RE.findall(env_val))
+            for cred_name in sorted(handles):
+                if (
+                    credential_vault is not None
+                    and credential_vault.resolve_credential(cred_name) is None
+                ):
+                    raise HTTPException(
+                        400,
+                        f"Credential {cred_name!r} does not exist in the vault. "
+                        "Store it via the credentials surface first.",
+                    )
+                if permissions is not None:
+                    blocked = [
+                        a for a in check_agents
+                        if not permissions.can_access_credential(a, cred_name)
+                    ]
+                    if blocked:
+                        raise HTTPException(
+                            400,
+                            f"Agent(s) {', '.join(repr(a) for a in blocked)} lack "
+                            f"permission for credential {cred_name!r}. Grant it "
+                            "in their permissions or narrow the assignment.",
+                        )
+        elif connector.auth.kind == "bearer":
+            # http bearer: vault-EXISTENCE only, deliberately no
+            # per-agent can_access_credential (plan D14) — the token is
+            # mesh-held and injected by the gateway; agents never see
+            # it, so per-agent grants would be exposure, not safety.
             if (
                 credential_vault is not None
-                and credential_vault.resolve_credential(cred_name) is None
+                and credential_vault.resolve_credential(connector.auth.cred)
+                is None
             ):
                 raise HTTPException(
                     400,
-                    f"Credential {cred_name!r} does not exist in the vault. "
-                    "Store it via the credentials surface first.",
+                    f"Credential {connector.auth.cred!r} does not exist in "
+                    "the vault. Store it via the credentials surface first.",
                 )
-            if permissions is not None:
-                blocked = [
-                    a for a in check_agents
-                    if not permissions.can_access_credential(a, cred_name)
-                ]
-                if blocked:
-                    raise HTTPException(
-                        400,
-                        f"Agent(s) {', '.join(repr(a) for a in blocked)} lack "
-                        f"permission for credential {cred_name!r}. Grant it "
-                        "in their permissions or narrow the assignment.",
-                    )
 
         # ── no-op detection: a GET→unchanged-PUT must not mark agents
-        # dirty or prompt for a restart. Both sides are validated
-        # MCPConnector instances, so direct field comparison suffices
-        # (env {} and None compare equal — both mean "no env").
-        if previous is not None:
-            same_server = (
-                connector.command == previous.command
-                and connector.args == previous.args
-                and (connector.env or None) == (previous.env or None)
-            )
-            if same_server and set(connector.agents) == set(previous.agents):
+        # dirty, prompt for a restart, or write an audit row. Both
+        # sides are validated instances, so direct field comparison
+        # suffices (stdio: env {} and None compare equal — both mean
+        # "no env").
+        if previous is not None and type(previous) is type(connector):
+            if isinstance(connector, MCPConnector):
+                same_record = (
+                    connector.command == previous.command
+                    and connector.args == previous.args
+                    and (connector.env or None) == (previous.env or None)
+                )
+            else:
+                same_record = (
+                    connector.url == previous.url
+                    and connector.auth == previous.auth
+                )
+            if same_record and set(connector.agents) == set(previous.agents):
                 return {
                     "connector": _connector_to_api(previous),
                     "affected_agents": [],
@@ -2442,23 +2524,27 @@ def create_dashboard_router(
         affected = sorted(set(before) | set(after))
 
         # Disk write off the event loop (same pattern as the skill
-        # marketplace calls in this file).
+        # marketplace calls in this file). The store decides the dirty
+        # matrix (plan D12): an http auth-only edit is NOT
+        # restart-relevant — it applies on the gateway's next per-call
+        # auth resolve, so no agent is marked dirty and the UI gets no
+        # restart prompt. (Phase 2b adds gateway.invalidate(name) here
+        # so a previously-401 connector re-discovers its tools.)
         import asyncio as _asyncio
-        await _asyncio.to_thread(connector_store.upsert, connector)
-        connector_store.mark_dirty(affected)
+        restart_relevant = await _asyncio.to_thread(
+            connector_store.upsert, connector,
+        )
+        if restart_relevant:
+            connector_store.mark_dirty(affected)
         try:
             blackboard.log_audit(
                 action="edit_connector",
                 target=connector.name,
                 field="connector",
                 before_value=json.dumps(
-                    _redact_mcp_env_for_audit(
-                        [{**previous.server_dict(), "agents": previous.agents}],
-                    ) if previous else None,
+                    _connector_audit_dict(previous) if previous else None,
                 ),
-                after_value=json.dumps(_redact_mcp_env_for_audit(
-                    [{**connector.server_dict(), "agents": connector.agents}],
-                )),
+                after_value=json.dumps(_connector_audit_dict(connector)),
                 actor="dashboard",
                 provenance="user",
             )
@@ -2467,8 +2553,8 @@ def create_dashboard_router(
         _emit_config_changed("connectors", name=connector.name)
         return {
             "connector": _connector_to_api(connector),
-            "affected_agents": affected,
-            "restart_required": bool(affected),
+            "affected_agents": affected if restart_relevant else [],
+            "restart_required": bool(affected) and restart_relevant,
         }
 
     @api_router.delete("/api/connectors/{name}")
@@ -2489,9 +2575,7 @@ def create_dashboard_router(
                 action="delete_connector",
                 target=previous.name,
                 field="connector",
-                before_value=json.dumps(_redact_mcp_env_for_audit(
-                    [{**previous.server_dict(), "agents": previous.agents}],
-                )),
+                before_value=json.dumps(_connector_audit_dict(previous)),
                 after_value="",
                 actor="dashboard",
                 provenance="user",
