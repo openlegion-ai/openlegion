@@ -17,8 +17,19 @@ proxy's well-exercised pattern.
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
+import tempfile
 from unittest.mock import patch
+
+# Per-process unique root for BrowserManager profile dirs.
+# BrowserManager.__init__ mkdirs profiles_dir, so a fixed "/tmp/..." path
+# is a machine-global write that lets two concurrent pytest runs (e.g.
+# from different checkouts) collide. mkdtemp gives each run its own root.
+_PROFILES_ROOT = tempfile.mkdtemp(prefix="ol_test_profiles_")
+atexit.register(shutil.rmtree, _PROFILES_ROOT, ignore_errors=True)
+
 
 
 class _PageStub:
@@ -80,7 +91,7 @@ class TestBrowserManagerVncAccessors:
     def test_get_agent_vnc_port_no_instance_returns_none(self):
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         assert mgr.get_agent_vnc_port("missing") is None
 
     def test_get_agent_vnc_port_no_display_slot_returns_none(self):
@@ -88,7 +99,7 @@ class TestBrowserManagerVncAccessors:
         is None — proxy must surface as 503 (no per-agent port)."""
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         inst = _make_instance("alpha")
         # display_slot defaults to None — explicit for clarity
         inst.display_slot = None
@@ -99,7 +110,7 @@ class TestBrowserManagerVncAccessors:
         from src.browser.display_allocator import Slot
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         inst = _make_instance("alpha")
         inst.display_slot = Slot(display=101, vnc_port=6101)
         mgr._instances["alpha"] = inst
@@ -108,7 +119,7 @@ class TestBrowserManagerVncAccessors:
     def test_touch_agent_missing_returns_false(self):
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         assert mgr.touch_agent("missing") is False
 
     def test_touch_agent_present_updates_last_activity(self):
@@ -116,7 +127,7 @@ class TestBrowserManagerVncAccessors:
 
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         inst = _make_instance("alpha")
         inst.last_activity = time.time() - 60  # 1 min stale
         mgr._instances["alpha"] = inst
@@ -132,7 +143,7 @@ class TestBrowserManagerVncAccessors:
 
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         a = _make_instance("alpha")
         b = _make_instance("bravo")
         a.last_activity = b.last_activity = time.time() - 60
@@ -164,7 +175,7 @@ class TestPerAgentVncHttpRoute:
 
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         app = _make_browser_app(mgr)
         client = TestClient(app)
         # Dot in agent_id fails the AGENT_ID_RE_PATTERN regex.
@@ -178,7 +189,7 @@ class TestPerAgentVncHttpRoute:
 
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         app = _make_browser_app(mgr)
         client = TestClient(app)
         resp = client.get("/agent-vnc/ghost/index.html")
@@ -192,7 +203,7 @@ class TestPerAgentVncHttpRoute:
 
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         inst = _make_instance("legacy")
         inst.display_slot = None
         mgr._instances["legacy"] = inst
@@ -212,7 +223,7 @@ class TestPerAgentVncHttpRoute:
         from src.browser.display_allocator import Slot
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         inst = _make_instance("real")
         # Pick a port that's almost certainly not bound.
         inst.display_slot = Slot(display=163, vnc_port=6163)
@@ -231,7 +242,7 @@ class TestPerAgentKeepalive:
 
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         a = _make_instance("alpha")
         b = _make_instance("bravo")
         a.last_activity = b.last_activity = time.time() - 60
@@ -252,7 +263,7 @@ class TestPerAgentKeepalive:
 
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         app = _make_browser_app(mgr)
         client = TestClient(app)
         resp = client.post("/browser/ghost/keepalive")
@@ -307,7 +318,7 @@ class TestVncPathsNotHandled:
 
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         app = _make_browser_app(mgr)
         client = TestClient(app)
         for legacy_path in (
@@ -344,7 +355,7 @@ class TestBrowserStatusActiveAgents:
         from src.browser.display_allocator import Slot
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         live = _make_instance("live")
         live.display_slot = Slot(display=110, vnc_port=6110)
         transient = _make_instance("transient")
@@ -374,7 +385,7 @@ class TestBrowserStatusActiveAgents:
 
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         app = _make_browser_app(mgr)
         client = TestClient(app)
         resp = client.get("/browser/status")

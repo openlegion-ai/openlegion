@@ -29,10 +29,21 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import atexit
 import os
+import shutil
+import tempfile
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+# Per-process unique root for BrowserManager profile dirs.
+# BrowserManager.__init__ mkdirs profiles_dir, so a fixed "/tmp/..." path
+# is a machine-global write that lets two concurrent pytest runs (e.g.
+# from different checkouts) collide. mkdtemp gives each run its own root.
+_PROFILES_ROOT = tempfile.mkdtemp(prefix="ol_test_profiles_")
+atexit.register(shutil.rmtree, _PROFILES_ROOT, ignore_errors=True)
+
 
 # ── Window mechanics ──────────────────────────────────────────────────────
 
@@ -480,7 +491,7 @@ class TestPageStateMonitor:
             },
         )
         inst = _FakeInstance("agent-mon-r", page)
-        mgr = BrowserManager(profiles_dir="/tmp/no-such")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/no-such")
         captcha_selectors = [
             'iframe[src*="recaptcha"]',
             'iframe[src*="hcaptcha"]',
@@ -543,7 +554,7 @@ class TestPageStateMonitor:
 
         page = _NavigatingPage()
         inst = _FakeInstance("agent-mon-a", page)
-        mgr = BrowserManager(profiles_dir="/tmp/no-such")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/no-such")
         captcha_selectors = ['iframe[src*="recaptcha"]']
         await mgr._monitor_post_solve_state(
             inst, captcha_selectors,
@@ -576,7 +587,7 @@ class TestPageStateMonitor:
             },
         )
         inst = _FakeInstance("agent-mon-text", page)
-        mgr = BrowserManager(profiles_dir="/tmp/no-such")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/no-such")
         captcha_selectors = ['iframe[src*="recaptcha"]']
         await mgr._monitor_post_solve_state(
             inst, captcha_selectors,
@@ -957,7 +968,7 @@ class TestVendorBlockSignals:
             },
         )
         inst = _FakeInstance("agent-vendor", page)
-        mgr = BrowserManager(profiles_dir="/tmp/no-such-vendor")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/no-such-vendor")
         captcha_selectors = ['iframe[src*="recaptcha"]']
         await mgr._monitor_post_solve_state(
             inst, captcha_selectors,
@@ -1006,7 +1017,7 @@ class TestVendorBlockSignals:
             locators={"body": _FakeLocator(0, body_text)},
         )
         inst = _FakeInstance("agent-text", page)
-        mgr = BrowserManager(profiles_dir="/tmp/no-such-text")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/no-such-text")
         await mgr._monitor_post_solve_state(
             inst, ['iframe[src*="recaptcha"]'],
             kind="recaptcha-v2-checkbox",
@@ -1031,7 +1042,7 @@ class TestAgentIdValidation:
     @pytest.mark.asyncio
     async def test_get_with_invalid_agent_id_returns_empty_shape(self):
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/no-such-validate")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/no-such-validate")
         for bad in ("", "../etc/passwd", "agent with spaces", "<script>"):
             health = await mgr.get_fingerprint_health(bad)
             assert health == {
@@ -1053,7 +1064,7 @@ class TestAgentIdValidation:
         for _ in range(10):
             await _record_fingerprint_outcome("agent-real", rejected=True)
         assert await _is_fingerprint_burned("agent-real") is True
-        mgr = BrowserManager(profiles_dir="/tmp/no-such-validate-2")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/no-such-validate-2")
         result = await mgr.reset_fingerprint_health("../agent-real")
         assert result == {"reset": False}
         assert await _is_fingerprint_burned("agent-real") is True
@@ -1117,7 +1128,7 @@ class TestBurnStateAudit:
             BrowserManager,
             _drain_fingerprint_audit,
         )
-        mgr = BrowserManager(profiles_dir="/tmp/no-such-fp")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/no-such-fp")
 
         # Pre-load the window with 9 rejections so the next rejection
         # crosses the threshold (10/10 = 100% > 50%).

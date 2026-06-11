@@ -51,6 +51,14 @@ from src.shared.utils import setup_logging
 logger = setup_logging("browser.display_allocator")
 
 
+# Root directory for X11 lock files (``.X{N}-lock``) and the
+# ``.X11-unix`` socket dir.  Production X11 REQUIRES /tmp — never change
+# this at runtime.  It exists as a module-level seam so tests can point
+# the allocator at a per-test tmp dir and stay safe under concurrent
+# pytest runs on one machine (two checkouts would otherwise fight over
+# the same real /tmp/.X{N}-lock files).
+_X11_ROOT = Path("/tmp")
+
 # Display N → port (VNC_PORT_BASE + N).  Keep base aligned with KasmVNC's
 # default 6080 so per-agent ports are nearby and operators recognise the
 # range — :6100 reads as "the new VNC ports" without a docs lookup.
@@ -86,11 +94,13 @@ class Slot:
 
     @property
     def lock_path(self) -> Path:
-        return Path(f"/tmp/.X{self.display}-lock")
+        # Computed at access time from the module-level root so tests can
+        # monkeypatch ``_X11_ROOT`` after Slot construction.
+        return _X11_ROOT / f".X{self.display}-lock"
 
     @property
     def socket_path(self) -> Path:
-        return Path(f"/tmp/.X11-unix/X{self.display}")
+        return _X11_ROOT / ".X11-unix" / f"X{self.display}"
 
 
 class DisplayAllocator:
@@ -306,14 +316,6 @@ def _remove_residue(slot: Slot) -> bool:
                 "Could not remove residue %s: %s", path, exc,
             )
     return removed
-
-
-# Convenience for tests / debugging — clear the env so a fresh allocator
-# pass observes a pristine /tmp.  NOT used in production.
-def _force_clear_residue_for_tests(display_start: int, display_end: int) -> None:
-    for display in range(display_start, display_end):
-        slot = Slot(display=display, vnc_port=port_for_display(display))
-        _remove_residue(slot)
 
 
 def _read_lock_pid(path: Path) -> int | None:

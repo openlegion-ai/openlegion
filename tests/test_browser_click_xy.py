@@ -9,10 +9,21 @@ canned dicts and verify the manager's classification + dispatch path.
 
 from __future__ import annotations
 
+import atexit
 import json
+import shutil
+import tempfile
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+# Per-process unique root for BrowserManager profile dirs.
+# BrowserManager.__init__ mkdirs profiles_dir, so a fixed "/tmp/..." path
+# is a machine-global write that lets two concurrent pytest runs (e.g.
+# from different checkouts) collide. mkdtemp gives each run its own root.
+_PROFILES_ROOT = tempfile.mkdtemp(prefix="ol_test_profiles_")
+atexit.register(shutil.rmtree, _PROFILES_ROOT, ignore_errors=True)
+
 
 
 def _make_inst(
@@ -38,7 +49,7 @@ def _make_inst(
 
 def _make_mgr_with(inst):
     from src.browser.service import BrowserManager
-    mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+    mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
     mgr._instances[inst.agent_id] = inst
     return mgr
 
@@ -413,7 +424,7 @@ class TestClickXyServerRoute:
         from src.browser.server import create_browser_app
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         async def _fake_click_xy(agent_id, x, y):
             return {
@@ -440,7 +451,7 @@ class TestClickXyServerRoute:
         from src.browser.server import create_browser_app
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         app = create_browser_app(mgr)
 
         client = TestClient(app)
@@ -454,7 +465,7 @@ class TestClickXyServerRoute:
         from src.browser.server import create_browser_app
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         app = create_browser_app(mgr)
 
         client = TestClient(app)
@@ -470,7 +481,7 @@ class TestClickXyServerRoute:
         from src.browser.server import create_browser_app
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         app = create_browser_app(mgr)
 
         client = TestClient(app)

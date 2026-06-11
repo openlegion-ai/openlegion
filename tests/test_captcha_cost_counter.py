@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from pathlib import Path
 
 import pytest
 
@@ -303,7 +302,7 @@ class TestSnapshotRestore:
         assert data["buckets"]["agent-1"]["millicents"] == 42
 
     @pytest.mark.asyncio
-    async def test_snapshot_failure_returns_false(self, monkeypatch):
+    async def test_snapshot_failure_returns_false(self, monkeypatch, tmp_path):
         """An os.replace failure must be reported, not raised."""
         await cost.add_cost("agent-1", 5)
 
@@ -312,7 +311,7 @@ class TestSnapshotRestore:
 
         monkeypatch.setattr("os.replace", boom)
         # Use a real path so the open succeeds before replace is reached.
-        ok = await cost.snapshot(Path("/tmp/test_captcha_cost_fail.json"))
+        ok = await cost.snapshot(tmp_path / "test_captcha_cost_fail.json")
         assert ok is False
 
     @pytest.mark.asyncio
