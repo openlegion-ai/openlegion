@@ -1758,7 +1758,14 @@ class TestToolDescriptions:
 
     @staticmethod
     def _description(name: str) -> str:
-        import src.agent.builtins.coordination_tool  # noqa: F401
+        # Reload rather than import: other test modules (test_grouped_tools)
+        # clear the _tool_staging registry in their setup, and a cached
+        # module import would then leave it empty. Re-running the @tool
+        # decorators makes the lookup order-independent.
+        import importlib
+
+        import src.agent.builtins.coordination_tool as ct
+        importlib.reload(ct)
         from src.agent.tools import _tool_staging
 
         return _tool_staging[name]["description"]
