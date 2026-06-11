@@ -240,9 +240,13 @@ class ToolRegistry:
     def _apply_remote_tools(self) -> None:
         """(Re)apply the stored remote payload onto ``self.tools`` —
         called from register_remote_tools() and reload() (which rebuilds
-        the tool dict from staging and would otherwise drop these)."""
+        the tool dict from staging and would otherwise drop these).
+
+        getattr-guarded: tests construct ToolRegistry via ``__new__``
+        and call reload() directly, so instance attributes from
+        ``__init__`` may not exist."""
         self._remote_connectors = {}
-        for cname, entry in self._remote_payload.items():
+        for cname, entry in getattr(self, "_remote_payload", {}).items():
             tools_list = entry.get("tools") or []
             self._remote_connectors[cname] = {
                 "state": "error" if entry.get("error") else "running",
@@ -286,7 +290,8 @@ class ToolRegistry:
         """Per-connector status for /capabilities — the remote
         counterpart of MCPClient.list_server_statuses()."""
         return [
-            {"name": n, **s} for n, s in self._remote_connectors.items()
+            {"name": n, **s}
+            for n, s in getattr(self, "_remote_connectors", {}).items()
         ]
 
     def reload(self) -> int:
