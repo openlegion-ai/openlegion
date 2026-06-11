@@ -7,7 +7,7 @@ Deeper docs: `docs/README.md` (architecture, security, configuration, mcp, memor
 ## Commands & Testing
 
 ```bash
-make test                        # fast suite: pytest minus e2e files (same invocation as CI)
+make test                        # fast suite: pytest minus e2e files (same test set as CI)
 make lint                        # ruff check + ruff format
 pytest tests/test_loop.py -x -v  # single file
 ```
@@ -15,6 +15,7 @@ pytest tests/test_loop.py -x -v  # single file
 - ALWAYS run tests in a subagent — keeps test output out of the main context window.
 - Mock LLM responses, not the loop — see `tests/test_loop.py:_make_loop()`. Use `AsyncMock` for async methods; SQLite in-memory or `tmp_path` for DB paths.
 - E2E tests (`tests/test_e2e*.py`) skip gracefully without Docker + an API key.
+- Run `make test` even for docs-only changes — some tests assert CLAUDE.md content (e.g. `tests/test_dashboard_ui.py` pins module rows and constraint names).
 - Ruff: py310 target, line length 120 (config in `pyproject.toml`). CI: GitHub Actions — ruff + pytest on 3.11/3.12, sharded 3 ways with `--dist=loadfile`.
 
 ## Git Workflow
@@ -75,7 +76,7 @@ Only modules with non-obvious behavior are listed. The rest are visible by readi
 | `src/agent/builtins/operator_tools.py` | Operator-only orchestration. `edit_agent` is the unified edit surface (immediate apply + undo receipt); `read_agent_config` is its inverse. `_OPERATOR_PERMISSION_CEILING` blocks `can_spawn` / `can_use_wallet`. |
 | `src/host/server.py` | Mesh FastAPI app — every endpoint permission-checked. `_RATE_LIMITS` enforces per-category limits. `_require_operator_or_internal` sits between standard agent auth and loopback-only `x-mesh-internal`. `pending_actions` is delete-confirmations only. |
 | `src/host/runtime.py` | RuntimeBackend ABC → DockerBackend / SandboxBackend. Container hardening enforced here. MCP servers come from the wired `ConnectorStore` at every start — `start_agent` has no `mcp_servers` param. |
-| `src/host/connectors.py` | `ConnectorStore` (`config/connectors.json`) — THE single source of MCP servers. `MCPConnector` = stdio server definition + `agents: ["*"] \| [ids]`; an agent-specific server is just a connector assigned to one agent. Edits apply on restart only — the dashboard Connectors page returns `affected_agents` and prompts; it never auto-restarts. Pending-restart is a generation derivation (immune to the edit-during-container-build race). A missing/denied `$CRED` drops that one connector with an error log — never blocks agent boot. Connector writes are human/dashboard-only. |
+| `src/host/connectors.py` | `ConnectorStore` (`config/connectors.json`) — THE single source of MCP servers. `MCPConnector` = stdio server definition + `agents: ["*"] \| [ids]`; an agent-specific server is just a connector assigned to one agent. Edits apply on restart only — the dashboard Connectors page (sub-tab ID `integrations` is frozen; label is "Connectors") returns `affected_agents` and prompts; it never auto-restarts. Mtime auto-reload picks up hand-edited files. Pending-restart is a generation derivation (immune to the edit-during-container-build race). A missing/denied `$CRED` drops that one connector with an error log — never blocks agent boot. Connector writes are human/dashboard-only. |
 | `src/host/credentials.py` | Two-tier vault (SYSTEM_*/CRED_*) + LLM API proxy + OAuth. `is_model_compatible` is the single source of truth for model-allowlist checks (OAuth model subsets are env-overridable — read the code, not stale lists). |
 | `src/host/permissions.py` | Per-agent ACL (glob patterns, deny-all default). `browser_actions: list[str] \| None` narrows per-action surface (`None` = all allowed, `[]` = deny all). |
 | `src/host/mesh.py` | Blackboard (SQLite WAL), PubSub, MessageRouter, `audit_log` with `undoable` + `archived`. |
@@ -90,6 +91,7 @@ Only modules with non-obvious behavior are listed. The rest are visible by readi
 | `src/browser/server.py` | Raises on startup if `MESH_AUTH_TOKEN` set but `BROWSER_AUTH_TOKEN` missing. Session persistence is opt-in via `BROWSER_SESSION_PERSISTENCE_ENABLED` (default false). |
 | `src/dashboard/server.py` | Alpine.js SPA, Jinja autoescape, CSP, CSRF via `X-Requested-With`, VNC URL injection. Four top-nav tabs with frozen IDs (Constraint #5). |
 | `src/dashboard/notifications.py` | Top-nav bell store; `_KNOWN_KINDS` is frozen. No automatic per-task-completion notifications — the operator authors genuinely user-facing ones via `notify_user`. |
+| `src/dashboard/telemetry.py` | Telemetry sink (`dashboard_telemetry` table) with retention cap + per-session rate limit. |
 | `src/channels/whatsapp.py` | WhatsApp Cloud API (`X-Hub-Signature-256` verification, warns when disabled). |
 | `src/templates/` | YAML fleet templates (starter, devteam, deep-research, monitor, sales, …). |
 
@@ -114,7 +116,7 @@ Engine is standalone — NO imports, calls, or shared code with app/ or provisio
 - `OPENLEGION_SYSTEM_<PROVIDER>_API_KEY` — LLM provider keys (mesh-only). `create_agent` / `apply_template` reject HTTP 400 if the chosen model's provider has no credentials configured.
 - `OPENLEGION_CRED_<NAME>` — agent-tier credentials (distinct from SYSTEM tier).
 - `OPENLEGION_MAX_AGENTS`, `OPENLEGION_MAX_TEAMS` — plan limits.
-- `OPENLEGION_BROWSER_MAX_CONCURRENT` — per-service Camoufox cap. Startup-only; restart browser service to apply.
+- `OPENLEGION_BROWSER_MAX_CONCURRENT` (legacy alias `MAX_BROWSERS`) — per-service Camoufox cap. Startup-only; restart browser service to apply.
 
 ## Security Boundaries
 
@@ -137,7 +139,7 @@ Intentional product decisions that can look like security gaps. Do not revert or
 - **Dashboard permission edits have NO operator ceiling** (`PUT /api/agents/{id}/permissions`). That path is the human's deliberate escalation surface; `_OPERATOR_PERMISSION_CEILING` applies only to the LLM/mesh edit path. Don't add a ceiling or a config toggle to the dashboard path (audit H1).
 - **The blackboard is shared by design** (audit H10). Don't naively enforce per-team key prefixes — it breaks the default agent and template coordination. Team scoping goes through team wiring.
 - **AST validation on self-authored tools is hygiene, not a sandbox.** Agents already have `run_command` (in-container code execution by design); the Docker container is the boundary. Marketplace tools (`/app/marketplace_tools`) load WITHOUT AST validation — trusted because the dir is operator-populated and read-only. If a remote/agent-reachable install path is ever added, pin installs to a verified commit SHA (M1, H15).
-- **Operator trust-tier carve-out.** `_caller_is_operator` short-circuits the coordination/management gates (messaging, pubsub, cron, fleet, task routing, spawn, blackboard ops) by design. Still gated like any worker: `can_use_wallet*`, `can_access_credential`, `can_manage_vault`, `can_browser_action`. `test_operator_still_gated_surfaces_not_in_bypass_grep` pins the boundary. Boot fail-closed: empty `auth_tokens` under `enforce` mode → `SystemExit` (X-Agent-ID would be forgeable).
+- **Operator trust-tier carve-out** (Constraint #12). `_caller_is_operator` short-circuits the coordination/management gates (messaging, pubsub, cron, fleet, task routing, spawn, blackboard ops) by design. Still gated like any worker: `can_use_wallet*`, `can_access_credential`, `can_manage_vault`, `can_browser_action`. `test_operator_still_gated_surfaces_not_in_bypass_grep` pins the boundary.
 
 ## Known Constraints & Decisions
 
@@ -152,3 +154,4 @@ Intentional product decisions that can look like security gaps. Do not revert or
 9. **Project→team rename (2026-05) shims remain**: `MeshClient.*_project` proxies, `can_manage_projects` validator, `tasks.project_id` emitted alongside `team_id` (pending external-consumer audit). Internal namespaces unchanged: blackboard `projects/{name}/` prefix, `target_kind="project"` on `pending_actions`. `src/host/team_migration.py` is a startup migrator pending removal.
 10. **Coordination-tool failure envelopes.** Errors from `hand_off` / `update_status` / `complete_task` wrap via `_failed_transition_envelope` so the LLM sees `handed_off=False` + a directive `error` + `recovery_hint`; sentinel keys merge AFTER caller `extras`. Without this shape, LLMs silently report success when handoffs fail post-commit.
 11. **Wizard state machine** `idle | ask | confirming | building | first-output | build_failed`, persisted to `localStorage.ol_wizard`; resets to `idle` on unknown values; mounts only when `step !== 'idle'`; mutually exclusive with the "What's new" tour.
+12. **Operator trust-tier carve-out** — see "Deliberate Tradeoffs" above for the bypassed vs. still-gated surfaces (code comments reference this as Constraint #12, e.g. `mesh_tool.py`). Boot fail-closed: empty `auth_tokens` under `enforce` mode → `SystemExit` (X-Agent-ID would be forgeable).
