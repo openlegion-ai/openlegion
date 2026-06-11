@@ -191,7 +191,7 @@ The SSO callback (`/__auth/callback`) is **not implemented in this repo** — it
 
 | Module | Purpose |
 |--------|---------|
-| `main.py` | Click commands and entry point (`start`, `stop`, `status`, `chat`, `version`, `wallet`, `teams` (alias `projects`), `team` (alias `project`), `tasks`, `pending`, `confirm`, `cancel`, `reset`). |
+| `main.py` | Click commands and entry point (`start`, `stop`, `status`, `chat`, `version`, `wallet`, `teams`, `team`, `tasks`, `pending`, `confirm`, `cancel`, `reset`). |
 | `config.py` | Config loading, Docker helpers, fleet template system (`_load_templates()`, `_create_agent_from_template()`, `_apply_template()`). |
 | `runtime.py` | `RuntimeContext` — full lifecycle management. Auto-creates the `operator` agent, enforces `RESERVED_AGENT_IDS`, falls back from `SandboxBackend` to `DockerBackend` on init failure. |
 | `repl.py` | `REPLSession` — interactive command dispatch. **Talks directly to agent endpoints** (`/chat`, `/chat/stream`), not through a mesh router hop. |
@@ -250,7 +250,7 @@ through PR 2 of the project→team rename.)
 - **Permission management on agent create**: `POST /mesh/agents/create` writes defaults of `blackboard_read=["*"]`, `blackboard_write=["tasks/*","context/*","status/*","output/*","artifacts/*"]`, `can_publish=["*"]`, `can_subscribe=["*"]` (`src/host/server.py:4020-4021`). The effective per-team scope comes from the MeshClient's auto-prefix at runtime, not from the on-disk permission file.
 - **Remove from team**: When an agent is removed from a team, `blackboard_read` and `blackboard_write` are cleared to `[]`.
 - **Solo agents**: Agents not assigned to any team have no scoped blackboard prefix, see only themselves in `list_agents`, and receive no `TEAM.md`.
-- **Cross-team blackboard counter**: `_blackboard_xproject_count` is a process-lifetime observability counter (no enforcement) surfaced on `/mesh/system/metrics` as `blackboard_cross_project_total`.
+- **Cross-team blackboard counter**: `_blackboard_xteam_count` is a process-lifetime observability counter (no enforcement) surfaced on `/mesh/system/metrics` as `blackboard_cross_project_total`.
 
 ### Team Data
 

@@ -509,7 +509,7 @@ class REPLSession:
             assigned = {m for pdata in projects.values() for m in pdata.get("members", [])} & all_agents
 
             if not projects:
-                click.echo("  No projects configured. Create with: openlegion project create")
+                click.echo("  No projects configured. Create one from the dashboard or ask the operator agent.")
                 return
 
             for pname, pdata in sorted(projects.items()):
