@@ -5013,68 +5013,6 @@
             </div>
           </div>
         </div>
-
-        <!-- Workflows -->
-        <div class="text-xs text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">Workflows<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Multi-step automation chains triggered by events or schedules. Each step dispatches work to an agent in sequence.</span></span></div>
-        <div class="mb-6">
-          <div class="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
-            <div x-show="workflows.length > 0" class="overflow-x-auto">
-              <table class="w-full text-sm">
-                <thead>
-                  <tr class="text-left text-gray-400 border-b border-gray-800">
-                    <th class="px-4 py-3">Name</th>
-                    <th class="px-4 py-3">Trigger</th>
-                    <th class="px-4 py-3">Steps</th>
-                    <th class="px-4 py-3">Timeout</th>
-                    <th class="px-4 py-3"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <template x-for="wf in workflows" :key="wf.name">
-                    <tr class="border-b border-gray-800/50 hover:bg-gray-800/30">
-                      <td class="px-4 py-3 text-gray-200 font-mono text-xs" x-text="wf.name"></td>
-                      <td class="px-4 py-3 text-gray-400 text-xs" x-text="wf.trigger"></td>
-                      <td class="px-4 py-3 text-gray-400 text-xs" x-text="wf.steps"></td>
-                      <td class="px-4 py-3 text-gray-400 text-xs" x-text="wf.timeout + 's'"></td>
-                      <td class="px-4 py-3 text-right">
-                        <button @click="runWorkflow(wf.name)" :disabled="workflowRunLoading[wf.name] === true" class="text-xs text-indigo-400 hover:text-indigo-300 disabled:opacity-50 inline-flex items-center gap-1">
-                          <svg x-show="workflowRunLoading[wf.name] === true" x-cloak class="animate-spin h-3 w-3" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-                          <span x-text="workflowRunLoading[wf.name] === true ? 'Running...' : 'Run'"></span>
-                        </button>
-                      </td>
-                    </tr>
-                  </template>
-                </tbody>
-              </table>
-              <!-- Active executions -->
-              <template x-if="workflowsActive.length > 0">
-                <div class="px-4 py-2 border-t border-gray-800 bg-gray-900/50">
-                  <div class="text-xs text-gray-400 mb-1">Active Executions</div>
-                  <template x-for="exec in workflowsActive" :key="exec.execution_id">
-                    <div class="text-xs text-gray-400 flex items-center gap-2 py-0.5">
-                      <span class="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>
-                      <span x-text="exec.workflow || exec.execution_id"></span>
-                      <span class="text-gray-500" x-text="exec.status || 'running'"></span>
-                      <button @click="cancelWorkflow(exec.execution_id)"
-                        :disabled="_cancellingWorkflows[exec.execution_id] === true"
-                        :aria-label="'Cancel workflow ' + (exec.workflow || exec.execution_id)"
-                        class="text-[11px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-red-900/30 text-gray-400 hover:text-red-400 transition-all ml-auto disabled:opacity-50 disabled:cursor-not-allowed"
-                        x-text="_cancellingWorkflows[exec.execution_id] === true ? 'Cancelling...' : 'Cancel'"></button>
-                    </div>
-                  </template>
-                </div>
-              </template>
-            </div>
-            <div x-show="workflowsLoading && workflows.length === 0" class="text-center py-8 text-gray-500 text-sm">
-              <svg class="animate-spin h-5 w-5 mx-auto mb-2 text-gray-600" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
-              Loading workflows&hellip;
-            </div>
-            <div x-show="!workflowsLoading && workflows.length === 0" class="text-center py-8">
-              <div class="text-gray-400 text-sm">No workflows configured</div>
-              <div class="text-gray-500 text-xs mt-1">Add workflows in your mesh.yaml config</div>
-            </div>
-          </div>
-        </div>
         </div><!-- /automation sub-tab -->
 
         <!-- Skills sub-tab (fleet catalog + install) -->

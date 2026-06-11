@@ -941,9 +941,10 @@ def create_dashboard_router(
             # explicitly via ``notify_user`` (and the heartbeat-driven
             # ``rate_delivery`` loop) when something is genuinely
             # user-facing. ``kind="delivered"`` itself stays in
-            # ``notification_store._KNOWN_KINDS`` so historical rows
-            # render correctly, but no producer in this dashboard
-            # creates new ones.
+            # ``notification_store._KNOWN_KINDS``: no producer in THIS
+            # module creates new ones, but the ChainWatcher delivery
+            # path (``src/cli/runtime.py:_deliver_chain_outcome``)
+            # still mints them when a chain outcome reaches the user.
             if event_type == "task_outcome":
                 # Outcome updates (user rated a delivery) do NOT create
                 # new bell notifications — the delivery already pinged

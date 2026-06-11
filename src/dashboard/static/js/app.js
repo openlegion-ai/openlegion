@@ -261,11 +261,6 @@ function dashboard() {
     cronEditUnit: 'm',
     cronEditCron: '',
 
-    // Workflows
-    workflows: [],
-    workflowsActive: [],
-    workflowsLoading: false,
-
     // Settings
     settingsData: null,
 
@@ -697,9 +692,6 @@ function dashboard() {
       agentProxySaving: false,
     },
 
-    // Workflow cancel tracking
-    _cancellingWorkflows: {},
-
     // Restart loading
     _restartingAgents: {},
 
@@ -708,7 +700,6 @@ function dashboard() {
     cronRunLoading: {},
     cronPauseLoading: {},
     cronEditSaving: false,
-    workflowRunLoading: {},
     credSaving: false,
     onboardSaving: false,
     channelConnecting: false,
@@ -1879,40 +1870,6 @@ function dashboard() {
       return tab.label;
     },
 
-    /** Toggle the side-panel messenger (visible on non-Chat tabs). */
-    toggleSidePanel() {
-      this.messengerSidePanelOpen = !this.messengerSidePanelOpen;
-      try {
-        if (this.messengerSidePanelOpen) {
-          // Capture the previously focused element so ESC can restore
-          // focus on close.
-          try { this._messengerSidePanelPrevFocus = document.activeElement; } catch (_) {}
-          localStorage.setItem('ol_messenger_side_panel_open', '1');
-          // Open Operator by default if no chat is active.
-          if (!this.openChats.includes('operator')) this.openChats.push('operator');
-          if (!this.activeChatId) this.activeChatId = 'operator';
-          this.chatPanelMinimized = false;
-          this._loadChatHistory(this.activeChatId || 'operator');
-          this.$nextTick(() => {
-            // Without this, the side-panel mounts at scrollTop=0 even
-            // though restored history is already in the container.
-            this._scrollChat(this.activeChatId || 'operator', true);
-            const el = document.getElementById('operator-chat-input');
-            if (el) el.focus();
-          });
-        } else {
-          localStorage.removeItem('ol_messenger_side_panel_open');
-          // Restore focus when toggled closed via the same button.
-          try {
-            if (this._messengerSidePanelPrevFocus && this._messengerSidePanelPrevFocus.focus) {
-              this._messengerSidePanelPrevFocus.focus();
-            }
-          } catch (_) {}
-          this._messengerSidePanelPrevFocus = null;
-        }
-      } catch (e) { /* ignore */ }
-    },
-
     /** Close the side panel (ESC handler). */
     closeSidePanel() {
       if (!this.messengerSidePanelOpen) return;
@@ -2052,10 +2009,6 @@ function dashboard() {
       try {
         localStorage.setItem('ol_wizard', JSON.stringify(this.wizard));
       } catch (_) { /* quota / private mode — ignore */ }
-    },
-
-    _wizardClear() {
-      try { localStorage.removeItem('ol_wizard'); } catch (_) { /* ignore */ }
     },
 
     _isFirstVisit() {
@@ -2228,13 +2181,6 @@ function dashboard() {
       this._wizardLastTrack = '';
       this._wizardSave();
       this.track('wizard_started', { startedAt: this.wizard.startedAt });
-    },
-
-    wizardStartAsk() {
-      // External trigger — same as startWizard but never collapses an
-      // active wizard. Useful when a "show wizard again" button is
-      // wired up later. For now ``loadAgents`` calls ``_maybeStartWizard``.
-      this.startWizard();
     },
 
     wizardChipClicked(label) {
@@ -2553,7 +2499,6 @@ function dashboard() {
         this.fetchCosts();
         this.fetchStorage();
         this.fetchCronJobs();
-        this.fetchWorkflows();
         if (this.systemTab === 'integrations') {
           this.fetchWebhooks();
           this.fetchChannels();
@@ -3608,39 +3553,6 @@ function dashboard() {
       }
     },
 
-    // Coerce a wire-shape ``completed_at`` to a numeric epoch in seconds.
-    // The orchestration store has historically returned epoch-seconds as a
-    // float, but legacy / external feeders sometimes hand us strings or
-    // millisecond integers — and a wall-clock skew can yield future
-    // timestamps that should never count as "recent" for the user. We
-    // accept all three shapes and clamp to <= now so the filter stays
-    // monotonic even if the source clock drifts.
-    _coerceCompletedAtSeconds(value) {
-      if (value === null || value === undefined || value === '') return 0;
-      let n;
-      if (typeof value === 'number') {
-        n = value;
-      } else if (typeof value === 'string') {
-        const parsed = Date.parse(value);
-        if (Number.isFinite(parsed)) {
-          n = parsed / 1000;
-        } else {
-          // Numeric string ("1730000000" or "1730000000.5") that
-          // Date.parse refused — fall back to Number().
-          const asNum = Number(value);
-          n = Number.isFinite(asNum) ? asNum : 0;
-        }
-      } else {
-        return 0;
-      }
-      // Heuristic: anything >= 10^12 is almost certainly milliseconds
-      // (10^12 seconds = year ~33658). Drop to seconds.
-      if (n >= 1e12) n = n / 1000;
-      const nowSec = Date.now() / 1000;
-      if (n > nowSec) n = nowSec;
-      if (n < 0) n = 0;
-      return n;
-    },
 
     // Title truncation for the Stuck tasks panel and drill-in panel.
     // Long titles (some agents accidentally hand off with their full
@@ -5932,12 +5844,6 @@ function dashboard() {
       return parts.length ? parts.join('/') : '.';
     },
 
-    formatFileSize(bytes) {
-      if (bytes < 1024) return bytes + ' B';
-      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
-      return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
-    },
-
     async fetchUploads() {
       this.uploadsLoading = true;
       this.uploadsError = null;
@@ -6548,11 +6454,6 @@ function dashboard() {
       } catch (e) {
         this.showToast('Delete failed: ' + (e.message || e));
       }
-    },
-
-    artifactIsText(name) {
-      const textExts = ['.md', '.txt', '.json', '.csv', '.yaml', '.yml', '.xml', '.html', '.css', '.js', '.ts', '.py', '.sh', '.sql', '.log', '.env', '.toml', '.ini', '.cfg'];
-      return textExts.some(ext => name.toLowerCase().endsWith(ext));
     },
 
     formatFileSize(bytes) {
@@ -7460,40 +7361,11 @@ function dashboard() {
       finally { this.cronPauseLoading = { ...this.cronPauseLoading, [jobId]: false }; }
     },
 
-    async fetchWorkflows() {
-      this.workflowsLoading = true;
-      try {
-        const resp = await fetch(`${window.__config.apiBase}/workflows`);
-        if (resp.ok) {
-          const data = await resp.json();
-          this.workflows = data.workflows || [];
-          this.workflowsActive = data.active || [];
-        }
-      } catch (e) { console.warn('fetchWorkflows failed:', e); }
-      this.workflowsLoading = false;
-    },
-
     async fetchModelHealth() {
       try {
         const resp = await fetch(`${window.__config.apiBase}/model-health`);
         if (resp.ok) this.modelHealth = (await resp.json()).models || [];
       } catch (e) { console.warn('fetchModelHealth failed:', e); }
-    },
-
-    async cancelWorkflow(executionId) {
-      if (this._cancellingWorkflows[executionId]) return;
-      this._cancellingWorkflows = { ...this._cancellingWorkflows, [executionId]: true };
-      try {
-        const resp = await fetch(`${window.__config.apiBase}/workflows/${encodeURIComponent(executionId)}/cancel`, { method: 'POST' });
-        if (resp.ok) {
-          this.showToast(`Workflow execution cancelled`);
-          await this.fetchWorkflows();
-        } else {
-          const err = await resp.json().catch(() => ({}));
-          this.showToast(`Cancel failed: ${err.detail || 'Unknown error'}`);
-        }
-      } catch (e) { this.showToast(`Cancel failed: ${e.message}`); }
-      finally { const copy = { ...this._cancellingWorkflows }; delete copy[executionId]; this._cancellingWorkflows = copy; }
     },
 
     async createCronJob() {
@@ -7556,27 +7428,6 @@ function dashboard() {
         }
       } catch (e) { this.showToast(`Error: ${e.message}`); }
       finally { this.credentialSaving = false; }
-    },
-
-    copyToClipboard(text) {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(() => {
-          this.showToast('URL copied');
-        }).catch(() => {
-          this.showToast('Failed to copy');
-        });
-      } else {
-        // Fallback for insecure contexts (non-HTTPS, non-localhost)
-        const ta = document.createElement('textarea');
-        ta.value = text;
-        ta.style.position = 'fixed';
-        ta.style.opacity = '0';
-        document.body.appendChild(ta);
-        ta.select();
-        try { document.execCommand('copy'); this.showToast('URL copied'); }
-        catch (_) { this.showToast('Failed to copy'); }
-        document.body.removeChild(ta);
-      }
     },
 
     _saveChatToSession() {
@@ -7646,22 +7497,6 @@ function dashboard() {
       if (status === 'unhealthy' || status === 'restarting') return 'bg-amber-500';
       if (status === 'failed') return 'bg-red-500';
       return 'bg-gray-500';
-    },
-
-    async runWorkflow(name) {
-      if (this.workflowRunLoading[name]) return;
-      this.workflowRunLoading = { ...this.workflowRunLoading, [name]: true };
-      try {
-        const resp = await fetch(`${window.__config.apiBase}/workflows/${encodeURIComponent(name)}/run`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-        if (resp.ok) {
-          const data = await resp.json();
-          this.showToast(`Workflow '${name}' started (${data.execution_id})`);
-          this.fetchWorkflows();
-        } else {
-          this.showToast(`Failed to start workflow '${name}'`);
-        }
-      } catch (e) { console.warn('runWorkflow failed:', e); }
-      finally { this.workflowRunLoading = { ...this.workflowRunLoading, [name]: false }; }
     },
 
     async deleteCronJob(jobId) {
@@ -8512,18 +8347,6 @@ function dashboard() {
       }
     },
 
-    clearChat(agentId) {
-      if (this._chatAborts[agentId]) {
-        this._chatAborts[agentId].abort();
-        delete this._chatAborts[agentId];
-      }
-      delete this._chatStreamTarget[agentId];
-      this._stopChatRecovery(agentId);
-      this.chatHistories[agentId] = [];
-      delete this._chatFetchedAt[agentId];
-      this._saveChatToSession();
-    },
-
     _scrollTimers: {},
 
     _scrollChat(agentId, force) {
@@ -8602,10 +8425,6 @@ function dashboard() {
       }
     },
 
-    chatToolValueBlock(value) {
-      return this._chatToolValueToText(value);
-    },
-
     chatToolPreview(value) {
       const text = this._chatToolValueToText(value).replace(/\s+/g, ' ').trim();
       return this._truncateText(text, 140);
@@ -8618,50 +8437,6 @@ function dashboard() {
     chatToolDetailText(value, preview) {
       const full = this._chatToolValueToText(value);
       return this._truncateText(full || preview || '', 4000);
-    },
-
-    chatToolCount(msg) {
-      if (!msg) return 0;
-      if (Array.isArray(msg.tools)) return msg.tools.length;
-      if (!Array.isArray(msg.timeline)) return 0;
-      return msg.timeline.filter(step => step && step.kind === 'tool').length;
-    },
-
-    chatPhaseLabel(msg) {
-      if (!msg) return 'Idle';
-      if (msg.role === 'error') return 'Error';
-      if (msg.streaming) {
-        if (msg.phase === 'tool') return 'Using tools';
-        if (msg.phase === 'responding') return 'Responding';
-        return 'Thinking';
-      }
-      if (msg.phase === 'done') return 'Completed';
-      if (msg.phase === 'responding') return 'Responded';
-      if (msg.phase === 'tool') return 'Tool run';
-      return 'Ready';
-    },
-
-    chatPhaseClass(msg) {
-      if (!msg) return 'chat-phase-neutral';
-      if (msg.role === 'error') return 'chat-phase-error';
-      if (msg.streaming) {
-        if (msg.phase === 'tool') return 'chat-phase-tool';
-        if (msg.phase === 'responding') return 'chat-phase-responding';
-        return 'chat-phase-thinking';
-      }
-      if (msg.phase === 'done' || msg.phase === 'responding') return 'chat-phase-done';
-      if (msg.phase === 'tool') return 'chat-phase-tool';
-      return 'chat-phase-neutral';
-    },
-
-    chatPhaseMarkerClass(phase) {
-      return ({
-        thinking: 'chat-phase-thinking',
-        tool: 'chat-phase-tool',
-        responding: 'chat-phase-responding',
-        done: 'chat-phase-done',
-        error: 'chat-phase-error',
-      })[phase] || 'chat-phase-neutral';
     },
 
     _normalizeEventTs(evt) {
@@ -9112,7 +8887,7 @@ function dashboard() {
         chat: ['chat', 'operator', 'message', 'talk', 'ask'],
         workplace: ['work', 'home', 'board', 'kanban', 'tasks', 'activity', 'delivered', 'in progress', 'stuck'],
         fleet: ['team', 'agents', 'fleet', 'cards', 'project'],
-        system: ['settings', 'system', 'costs', 'cron', 'schedules', 'automation', 'credentials', 'api keys', 'connections', 'integrations', 'infrastructure', 'pricing', 'browsers', 'pubsub', 'blackboard', 'comms', 'communication', 'workflows', 'storage', 'uploads', 'disk', 'network', 'proxy', 'socks'],
+        system: ['settings', 'system', 'costs', 'cron', 'schedules', 'automation', 'credentials', 'api keys', 'connections', 'integrations', 'infrastructure', 'pricing', 'browsers', 'pubsub', 'blackboard', 'comms', 'communication', 'storage', 'uploads', 'disk', 'network', 'proxy', 'socks'],
       };
       for (const [tabId, keywords] of Object.entries(tabKeywords)) {
         const tab = this.tabs.find(t => t.id === tabId);
@@ -9153,12 +8928,6 @@ function dashboard() {
         const message = (job.message || '').toLowerCase();
         if (id.includes(q) || agent.includes(q) || message.includes(q)) {
           results.push({ type: 'cron', label: job.id, desc: `${job.agent} · ${job.schedule}`, action: () => { this.systemTab = 'automation'; this.switchTab('system'); } });
-        }
-      }
-      // Match workflows
-      for (const wf of this.workflows || []) {
-        if ((wf.name || '').toLowerCase().includes(q)) {
-          results.push({ type: 'action', label: `Run ${wf.name}`, desc: `Workflow · ${wf.steps} steps`, action: () => { this.systemTab = 'automation'; this.switchTab('system'); this.runWorkflow(wf.name); } });
         }
       }
       // Match credentials
@@ -10535,8 +10304,6 @@ function dashboard() {
         message_route: 'text-teal-400',
         pubsub_publish: 'text-sky-400',
         agent_spawn: 'text-indigo-400',
-        workflow_step_start: 'text-orange-400',
-        workflow_step_end: 'text-orange-300',
         lane_start: 'text-yellow-400',
         lane_complete: 'text-yellow-300',
         cron_trigger: 'text-pink-400',
@@ -10567,8 +10334,6 @@ function dashboard() {
         message_route: 'bg-teal-400',
         pubsub_publish: 'bg-sky-400',
         agent_spawn: 'bg-indigo-400',
-        workflow_step_start: 'bg-orange-400',
-        workflow_step_end: 'bg-orange-300',
         lane_start: 'bg-yellow-400',
         lane_complete: 'bg-yellow-300',
         cron_trigger: 'bg-pink-400',
@@ -10577,33 +10342,6 @@ function dashboard() {
         browser_nav_probe: 'bg-amber-400',
       };
       return map[type] || 'bg-gray-400';
-    },
-
-    eventTypeLabel(type) {
-      const map = {
-        agent_state: 'state',
-        message_sent: 'msg out',
-        message_received: 'msg in',
-        tool_start: 'tool start',
-        tool_result: 'tool result',
-        text_delta: 'stream',
-        llm_call: 'llm',
-        blackboard_write: 'blackboard',
-        health_change: 'health',
-      };
-      if (!type) return 'event';
-      return map[type] || String(type).replace(/_/g, ' ');
-    },
-
-    eventClock(ts) {
-      if (!ts) return '';
-      const ms = typeof ts === 'number' ? ts * 1000 : Date.parse(ts);
-      if (!Number.isFinite(ms)) return '';
-      return new Date(ms).toLocaleTimeString([], {
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-      });
     },
 
     // ── Browser metrics card helpers (Phase 2 §5.1/§5.2) ───────────────
@@ -10861,20 +10599,6 @@ function dashboard() {
       return succ / (succ + fail);
     },
 
-    browserHistorySnapshotCount(agentId) {
-      const hist = this.browserHistoryFor(agentId);
-      let total = 0;
-      for (const p of hist) total += p.snapshot_count || 0;
-      return total;
-    },
-
-    browserHistoryNavTimeouts(agentId) {
-      const hist = this.browserHistoryFor(agentId);
-      let total = 0;
-      for (const p of hist) total += p.nav_timeout || 0;
-      return total;
-    },
-
     browserHistoryTrendArrow(agentId) {
       // Compare the last data point's success rate to the second-to-last.
       // Returns 'up' / 'down' / 'flat' / null. Fewer than two non-null
@@ -10893,44 +10617,6 @@ function dashboard() {
       const delta = last - prev;
       if (Math.abs(delta) < 0.05) return 'flat';
       return delta > 0 ? 'up' : 'down';
-    },
-
-    browserHistoryBars(agentId, field, max) {
-      // Build a list of {height, label, value} entries for the CSS sparkline.
-      // ``field`` is one of: 'snapshot_bytes_p50', 'snapshot_bytes_p95',
-      // 'snapshot_count', 'click_total' (computed). ``max`` clamps the
-      // upper bound for height normalization; null = autoscale.
-      const hist = this.browserHistoryFor(agentId);
-      if (hist.length === 0) return [];
-      const values = hist.map(p => {
-        if (field === 'click_total') {
-          return (p.click_success || 0) + (p.click_fail || 0);
-        }
-        return p[field] || 0;
-      });
-      const peak = max != null
-        ? max
-        : Math.max(1, ...values);
-      return values.map((v, i) => {
-        const heightPct = peak > 0 ? Math.min(100, (v / peak) * 100) : 0;
-        const p = hist[i];
-        return {
-          height: heightPct,
-          value: v,
-          ts: p.ts,
-          seq: p.seq,
-        };
-      });
-    },
-
-    browserHistoryActiveCount(agentId) {
-      // Active means we received a payload in the last 3 minutes (matches
-      // browserMetricsStale threshold) — instances that went idle drop to
-      // zero on the dashboard even though the BrowserManager may still
-      // hold a stopped CamoufoxInstance.
-      const last = this.browserMetrics[agentId];
-      if (!last) return 0;
-      return this.browserMetricsStale(last.receivedAt) ? 0 : 1;
     },
 
     eventDetail(evt) {
@@ -11440,16 +11126,6 @@ function dashboard() {
       return permission;
     },
 
-    // Toggle off without revoking the OS-level permission (browsers
-    // don't let JS revoke that — user must visit site settings). The
-    // localStorage flag is the in-app off-switch.
-    disableBrowserNotifications() {
-      this.browserNotifyEnabled = false;
-      try {
-        localStorage.setItem('olBrowserNotifyEnabled', 'false');
-      } catch (_) { /* ignore */ }
-    },
-
     // Fire a Notification for a specific notification entry, but only
     // if all three gates pass. Click handler focuses the window and
     // routes to the relevant in-app context.
@@ -11748,13 +11424,6 @@ function dashboard() {
       return Math.abs(hash) % palette;
     },
 
-    agentInitials(agentId) {
-      if (!agentId) return '??';
-      const parts = agentId.replace(/[_-]/g, ' ').trim().split(/\s+/);
-      if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
-      return agentId.substring(0, 2).toUpperCase();
-    },
-
     agentAvatarNum(agentId) {
       if (!agentId) return 1;
       const cfg = this.agentConfigs[agentId];
@@ -11872,21 +11541,5 @@ function dashboard() {
       return 'text-cyan-400';
     },
 
-    commsIconClass(item) {
-      if (item.source === 'pubsub') return 'bg-purple-500/20 text-purple-400';
-      if (item.action === 'delete') return 'bg-red-500/20 text-red-400';
-      return 'bg-cyan-500/20 text-cyan-400';
-    },
-
-    waterfall(evt, allEvents) {
-      if (!allEvents || allEvents.length < 2) return '';
-      const toEpoch = (ts) => typeof ts === 'string' ? new Date(ts).getTime() / 1000 : ts;
-      const minTs = toEpoch(allEvents[0].timestamp);
-      const maxTs = toEpoch(allEvents[allEvents.length - 1].timestamp);
-      const span = maxTs - minTs || 1;
-      const left = ((toEpoch(evt.timestamp) - minTs) / span) * 100;
-      const width = Math.max(2, (evt.duration_ms / 1000 / span) * 100);
-      return `left:${left.toFixed(1)}%;width:${Math.min(width, 100 - left).toFixed(1)}%`;
-    },
   };
 }
