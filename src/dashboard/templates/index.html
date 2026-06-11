@@ -5208,10 +5208,21 @@
                         :class="connectorProbeResult[c.name]?.ok ? 'bg-emerald-900/30 text-emerald-400 border border-emerald-800/40' : 'bg-red-900/20 text-red-400 border border-red-800/30'"
                         :title="connectorProbeResult[c.name]?.ok ? (connectorProbeResult[c.name].tools_count + ' tools discovered') : (connectorProbeResult[c.name]?.error || 'Connection failed')"
                         x-text="connectorProbeResult[c.name]?.ok ? (connectorProbeResult[c.name].tools_count + ' tools') : 'failed'"></span>
+                  <!-- Standing auth state: a bound OAuth connector wears a
+                       green Connected badge (hidden when a probe says the
+                       grant died — the Connect button takes over as the
+                       reconnect affordance). -->
+                  <span x-show="c.transport === 'http' && c.auth?.kind === 'oauth' && c.auth?.connection && !connectorProbeResult[c.name]?.needs_auth"
+                        class="text-[11px] px-1.5 py-0.5 rounded leading-none bg-emerald-900/30 text-emerald-400 border border-emerald-800/40 shrink-0 inline-flex items-center gap-1"
+                        :title="'OAuth connected (' + (c.auth?.connection || '') + ') — token refreshes automatically'"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block"></span>Connected</span>
+                  <span x-show="c.transport === 'http' && c.auth?.kind === 'bearer'"
+                        class="text-[11px] px-1.5 py-0.5 rounded leading-none bg-gray-800 text-gray-400 border border-gray-700 shrink-0"
+                        :title="'API key from the vault: ' + (c.auth?.cred || '')">API key</span>
                   <a x-show="c.transport === 'http' && ((c.auth?.kind === 'oauth' && !c.auth?.connection) || connectorProbeResult[c.name]?.needs_auth)"
                      :href="'/dashboard/integrations/mcp/' + encodeURIComponent(c.name) + '/connect'"
                      class="text-[11px] px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors shrink-0"
-                     title="Authorize via the server's OAuth flow — endpoints are auto-discovered">Connect</a>
+                     :title="c.auth?.connection ? 'The authorization expired or was revoked — reconnect' : 'Authorize via the server\'s OAuth flow — endpoints are auto-discovered'"
+                     x-text="c.auth?.connection ? 'Reconnect' : 'Connect'"></a>
                   <button type="button" x-show="c.transport === 'http'" @click="probeConnector(c.name)"
                           :disabled="connectorProbing === c.name"
                           class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[11px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-all shrink-0 disabled:opacity-50"
