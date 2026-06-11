@@ -171,16 +171,19 @@ and await that id. Stop and summarize when the chain is terminal \
 the system auto-delivers the outcome). No explicit ask to watch -> \
 delegate and release.
 
-After a chain completes, the system wakes you ONCE to verify it: \
-confirm the side effects are real (artifacts, files, merged PRs — not \
-just task statuses) and rate the stages. Never promise the user any \
-other follow-up — promise only what the system delivers: the result \
-notification and this post-completion verification.
+After you delegate and release, the user's chat shows live progress \
+(watch chip + stage updates) and the completed outcome is posted into \
+the chat plus a desktop notification — there is no bell. Tell the \
+user that is where results appear. After completion the system wakes \
+you ONCE to verify: confirm side effects are real (artifacts, files, \
+merged PRs — not just statuses) and rate the stages. Promise nothing \
+beyond the in-chat result and this one verification.
 
 <!-- playbook_v2 -->
 <!-- playbook_v3_handoff_briefs -->
 <!-- playbook_v4_watch_mode -->
-<!-- playbook_v5_verification_wake -->"""
+<!-- playbook_v5_verification_wake -->
+<!-- playbook_v6_chat_delivery -->"""
 
 # ── v3 addendum (appended to EXISTING operator INSTRUCTIONS.md) ──
 #
@@ -241,6 +244,22 @@ other follow-up — promise only what the system delivers: the result \
 notification and this post-completion verification.
 
 <!-- playbook_v5_verification_wake -->"""
+
+# ── v6 addendum (appended to EXISTING operator INSTRUCTIONS.md) ──
+# Same append-only contract as v3-v5.
+
+_PLAYBOOK_V6_ADDENDUM = """\
+
+## Chat-Native Delivery (v6)
+
+After you delegate and release, the user's chat shows progress \
+automatically (a live watch chip with stage updates) and the completed \
+outcome is posted into the chat plus a desktop notification — there is \
+no notifications bell. Tell the user exactly that: progress and the \
+result appear right here. Promise only what the system delivers: the \
+in-chat result and your one post-completion verification.
+
+<!-- playbook_v6_chat_delivery -->"""
 
 # ── Boot greeting (seeded once on first operator creation) ────
 

@@ -2524,3 +2524,37 @@ class TestDispatchChatDoneContract:
         idx = js.index("evt.type === 'notification' && agent")
         block = js[idx:idx + 1600]
         assert "_maybeFireBrowserNotification" in block
+
+
+class TestChatWatchChips:
+    """The chat-thread watch chip — live mirror of the Work-tab pipeline
+    card for dashboard-origin chains, with a 'finishing…' ghost bridging
+    the settle window until the outcome bubble lands."""
+
+    def test_chip_markup_present(self):
+        assert 'data-testid="chat-watch-chips"' in _INDEX_HTML
+        assert "chatWatchChips()" in _INDEX_HTML
+        assert "chipStageLabel(p)" in _INDEX_HTML
+        assert "openPipelineFromChat(p)" in _INDEX_HTML
+
+    def test_chip_js_helpers_present(self):
+        js = _read(_APP_JS)
+        for marker in (
+            "chatWatchChips()", "chipStageLabel(p)",
+            "openPipelineFromChat(p)", "_trackChipGhosts",
+        ):
+            assert marker in js, marker
+        # Ghost lifecycle: created when a dashboard chain leaves the
+        # payload, cleared by the outcome notification or a 90s timeout.
+        assert "delete this._chipGhosts[evt.data.root_task_id]" in js
+        assert "90_000" in js
+
+    def test_chips_filter_dashboard_origin(self):
+        js = _read(_APP_JS)
+        idx = js.index("chatWatchChips()")
+        block = js[idx:idx + 800]
+        assert "origin.channel === 'dashboard'" in block
+
+    def test_pipelines_seeded_on_mount_and_chat_entry(self):
+        js = _read(_APP_JS)
+        assert js.count("this.loadWorkplacePipelines()") >= 3  # mount + chat entry + WS debounce
