@@ -12,6 +12,8 @@ Covers:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 import src.browser.display_allocator as display_allocator
@@ -22,7 +24,6 @@ from src.browser.display_allocator import (
     DisplayAllocator,
     PoolExhausted,
     Slot,
-    _force_clear_residue_for_tests,
     _read_lock_pid,
     _write_fake_lock_for_tests,
     display_for_port,
@@ -34,12 +35,18 @@ TEST_DISPLAY_END = 805
 
 
 @pytest.fixture(autouse=True)
-def _isolate_lockfile_residue(monkeypatch):
-    """Keep allocator unit tests independent of host TCP bind permissions."""
+def _isolate_lockfile_residue(monkeypatch, tmp_path):
+    """Isolate every test from the host: fake the port probe and point the
+    X11 root at a per-test tmp dir.
+
+    Patching ``_X11_ROOT`` keeps lock/socket files out of the real ``/tmp``
+    so two concurrent pytest runs (e.g. from different checkouts) can't
+    delete each other's lock files mid-test.
+    """
     monkeypatch.setattr(display_allocator, "_port_is_bindable", lambda _port: True)
-    _force_clear_residue_for_tests(TEST_DISPLAY_START, TEST_DISPLAY_END)
+    monkeypatch.setattr(display_allocator, "_X11_ROOT", tmp_path)
+    (tmp_path / ".X11-unix").mkdir()
     yield
-    _force_clear_residue_for_tests(TEST_DISPLAY_START, TEST_DISPLAY_END)
 
 
 def _alloc_in_range(
@@ -227,10 +234,21 @@ class TestAllocateRecovery:
 
 
 class TestHelpers:
-    def test_lock_path_format(self):
+    def test_lock_path_format(self, tmp_path):
+        # The autouse fixture points _X11_ROOT at tmp_path; paths must
+        # follow the patched root (this is what makes the suite safe for
+        # concurrent runs on one machine).
         slot = Slot(display=137, vnc_port=port_for_display(137))
-        assert str(slot.lock_path) == "/tmp/.X137-lock"
-        assert str(slot.socket_path) == "/tmp/.X11-unix/X137"
+        assert slot.lock_path == tmp_path / ".X137-lock"
+        assert slot.socket_path == tmp_path / ".X11-unix" / "X137"
+
+    def test_default_root_produces_production_paths(self, monkeypatch):
+        """With the default root, paths are byte-identical to the historical
+        hardcoded values — production X11 requires /tmp."""
+        monkeypatch.setattr(display_allocator, "_X11_ROOT", Path("/tmp"))
+        slot = Slot(display=137, vnc_port=port_for_display(137))
+        assert slot.lock_path == Path("/tmp") / ".X137-lock"
+        assert slot.socket_path == Path("/tmp") / ".X11-unix" / "X137"
 
     def test_display_str_format(self):
         slot = Slot(display=100, vnc_port=6100)

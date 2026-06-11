@@ -479,11 +479,11 @@ class TestTimestampShape:
 
 class TestResetClearsAndReattaches:
     @pytest.mark.asyncio
-    async def test_reset_drops_old_instance_and_new_one_starts_fresh(self):
+    async def test_reset_drops_old_instance_and_new_one_starts_fresh(self, tmp_path):
         from src.browser.service import BrowserManager, CamoufoxInstance
 
         # Build a manager with one stale instance carrying a populated log.
-        mgr = BrowserManager(profiles_dir="/tmp/_test_inspect_reset")
+        mgr = BrowserManager(profiles_dir=str(tmp_path / "_test_inspect_reset"))
         old_ctx = AsyncMock()
         old_page = MagicMock()
         # Old context.on was wired during __init__ by _attach_network_listeners;

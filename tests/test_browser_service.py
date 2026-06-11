@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import tempfile
 import threading
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,6 +11,13 @@ import pytest
 
 from src.browser.ref_handle import from_legacy_dict as _h
 from src.browser.service import BrowserManager, CamoufoxInstance
+
+# Per-process unique root for BrowserManager profile dirs.
+# BrowserManager.__init__ mkdirs profiles_dir, so a fixed "/tmp/..." path
+# is a machine-global write that lets two concurrent pytest runs (e.g.
+# from different checkouts) collide. mkdtemp gives each run its own root.
+_PROFILES_ROOT = tempfile.mkdtemp(prefix="ol_test_profiles_")
+
 
 
 def _no_playwright() -> bool:
@@ -64,14 +72,14 @@ class TestBrowserManagerLifecycle:
     @pytest.mark.asyncio
     async def test_get_status_no_browser(self):
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles", max_concurrent=3)
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles", max_concurrent=3)
         status = await mgr.get_status("nonexistent")
         assert status["running"] is False
 
     @pytest.mark.asyncio
     async def test_service_status(self):
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles", max_concurrent=5)
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles", max_concurrent=5)
         status = await mgr.get_service_status()
         assert status["healthy"] is True
         assert status["active_browsers"] == 0
@@ -80,14 +88,14 @@ class TestBrowserManagerLifecycle:
     @pytest.mark.asyncio
     async def test_stop_nonexistent_is_noop(self):
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         # Should not raise
         await mgr.stop("nonexistent")
 
     @pytest.mark.asyncio
     async def test_reset_stops_instance(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         # Manually inject a mock instance
         mock_context = AsyncMock()
@@ -101,7 +109,7 @@ class TestBrowserManagerLifecycle:
     @pytest.mark.asyncio
     async def test_stop_all(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         for aid in ("a1", "a2"):
             mock_ctx = AsyncMock()
@@ -135,7 +143,7 @@ class TestBrowserManagerLifecycle:
     async def test_focus_auto_starts_browser(self):
         """Focus auto-starts a browser if one isn't running."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.bring_to_front = AsyncMock()
         inst = CamoufoxInstance("agent1", MagicMock(), AsyncMock(), mock_page)
@@ -153,7 +161,7 @@ class TestX11WindowTracking:
     async def test_get_firefox_wids_parses_output(self):
         """_get_firefox_wids should parse xdotool output into a set of ints."""
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_result = MagicMock()
         mock_result.returncode = 0
         mock_result.stdout = "12345\n67890\n"
@@ -164,7 +172,7 @@ class TestX11WindowTracking:
     @pytest.mark.asyncio
     async def test_get_firefox_wids_empty_when_no_windows(self):
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_result = MagicMock()
         mock_result.returncode = 1  # xdotool returns 1 when no windows found
         mock_result.stdout = ""
@@ -175,7 +183,7 @@ class TestX11WindowTracking:
     @pytest.mark.asyncio
     async def test_get_firefox_wids_handles_exception(self):
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         with patch("src.browser.service.subprocess.run", side_effect=FileNotFoundError):
             wids = await mgr._get_firefox_wids()
         assert wids == set()
@@ -183,7 +191,7 @@ class TestX11WindowTracking:
     @pytest.mark.asyncio
     async def test_discover_new_wid_finds_new_window(self):
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         # First call returns existing windows, second call returns with a new one
         mgr._get_firefox_wids = AsyncMock(
             side_effect=[{100, 200}, {100, 200, 300}]
@@ -195,7 +203,7 @@ class TestX11WindowTracking:
     async def test_discover_new_wid_picks_highest(self):
         """When multiple new windows appear, pick the highest WID (most recent)."""
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mgr._get_firefox_wids = AsyncMock(return_value={100, 200, 300, 400})
         wid = await mgr._discover_new_wid({100})
         assert wid == 400
@@ -203,7 +211,7 @@ class TestX11WindowTracking:
     @pytest.mark.asyncio
     async def test_discover_new_wid_returns_none_on_timeout(self):
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         # Always returns the same set — no new windows
         mgr._get_firefox_wids = AsyncMock(return_value={100, 200})
         with patch("src.browser.service.asyncio.sleep", new_callable=AsyncMock):
@@ -214,7 +222,7 @@ class TestX11WindowTracking:
     async def test_focus_uses_specific_wid(self):
         """focus() should use the stored X11 WID for xdotool, not search --class."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.bring_to_front = AsyncMock()
         inst = CamoufoxInstance("agent1", MagicMock(), AsyncMock(), mock_page)
@@ -230,7 +238,7 @@ class TestX11WindowTracking:
     async def test_focus_skips_xdotool_without_wid(self):
         """focus() should skip xdotool entirely when no WID is stored."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.bring_to_front = AsyncMock()
         inst = CamoufoxInstance("agent1", MagicMock(), AsyncMock(), mock_page)
@@ -253,7 +261,7 @@ class TestX11WindowTracking:
     async def test_reset_clears_stale_wid(self):
         """After reset, next get_or_start creates new instance with fresh WID."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_context = AsyncMock()
         inst = CamoufoxInstance("agent1", MagicMock(), mock_context, AsyncMock())
         inst.x11_wid = 99999
@@ -304,7 +312,7 @@ class TestPerAgentXStack:
     async def test_teardown_is_noop_without_slot(self):
         """_teardown_per_agent_x_stack is safe to call on a legacy-mode inst."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         inst = CamoufoxInstance("a", MagicMock(), AsyncMock(), AsyncMock())
         # display_slot is None and _x_procs is empty — nothing to do.
         await mgr._teardown_per_agent_x_stack(inst)
@@ -321,7 +329,7 @@ class TestPerAgentXStack:
         )
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         # Use a contained allocator whose VNC ports are free on this host.
         for display_start in range(200, 500):
             if all(
@@ -387,7 +395,7 @@ class TestPerAgentXStack:
         from src.browser.display_allocator import Slot, port_for_display
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         inst = CamoufoxInstance("a", MagicMock(), AsyncMock(), AsyncMock())
         inst.display_slot = Slot(display=200, vnc_port=port_for_display(200))
 
@@ -411,7 +419,7 @@ class TestPerAgentXStack:
         """No inst → env is None (subprocess.run inherits os.environ)."""
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         observed: dict[str, str | None] = {}
 
         def fake_run(cmd, **kwargs):
@@ -433,7 +441,7 @@ class TestPerAgentXStack:
     async def test_lazy_allocator_construction(self):
         """Allocator is constructed once on first _ensure_allocator call."""
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         assert mgr._display_allocator is None
         a1 = mgr._ensure_allocator()
         a2 = mgr._ensure_allocator()
@@ -445,7 +453,7 @@ class TestPerAgentXStack:
         from src.browser.display_allocator import Slot, port_for_display
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.bring_to_front = AsyncMock()
         inst = CamoufoxInstance("a", MagicMock(), AsyncMock(), mock_page)
@@ -511,7 +519,7 @@ class TestStartBrowserSlotLeak:
         """
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles_h13")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles_h13")
         alloc = self._free_allocator()
         mgr._display_allocator = alloc
 
@@ -671,7 +679,7 @@ class TestReconcileOrphanedSlots:
     def test_reconcile_releases_orphan_keeps_live(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles_h13r")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles_h13r")
         alloc = self._free_allocator()
         mgr._display_allocator = alloc
 
@@ -694,7 +702,7 @@ class TestReconcileOrphanedSlots:
     def test_reconcile_noop_when_all_backed(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles_h13r2")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles_h13r2")
         alloc = self._free_allocator()
         mgr._display_allocator = alloc
 
@@ -711,7 +719,7 @@ class TestReconcileOrphanedSlots:
     def test_reconcile_noop_without_allocator(self):
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles_h13r3")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles_h13r3")
         # Never constructed — must not raise.
         assert mgr._display_allocator is None
         mgr._reconcile_orphaned_slots()
@@ -721,7 +729,7 @@ class TestReconcileOrphanedSlots:
     async def test_cleanup_idle_invokes_reconcile(self):
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles_h13r4")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles_h13r4")
         alloc = self._free_allocator()
         mgr._display_allocator = alloc
         orphan = alloc.allocate()
@@ -741,7 +749,7 @@ class TestBrowserServer:
         from src.browser.server import create_browser_app
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         app = create_browser_app(mgr)
 
         from starlette.testclient import TestClient
@@ -756,7 +764,7 @@ class TestBrowserServer:
         from src.browser.server import create_browser_app
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         app = create_browser_app(mgr)
 
         from starlette.testclient import TestClient
@@ -770,7 +778,7 @@ class TestBrowserServer:
         from src.browser.server import create_browser_app
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         app = create_browser_app(mgr)
 
         from starlette.testclient import TestClient
@@ -783,7 +791,7 @@ class TestBrowserServer:
         from src.browser.server import create_browser_app
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mgr.snapshot = AsyncMock(return_value={"ok": True})
         app = create_browser_app(mgr)
 
@@ -806,7 +814,7 @@ class TestBrowserServer:
         from src.browser.server import create_browser_app
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mgr.click = AsyncMock(return_value={"ok": True})
         mgr.type_text = AsyncMock(return_value={"ok": True})
         mgr.screenshot = AsyncMock(return_value={"ok": True})
@@ -854,7 +862,7 @@ class TestBrowserManagerRefResolution:
     @pytest.mark.asyncio
     async def test_locator_from_ref_with_name(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         mock_locator = MagicMock()
@@ -872,7 +880,7 @@ class TestBrowserManagerRefResolution:
     @pytest.mark.asyncio
     async def test_locator_from_ref_no_name(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         mock_locator = MagicMock()
@@ -889,7 +897,7 @@ class TestBrowserManagerRefResolution:
     async def test_locator_from_ref_uses_nth_for_duplicate(self):
         """Second occurrence of same role+name must use .nth(1) to skip the first."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         mock_locator = MagicMock()
@@ -908,7 +916,7 @@ class TestBrowserManagerRefResolution:
     @pytest.mark.asyncio
     async def test_locator_from_ref_missing_returns_none(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), MagicMock())
         inst.refs = {}
@@ -929,7 +937,7 @@ class TestTypeTextClearBehavior:
         chain that React/Vue controlled components rely on to update state.
         """
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.keyboard = AsyncMock()
@@ -958,7 +966,7 @@ class TestTypeTextClearBehavior:
     async def test_clear_false_types_without_select_all(self):
         """clear=False should click then type char-by-char without Ctrl+A."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.keyboard = AsyncMock()
@@ -1311,7 +1319,7 @@ class TestNavigate:
         from src.browser.ref_handle import RefHandle
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.goto = AsyncMock()
         mock_page.title = AsyncMock(return_value="New Page")
@@ -1345,7 +1353,7 @@ class TestNavigate:
     @pytest.mark.asyncio
     async def test_navigate_success(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.goto = AsyncMock()
@@ -1363,7 +1371,7 @@ class TestNavigate:
     @pytest.mark.asyncio
     async def test_navigate_blocked_file_url(self):
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         result = await mgr.navigate("a1", "file:///etc/passwd")
         assert result["success"] is False
@@ -1372,7 +1380,7 @@ class TestNavigate:
     @pytest.mark.asyncio
     async def test_navigate_blocked_javascript_url(self):
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         result = await mgr.navigate("a1", "javascript:alert(1)")
         assert result["success"] is False
@@ -1381,7 +1389,7 @@ class TestNavigate:
     @pytest.mark.asyncio
     async def test_navigate_blocked_data_url(self):
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         result = await mgr.navigate("a1", "data:text/html,<h1>hi</h1>")
         assert result["success"] is False
@@ -1392,7 +1400,7 @@ class TestNavigate:
         """Protocol-relative URLs (``//evil.com/path``) parse as empty
         scheme; the deny-list missed them. Allow-list rejects."""
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         result = await mgr.navigate("a1", "//evil.com/path")
         assert result["success"] is False
@@ -1401,7 +1409,7 @@ class TestNavigate:
     @pytest.mark.asyncio
     async def test_navigate_rejects_about_scheme(self):
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         result = await mgr.navigate("a1", "about:config")
         assert result["success"] is False
@@ -1410,7 +1418,7 @@ class TestNavigate:
     @pytest.mark.asyncio
     async def test_navigate_rejects_chrome_scheme(self):
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         result = await mgr.navigate("a1", "chrome://settings/")
         assert result["success"] is False
@@ -1420,7 +1428,7 @@ class TestNavigate:
     async def test_navigate_caps_wait_ms(self):
         """wait_ms over 10000 should be capped to 10000."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.goto = AsyncMock()
@@ -1437,7 +1445,7 @@ class TestNavigate:
     @pytest.mark.asyncio
     async def test_navigate_error(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_CONNECTION_REFUSED"))
@@ -1455,7 +1463,7 @@ class TestClick:
     @pytest.mark.asyncio
     async def test_click_by_ref(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         mock_locator = AsyncMock()
@@ -1482,7 +1490,7 @@ class TestClick:
         visually-active buttons, which auto-triggers force=True
         in the click loop."""
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         page = MagicMock()
         locator = AsyncMock()
         locator.scroll_into_view_if_needed = AsyncMock()
@@ -1499,7 +1507,7 @@ class TestClick:
         should still proceed — we attempt the click at the last-known
         position rather than fail-fast on the scroll."""
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         page = MagicMock()
         locator = AsyncMock()
         locator.scroll_into_view_if_needed = AsyncMock(
@@ -1514,7 +1522,7 @@ class TestClick:
     async def test_human_click_selector_force_scrolls_into_view_first(self):
         """Mirror of the locator-based force test for the selector path."""
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         page = AsyncMock()
         sub_locator = AsyncMock()
         sub_locator.scroll_into_view_if_needed = AsyncMock()
@@ -1528,7 +1536,7 @@ class TestClick:
     @pytest.mark.asyncio
     async def test_click_by_selector(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.click = AsyncMock()
@@ -1542,7 +1550,7 @@ class TestClick:
     @pytest.mark.asyncio
     async def test_click_no_ref_or_selector(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), AsyncMock())
         mgr._instances["a1"] = inst
@@ -1554,7 +1562,7 @@ class TestClick:
     @pytest.mark.asyncio
     async def test_click_missing_ref(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), MagicMock())
         inst.refs = {}
@@ -1570,7 +1578,7 @@ class TestClick:
         reflects the latest 100 outcomes.
         """
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.click = AsyncMock()
@@ -1587,7 +1595,7 @@ class TestClick:
         """A click raising an exception must also append to the window
         (as ``False``) — otherwise failure modes disappear from health."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.click = AsyncMock(side_effect=RuntimeError("boom"))
@@ -1625,7 +1633,7 @@ class TestScreenshot:
         to returning the original payload as PNG. Keeps the agent
         unblocked rather than failing the call."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.screenshot = AsyncMock(
@@ -1644,7 +1652,7 @@ class TestScreenshot:
     async def test_screenshot_default_returns_webp(self):
         """Default call yields a valid WebP payload."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         # Larger fixture so WebP's container overhead is dominated by
         # the encoded pixel data — small fixtures can encode larger as
         # WebP than PNG because of header/chunk overhead.
@@ -1671,7 +1679,7 @@ class TestScreenshot:
         """Explicit ``format='png'`` with scale=1.0 returns the raw
         Playwright bytes (no Pillow round-trip)."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         png = _make_png_bytes()
         mock_page = AsyncMock()
         mock_page.screenshot = AsyncMock(return_value=png)
@@ -1694,7 +1702,7 @@ class TestScreenshot:
         from PIL import Image
 
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         png = _make_png_bytes(width=200, height=120)
         mock_page = AsyncMock()
         mock_page.screenshot = AsyncMock(return_value=png)
@@ -1711,7 +1719,7 @@ class TestScreenshot:
     @pytest.mark.asyncio
     async def test_screenshot_unknown_format_rejected(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.screenshot = AsyncMock(return_value=b"")
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
@@ -1728,7 +1736,7 @@ class TestScreenshot:
         from src.browser.service import BrowserManager, CamoufoxInstance
         # Force operator default to PNG via env override.
         monkeypatch.setenv("BROWSER_SCREENSHOT_FORMAT", "png")
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         png = _make_png_bytes(400, 300)
         mock_page = AsyncMock()
         mock_page.screenshot = AsyncMock(return_value=png)
@@ -1743,7 +1751,7 @@ class TestScreenshot:
     async def test_screenshot_format_whitespace_normalized(self):
         """``format=' WEBP '`` strips + lowercases instead of rejecting."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         png = _make_png_bytes(400, 300)
         mock_page = AsyncMock()
         mock_page.screenshot = AsyncMock(return_value=png)
@@ -1758,7 +1766,7 @@ class TestScreenshot:
     async def test_screenshot_quality_clamped(self):
         """Out-of-range quality clamps silently rather than raising."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         png = _make_png_bytes()
         mock_page = AsyncMock()
         mock_page.screenshot = AsyncMock(return_value=png)
@@ -1778,7 +1786,7 @@ class TestScreenshot:
         import builtins
 
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         png = _make_png_bytes()
         mock_page = AsyncMock()
         mock_page.screenshot = AsyncMock(return_value=png)
@@ -1805,7 +1813,7 @@ class TestEvaluate:
     @pytest.mark.asyncio
     async def test_evaluate_success(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.evaluate = AsyncMock(return_value=42)
@@ -1819,7 +1827,7 @@ class TestEvaluate:
     @pytest.mark.asyncio
     async def test_evaluate_error(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.evaluate = AsyncMock(side_effect=Exception("Evaluation failed"))
@@ -1852,7 +1860,7 @@ class TestPoolExhaustion:
             CamoufoxInstance,
         )
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles", max_concurrent=2)
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles", max_concurrent=2)
 
         # Two existing instances → at cap.
         ctx_a1 = AsyncMock()
@@ -1891,7 +1899,7 @@ class TestPoolExhaustion:
         """Asking for an already-running agent at cap returns the existing one."""
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles", max_concurrent=2)
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles", max_concurrent=2)
         inst = CamoufoxInstance("a1", MagicMock(), AsyncMock(), MagicMock())
         mgr._instances["a1"] = inst
         # Pad to cap.
@@ -1909,7 +1917,7 @@ class TestPoolExhaustion:
         from src.browser.server import create_browser_app
         from src.browser.service import BrowserManager, BrowserPoolExhausted
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         app = create_browser_app(mgr)
 
         # Inject a route that raises so we exercise the handler — keeps
@@ -1947,7 +1955,7 @@ class TestPoolExhaustion:
         )
 
         mgr = BrowserManager(
-            profiles_dir="/tmp/test_profiles",
+            profiles_dir=f"{_PROFILES_ROOT}/test_profiles",
             max_concurrent=2,
             idle_timeout_minutes=1,
         )
@@ -1989,7 +1997,7 @@ class TestPoolExhaustion:
         """
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles", max_concurrent=2)
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles", max_concurrent=2)
         for aid in ("a", "b"):
             mgr._instances[aid] = CamoufoxInstance(
                 aid, MagicMock(), AsyncMock(), MagicMock(),
@@ -2022,7 +2030,7 @@ class TestPoolExhaustion:
             CamoufoxInstance,
         )
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles", max_concurrent=1)
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles", max_concurrent=1)
         mgr._instances["a"] = CamoufoxInstance(
             "a", MagicMock(), AsyncMock(), MagicMock(),
         )
@@ -2046,7 +2054,7 @@ class TestIdleCleanup:
 
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles", idle_timeout_minutes=1)
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles", idle_timeout_minutes=1)
 
         # One idle, one active
         ctx_idle = AsyncMock()
@@ -2075,7 +2083,7 @@ class TestServerAuth:
         from src.browser.service import BrowserManager
 
         with patch.dict("os.environ", {"BROWSER_AUTH_TOKEN": "secret-token"}):
-            mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+            mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
             app = create_browser_app(mgr)
 
         from starlette.testclient import TestClient
@@ -2088,7 +2096,7 @@ class TestServerAuth:
         from src.browser.service import BrowserManager
 
         with patch.dict("os.environ", {"BROWSER_AUTH_TOKEN": "secret-token"}):
-            mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+            mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
             app = create_browser_app(mgr)
 
         from starlette.testclient import TestClient
@@ -2101,7 +2109,7 @@ class TestServerAuth:
         from src.browser.service import BrowserManager
 
         with patch.dict("os.environ", {"BROWSER_AUTH_TOKEN": "secret-token"}):
-            mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+            mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
             app = create_browser_app(mgr)
 
         from starlette.testclient import TestClient
@@ -2116,7 +2124,7 @@ class TestAgentIdValidation:
     @pytest.mark.asyncio
     async def test_valid_agent_id(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         inst = CamoufoxInstance("agent-1", MagicMock(), AsyncMock(), AsyncMock())
         mgr._start_browser = AsyncMock(return_value=inst)
@@ -2127,7 +2135,7 @@ class TestAgentIdValidation:
     @pytest.mark.asyncio
     async def test_invalid_agent_id_with_slashes(self):
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         with pytest.raises(ValueError, match="Invalid agent_id"):
             await mgr.get_or_start("../../etc/passwd")
@@ -2135,7 +2143,7 @@ class TestAgentIdValidation:
     @pytest.mark.asyncio
     async def test_invalid_agent_id_with_spaces(self):
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         with pytest.raises(ValueError, match="Invalid agent_id"):
             await mgr.get_or_start("agent with spaces")
@@ -2147,7 +2155,7 @@ class TestSnapshot:
     @pytest.mark.asyncio
     async def test_snapshot_empty_page(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.accessibility = MagicMock()
@@ -2164,7 +2172,7 @@ class TestSnapshot:
     @pytest.mark.asyncio
     async def test_snapshot_with_actionable_elements(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         tree = {
@@ -2203,7 +2211,7 @@ class TestSnapshot:
     @pytest.mark.asyncio
     async def test_snapshot_no_interactive_elements(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         tree = {
@@ -2231,7 +2239,7 @@ class TestSnapshot:
         can tell which ref is the active element.
         """
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         tree = {
@@ -2273,7 +2281,7 @@ class TestSnapshot:
     async def test_snapshot_element_limit(self):
         """Snapshot should stop adding refs after _MAX_SNAPSHOT_ELEMENTS."""
         from src.browser.service import _MAX_SNAPSHOT_ELEMENTS, BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         # Create tree with more elements than the limit
@@ -2303,7 +2311,7 @@ class TestSnapshotFormatV2:
         """Without the flag the snapshot is the historical v1 format —
         no version marker, no section headers."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.accessibility = MagicMock()
         mock_page.accessibility.snapshot = AsyncMock(return_value={
@@ -2325,7 +2333,7 @@ class TestSnapshotFormatV2:
     @pytest.mark.asyncio
     async def test_v2_emits_version_marker(self, v2_flag):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.accessibility = MagicMock()
         mock_page.accessibility.snapshot = AsyncMock(return_value={
@@ -2343,7 +2351,7 @@ class TestSnapshotFormatV2:
     @pytest.mark.asyncio
     async def test_v2_groups_by_landmark(self, v2_flag):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.accessibility = MagicMock()
         mock_page.accessibility.snapshot = AsyncMock(return_value={
@@ -2380,7 +2388,7 @@ class TestSnapshotFormatV2:
     @pytest.mark.asyncio
     async def test_v2_unlandmarked_section_emitted(self, v2_flag):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.accessibility = MagicMock()
         mock_page.accessibility.snapshot = AsyncMock(return_value={
@@ -2489,7 +2497,7 @@ class TestSnapshotFormatV2:
         """
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         # Modal is detected (visible) but scoping returns a tree with
         # only context (heading) — no actionable refs — on first pass.
         # Second pass after the retry yields an actionable button.
@@ -2565,7 +2573,7 @@ class TestSnapshotFilter:
 
     async def _snap_with_filter(self, filter_value):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.accessibility = MagicMock()
         mock_page.accessibility.snapshot = AsyncMock(
@@ -2658,7 +2666,7 @@ class TestSnapshotFromRef:
     @pytest.mark.asyncio
     async def test_from_ref_unknown_returns_not_found(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.accessibility = MagicMock()
         mock_page.accessibility.snapshot = AsyncMock(return_value={
@@ -2674,7 +2682,7 @@ class TestSnapshotFromRef:
     @pytest.mark.asyncio
     async def test_from_ref_empty_returns_invalid_input(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), AsyncMock())
         mgr._instances["a1"] = inst
         result = await mgr.snapshot("a1", from_ref="")
@@ -2687,7 +2695,7 @@ class TestSnapshotFromRef:
         resolved element handle as ``root``; the result is just that subtree."""
         from src.browser.ref_handle import RefHandle
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         # 1. Set up the inst and seed it with a single ref that
         # ``_locator_from_ref`` can resolve. Using light_dom because shadow/
@@ -2749,7 +2757,7 @@ class TestSnapshotFromRef:
         further."""
         from src.browser.ref_handle import RefHandle
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         scoped_tree = {
             "role": "form", "name": "Login",
@@ -2798,7 +2806,7 @@ class TestSnapshotFromRef:
         overlay."""
         from src.browser.ref_handle import RefHandle
         from src.browser.service import _MODAL_SELECTOR, BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         scoped_tree = {
             "role": "form", "name": "Compose",
@@ -2848,7 +2856,7 @@ class TestSnapshotFromRef:
         modal scope_root (stays None)."""
         from src.browser.ref_handle import RefHandle
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         scoped_tree = {
             "role": "form", "name": "Login",
@@ -2894,7 +2902,7 @@ class TestSnapshotFromRef:
         from src.browser.ref_handle import RefHandle
         from src.browser.service import BrowserManager, CamoufoxInstance
         monkeypatch.setenv("BROWSER_SNAPSHOT_FORMAT", "v2")
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         scoped_tree = {
             "role": "form", "name": "Login",
             "children": [{"role": "button", "name": "Submit"}],
@@ -2931,7 +2939,7 @@ class TestDiffSnapshot:
 
     async def _setup(self, tree, url="https://example.com"):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.url = url
         mock_page.accessibility = MagicMock()
@@ -3092,7 +3100,7 @@ class TestDiffSnapshot:
     async def test_tab_changed_to_baselined_tab(self):
         """Switching to a previously-baselined tab → ``tab_changed``."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         # Tab A: baseline at https://a.com.
         page_a = AsyncMock()
         page_a.url = "https://a.com"
@@ -3134,7 +3142,7 @@ class TestDiffSnapshot:
         tab_changed when last_active_page_id differs (regression for
         the previous-vs-current ordering bug)."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         page_a = AsyncMock()
         page_a.url = "https://a.com"
         page_a.accessibility = MagicMock()
@@ -3425,7 +3433,7 @@ class TestTypeTextWithRef:
     @pytest.mark.asyncio
     async def test_type_by_ref_clear(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         mock_locator = AsyncMock()
@@ -3458,7 +3466,7 @@ class TestTypeTextWithRef:
     @pytest.mark.asyncio
     async def test_type_by_ref_no_clear(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         mock_locator = AsyncMock()
@@ -3489,7 +3497,7 @@ class TestTypeTextWithRef:
     @pytest.mark.asyncio
     async def test_type_no_ref_or_selector(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), AsyncMock())
         mgr._instances["a1"] = inst
@@ -3505,7 +3513,7 @@ class TestDetectCaptcha:
     @pytest.mark.asyncio
     async def test_no_captcha_found(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         mock_locator = MagicMock()
@@ -3521,7 +3529,7 @@ class TestDetectCaptcha:
     @pytest.mark.asyncio
     async def test_captcha_found(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         call_count = [0]
@@ -3693,7 +3701,7 @@ class TestScroll:
     @pytest.mark.asyncio
     async def test_scroll_down_default(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.viewport_size = {"width": 1280, "height": 720}
@@ -3711,7 +3719,7 @@ class TestScroll:
     @pytest.mark.asyncio
     async def test_scroll_up(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.viewport_size = {"width": 1280, "height": 720}
@@ -3733,7 +3741,7 @@ class TestScroll:
     @pytest.mark.asyncio
     async def test_scroll_to_ref(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         mock_locator = AsyncMock()
@@ -3752,7 +3760,7 @@ class TestScroll:
     @pytest.mark.asyncio
     async def test_scroll_missing_ref(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.viewport_size = {"width": 1280, "height": 720}
@@ -3770,7 +3778,7 @@ class TestScroll:
     @pytest.mark.asyncio
     async def test_scroll_invalid_direction(self):
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         result = await mgr.scroll("a1", direction="left")
         assert result["success"] is False
@@ -3779,7 +3787,7 @@ class TestScroll:
     @pytest.mark.asyncio
     async def test_scroll_amount_capped(self):
         from src.browser.service import _MAX_SCROLL_PX, BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.viewport_size = {"width": 1280, "height": 720}
@@ -3795,7 +3803,7 @@ class TestScroll:
     async def test_scroll_no_viewport(self):
         """When viewport_size is None, should fallback to 800px."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.viewport_size = None
@@ -3810,7 +3818,7 @@ class TestScroll:
     @pytest.mark.asyncio
     async def test_scroll_error_handling(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.viewport_size = {"width": 1280, "height": 720}
@@ -3829,7 +3837,7 @@ class TestScroll:
         events fire, so the wheel routes to that container's scroll target.
         CDP path: locator.hover() then page.mouse.wheel()."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         mock_page.viewport_size = {"width": 1280, "height": 720}
@@ -3860,7 +3868,7 @@ class TestScroll:
         Stealth requirement: do not leak isTrusted=false on bot-detection sites."""
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = MagicMock()
         mock_page.viewport_size = {"width": 1280, "height": 720}
         mock_page.mouse = AsyncMock()
@@ -3889,7 +3897,7 @@ class TestScroll:
     @pytest.mark.asyncio
     async def test_scroll_inside_ref_missing(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.viewport_size = {"width": 1280, "height": 720}
         mock_page.mouse = AsyncMock()
@@ -3907,7 +3915,7 @@ class TestScroll:
     @pytest.mark.asyncio
     async def test_scroll_ref_and_inside_ref_mutually_exclusive(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.viewport_size = {"width": 1280, "height": 720}
         mock_page.mouse = AsyncMock()
@@ -3928,7 +3936,7 @@ class TestScroll:
         the notch loop selects (X11 if available, CDP otherwise)."""
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = MagicMock()
         mock_page.viewport_size = {"width": 1280, "height": 720}
         mock_page.mouse = AsyncMock()
@@ -3963,7 +3971,7 @@ class TestScroll:
         even though the X11 cursor is correctly placed over the modal."""
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = MagicMock()
         mock_page.viewport_size = {"width": 1280, "height": 720}
         mock_page.mouse = AsyncMock()
@@ -4000,7 +4008,7 @@ class TestScroll:
         the agent entirely. The resync is best-effort."""
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = MagicMock()
         mock_page.viewport_size = {"width": 1280, "height": 720}
         mock_page.mouse = AsyncMock()
@@ -4030,7 +4038,7 @@ class TestScroll:
         (or negative delta on CDP path)."""
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = MagicMock()
         mock_page.viewport_size = {"width": 1280, "height": 720}
         mock_page.mouse = AsyncMock()
@@ -4065,7 +4073,7 @@ class TestX11Scroll:
     async def test_x11_scroll_uses_xdotool(self):
         """When x11_wid is set, scroll uses xdotool button 5 for down."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.viewport_size = {"width": 1280, "height": 720}
@@ -4091,7 +4099,7 @@ class TestX11Scroll:
     async def test_x11_scroll_up_uses_button_4(self):
         """Scroll up uses xdotool button 4."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.viewport_size = {"width": 1280, "height": 720}
@@ -4114,7 +4122,7 @@ class TestX11Scroll:
     async def test_x11_scroll_fallback_on_failure(self):
         """When xdotool fails mid-scroll, remaining distance uses CDP."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.viewport_size = {"width": 1280, "height": 720}
@@ -4151,7 +4159,7 @@ class TestX11EnsureInViewport:
     async def test_element_in_viewport_no_scroll(self):
         """Element already visible — no scroll or fallback needed."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.viewport_size = {"width": 1920, "height": 1080}
@@ -4174,7 +4182,7 @@ class TestX11EnsureInViewport:
     async def test_element_below_viewport_scrolls_x11(self):
         """Element below viewport — X11 scroll down until visible."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.viewport_size = {"width": 1920, "height": 1080}
@@ -4206,7 +4214,7 @@ class TestX11EnsureInViewport:
     async def test_no_x11_wid_uses_protocol_scroll(self):
         """Without x11_wid, should use protocol scroll immediately."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.viewport_size = {"width": 1920, "height": 1080}
@@ -4224,7 +4232,7 @@ class TestX11EnsureInViewport:
     async def test_inner_container_falls_back(self):
         """When X11 scroll doesn't move element, fall back to protocol."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.viewport_size = {"width": 1920, "height": 1080}
@@ -4250,7 +4258,7 @@ class TestX11EnsureInViewport:
     async def test_small_movement_continues_scrolling(self):
         """Small but real movement (>= 2px) should NOT trigger stall detection."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.viewport_size = {"width": 1920, "height": 1080}
@@ -4281,7 +4289,7 @@ class TestX11EnsureInViewport:
     async def test_no_viewport_uses_protocol(self):
         """When viewport_size is None, fall back to protocol scroll."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.viewport_size = None
@@ -4303,7 +4311,7 @@ class TestTypoInjection:
     async def test_short_text_no_typos(self):
         """Text shorter than 15 alpha chars should never get typos."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), MagicMock())
         inst.x11_wid = 12345
@@ -4322,7 +4330,7 @@ class TestTypoInjection:
     async def test_typos_disabled_no_backspace(self):
         """typos=False should produce zero typo corrections."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), MagicMock())
         inst.x11_wid = 12345
@@ -4345,7 +4353,7 @@ class TestTypoInjection:
         Patches random.gauss to guarantee a budget of 2 typos.
         """
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), MagicMock())
         inst.x11_wid = 12345
@@ -4374,7 +4382,7 @@ class TestClickRandomDelay:
     @pytest.mark.asyncio
     async def test_click_delay_varies(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         delays = []
 
@@ -4411,7 +4419,7 @@ class TestTypeWithVariance:
         """
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.keyboard = AsyncMock()
         mock_page.keyboard.type = AsyncMock()
@@ -4443,7 +4451,7 @@ class TestTypeWithVariance:
         """If keyboard.press() raises (char outside key map), fall back to keyboard.type."""
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.keyboard = AsyncMock()
         mock_page.keyboard.type = AsyncMock()
@@ -4466,7 +4474,7 @@ class TestTypeWithVariance:
         """\\n uses keyboard.press('Enter'), \\t uses keyboard.press('Tab')."""
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.keyboard = AsyncMock()
         mock_page.keyboard.type = AsyncMock()
@@ -4501,7 +4509,7 @@ class TestTypeFast:
         """
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.keyboard = AsyncMock()
         mock_page.keyboard.press = AsyncMock()
@@ -4528,7 +4536,7 @@ class TestTypeFast:
     async def test_type_fast_handles_special_keys(self):
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.keyboard = AsyncMock()
         mock_page.keyboard.press = AsyncMock()
@@ -4550,7 +4558,7 @@ class TestTypeFast:
         """
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_locator = AsyncMock()
         mock_locator.nth = MagicMock(return_value=mock_locator)
         mock_page = MagicMock()
@@ -4594,7 +4602,7 @@ class TestSnapshotAfter:
     async def test_click_snapshot_after(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.click = AsyncMock()
@@ -4619,7 +4627,7 @@ class TestSnapshotAfter:
     async def test_click_without_snapshot_after(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.click = AsyncMock()
@@ -4656,7 +4664,7 @@ class TestNavigateBodyCap:
     async def test_body_capped_at_1000_with_snapshot_after(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.goto = AsyncMock()
         mock_page.title = AsyncMock(return_value="t")
@@ -4687,7 +4695,7 @@ class TestNavigateBodyCap:
     async def test_body_capped_at_5000_without_snapshot_after(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.goto = AsyncMock()
         mock_page.title = AsyncMock(return_value="t")
@@ -4717,7 +4725,7 @@ class TestNavigateBodyCap:
         cap so the agent has usable page text."""
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.goto = AsyncMock()
         mock_page.title = AsyncMock(return_value="t")
@@ -4750,7 +4758,7 @@ class TestNavigateRetry:
     async def test_navigate_retries_on_timeout(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.goto = AsyncMock(
             side_effect=[Exception("Timeout 30000ms exceeded"), None]
@@ -4774,7 +4782,7 @@ class TestNavigateRetry:
     async def test_navigate_no_retry_on_non_timeout(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.goto = AsyncMock(side_effect=Exception("net::ERR_NAME_NOT_RESOLVED"))
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
@@ -4876,7 +4884,7 @@ class TestExtractTextFromA11y:
         """navigate() should extract body text via a11y snapshot, not page.evaluate."""
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.goto = AsyncMock()
         mock_page.title = AsyncMock(return_value="Example")
@@ -4908,7 +4916,7 @@ class TestExtractTextFromA11y:
         """When _js_snapshot_mode is True, navigate skips a11y call."""
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.goto = AsyncMock()
         mock_page.title = AsyncMock(return_value="Example")
@@ -4933,7 +4941,7 @@ class TestLandmarkAnnotations:
     async def test_landmark_context_in_snapshot(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         tree = {
             "role": "WebArea", "name": "Test Page",
@@ -4961,7 +4969,7 @@ class TestLandmarkAnnotations:
     async def test_no_landmark_when_absent(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         tree = {
             "role": "WebArea", "name": "Test",
@@ -4987,7 +4995,7 @@ class TestNavigateWaitUntil:
     @pytest.mark.asyncio
     async def test_navigate_default_wait_until_is_domcontentloaded(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.goto = AsyncMock()
@@ -5009,7 +5017,7 @@ class TestNavigateWaitUntil:
     @pytest.mark.asyncio
     async def test_navigate_networkidle_passed_through(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.goto = AsyncMock()
@@ -5031,7 +5039,7 @@ class TestNavigateWaitUntil:
     @pytest.mark.asyncio
     async def test_navigate_invalid_wait_until_rejected(self):
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         result = await mgr.navigate("a1", "https://example.com", wait_until="invalid")
         assert result["success"] is False
@@ -5044,7 +5052,7 @@ class TestForceClick:
     @pytest.mark.asyncio
     async def test_click_force_false_by_default(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.click = AsyncMock()
@@ -5057,7 +5065,7 @@ class TestForceClick:
     @pytest.mark.asyncio
     async def test_click_force_true_passed_through(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.click = AsyncMock()
@@ -5071,7 +5079,7 @@ class TestForceClick:
     @pytest.mark.asyncio
     async def test_click_force_with_ref(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         mock_locator = AsyncMock()
@@ -5093,7 +5101,7 @@ class TestWaitForElement:
     @pytest.mark.asyncio
     async def test_wait_for_visible_success(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.wait_for_selector = AsyncMock()
@@ -5110,7 +5118,7 @@ class TestWaitForElement:
     @pytest.mark.asyncio
     async def test_wait_for_timeout_returns_error(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.wait_for_selector = AsyncMock(side_effect=Exception("Timeout 10000ms exceeded"))
@@ -5124,7 +5132,7 @@ class TestWaitForElement:
     @pytest.mark.asyncio
     async def test_wait_for_invalid_state_rejected(self):
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         result = await mgr.wait_for_element("a1", selector="#btn", state="hovering")
         assert result["success"] is False
@@ -5133,7 +5141,7 @@ class TestWaitForElement:
     @pytest.mark.asyncio
     async def test_wait_for_timeout_capped(self):
         from src.browser.service import _WAIT_FOR_TIMEOUT_MS, BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.wait_for_selector = AsyncMock()
@@ -5151,7 +5159,7 @@ class TestHover:
     @pytest.mark.asyncio
     async def test_hover_by_selector(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.hover = AsyncMock()
@@ -5167,7 +5175,7 @@ class TestHover:
     @pytest.mark.asyncio
     async def test_hover_by_ref(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         mock_locator = AsyncMock()
@@ -5186,7 +5194,7 @@ class TestHover:
     @pytest.mark.asyncio
     async def test_hover_no_ref_or_selector(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), AsyncMock())
         mgr._instances["a1"] = inst
 
@@ -5197,7 +5205,7 @@ class TestHover:
     @pytest.mark.asyncio
     async def test_hover_error_propagated(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.hover = AsyncMock(side_effect=Exception("element not found"))
@@ -5269,7 +5277,7 @@ class TestScrollParameterized:
     async def test_scroll_uses_wheel_events_not_evaluate(self):
         """Scroll must use mouse.wheel() for isTrusted wheel events, not evaluate."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.viewport_size = {"width": 1280, "height": 720}
@@ -5295,7 +5303,7 @@ class TestScrollParameterized:
     async def test_scroll_up_delta_is_negative(self):
         """Scroll up must pass a negative delta to mouse.wheel()."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.viewport_size = {"width": 1280, "height": 720}
@@ -5321,7 +5329,7 @@ class TestWordBoundaryPause:
         """With random.random()=0.05, pause fires after space (12%) but not mid-word (2.5%)."""
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.keyboard = AsyncMock()
         mock_page.keyboard.press = AsyncMock()
@@ -5350,7 +5358,7 @@ class TestWordBoundaryPause:
         """With random.random()=0.15, no pauses fire (0.15 > 0.08)."""
         from src.browser.service import BrowserManager
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mock_page = AsyncMock()
         mock_page.keyboard = AsyncMock()
         mock_page.keyboard.press = AsyncMock()
@@ -6422,7 +6430,7 @@ class TestDialogScoping:
     async def test_snapshot_scopes_to_dialog(self):
         """Elements outside the dialog should not appear in snapshot."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         full_tree = {
             "role": "WebArea", "name": "",
@@ -6467,7 +6475,7 @@ class TestDialogScoping:
     async def test_snapshot_no_dialog_walks_all(self):
         """Without a dialog, all elements should appear as before."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         tree = {
             "role": "WebArea", "name": "",
@@ -6491,7 +6499,7 @@ class TestDialogScoping:
     async def test_snapshot_aria_modal_detected(self):
         """Elements with aria-modal=true (without dialog role in a11y tree) should trigger scoping."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         # Simulate Twitter: DOM has aria-modal=true but a11y tree uses 'group' role
         full_tree = {
@@ -6527,7 +6535,7 @@ class TestDialogScoping:
     async def test_snapshot_dialog_clears_flag_when_dismissed(self):
         """After dialog is dismissed, next snapshot should clear dialog_active."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         # First snapshot: modal open
         dialog_subtree = {
@@ -6565,7 +6573,7 @@ class TestDialogScoping:
         must not affect the modal "Post" button's index within the dialog.
         """
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         full_tree = {
             "role": "WebArea", "name": "",
@@ -6603,7 +6611,7 @@ class TestDialogScoping:
     async def test_locator_from_ref_scopes_to_dialog(self):
         """When dialog_active is True, locator should search within dialog elements."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         mock_dialog_locator = MagicMock()
@@ -6630,7 +6638,7 @@ class TestDialogScoping:
     async def test_locator_from_ref_page_scope_when_no_dialog(self):
         """When dialog_active is False, locator should search entire page."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         mock_role_locator = MagicMock()
@@ -6650,7 +6658,7 @@ class TestDialogScoping:
     async def test_snapshot_hidden_dialog_ignored(self):
         """Hidden dialog elements (aria-hidden) should not trigger scoping."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         # DOM query returns an element but it's not visible
         tree = {
@@ -6681,7 +6689,7 @@ class TestDialogScoping:
         after a short wait should pick up elements that finished rendering.
         """
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         full_tree = {
             "role": "WebArea", "name": "",
@@ -6748,7 +6756,7 @@ class TestDialogScoping:
         roles (button/textbox) should trigger the retry path.
         """
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         full_tree = {
             "role": "WebArea", "name": "",
@@ -6805,7 +6813,7 @@ class TestDialogScoping:
             BrowserManager,
             CamoufoxInstance,
         )
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         # Build mock chain: page.get_by_role(...).nth(0).click()
         # get_by_role and nth are sync; click is async.
@@ -6846,7 +6854,7 @@ class TestDialogScoping:
             BrowserManager,
             CamoufoxInstance,
         )
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         # Build mock chain: page.locator(selector).get_by_role(...).nth(0).click()
         mock_click = AsyncMock()
@@ -6886,7 +6894,7 @@ class TestDialogScoping:
         snapshots. Without fallback the agent would get zero refs — blind.
         """
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         full_tree = {
             "role": "WebArea", "name": "",
@@ -6938,7 +6946,7 @@ class TestDialogScoping:
     async def test_snapshot_fallback_when_scoped_snapshot_raises(self):
         """If both Playwright and JS scoped snapshots fail, fall back to full tree."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         full_tree = {
             "role": "WebArea", "name": "",
@@ -6984,7 +6992,7 @@ class TestDialogScoping:
     async def test_navigate_resets_dialog_active(self):
         """Navigation to a new page should clear stale dialog_active flag."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.goto = AsyncMock()
@@ -7010,7 +7018,7 @@ class TestDialogScoping:
         snapshot(root=child) — producing wrong occurrence indices.
         """
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         parent_subtree = {
             "role": "dialog", "name": "Parent",
@@ -7106,7 +7114,7 @@ class TestJsA11yTreeFallback:
         """Default-construction snapshot drives ``page.evaluate``, NOT
         ``page.accessibility.snapshot``. Pins the §8.3 P0.3 fix."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         # Sentinel: if anything routes through the native API the test
@@ -7153,7 +7161,7 @@ class TestJsA11yTreeFallback:
         """
         from src.browser.ref_handle import RefHandle
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         # Synthetic JS-walker output with a shadow-pathed button. The
         # mock page only mocks ``page.evaluate`` — there is no
@@ -7192,7 +7200,7 @@ class TestJsA11yTreeFallback:
     async def test_js_fallback_scoped_to_dialog(self):
         """In JS mode, scoped snapshots use element.evaluate()."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         full_tree = {
             "role": "WebArea", "name": "",
@@ -7242,7 +7250,7 @@ class TestJsA11yTreeFallback:
     async def test_js_fallback_empty_returns_empty_page(self):
         """When JS fallback returns None, snapshot returns empty page."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.evaluate = AsyncMock(return_value=None)
@@ -7260,7 +7268,7 @@ class TestJsA11yTreeFallback:
     async def test_js_tree_none_role_flattened(self):
         """Nodes with role='none' (non-role containers) are walked for children."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         # JS tree has 'none' role wrapper (non-role div containing buttons)
         js_tree = {
@@ -7400,7 +7408,7 @@ class TestBrowserSettingsEndpoint:
         """GET /browser/settings should return default speed=1.0."""
         from src.browser.server import create_browser_app
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         app = create_browser_app(mgr)
 
         from starlette.testclient import TestClient
@@ -7414,7 +7422,7 @@ class TestBrowserSettingsEndpoint:
         from src.browser.server import create_browser_app
         from src.browser.service import BrowserManager
         from src.browser.timing import get_speed
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         app = create_browser_app(mgr)
 
         from starlette.testclient import TestClient
@@ -7429,7 +7437,7 @@ class TestBrowserSettingsEndpoint:
         from src.browser.server import create_browser_app
         from src.browser.service import BrowserManager
         from src.browser.timing import get_speed
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         app = create_browser_app(mgr)
 
         from starlette.testclient import TestClient
@@ -7443,7 +7451,7 @@ class TestBrowserSettingsEndpoint:
         """GET /browser/settings should include delay."""
         from src.browser.server import create_browser_app
         from src.browser.service import BrowserManager
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         app = create_browser_app(mgr)
 
         from starlette.testclient import TestClient
@@ -7458,7 +7466,7 @@ class TestBrowserSettingsEndpoint:
         from src.browser.server import create_browser_app
         from src.browser.service import BrowserManager
         from src.browser.timing import get_delay
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         app = create_browser_app(mgr)
 
         from starlette.testclient import TestClient
@@ -7473,7 +7481,7 @@ class TestBrowserSettingsEndpoint:
         from src.browser.server import create_browser_app
         from src.browser.service import BrowserManager
         from src.browser.timing import get_delay
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         app = create_browser_app(mgr)
 
         from starlette.testclient import TestClient
@@ -7489,7 +7497,7 @@ class TestBrowserSettingsEndpoint:
         from src.browser.service import BrowserManager
         from src.browser.timing import get_speed, set_speed
         set_speed(2.0)
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         app = create_browser_app(mgr)
 
         from starlette.testclient import TestClient
@@ -7636,7 +7644,7 @@ class TestX11Input:
 
     def _make_manager(self):
         with patch("src.browser.service.Path.mkdir"):
-            return BrowserManager(profiles_dir="/tmp/test_profiles")
+            return BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
     def _make_instance(self, agent_id="agent-1", x11_wid=12345):
         mock_page = MagicMock()
@@ -8580,7 +8588,7 @@ class TestModalRetryRequery:
     async def test_modal_retry_re_queries_elements(self):
         """Retry loop should re-query modal elements (handles go stale on SPA re-render)."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         full_tree = {
             "role": "WebArea", "name": "",
@@ -8650,7 +8658,7 @@ class TestModalRetryRequery:
         from targeting elements behind the overlay.
         """
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         full_tree = {
             "role": "WebArea", "name": "",
@@ -8695,7 +8703,7 @@ class TestModalRetryRequery:
 
 class TestBrowserManagerProxyConfig:
     def test_set_proxy_config(self):
-        manager = BrowserManager(profiles_dir="/tmp/test_profiles_proxy")
+        manager = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles_proxy")
         manager.set_proxy_config("agent-1", {
             "url": "socks5://host:1080",
             "username": "u",
@@ -8705,23 +8713,23 @@ class TestBrowserManagerProxyConfig:
         assert config == {"url": "socks5://host:1080", "username": "u", "password": "p"}
 
     def test_get_proxy_config_returns_none_for_unknown(self):
-        manager = BrowserManager(profiles_dir="/tmp/test_profiles_proxy2")
+        manager = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles_proxy2")
         assert manager.get_proxy_config("unknown") is None
 
     def test_clear_proxy_config(self):
-        manager = BrowserManager(profiles_dir="/tmp/test_profiles_proxy3")
+        manager = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles_proxy3")
         manager.set_proxy_config("agent-1", {"url": "http://host:8080"})
         manager.set_proxy_config("agent-1", None)
         assert manager.get_proxy_config("agent-1") is None
 
     def test_boot_id_is_stable_and_nonempty(self):
-        manager = BrowserManager(profiles_dir="/tmp/test_profiles_proxy4")
+        manager = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles_proxy4")
         assert manager.boot_id
         assert manager.boot_id == manager.boot_id
 
     def test_empty_dict_means_explicit_no_proxy(self):
         """Empty dict stored via set_proxy_config means 'explicitly no proxy' (direct mode)."""
-        manager = BrowserManager(profiles_dir="/tmp/test_profiles_proxy5")
+        manager = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles_proxy5")
         manager.set_proxy_config("agent-1", {})
         config = manager.get_proxy_config("agent-1")
         assert config is not None  # not None — that would mean no config pushed
@@ -8730,7 +8738,7 @@ class TestBrowserManagerProxyConfig:
 
     def test_none_clears_config(self):
         """None clears the stored config (no config pushed state)."""
-        manager = BrowserManager(profiles_dir="/tmp/test_profiles_proxy6")
+        manager = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles_proxy6")
         manager.set_proxy_config("agent-1", {"url": "http://host:8080"})
         manager.set_proxy_config("agent-1", None)
         assert manager.get_proxy_config("agent-1") is None
@@ -8980,7 +8988,7 @@ class TestCheckCaptchaAutoSolve:
         """When solver succeeds, the §11.13 envelope reports solver_outcome='solved'."""
         from src.browser.captcha import SolveResult
 
-        manager = BrowserManager(profiles_dir="/tmp/test_profiles_captcha1")
+        manager = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles_captcha1")
 
         mock_solver = AsyncMock()
         mock_solver.solve = AsyncMock(return_value=SolveResult(
@@ -9012,7 +9020,7 @@ class TestCheckCaptchaAutoSolve:
         """When solver fails, _check_captcha reports solver_outcome='rejected'."""
         from src.browser.captcha import SolveResult
 
-        manager = BrowserManager(profiles_dir="/tmp/test_profiles_captcha2")
+        manager = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles_captcha2")
 
         mock_solver = AsyncMock()
         # No-token failure → rejected envelope.
@@ -9317,7 +9325,7 @@ class TestFindText:
         """
         from src.browser.service import BrowserManager, CamoufoxInstance
 
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         tree_v1 = {
             "role": "WebArea", "name": "",
             "children": [{"role": "button", "name": "Submit"}],
@@ -9754,7 +9762,7 @@ class TestShadowDOM:
     async def test_walker_emits_shadow_path_for_open_root(self):
         from src.browser.ref_handle import RefHandle
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         tree = {
             "role": "WebArea", "name": "",
@@ -9790,7 +9798,7 @@ class TestShadowDOM:
     @pytest.mark.asyncio
     async def test_walker_emits_nested_shadow_path(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         tree = {
             "role": "WebArea", "name": "",
             "children": [
@@ -9827,7 +9835,7 @@ class TestShadowDOM:
         """Regression guard: pages without any shadow DOM must produce
         light_dom-shaped handles (shadow_path=())."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         tree = {
             "role": "WebArea", "name": "",
@@ -9857,7 +9865,7 @@ class TestShadowDOM:
         or actual closed shadow roots — see real-browser tests for that.
         """
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         tree = {
             "role": "WebArea", "name": "",
@@ -9887,7 +9895,7 @@ class TestShadowDOM:
             BrowserManager,
             CamoufoxInstance,
         )
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         # Build 51 nested layers, the deepest carrying a button.
         node = {"role": "button", "name": "Deep"}
@@ -10066,7 +10074,7 @@ class TestShadowDOM:
         ``evaluate_handle`` resolver instead of ``get_by_role.nth(...)``."""
         from src.browser.ref_handle import RefHandle, ShadowHop
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         # Stage-1 returns a JSHandle whose .evaluate returns no error
@@ -10112,7 +10120,7 @@ class TestShadowDOM:
     async def test_locator_from_ref_raises_ref_stale_on_missing_host(self):
         from src.browser.ref_handle import RefHandle, RefStale, ShadowHop
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         stage1_handle = AsyncMock()
@@ -10134,7 +10142,7 @@ class TestShadowDOM:
     async def test_locator_from_ref_raises_ref_stale_on_discriminator_mismatch(self):
         from src.browser.ref_handle import RefHandle, RefStale, ShadowHop
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         stage1_handle = AsyncMock()
@@ -10156,7 +10164,7 @@ class TestShadowDOM:
     async def test_locator_from_ref_raises_ref_stale_when_element_not_found(self):
         from src.browser.ref_handle import RefHandle, RefStale, ShadowHop
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         stage1_handle = AsyncMock()
@@ -10184,7 +10192,7 @@ class TestShadowDOM:
         ``.bounding_box`` and ``.scroll_into_view_if_needed``."""
         from src.browser.ref_handle import RefHandle, ShadowHop
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.keyboard = AsyncMock()
@@ -10226,7 +10234,7 @@ class TestShadowDOM:
     async def test_click_accepts_shadow_element_handle(self):
         from src.browser.ref_handle import RefHandle, ShadowHop
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         inst = CamoufoxInstance("a1", MagicMock(), MagicMock(), mock_page)
@@ -10495,7 +10503,7 @@ class TestShadowDOM:
         """
         from src.browser.ref_handle import RefHandle, RefStale, ShadowHop
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         stage1_handle = AsyncMock()
@@ -10532,7 +10540,7 @@ class TestShadowDOM:
         """
         from src.browser.ref_handle import RefHandle, RefStale, ShadowHop
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         stage1_handle = AsyncMock()
@@ -10682,7 +10690,7 @@ class TestShadowDOM:
         """
         from src.browser.ref_handle import RefHandle, ShadowHop
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         stage1_handle = AsyncMock()
@@ -10740,7 +10748,7 @@ class TestShadowDOM:
         """
         from src.browser.ref_handle import RefHandle, ShadowHop
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         stage1_handle = AsyncMock()
@@ -10772,7 +10780,7 @@ class TestShadowDOM:
         """
         from src.browser.ref_handle import RefHandle, RefStale, ShadowHop
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         stage1_handle = AsyncMock()
@@ -10801,7 +10809,7 @@ class TestShadowDOM:
         """
         from src.browser.ref_handle import RefHandle, RefStale, ShadowHop
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         stage1_handle = AsyncMock()
@@ -10911,7 +10919,7 @@ class TestShadowDOM:
         """
         from src.browser.ref_handle import RefHandle, RefStale, ShadowHop
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = MagicMock()
         mock_page.evaluate_handle = AsyncMock()
@@ -10954,7 +10962,7 @@ class TestIframeTraversal:
     @pytest.mark.asyncio
     async def test_same_origin_iframe_emits_refs_with_frame_id(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -11005,7 +11013,7 @@ class TestIframeTraversal:
     @pytest.mark.asyncio
     async def test_two_iframes_get_different_frame_ids(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -11066,7 +11074,7 @@ class TestIframeTraversal:
     @pytest.mark.asyncio
     async def test_cross_origin_iframe_emits_opaque_stub_no_descent(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -11108,7 +11116,7 @@ class TestIframeTraversal:
     async def test_click_via_ref_inside_iframe_uses_frame_locator(self):
         from src.browser.ref_handle import RefHandle
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -11143,7 +11151,7 @@ class TestIframeTraversal:
     async def test_type_via_ref_inside_iframe_uses_frame_locator(self):
         from src.browser.ref_handle import RefHandle
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -11178,7 +11186,7 @@ class TestIframeTraversal:
     @pytest.mark.asyncio
     async def test_two_level_nested_iframes(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -11234,7 +11242,7 @@ class TestIframeTraversal:
     @pytest.mark.asyncio
     async def test_four_deep_nesting_stops_at_limit(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -11289,7 +11297,7 @@ class TestIframeTraversal:
     @pytest.mark.asyncio
     async def test_snapshot_frame_arg_walks_only_target(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -11334,7 +11342,7 @@ class TestIframeTraversal:
     async def test_click_with_frame_arg_conflicting_ref_returns_error(self):
         from src.browser.ref_handle import RefHandle
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -11379,7 +11387,7 @@ class TestIframeTraversal:
         """
         from src.browser.ref_handle import RefHandle
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -11414,7 +11422,7 @@ class TestIframeTraversal:
         """Same as click() but for type_text()."""
         from src.browser.ref_handle import RefHandle
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -11446,7 +11454,7 @@ class TestIframeTraversal:
     async def test_click_returns_ref_stale_when_frame_detached(self):
         from src.browser.ref_handle import RefHandle
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -11470,7 +11478,7 @@ class TestIframeTraversal:
     @pytest.mark.asyncio
     async def test_light_dom_only_page_unaffected(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -11503,7 +11511,7 @@ class TestIframeTraversal:
         silently ignoring frame=."""
         from src.browser.ref_handle import RefHandle
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -11534,7 +11542,7 @@ class TestIframeTraversal:
         """snapshot(frame=outer) descends into same-origin frames inside
         the targeted frame so nested refs carry their own frame_id."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -11611,7 +11619,7 @@ class TestIframeTraversal:
         frame_ids_inv signals a detached frame, not a URL miss — surface
         as ref_stale so the agent re-snapshots."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -11637,7 +11645,7 @@ class TestIframeTraversal:
     async def test_resolve_frame_arg_prefers_exact_url_match(self):
         """When two frames match by substring, exact URL equality wins."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -11663,7 +11671,7 @@ class TestIframeTraversal:
     async def test_iframe_stub_name_truncated_to_200(self):
         """Long title/src on an iframe stub gets capped to 200 chars."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -11717,7 +11725,7 @@ class TestIframeTraversal:
         addressable via the documented ``frame=`` token. Main-frame
         refs keep the historical 4-key shape."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -11768,7 +11776,7 @@ class TestIframeTraversal:
         distinct frame_ids — not the first child's content twice.
         """
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -11833,7 +11841,7 @@ class TestIframeTraversal:
         descent uses ``iframe_index`` (sibling position) so their
         contents still surface in the snapshot."""
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -11885,7 +11893,7 @@ class TestIframeTraversal:
         rendered solely from ``entries``, so iframes vanished."""
         monkeypatch.setenv("BROWSER_SNAPSHOT_FORMAT", "v2")
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -11934,7 +11942,7 @@ class TestIframeTraversal:
         for refs that will never appear.
         """
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -12010,7 +12018,7 @@ class TestIframeTraversal:
         must skip detached entries before applying the index fallback.
         """
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -12067,7 +12075,7 @@ class TestIframeTraversal:
         against that frame, not the main page."""
         from src.browser.ref_handle import RefHandle, ShadowHop
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -12121,7 +12129,7 @@ class TestSelectorFrameClickAndType:
     @pytest.mark.asyncio
     async def test_click_with_selector_and_frame_arg(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -12155,7 +12163,7 @@ class TestSelectorFrameClickAndType:
     @pytest.mark.asyncio
     async def test_type_with_selector_and_frame_arg(self):
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         mock_page = AsyncMock()
         mock_page.url = "https://example.com/"
@@ -12238,7 +12246,7 @@ class TestSnapshotDiffSubsetShortCircuit:
         import asyncio
 
         from src.browser.service import BrowserManager, CamoufoxInstance
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
 
         tree_v1 = {
             "role": "WebArea", "name": "",
@@ -12316,7 +12324,7 @@ class TestBrowserSsrfParity:
 
     @pytest.mark.asyncio
     async def test_navigate_rejects_metadata_ip(self):
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         # get_or_start should never be reached — assert by making it raise.
         mgr.get_or_start = AsyncMock(
             side_effect=AssertionError("get_or_start must not be called"),
@@ -12327,7 +12335,7 @@ class TestBrowserSsrfParity:
 
     @pytest.mark.asyncio
     async def test_navigate_rejects_private_ip(self):
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mgr.get_or_start = AsyncMock(
             side_effect=AssertionError("get_or_start must not be called"),
         )
@@ -12340,7 +12348,7 @@ class TestBrowserSsrfParity:
         # A public host passes the SSRF gate and proceeds toward
         # get_or_start (which we stub to short-circuit). The point is the
         # SSRF guard does NOT reject a legitimate public URL.
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         sentinel = {"success": False, "error": "stub-reached-get_or_start"}
 
         async def _boom(*a, **k):
@@ -12355,7 +12363,7 @@ class TestBrowserSsrfParity:
 
     @pytest.mark.asyncio
     async def test_open_tab_rejects_metadata_ip(self):
-        mgr = BrowserManager(profiles_dir="/tmp/test_profiles")
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         mgr.get_or_start = AsyncMock(
             side_effect=AssertionError("get_or_start must not be called"),
         )
