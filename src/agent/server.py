@@ -395,6 +395,21 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         _trace_id = request.headers.get("x-trace-id")
         _origin = _origin_from_mesh_request(request)
         async def event_generator():
+            # Seed the trace/origin contextvars HERE, in the pump's own
+            # task context. Each ``__anext__`` below is wrapped in its own
+            # task, and a task runs in a COPY of the creating context —
+            # so sets made INSIDE the generator (loop.chat_stream) live
+            # and die with one step's copy and are invisible to the next.
+            # In production that meant every tool call in a streamed chat
+            # saw ``current_origin = None``: dashboard-initiated chains
+            # stored NULL origins and the entire delegate-and-subscribe
+            # surface (chain completion delivery, stall nudges, failure
+            # recovery wakes) silently never fired, and ``llm.py`` sent
+            # no x-trace-id (no per-call traces). Seeding in THIS context
+            # makes every per-step task copy inherit the values.
+            from src.shared.trace import current_origin, current_trace_id
+            _tid_token = current_trace_id.set(_trace_id)
+            _origin_token = current_origin.set(_origin)
             stream = loop.chat_stream(
                 sanitize_for_prompt(msg.message), trace_id=_trace_id,
                 origin=_origin,
@@ -423,6 +438,11 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
                     next_event.cancel()
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await next_event
+                # Tokens were minted in THIS context, so the resets are
+                # safe (unlike the in-generator reset, which lands in a
+                # per-step context copy and is suppressed there).
+                current_origin.reset(_origin_token)
+                current_trace_id.reset(_tid_token)
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 
     @app.post("/chat/reset")
