@@ -393,6 +393,14 @@ function dashboard() {
     identityLearnings: null,
     identityLearningsLoading: false,
 
+    // Standing goals (Memory tab) — blackboard goals/{agent_id}
+    agentGoals: [],
+    agentGoalsMeta: null,
+    agentGoalsLoading: false,
+    agentGoalsEditing: false,
+    agentGoalsBuffer: '',
+    agentGoalsSaving: false,
+
     // Files tab
     agentFiles: [],
     agentFilesLoading: false,
@@ -5567,6 +5575,9 @@ function dashboard() {
       const fileMap = _IDENTITY_FILE_MAP[tab.id];
       if (fileMap) {
         this.identityContentLoading = true;
+        // Standing goals live alongside the memory files — fire the
+        // fetch before the file loop so it lands in parallel.
+        if (tab.id === 'memory') this.loadAgentGoals(agentId);
         for (const entry of fileMap) {
           try {
             const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/workspace/${entry.file}`);
@@ -6015,6 +6026,56 @@ function dashboard() {
         if (resp.ok) this.identityLearnings = await resp.json();
       } catch (e) { console.warn('fetchIdentityLearnings failed:', e); }
       this.identityLearningsLoading = false;
+    },
+
+    async loadAgentGoals(agentId) {
+      this.agentGoalsLoading = true;
+      this.agentGoalsEditing = false;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/goals`);
+        if (resp.ok) {
+          const data = await resp.json();
+          this.agentGoals = data.goals || [];
+          this.agentGoalsMeta = data;
+        }
+      } catch (e) { console.warn('loadAgentGoals failed:', e); }
+      this.agentGoalsLoading = false;
+    },
+
+    startAgentGoalsEdit() {
+      this.agentGoalsBuffer = this.agentGoals.join('\n');
+      this.agentGoalsEditing = true;
+    },
+
+    cancelAgentGoalsEdit() {
+      this.agentGoalsEditing = false;
+      this.agentGoalsBuffer = '';
+    },
+
+    async saveAgentGoals(agentId) {
+      if (this.agentGoalsSaving) return;
+      const goals = this.agentGoalsBuffer.split('\n').map(g => g.trim()).filter(g => g);
+      this.agentGoalsSaving = true;
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/agents/${agentId}/goals`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ goals }),
+        });
+        if (resp.ok) {
+          this.agentGoals = goals;
+          this.agentGoalsMeta = { ...(this.agentGoalsMeta || {}), updated_at: new Date().toISOString(), set_by: 'user' };
+          this.agentGoalsEditing = false;
+          this.agentGoalsBuffer = '';
+          this.showToast(goals.length ? 'Saved standing goals' : 'Cleared standing goals');
+        } else {
+          try {
+            const err = await resp.json();
+            this.showToast(`Save failed: ${err.detail || 'Unknown error'}`);
+          } catch (_) { this.showToast('Save failed'); }
+        }
+      } catch (e) { this.showToast(`Save failed: ${e.message}`); }
+      this.agentGoalsSaving = false;
     },
 
     async fetchAgentActivity(agentId) {

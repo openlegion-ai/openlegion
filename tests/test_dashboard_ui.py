@@ -2593,3 +2593,18 @@ class TestLimitsConfigUICompleteness:
         # The three per-agent caps must be bound in the agent edit panel.
         for field in ("max_output_tokens", "max_tool_rounds", "llm_timeout_seconds"):
             assert f"editForm.{field}" in _INDEX_HTML, f"{field} missing from agent edit UI"
+
+
+class TestAgentGoalsSection:
+    """Standing-goals section on the agent Memory tab (Fleet → detail)."""
+
+    def test_agent_goals_section_present(self, index_html: str, app_js: str):
+        assert 'data-testid="agent-goals-section"' in index_html
+        assert 'data-testid="agent-goal-chip"' in index_html
+        # Gated to the Memory sub-tab of the agent settings panel.
+        idx = index_html.find('data-testid="agent-goals-section"')
+        slice_ = index_html[max(0, idx - 300):idx + 300]
+        assert "identityTab === 'memory'" in slice_
+        # Loader + save handler wired into the SPA.
+        assert "loadAgentGoals" in app_js
+        assert "saveAgentGoals" in app_js

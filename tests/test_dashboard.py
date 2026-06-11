@@ -5892,3 +5892,123 @@ class TestDashboardFileDownload:
         )
         assert resp.status_code == 200
         assert resp.content == b"stuck"  # exactly one page, loop terminated
+
+
+class TestAgentGoalsEndpoints:
+    """Standing-goals read/edit surface (Memory tab → blackboard goals/{id})."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_get_unknown_agent_404(self):
+        resp = self.client.get("/dashboard/api/agents/ghost/goals")
+        assert resp.status_code == 404
+
+    def test_get_empty_when_nothing_set(self):
+        with patch("src.cli.config._load_projects", return_value={}):
+            resp = self.client.get("/dashboard/api/agents/alpha/goals")
+        assert resp.status_code == 200
+        assert resp.json() == {"goals": [], "updated_at": None}
+
+    def test_put_and_get_roundtrip_solo_key(self):
+        with patch("src.cli.config._load_projects", return_value={}):
+            resp = self.client.put(
+                "/dashboard/api/agents/alpha/goals",
+                json={"goals": ["Ship the weekly report."]},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["set"] is True
+            assert data["count"] == 1
+            get_resp = self.client.get("/dashboard/api/agents/alpha/goals")
+        body = get_resp.json()
+        assert body["goals"] == ["Ship the weekly report."]
+        assert body["set_by"] == "user"
+        assert body["updated_at"]
+        # Solo agent (no team) → the raw key, no projects/ prefix.
+        entry = self.components["blackboard"].read("goals/alpha")
+        assert entry is not None
+        assert entry.value["goals"] == ["Ship the weekly report."]
+        assert entry.ttl is None
+
+    def test_team_agent_writes_scoped_key(self):
+        with patch("src.cli.config._load_projects", return_value={
+            "team-a": {"members": ["alpha"]},
+        }):
+            resp = self.client.put(
+                "/dashboard/api/agents/alpha/goals",
+                json={"goals": ["Watch the inbox."]},
+            )
+            assert resp.status_code == 200
+            # Team agents read via _scope_key → projects/{team}/goals/{id}.
+            entry = self.components["blackboard"].read("projects/team-a/goals/alpha")
+            assert entry is not None
+            assert entry.value["goals"] == ["Watch the inbox."]
+            get_resp = self.client.get("/dashboard/api/agents/alpha/goals")
+            assert get_resp.json()["goals"] == ["Watch the inbox."]
+        # Nothing leaked to the unscoped key.
+        assert self.components["blackboard"].read("goals/alpha") is None
+
+    def test_put_validation_rejects_bad_payloads(self):
+        with patch("src.cli.config._load_projects", return_value={}):
+            # Not a list.
+            resp = self.client.put(
+                "/dashboard/api/agents/alpha/goals", json={"goals": "do it"},
+            )
+            assert resp.status_code == 400
+            # Too many entries (max 5).
+            resp = self.client.put(
+                "/dashboard/api/agents/alpha/goals",
+                json={"goals": [f"goal {i}" for i in range(6)]},
+            )
+            assert resp.status_code == 400
+            # A single goal over 300 chars.
+            resp = self.client.put(
+                "/dashboard/api/agents/alpha/goals", json={"goals": ["a" * 301]},
+            )
+            assert resp.status_code == 400
+            # Blank after strip.
+            resp = self.client.put(
+                "/dashboard/api/agents/alpha/goals", json={"goals": [" "]},
+            )
+            assert resp.status_code == 400
+
+    def test_put_empty_clears(self):
+        with patch("src.cli.config._load_projects", return_value={}):
+            resp = self.client.put(
+                "/dashboard/api/agents/alpha/goals", json={"goals": ["Keep going."]},
+            )
+            assert resp.status_code == 200
+            resp = self.client.put(
+                "/dashboard/api/agents/alpha/goals", json={"goals": []},
+            )
+            assert resp.status_code == 200
+            assert resp.json() == {"cleared": True, "agent_id": "alpha"}
+            get_resp = self.client.get("/dashboard/api/agents/alpha/goals")
+        assert get_resp.json()["goals"] == []
+        assert self.components["blackboard"].read("goals/alpha") is None
+
+    def test_put_operator_rejected(self):
+        # The registry dict is shared by reference with the router closure.
+        self.components["agent_registry"]["operator"] = "http://localhost:8409"
+        resp = self.client.put(
+            "/dashboard/api/agents/operator/goals", json={"goals": ["x"]},
+        )
+        assert resp.status_code == 400
+        # Parity with set_agent_goals: point at the Work-tab goals.
+        assert "Work tab" in resp.json()["detail"]
+
+    def test_put_without_csrf_header_403(self):
+        # Raw TestClient against the same app — no auto-injected
+        # X-Requested-With header.
+        raw = TestClient(self.client.app)
+        resp = raw.put(
+            "/dashboard/api/agents/alpha/goals", json={"goals": ["x"]},
+        )
+        assert resp.status_code == 403
