@@ -341,7 +341,10 @@ class TestDashboardProbeAndInvalidate:
         assert resp.json() == {"ok": True, "tools_count": 3}
         gateway.probe.assert_awaited_once_with("linear")
 
-    def test_auth_only_edit_invalidates_gateway_cache(self, dash_env):
+    def test_auth_mode_change_invalidates_and_prompts_restart(self, dash_env):
+        # none -> bearer is a MODE change: cache invalidated (auth-only
+        # at the store layer) AND restart prompted (agents registered
+        # zero tools for the 401ing connector at their last boot).
         client, _, gateway = dash_env
         resp = client.put("/dashboard/api/connectors/linear", json={
             "transport": "http",
@@ -350,8 +353,22 @@ class TestDashboardProbeAndInvalidate:
             "agents": ["alpha"],
         })
         assert resp.status_code == 200, resp.text
-        assert resp.json()["restart_required"] is False
+        assert resp.json()["restart_required"] is True
         gateway.invalidate.assert_called_once_with("linear")
+
+    def test_auth_rotation_invalidates_without_restart(self, dash_env):
+        client, _, gateway = dash_env
+        for cred in ("linear_token", "linear_token_v2"):
+            resp = client.put("/dashboard/api/connectors/linear", json={
+                "transport": "http",
+                "url": "https://93.184.216.34/mcp",
+                "auth": {"kind": "bearer", "cred": cred},
+                "agents": ["alpha"],
+            })
+            assert resp.status_code == 200, resp.text
+        # Second PUT was same-kind rotation: no restart, cache dropped.
+        assert resp.json()["restart_required"] is False
+        assert gateway.invalidate.call_count == 2
 
     def test_restart_relevant_edit_does_not_invalidate(self, dash_env):
         # Generation-keyed cache handles those; invalidate is the

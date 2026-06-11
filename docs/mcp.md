@@ -61,9 +61,14 @@ key is omitted) or **remote** (`transport: "http"`):
   `Authorization: Bearer` per call), or `oauth` (`auth.connection` names
   a vault connection, set by the Connect flow). The secret never enters
   a container and never appears in any API response — the dashboard
-  shows credential *names* only. Auth changes apply on the gateway's
-  next call with **no agent restart**; URL and assignment changes apply
-  on restart like everything else.
+  shows credential *names* only. Auth **key rotation** (same kind, new
+  secret / re-Connect) applies on the gateway's next call with no agent
+  restart; switching the auth **mode** (none→bearer, →oauth) or the
+  FIRST Connect bind marks assigned agents pending-restart — agents
+  register a connector's tools at boot, and a server that 401'd at
+  their last start registered zero, so only a bounce surfaces the
+  tools. URL and assignment changes apply on restart like everything
+  else.
 
 Remote records validate via the `Connector` discriminated union
 (`src.shared.types.CONNECTOR_ADAPTER`) and are **excluded from

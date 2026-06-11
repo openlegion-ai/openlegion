@@ -2538,21 +2538,32 @@ def create_dashboard_router(
         affected = sorted(set(before) | set(after))
 
         # Disk write off the event loop (same pattern as the skill
-        # marketplace calls in this file). The store decides the dirty
-        # matrix (plan D12): an http auth-only edit is NOT
-        # restart-relevant — it applies on the gateway's next per-call
-        # auth resolve, so no agent is marked dirty and the UI gets no
-        # restart prompt. The gateway's discovery cache IS invalidated
-        # for it: a connector that 401'd before Connect has no tools
-        # cached and must re-discover with the new auth.
+        # marketplace calls in this file). The dirty matrix (plan D12),
+        # refined: an http auth ROTATION (same kind, new secret) applies
+        # on the gateway's next per-call resolve — no restart prompt.
+        # An auth-MODE change (none→bearer, →oauth, …) is different:
+        # agents register a connector's tools at BOOT, and a server
+        # that 401'd at the agent's last start registered zero tools —
+        # fixing its auth mode only takes effect for agents after a
+        # bounce, so it must mark them pending-restart like any other
+        # agent-visible change. The gateway cache invalidates for every
+        # auth edit either way.
         import asyncio as _asyncio
         restart_relevant = await _asyncio.to_thread(
             connector_store.upsert, connector,
         )
-        if restart_relevant:
+        auth_mode_changed = (
+            not restart_relevant
+            and previous is not None
+            and isinstance(connector, HttpConnector)
+            and isinstance(previous, HttpConnector)
+            and previous.auth.kind != connector.auth.kind
+        )
+        if restart_relevant or auth_mode_changed:
             connector_store.mark_dirty(affected)
-        elif mcp_gateway is not None:
+        if not restart_relevant and mcp_gateway is not None:
             mcp_gateway.invalidate(connector.name)
+        prompt_restart = restart_relevant or auth_mode_changed
         try:
             blackboard.log_audit(
                 action="edit_connector",
@@ -2570,8 +2581,8 @@ def create_dashboard_router(
         _emit_config_changed("connectors", name=connector.name)
         return {
             "connector": _connector_to_api(connector),
-            "affected_agents": affected if restart_relevant else [],
-            "restart_required": bool(affected) and restart_relevant,
+            "affected_agents": affected if prompt_restart else [],
+            "restart_required": bool(affected) and prompt_restart,
         }
 
     @api_router.delete("/api/connectors/{name}")
@@ -5072,12 +5083,17 @@ def create_dashboard_router(
         except Exception as exc:  # noqa: BLE001 — surface as a UI banner
             logger.warning("MCP OAuth exchange failed for %s: %s", name, exc)
             return _back("integration_error=exchange_failed")
-        # Bind the connection to the connector. This is an auth-only
-        # edit by construction (plan D12): no pending-restart, but the
-        # gateway's discovery cache must drop so a previously-401
-        # connector re-discovers with the new auth.
+        # Bind the connection to the connector. The gateway's discovery
+        # cache drops so a previously-401 connector re-discovers with
+        # the new auth. The FIRST bind also marks assigned agents
+        # pending-restart: they registered this connector's tools (zero,
+        # pre-auth) at their last boot, so the connection only reaches
+        # them after a bounce — without the dirty mark nothing ever
+        # prompts it. A RE-connect of an already-bound connector stays
+        # restart-free (rotation semantics, plan D12).
         c = connector_store.get(name)
         if isinstance(c, HttpConnector):
+            first_bind = c.auth.kind != "oauth" or not c.auth.connection
             bound = c.model_copy(update={
                 "auth": ConnectorAuth(
                     kind="oauth", connection=pending.connection_name,
@@ -5087,9 +5103,11 @@ def create_dashboard_router(
             await _asyncio.to_thread(connector_store.upsert, bound)
             if mcp_gateway is not None:
                 mcp_gateway.invalidate(c.name)
+            if first_bind:
+                connector_store.mark_dirty(_expand_assignment(bound.agents))
             logger.info(
-                "MCP connector connected: %s → %s",
-                name, pending.connection_name,
+                "MCP connector connected: %s → %s (first_bind=%s)",
+                name, pending.connection_name, first_bind,
             )
         else:
             # Connector deleted (or replaced with stdio) mid-flow: the
