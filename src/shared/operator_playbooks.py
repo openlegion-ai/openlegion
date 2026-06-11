@@ -171,9 +171,16 @@ and await that id. Stop and summarize when the chain is terminal \
 the system auto-delivers the outcome). No explicit ask to watch -> \
 delegate and release.
 
+After a chain completes, the system wakes you ONCE to verify it: \
+confirm the side effects are real (artifacts, files, merged PRs — not \
+just task statuses) and rate the stages. Never promise the user any \
+other follow-up — promise only what the system delivers: the result \
+notification and this post-completion verification.
+
 <!-- playbook_v2 -->
 <!-- playbook_v3_handoff_briefs -->
-<!-- playbook_v4_watch_mode -->"""
+<!-- playbook_v4_watch_mode -->
+<!-- playbook_v5_verification_wake -->"""
 
 # ── v3 addendum (appended to EXISTING operator INSTRUCTIONS.md) ──
 #
@@ -219,6 +226,21 @@ the system auto-delivers the outcome). No explicit ask to watch -> \
 delegate and release.
 
 <!-- playbook_v4_watch_mode -->"""
+
+# ── v5 addendum (appended to EXISTING operator INSTRUCTIONS.md) ──
+# Same append-only contract as v3/v4.
+
+_PLAYBOOK_V5_ADDENDUM = """\
+
+## Post-Completion Verification (v5)
+
+After a chain completes, the system wakes you ONCE to verify it: \
+confirm the side effects are real (artifacts, files, merged PRs — not \
+just task statuses) and rate the stages. Never promise the user any \
+other follow-up — promise only what the system delivers: the result \
+notification and this post-completion verification.
+
+<!-- playbook_v5_verification_wake -->"""
 
 # ── Boot greeting (seeded once on first operator creation) ────
 

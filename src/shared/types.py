@@ -119,6 +119,7 @@ PLAYBOOK_SENTINELS: tuple[str, ...] = (
     "playbook_v2",
     "playbook_v3_handoff_briefs",
     "playbook_v4_watch_mode",
+    "playbook_v5_verification_wake",
 )
 
 # === Inter-Component Messages ===

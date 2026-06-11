@@ -1434,3 +1434,31 @@ class TestPlaybookV4WatchModeMigration:
         )
         text = (Path(self._tmpdir) / "INSTRUCTIONS.md").read_text()
         assert "playbook_v4_watch_mode" not in text
+
+
+class TestPlaybookV5VerificationWakeMigration:
+    """v5 addendum — same append-only contract as v2-v4."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_appends_v5_once_and_idempotent(self):
+        from src.shared.operator_playbooks import _OPERATOR_CORE
+        (Path(self._tmpdir) / "INSTRUCTIONS.md").write_text(
+            "# Mine\n<!-- playbook_v2 -->\n"
+            "<!-- playbook_v3_handoff_briefs -->\n"
+            "<!-- playbook_v4_watch_mode -->\n"
+        )
+        WorkspaceManager(
+            workspace_dir=self._tmpdir, initial_instructions=_OPERATOR_CORE,
+        )
+        WorkspaceManager(
+            workspace_dir=self._tmpdir, initial_instructions=_OPERATOR_CORE,
+        )
+        text = (Path(self._tmpdir) / "INSTRUCTIONS.md").read_text()
+        assert text.count("<!-- playbook_v5_verification_wake -->") == 1
+        assert "Post-Completion Verification" in text
+        assert "# Mine" in text

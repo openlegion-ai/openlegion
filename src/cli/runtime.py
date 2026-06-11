@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -163,6 +164,11 @@ class RuntimeContext:
         self.trace_store = None
         self.agent_urls: dict[str, str] = {}
         self._dispatch_loop = None
+        # Post-completion verification wakes (success path) — sliding
+        # window so a burst of completing chains can't turn the operator
+        # interrupt-driven. Suppressed chains are still rated on the
+        # next heartbeat.
+        self._verify_wake_times: deque = deque()
         self._server = None
         self._active_channels: list = []
         self._start_time: float | None = None
@@ -1036,6 +1042,19 @@ class RuntimeContext:
             except Exception as e:
                 logger.debug("notification_added emit failed: %s", e)
 
+        # 1b. Post-completion verification wake (success path only). The
+        #     user already has the result (bell above); the operator gets
+        #     ONE wake per completed chain to verify side effects are
+        #     REAL (artifacts/files/PRs, not just 'done' statuses), rate
+        #     the stages, and speak up only if something is wrong.
+        #     failed/blocked chains are excluded — the mesh recovery wake
+        #     already fires per failed task. Best-effort: a wake failure
+        #     never flips this delivery to False (the bell is the
+        #     guarantee), and the rate cap keeps a completion burst from
+        #     monopolizing the operator's lane.
+        if kind == "done":
+            self._maybe_wake_operator_verification(root, root_id, root_title)
+
         # 2. Push to a paired chat channel for non-dashboard originators, with
         #    bounded retry so a transient channel failure (network blip, rate
         #    limit) doesn't silently drop it. Runs as a background task so it
@@ -1095,6 +1114,75 @@ class RuntimeContext:
             "(bell delivered as fallback)",
             origin.channel, origin.user, attempts,
         )
+
+
+    # Verification-wake rate cap: at most N wakes per sliding window.
+    # Mirrors the mesh-side recovery-wake storm guard (same numbers) —
+    # one operator turn per completed chain is the point, but a backlog
+    # of chains completing together must not queue an interrupt storm.
+    _VERIFY_WAKE_MAX = 5
+    _VERIFY_WAKE_WINDOW_S = 600.0
+
+    def _maybe_wake_operator_verification(
+        self, root: dict, root_id: str, root_title: str,
+    ) -> None:
+        """Wake the operator once to verify a COMPLETED user chain.
+
+        Fire-and-forget onto the dispatch loop (this runs on the chain
+        watcher's own loop — never block its sweep on a busy operator
+        lane). ``auto_notify=False``: the user already got the terminal
+        delivery; if verification finds a problem the operator decides
+        to speak via notify_user. ``task_id`` is deliberately NOT
+        threaded — a verification turn must never auto-close anything.
+        """
+        if self.lane_manager is None or self._dispatch_loop is None:
+            return
+        now = time.time()
+        while (
+            self._verify_wake_times
+            and now - self._verify_wake_times[0] > self._VERIFY_WAKE_WINDOW_S
+        ):
+            self._verify_wake_times.popleft()
+        if len(self._verify_wake_times) >= self._VERIFY_WAKE_MAX:
+            logger.warning(
+                "verification wake for chain %s suppressed: cap (%d/%ds) "
+                "reached — the heartbeat rating step covers it",
+                root_id, self._VERIFY_WAKE_MAX,
+                int(self._VERIFY_WAKE_WINDOW_S),
+            )
+            return
+        self._verify_wake_times.append(now)
+        from src.shared.utils import sanitize_for_prompt
+        msg = (
+            f"User chain {root_id} ('{sanitize_for_prompt(root_title)}') "
+            "completed and the user was ALREADY notified of the result — "
+            "do NOT re-announce it. Verify it now: confirm the promised "
+            "side effects really exist (artifacts, files, merged PRs — "
+            "check externally visible effects with your tools, not just "
+            f"task statuses), use workflow_snapshot('{root_id}') and "
+            "inspect_task_run on any stage that looks shallow, then "
+            "rate_delivery the done stages. Message the user ONLY if "
+            "verification fails or adds something material."
+        )
+        origin_dict = root.get("origin") or {}
+        try:
+            from src.shared.types import MessageOrigin
+            wake_origin = MessageOrigin(
+                kind="human",
+                channel=str(origin_dict.get("channel") or ""),
+                user=str(origin_dict.get("user") or ""),
+            )
+            asyncio.run_coroutine_threadsafe(
+                self.lane_manager.enqueue(
+                    "operator", msg, mode="followup",
+                    origin=wake_origin, auto_notify=False,
+                ),
+                self._dispatch_loop,
+            )
+        except Exception as e:
+            logger.warning(
+                "verification wake for chain %s failed: %s", root_id, e,
+            )
 
     def _start_mesh_server(self) -> None:
         import uvicorn
