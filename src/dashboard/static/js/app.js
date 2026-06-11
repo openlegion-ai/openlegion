@@ -54,6 +54,7 @@ const _MEMORY_COMPILED_BEGIN = '<!-- compiled:begin -->';
 const _MEMORY_COMPILED_END = '<!-- compiled:end -->';
 const _MEMORY_HEAD_CAP = 10968;
 const _MEMORY_RECENT_LOG_CHARS = 5000;
+const _MEMORY_MAX_INJECT = 16000; // _MAX_MEMORY — the per-file bootstrap cap
 
 // Approximate the prompt-injected size of raw MEMORY.md content,
 // mirroring WorkspaceManager._split_memory + get_memory_injection:
@@ -74,6 +75,12 @@ function _memoryInjectedLength(raw) {
       log = inner.slice(end + _MEMORY_COMPILED_END.length).trim();
     }
   }
+  // With no log to inject, the engine skips the head/recent split entirely
+  // (get_memory_injection returns the head un-capped when there is no recent
+  // slice) and only the per-file bootstrap cap bounds it — exactly the legacy
+  // marker-less-file case, where the 10968 cap would understate a saturated,
+  // clipping injection as ~69%.
+  if (!log) return Math.min(head.length, _MEMORY_MAX_INJECT);
   return Math.min(head.length, _MEMORY_HEAD_CAP) + Math.min(log.length, _MEMORY_RECENT_LOG_CHARS);
 }
 
