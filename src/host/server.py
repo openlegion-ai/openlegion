@@ -40,6 +40,15 @@ from src.host.orchestration import (
     Tasks,
 )
 from src.host.pending_actions import PendingActions
+from src.shared.limits import (
+    MAX_OUTPUT_TOKENS_MAX,
+    MAX_OUTPUT_TOKENS_MIN,
+    THINKING_LEVELS,
+)
+from src.shared.models import (
+    missing_provider_key_message,
+    model_not_compatible_message,
+)
 from src.shared.paths import resolve_under_root
 from src.shared.redaction import redact_text_with_urls, redact_url
 from src.shared.types import (
@@ -1352,7 +1361,7 @@ def create_mesh_app(
                     gate="api:model_incompatible",
                 )
                 raise HTTPException(
-                    403, reason or f"Model '{requested_model}' is not compatible.",
+                    403, reason or model_not_compatible_message(requested_model),
                 )
 
     def _resolve_browser_target(
@@ -1672,18 +1681,15 @@ def create_mesh_app(
                     )
 
         if lane_manager is not None and dispatch_loop is not None:
-            try:
-                asyncio.run_coroutine_threadsafe(
-                    lane_manager.enqueue(
-                        target, wake_msg, mode="followup",
-                        origin=origin, auto_notify=had_origin,
-                        task_id=task_id, system_note=True,
-                    ),
-                    dispatch_loop,
-                )
-            except Exception as e:
-                logger.warning("Wake enqueue for %s failed: %s", target, e)
-                return {"woken": False, "error": str(e)}
+            ok, err = _try_wake_agent(
+                target, wake_msg, origin,
+                task_id=task_id, auto_notify=had_origin,
+                on_fail=lambda e: logger.warning(
+                    "Wake enqueue for %s failed: %s", target, e,
+                ),
+            )
+            if not ok:
+                return {"woken": False, "error": err}
             return {"woken": True, "target": target}
         # Fallback: send via router (message-only, no task processing)
         await router.route(AgentMessage(
@@ -4130,21 +4136,16 @@ def create_mesh_app(
             if provider:
                 available = credential_vault.get_providers_with_credentials()
                 if provider not in available:
-                    available_list = sorted(available) if available else "none"
                     raise HTTPException(
                         400,
-                        f"Model '{model}' requires '{provider}' credentials, "
-                        f"but no {provider.upper()} key is configured. "
-                        f"Available providers: {available_list}. Set "
-                        f"OPENLEGION_SYSTEM_{provider.upper()}_API_KEY or "
-                        "pick a different model.",
+                        missing_provider_key_message(model, provider, available),
                     )
             # Credential-kind-aware check: OAuth-only providers only accept
             # specific models. Surface the allowed list so the operator
             # doesn't have to guess (see Fix 2 in the seam follow-up).
             compatible, reason = credential_vault.is_model_compatible(model)
             if not compatible:
-                raise HTTPException(400, reason or f"Model '{model}' is not compatible.")
+                raise HTTPException(400, reason or model_not_compatible_message(model))
 
         # Create agent config
         import random
@@ -5652,13 +5653,12 @@ def create_mesh_app(
                 channel=str(origin_dict.get("channel") or ""),
                 user=str(origin_dict.get("user") or ""),
             )
-            asyncio.run_coroutine_threadsafe(
-                lane_manager.enqueue(
-                    "operator", wake_msg, mode="followup",
-                    origin=wake_origin, auto_notify=False,
-                    task_id=None, system_note=True,
+            _try_wake_agent(
+                "operator", wake_msg, wake_origin,
+                auto_notify=False,
+                on_fail=lambda e: logger.warning(
+                    "Operator wake for task %s failed: %s", task_id, e,
                 ),
-                dispatch_loop,
             )
         except Exception as e:
             logger.warning(
@@ -5803,13 +5803,13 @@ def create_mesh_app(
                     f"Task {task_id} ({title}) reached {event_kind}. "
                     "Call check_inbox to see the event payload."
                 )
-                asyncio.run_coroutine_threadsafe(
-                    lane_manager.enqueue(
-                        origin_user, wake_msg, mode="followup",
-                        origin=wake_origin, auto_notify=False,
-                        task_id=task_id, system_note=True,
+                _try_wake_agent(
+                    origin_user, wake_msg, wake_origin,
+                    task_id=task_id, auto_notify=False,
+                    on_fail=lambda e: logger.warning(
+                        "Back-edge wake for %s on task %s failed: %s",
+                        origin_user, task_id, e,
                     ),
-                    dispatch_loop,
                 )
             except Exception as e:
                 logger.warning(
@@ -5886,7 +5886,7 @@ def create_mesh_app(
         artifact_refs = body.get("artifact_refs") or None
         # B4 — optional per-task reasoning depth for the assignee.
         thinking = body.get("thinking") or None
-        if thinking is not None and thinking not in ("off", "low", "medium", "high"):
+        if thinking is not None and thinking not in THINKING_LEVELS:
             raise HTTPException(
                 400, f"thinking must be off/low/medium/high, got {thinking!r}",
             )
@@ -6391,24 +6391,38 @@ def create_mesh_app(
 
     def _try_wake_agent(
         target: str, message: str, origin: "MessageOrigin | None",
-    ) -> bool:
+        *,
+        task_id: str | None = None,
+        auto_notify: bool | None = None,
+        on_fail=None,
+    ) -> tuple[bool, str | None]:
         """Best-effort lane enqueue so an operator state change is acted on now.
 
-        Used by reroute / retry / cancel: the task store is already
-        updated when this fires, so any failure here is logged but
-        non-fatal — the worker will pick the change up on its next
-        heartbeat. Fire-and-forget against ``dispatch_loop`` (same
-        pattern as ``/mesh/wake``) so the HTTP response doesn't block
-        on the agent finishing the work. ``auto_notify`` is only set
-        when a real origin was provided, so completion of the woken
-        work flows back to the originating human channel.
+        Used by reroute / retry / cancel (and the /mesh/wake body,
+        operator-recovery and back-edge wake paths): the task store is
+        already updated when this fires, so any failure here is logged
+        but non-fatal — the worker will pick the change up on its next
+        heartbeat. Fire-and-forget against ``dispatch_loop`` so the HTTP
+        response doesn't block on the agent finishing the work.
+
+        ``auto_notify=None`` (default) preserves the original semantics:
+        notify only when a real origin was provided, so completion of
+        the woken work flows back to the originating human channel.
+        Pass an explicit bool to override. ``task_id`` is threaded to
+        the lane so the recipient's loop can auto-close the task
+        (Constraint #6). ``on_fail`` is an optional ``(exc) -> None``
+        callback that replaces the default failure log line so callers
+        keep their site-specific log text.
+
+        Returns ``(ok, error_str)`` — ``error_str`` is set only on an
+        enqueue-dispatch failure.
         """
         from src.shared.types import MessageOrigin
 
         if lane_manager is None or dispatch_loop is None:
-            return False
+            return False, None
         if not target or target not in router.agent_registry:
-            return False
+            return False, None
         had_origin = origin is not None
         eff_origin = origin if origin is not None else MessageOrigin(
             kind="agent", channel="", user="",
@@ -6418,15 +6432,20 @@ def create_mesh_app(
         # would emit a "coroutine was never awaited" warning.
         coro = lane_manager.enqueue(
             target, sanitize_for_prompt(message), mode="followup",
-            origin=eff_origin, auto_notify=had_origin, system_note=True,
+            origin=eff_origin,
+            auto_notify=had_origin if auto_notify is None else auto_notify,
+            task_id=task_id, system_note=True,
         )
         try:
             asyncio.run_coroutine_threadsafe(coro, dispatch_loop)
-            return True
+            return True, None
         except Exception as e:
             coro.close()
-            logger.warning("Operator wake enqueue for %s failed: %s", target, e)
-            return False
+            if on_fail is not None:
+                on_fail(e)
+            else:
+                logger.warning("Operator wake enqueue for %s failed: %s", target, e)
+            return False, str(e)
 
     @app.post("/mesh/tasks/{task_id}/reroute")
     async def reroute_task(task_id: str, request: Request) -> dict:
@@ -8246,29 +8265,24 @@ def create_mesh_app(
                 if _provider:
                     _available = credential_vault.get_providers_with_credentials()
                     if _provider not in _available:
-                        _available_list = sorted(_available) if _available else "none"
                         raise HTTPException(
                             400,
-                            f"Model '{new_value}' requires '{_provider}' "
-                            f"credentials, but no {_provider.upper()} key is "
-                            f"configured. Available providers: "
-                            f"{_available_list}. Set "
-                            f"OPENLEGION_SYSTEM_{_provider.upper()}_API_KEY or "
-                            f"pick a different model.",
+                            missing_provider_key_message(
+                                new_value, _provider, _available,
+                            ),
                         )
                 # Credential-kind-aware check: OAuth-only providers only
                 # accept specific models. See Fix 2 in seam follow-up.
                 _compatible, _reason = credential_vault.is_model_compatible(new_value)
                 if not _compatible:
                     raise HTTPException(
-                        400, _reason or f"Model '{new_value}' is not compatible.",
+                        400, _reason or model_not_compatible_message(new_value),
                     )
         elif field == "thinking":
-            from src.agent.llm import LLMClient
-            if new_value not in LLMClient.VALID_THINKING_LEVELS:
+            if new_value not in THINKING_LEVELS:
                 raise HTTPException(
                     400,
-                    f"thinking must be one of: {sorted(LLMClient.VALID_THINKING_LEVELS)}",
+                    f"thinking must be one of: {sorted(THINKING_LEVELS)}",
                 )
         elif field == "max_output_tokens":
             # Re-enforce server-side (mirrors operator_tools._validate_edit and
@@ -8279,9 +8293,11 @@ def create_mesh_app(
                 raise HTTPException(
                     400, "max_output_tokens must be an integer",
                 )
-            if not (256 <= new_value <= 200_000):
+            if not (MAX_OUTPUT_TOKENS_MIN <= new_value <= MAX_OUTPUT_TOKENS_MAX):
                 raise HTTPException(
-                    400, "max_output_tokens must be between 256 and 200000",
+                    400,
+                    f"max_output_tokens must be between "
+                    f"{MAX_OUTPUT_TOKENS_MIN} and {MAX_OUTPUT_TOKENS_MAX}",
                 )
         elif field in ("max_tool_rounds", "llm_timeout_seconds"):
             # Per-agent operational caps. Re-enforce server-side; range is the

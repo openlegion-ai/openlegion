@@ -9,6 +9,11 @@ import time as _time
 from datetime import datetime, timezone
 
 from src.agent.tools import tool
+from src.shared.limits import (
+    MAX_OUTPUT_TOKENS_MAX,
+    MAX_OUTPUT_TOKENS_MIN,
+    THINKING_LEVELS,
+)
 from src.shared.operator_ceiling import (
     _OPERATOR_PERMISSION_CEILING,  # noqa: F401 — re-exported for back-compat
     clamp_to_operator_ceiling,
@@ -44,12 +49,13 @@ _VALID_FIELDS = frozenset({
     "max_output_tokens", "max_tool_rounds", "llm_timeout_seconds",
 })
 
-# Per-agent output-token cap bounds. Mirrors the clamp in
+# Per-agent output-token cap bounds. Shared with the clamp in
 # ``src/agent/__main__.py`` (LLM_MAX_TOKENS) and the validation in the
 # agent ``/config`` endpoint + host ``/edit-soft`` so all three layers
-# reject the same out-of-range values identically.
-_MAX_OUTPUT_TOKENS_MIN = 256
-_MAX_OUTPUT_TOKENS_MAX = 200_000
+# reject the same out-of-range values identically (values single-sourced
+# in ``src.shared.limits``).
+_MAX_OUTPUT_TOKENS_MIN = MAX_OUTPUT_TOKENS_MIN
+_MAX_OUTPUT_TOKENS_MAX = MAX_OUTPUT_TOKENS_MAX
 
 # Heartbeat schedule validator. Accepts the same forms cron.py accepts:
 #  * 5-field cron expressions ("*/15 * * * *", "0 9 * * 1-5")
@@ -136,7 +142,7 @@ def _validate_edit(agent_id: str, field: str, value) -> dict | None:
             return {"error": f"daily_usd must be 0.01-1000, got {daily}"}
         if not isinstance(monthly, (int, float)) or not (0.10 <= monthly <= 30000):
             return {"error": f"monthly_usd must be 0.10-30000, got {monthly}"}
-    if field == "thinking" and value not in ("off", "low", "medium", "high"):
+    if field == "thinking" and value not in THINKING_LEVELS:
         return {
             "error": (
                 f"thinking must be 'off', 'low', 'medium', or 'high', "

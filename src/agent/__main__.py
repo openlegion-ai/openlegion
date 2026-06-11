@@ -25,6 +25,7 @@ from src.agent.mesh_client import MeshClient
 from src.agent.server import create_agent_app, run_maintenance_loop
 from src.agent.tools import ToolRegistry
 from src.agent.workspace import WorkspaceManager
+from src.shared import limits
 from src.shared.trace import new_trace_id
 from src.shared.utils import setup_logging
 
@@ -59,7 +60,10 @@ def main() -> None:
     except ValueError:
         logger.warning("Invalid LLM_MAX_TOKENS, using default 16384")
         max_output_tokens = 16384
-    max_output_tokens = max(256, min(max_output_tokens, 200_000))
+    max_output_tokens = max(
+        limits.MAX_OUTPUT_TOKENS_MIN,
+        min(max_output_tokens, limits.MAX_OUTPUT_TOKENS_MAX),
+    )
     llm = LLMClient(
         mesh_url=mesh_url, agent_id=agent_id,
         default_model=llm_model, embedding_model=embedding_model,
