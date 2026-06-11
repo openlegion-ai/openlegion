@@ -671,6 +671,10 @@ def create_dashboard_router(
     # instance must be wired into the runtime backend via
     # ``set_connector_store`` so catalog edits apply on agent restart.
     connector_store: Any = None,
+    # Mesh-side gateway for remote (http) connectors: powers the probe
+    # ("Test connection") endpoint and the discovery-cache invalidation
+    # on auth-only edits (plan D12).
+    mcp_gateway: Any = None,
 ) -> APIRouter:
     """Create the dashboard FastAPI router."""
     # Lazy-init telemetry sink so callers (mesh CLI, tests) can opt out by
@@ -2359,8 +2363,9 @@ def create_dashboard_router(
                 a for a in connector_store.pending_restart()
                 if a in agent_registry
             ],
-            # Agent-tier vault credential names for the env-row
-            # credential picker (names only, never values).
+            # Agent-tier vault credential names for the stdio env-row
+            # picker AND the remote bearer picker (names only, never
+            # values).
             "available_credentials": sorted(
                 credential_vault.list_agent_credential_names()
             ) if credential_vault else [],
@@ -2398,6 +2403,15 @@ def create_dashboard_router(
         # Display-side artifacts a GET-replay would carry.
         raw.pop("env_keys", None)
         raw.pop("assigned_agents", None)
+        # Absent transport inherits the EXISTING record's transport —
+        # otherwise the union's stdio default would turn a partial PUT
+        # against an http connector into a confusing extra_forbidden
+        # 400 (or, with stdio fields, a silent http→stdio morph). A
+        # cross-transport replace must say so explicitly.
+        if "transport" not in body and previous is not None:
+            raw["transport"] = (
+                "http" if isinstance(previous, HttpConnector) else "stdio"
+            )
         # Absent = preserve: a partial PUT must not silently wipe the
         # persisted env / auth / assignment. Guarded per transport —
         # a cross-transport replace (same name, stdio↔http) preserves
@@ -2524,18 +2538,32 @@ def create_dashboard_router(
         affected = sorted(set(before) | set(after))
 
         # Disk write off the event loop (same pattern as the skill
-        # marketplace calls in this file). The store decides the dirty
-        # matrix (plan D12): an http auth-only edit is NOT
-        # restart-relevant — it applies on the gateway's next per-call
-        # auth resolve, so no agent is marked dirty and the UI gets no
-        # restart prompt. (Phase 2b adds gateway.invalidate(name) here
-        # so a previously-401 connector re-discovers its tools.)
+        # marketplace calls in this file). The dirty matrix (plan D12),
+        # refined: an http auth ROTATION (same kind, new secret) applies
+        # on the gateway's next per-call resolve — no restart prompt.
+        # An auth-MODE change (none→bearer, →oauth, …) is different:
+        # agents register a connector's tools at BOOT, and a server
+        # that 401'd at the agent's last start registered zero tools —
+        # fixing its auth mode only takes effect for agents after a
+        # bounce, so it must mark them pending-restart like any other
+        # agent-visible change. The gateway cache invalidates for every
+        # auth edit either way.
         import asyncio as _asyncio
         restart_relevant = await _asyncio.to_thread(
             connector_store.upsert, connector,
         )
-        if restart_relevant:
+        auth_mode_changed = (
+            not restart_relevant
+            and previous is not None
+            and isinstance(connector, HttpConnector)
+            and isinstance(previous, HttpConnector)
+            and previous.auth.kind != connector.auth.kind
+        )
+        if restart_relevant or auth_mode_changed:
             connector_store.mark_dirty(affected)
+        if not restart_relevant and mcp_gateway is not None:
+            mcp_gateway.invalidate(connector.name)
+        prompt_restart = restart_relevant or auth_mode_changed
         try:
             blackboard.log_audit(
                 action="edit_connector",
@@ -2553,8 +2581,8 @@ def create_dashboard_router(
         _emit_config_changed("connectors", name=connector.name)
         return {
             "connector": _connector_to_api(connector),
-            "affected_agents": affected if restart_relevant else [],
-            "restart_required": bool(affected) and restart_relevant,
+            "affected_agents": affected if prompt_restart else [],
+            "restart_required": bool(affected) and prompt_restart,
         }
 
     @api_router.delete("/api/connectors/{name}")
@@ -2570,6 +2598,8 @@ def create_dashboard_router(
         import asyncio as _asyncio
         await _asyncio.to_thread(connector_store.remove, name)
         connector_store.mark_dirty(affected)
+        if mcp_gateway is not None:
+            mcp_gateway.invalidate(name)
         try:
             blackboard.log_audit(
                 action="delete_connector",
@@ -2588,6 +2618,21 @@ def create_dashboard_router(
             "affected_agents": affected,
             "restart_required": bool(affected),
         }
+
+    @api_router.post("/api/connectors/{name}/probe")
+    async def api_connector_probe(name: str) -> dict:
+        """'Test connection' for a remote connector: fresh initialize +
+        tool discovery through the mesh gateway. Returns
+        ``{ok, tools_count}`` or ``{ok: False, error, needs_auth}`` —
+        ``needs_auth`` drives the Connect affordance (Phase 3). Covered
+        by the X-Requested-With CSRF middleware like every state-
+        adjacent route (it makes a mesh-originated outbound request)."""
+        if mcp_gateway is None:
+            raise HTTPException(503, "Connector gateway not configured")
+        # probe() classifies every failure (incl. GatewayUnavailable)
+        # into its {ok: False, error, needs_auth} shape — no exception
+        # mapping needed here.
+        return await mcp_gateway.probe(name)
 
     # Agents with a batch-initiated restart currently in flight. Guards
     # against overlapping batches interleaving stop/start on the same
@@ -4910,6 +4955,171 @@ def create_dashboard_router(
             "Integration connected: %s (%s)", pending.connection_name, provider,
         )
         _emit_config_changed("integrations", name=pending.connection_name, provider=provider)
+        return _back(f"integration_connected={pending.connection_name}")
+
+    # ── MCP connector OAuth (paste URL → Connect) ─────────────
+    #
+    # Same dance as the provider flow above, but the endpoints are
+    # DISCOVERED from the remote MCP server (RFC 9728 → 8414) and the
+    # client identity is minted via Dynamic Client Registration (RFC
+    # 7591) — there is no registry entry and no BYO client-id fallback
+    # (plan §11-Q4: a server without DCR gets a diagnosable error).
+    # Everything discovery returns is server-controlled input and goes
+    # through the D16 SSRF posture in src/host/mcp_oauth.py. The
+    # discovered token endpoint + client identity ride the single-use
+    # state entry (server-side) and end up EMBEDDED in the connection
+    # blob so refresh-on-resolve works with no registry (plan §7.1).
+
+    @api_router.get("/integrations/mcp/{name}/connect")
+    async def mcp_connector_connect(name: str, request: Request):
+        """Begin the OAuth dance for a remote MCP connector."""
+        from fastapi.responses import RedirectResponse
+
+        from src.host.mcp_oauth import MCPOAuthError, discover, register_client
+        from src.host.oauth_providers import generate_pkce
+        from src.shared.types import HttpConnector
+        if credential_vault is None or connector_store is None:
+            raise HTTPException(503, "Connector catalog or vault not available")
+        c = connector_store.get(name)
+        if not isinstance(c, HttpConnector):
+            raise HTTPException(404, f"Unknown remote connector: {name}")
+        redirect_uri = (
+            f"{_public_base_url(request)}/dashboard/integrations/mcp/"
+            f"{c.name}/callback"
+        )
+        try:
+            disco = await discover(c.url)
+            if disco.registration_endpoint is None:
+                raise MCPOAuthError(
+                    "client registration",
+                    "the authorization server does not support Dynamic "
+                    "Client Registration — one-click Connect is not "
+                    "possible for this server",
+                )
+            client_id, client_secret = await register_client(
+                disco.registration_endpoint, redirect_uri,
+            )
+        except MCPOAuthError as exc:
+            raise HTTPException(
+                502, f"OAuth setup failed at {exc.step}: {exc}",
+            ) from exc
+        verifier, challenge = generate_pkce()
+        conn_name = re.sub(r"[^a-z0-9_]", "_", f"mcp_{c.name.lower()}")[:64]
+        state = _oauth_state_store.create(
+            provider=f"mcp:{c.name.lower()}",
+            connection_name=conn_name,
+            scopes=(),  # AS defaults; MCP servers scope via `resource`
+            code_verifier=verifier,
+            redirect_uri=redirect_uri,
+            session_hash=_oauth_session_hash(request),
+            extra={
+                "token_endpoint": disco.token_endpoint,
+                "client_id": client_id,
+                "client_secret": client_secret or "",
+                "resource": c.url,
+            },
+        )
+        from urllib.parse import urlencode
+        params = urlencode({
+            "response_type": "code",
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "state": state,
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "resource": c.url,  # RFC 8707
+        })
+        sep = "&" if "?" in disco.authorization_endpoint else "?"
+        return RedirectResponse(
+            f"{disco.authorization_endpoint}{sep}{params}", status_code=302,
+        )
+
+    @api_router.get("/integrations/mcp/{name}/callback")
+    async def mcp_connector_callback(
+        name: str, request: Request,
+        code: str = "", state: str = "", error: str = "",
+    ):
+        """AS redirect target for a remote MCP connector."""
+        from fastapi.responses import RedirectResponse
+
+        from src.shared.types import ConnectorAuth, HttpConnector
+
+        def _back(params: str):
+            return RedirectResponse(f"/dashboard/?{params}", status_code=302)
+
+        if error:
+            return _back(
+                f"integration_error={re.sub(r'[^a-zA-Z0-9_-]', '', error)[:64]}",
+            )
+        if credential_vault is None or connector_store is None:
+            return _back("integration_error=unavailable")
+        pending = _oauth_state_store.consume(
+            state, session_hash=_oauth_session_hash(request),
+        )
+        if (
+            pending is None
+            or pending.provider != f"mcp:{name.lower()}"
+            or not code
+        ):
+            return _back("integration_error=invalid_state")
+        extra = pending.extra
+        try:
+            conn = await credential_vault.exchange_code_dynamic(
+                token_endpoint=extra["token_endpoint"],
+                client_id=extra["client_id"],
+                client_secret=extra.get("client_secret") or None,
+                code=code,
+                redirect_uri=pending.redirect_uri,
+                code_verifier=pending.code_verifier,
+                resource=extra.get("resource") or None,
+                provider_label=pending.provider,
+            )
+            # §11-Q3 (deliberate divergence from the Google flow's
+            # refresh_required rejection): many MCP authorization
+            # servers issue short-lived tokens with NO refresh token.
+            # Accept them — expiry surfaces as needs_auth on probe,
+            # which renders the reconnect affordance.
+            credential_vault.store_connection(pending.connection_name, conn)
+        except Exception as exc:  # noqa: BLE001 — surface as a UI banner
+            logger.warning("MCP OAuth exchange failed for %s: %s", name, exc)
+            return _back("integration_error=exchange_failed")
+        # Bind the connection to the connector. The gateway's discovery
+        # cache drops so a previously-401 connector re-discovers with
+        # the new auth. The FIRST bind also marks assigned agents
+        # pending-restart: they registered this connector's tools (zero,
+        # pre-auth) at their last boot, so the connection only reaches
+        # them after a bounce — without the dirty mark nothing ever
+        # prompts it. A RE-connect of an already-bound connector stays
+        # restart-free (rotation semantics, plan D12).
+        c = connector_store.get(name)
+        if isinstance(c, HttpConnector):
+            first_bind = c.auth.kind != "oauth" or not c.auth.connection
+            bound = c.model_copy(update={
+                "auth": ConnectorAuth(
+                    kind="oauth", connection=pending.connection_name,
+                ),
+            })
+            import asyncio as _asyncio
+            await _asyncio.to_thread(connector_store.upsert, bound)
+            if mcp_gateway is not None:
+                mcp_gateway.invalidate(c.name)
+            if first_bind:
+                connector_store.mark_dirty(_expand_assignment(bound.agents))
+            logger.info(
+                "MCP connector connected: %s → %s (first_bind=%s)",
+                name, pending.connection_name, first_bind,
+            )
+        else:
+            # Connector deleted (or replaced with stdio) mid-flow: the
+            # exchanged connection is stored but unbound — visible on
+            # the integrations list, removable via disconnect. Say so
+            # rather than claiming success silently.
+            logger.warning(
+                "MCP OAuth callback for %r: connector no longer exists; "
+                "connection %r stored unbound",
+                name, pending.connection_name,
+            )
+        _emit_config_changed("connectors", name=name)
         return _back(f"integration_connected={pending.connection_name}")
 
     @api_router.post("/api/integrations/{name}/disconnect")

@@ -93,6 +93,27 @@ class ConnectionRefreshError(RuntimeError):
         self.first_failure = first_failure
 
 
+async def _validate_dynamic_token_endpoint(url: str) -> None:
+    """SSRF gate for DISCOVERED (blob-embedded) token endpoints.
+
+    Static registry endpoints are code-fixed and need no check; dynamic
+    ones came from a remote MCP server's metadata and persist in the
+    connection blob for its lifetime — validate https + public-IP (no
+    loopback carve-out) at EVERY point of use, not just at discovery.
+    Lazy import: the gateway module is light, but credentials loads in
+    contexts (CLI) that never touch remote connectors.
+    """
+    from urllib.parse import urlparse as _urlparse
+
+    from src.host.mcp_gateway import _assert_public_host
+    parsed = _urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise RuntimeError(
+            f"dynamic token endpoint must be https:// (got {url[:120]!r})",
+        )
+    await _assert_public_host(url, allow_loopback=False)
+
+
 # ── Anthropic prompt caching (OAuth path) ────────────────────
 _PROMPT_CACHE_ENABLED = os.environ.get(
     "OPENLEGION_PROMPT_CACHING", "1"
@@ -970,6 +991,82 @@ class CredentialVault:
             "account": account,
         }
 
+    async def exchange_code_dynamic(
+        self,
+        *,
+        token_endpoint: str,
+        client_id: str,
+        code: str,
+        redirect_uri: str,
+        code_verifier: str,
+        client_secret: str | None = None,
+        resource: str | None = None,
+        provider_label: str = "mcp",
+    ) -> dict:
+        """OAuth 2.1 code exchange against a DISCOVERED token endpoint
+        (remote MCP connectors — Phase 3).
+
+        Public-client capable: ``client_secret`` is optional because
+        Dynamic Client Registration commonly mints none — PKCE is the
+        proof of possession. The returned connection dict EMBEDS the
+        token endpoint + client identity so refresh works without any
+        provider-registry entry (``ensure_connection_token`` prefers
+        blob fields over the registry). Does NOT persist — caller
+        stores via :meth:`store_connection`. Tokens never logged.
+        """
+        # The endpoint is DISCOVERED (server-controlled); validate at
+        # the point of use, not just at discovery.
+        await _validate_dynamic_token_endpoint(token_endpoint)
+        data = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "code_verifier": code_verifier,
+        }
+        if client_secret:
+            data["client_secret"] = client_secret
+        if resource:
+            data["resource"] = resource  # RFC 8707 token binding
+        client = await self._get_http_client()
+        try:
+            resp = await client.post(
+                token_endpoint, data=data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=30,
+            )
+        except (httpx.TimeoutException, httpx.ConnectError) as exc:
+            raise RuntimeError(
+                f"{provider_label} token exchange failed: {exc}",
+            ) from exc
+        if not resp.is_success:
+            raise RuntimeError(
+                f"{provider_label} token exchange failed "
+                f"(HTTP {resp.status_code}): {resp.text[:200]}"
+            )
+        payload = resp.json()
+        access = payload.get("access_token", "")
+        if not access:
+            raise RuntimeError(
+                f"{provider_label} token exchange returned no access_token",
+            )
+        expires_in = int(payload.get("expires_in", 3600))
+        scope_str = payload.get("scope", "")
+        return {
+            "provider": provider_label,
+            "access_token": access,
+            "refresh_token": payload.get("refresh_token", ""),
+            "expires_at": int(time.time()) + expires_in,
+            "scopes": scope_str.split() if scope_str else [],
+            "account": "",
+            # Blob-embedded refresh context (see ensure_connection_token).
+            "token_endpoint": token_endpoint,
+            "client_id": client_id,
+            "client_secret": client_secret or "",
+            "uses_pkce": True,
+            "resource": resource or "",
+        }
+
     async def _fetch_oauth_account(self, provider, access_token: str) -> str:
         """Best-effort: which account did the user connect (for display only)."""
         if not provider.userinfo_url:
@@ -1074,33 +1171,68 @@ class CredentialVault:
             refresh_token = conn.get("refresh_token", "")
             if not refresh_token:
                 return conn["access_token"]
-            provider = get_provider(conn.get("provider", ""))
-            if provider is None:
-                return conn["access_token"]
-            client_id = self.system_credentials.get(provider.client_id_key, "")
-            client_secret = self.system_credentials.get(provider.client_secret_key, "")
-            if not client_id or not client_secret:
-                return conn["access_token"]
+            # Token endpoint + client identity come from the connection
+            # blob when present (dynamic providers: MCP connectors
+            # minted via discovery/DCR — they have no registry entry,
+            # and silently returning the stale token for them was the
+            # pre-Phase-3 gap) or from the static provider registry
+            # (the Google Option-B flow — unchanged).
+            token_url = conn.get("token_endpoint", "")
+            provider_key = conn.get("provider", "")
+            if token_url:
+                client_id = conn.get("client_id", "")
+                client_secret = conn.get("client_secret", "")
+                if not client_id:
+                    return conn["access_token"]
+                # Blob endpoints are re-validated on EVERY refresh, not
+                # just once at discovery: the blob persists in .env for
+                # the connection's lifetime, and a later DNS repoint of
+                # the AS host (or a tampered/restored blob) must not
+                # get the mesh delivering refresh_token POSTs to
+                # internal addresses. Same posture as discovery —
+                # https-only, public addresses, no loopback carve-out.
+                await _validate_dynamic_token_endpoint(token_url)
+            else:
+                provider = get_provider(provider_key)
+                if provider is None:
+                    return conn["access_token"]
+                token_url = provider.token_url
+                provider_key = provider.key
+                client_id = self.system_credentials.get(provider.client_id_key, "")
+                client_secret = self.system_credentials.get(
+                    provider.client_secret_key, "",
+                )
+                if not client_id or not client_secret:
+                    return conn["access_token"]
+            plabel = provider_key or "dynamic"
+            data = {
+                "grant_type": "refresh_token",
+                "client_id": client_id,
+                "refresh_token": refresh_token,
+            }
+            # Public clients (OAuth 2.1 DCR + PKCE) have no secret —
+            # PKCE at the exchange was the proof of possession.
+            if client_secret:
+                data["client_secret"] = client_secret
+            # RFC 8707: bind the refreshed token to the same resource
+            # the grant was issued for (some ASes require it).
+            if conn.get("resource"):
+                data["resource"] = conn["resource"]
             client = await self._get_http_client()
             try:
                 resp = await client.post(
-                    provider.token_url,
-                    data={
-                        "grant_type": "refresh_token",
-                        "client_id": client_id,
-                        "client_secret": client_secret,
-                        "refresh_token": refresh_token,
-                    },
+                    token_url,
+                    data=data,
                     headers={"Content-Type": "application/x-www-form-urlencoded"},
                     timeout=30,
                 )
             except (httpx.TimeoutException, httpx.ConnectError) as exc:
                 raise RuntimeError(
-                    f"{provider.key} token refresh request failed: {exc}",
+                    f"{plabel} token refresh request failed: {exc}",
                 ) from exc
             if not resp.is_success:
                 msg = (
-                    f"{provider.key} token refresh failed "
+                    f"{plabel} token refresh failed "
                     f"(HTTP {resp.status_code}): {resp.text[:200]}"
                 )
                 if 400 <= resp.status_code < 500:
@@ -1114,14 +1246,14 @@ class CredentialVault:
                     first = name not in self._connection_refresh_failures
                     self._connection_refresh_failures[name] = {
                         "ts": time.monotonic(),
-                        "provider": provider.key,
+                        "provider": plabel,
                         "error": resp.text[:200],
                         "message": msg,
                     }
                     raise ConnectionRefreshError(
                         msg,
                         connection=name,
-                        provider=provider.key,
+                        provider=plabel,
                         provider_error=resp.text[:200],
                         first_failure=first,
                     )
@@ -1130,7 +1262,7 @@ class CredentialVault:
             payload = resp.json()
             new_access = payload.get("access_token", "")
             if not new_access:
-                raise RuntimeError(f"{provider.key} refresh returned no access_token")
+                raise RuntimeError(f"{plabel} refresh returned no access_token")
             # Successful refresh ends any failure episode — the next hard
             # failure (if ever) starts a new one and re-notifies.
             self._connection_refresh_failures.pop(name, None)

@@ -908,7 +908,7 @@ the emerging standard for LLM tool interoperability. Any MCP-compatible tool ser
 can be plugged into an agent via config, with tools automatically discovered and
 exposed to the LLM alongside built-in tools.
 
-> **Note:** MCP support is an optional dependency and is NOT installed by `./install.sh`. From the cloned repo, activate the venv and run `pip install -e '.[mcp]'`. Without it, agents with `mcp_servers` configured will log an import error and skip MCP tool loading at startup. Wallet tools likewise require the optional `[wallet]` group (`web3`, `eth-account`, `mnemonic`, `solders`, `solana`).
+> **Note:** the `mcp` SDK is a core dependency (it powers both in-container stdio servers and the mesh-side gateway for remote connectors) — `./install.sh` installs it; `pip install -e '.[mcp]'` remains as a no-op alias. Agent containers install it via `Dockerfile.agent`. Wallet tools still require the optional `[wallet]` group (`web3`, `eth-account`, `mnemonic`, `solders`, `solana`).
 
 ### Configuration
 

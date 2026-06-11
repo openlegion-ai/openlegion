@@ -1198,13 +1198,20 @@ class REPLSession:
             click.echo(f"  Budget:      ${daily:.2f}/day")
         click.echo(f"  Thinking:    {thinking}")
         # MCP connectors come from the fleet catalog (dashboard-managed).
+        # Both transports count: stdio (in-container) and http (remote,
+        # mesh-gateway-proxied).
         connector_store = getattr(self.ctx, "connector_store", None)
         if connector_store is not None:
-            assigned = connector_store.stdio_for_agent(name)
+            assigned = [s.get("name", "?") for s in connector_store.stdio_for_agent(name)]
+            http_for_agent = getattr(connector_store, "http_for_agent", None)
+            if http_for_agent is not None:
+                assigned += [f"{c.name} (remote)" for c in http_for_agent(name)]
             if assigned:
-                names = ", ".join(s.get("name", "?") for s in assigned)
                 plural = "s" if len(assigned) != 1 else ""
-                click.echo(f"  Connectors:  {len(assigned)} MCP server{plural} ({names})")
+                click.echo(
+                    f"  Connectors:  {len(assigned)} MCP server{plural} "
+                    f"({', '.join(assigned)})",
+                )
 
         # Fetch workspace file info from the agent
         try:

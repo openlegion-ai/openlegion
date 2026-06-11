@@ -20,7 +20,7 @@ from __future__ import annotations
 import secrets
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -32,6 +32,12 @@ class PendingAuth:
     redirect_uri: str
     session_hash: str
     expires_at: float
+    # Flow-specific context that must survive the redirect round-trip.
+    # MCP connectors (dynamic providers) stash the DISCOVERED token
+    # endpoint + DCR client identity here — there is no registry entry
+    # to re-derive them from at callback time. May contain a client
+    # secret: never log this field.
+    extra: dict = field(default_factory=dict)
 
 
 class OAuthStateStore:
@@ -50,6 +56,7 @@ class OAuthStateStore:
         code_verifier: str,
         redirect_uri: str,
         session_hash: str,
+        extra: dict | None = None,
         now: float | None = None,
     ) -> str:
         """Mint a new state token and record the pending auth. Returns the token."""
@@ -63,6 +70,7 @@ class OAuthStateStore:
             redirect_uri=redirect_uri,
             session_hash=session_hash,
             expires_at=ts + self._ttl,
+            extra=dict(extra or {}),
         )
         with self._lock:
             self._reap(ts)

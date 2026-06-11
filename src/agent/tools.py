@@ -152,6 +152,11 @@ class ToolRegistry:
         self._mcp_client = mcp_client
         self.tools: dict[str, dict] = {}
         self._builtin_functions: frozenset = frozenset()
+        # Last remote-connector payload from the mesh gateway
+        # (register_remote_tools). Kept so reload() can re-apply remote
+        # registrations after it rebuilds self.tools from staging.
+        self._remote_payload: dict[str, dict] = {}
+        self._remote_connectors: dict[str, dict] = {}
         # Memoization caches — cleared on reload()
         self._tool_defs_cache: dict[tuple, list[dict]] = {}
         self._descriptions_cache: dict[tuple, str] = {}
@@ -219,6 +224,76 @@ class ToolRegistry:
                 self.tools[name] = tool_def
             # Conflicts already handled with prefixing in MCPClient.start()
 
+    def register_remote_tools(self, connectors: dict[str, dict]) -> None:
+        """Register tools from remote (http) connectors, fetched from
+        the mesh gateway at startup.
+
+        ``connectors`` is the ``/mesh/connectors/tools`` payload:
+        ``{connector_name: {"tools": [{name, description, parameters}],
+        "error"?}}`` — schemas already sanitized mesh-side. Calls route
+        back through the mesh (``call_connector_tool``); no token or
+        session state exists in this process.
+        """
+        self._remote_payload = dict(connectors or {})
+        self._apply_remote_tools()
+
+    def _apply_remote_tools(self) -> None:
+        """(Re)apply the stored remote payload onto ``self.tools`` —
+        called from register_remote_tools() and reload() (which rebuilds
+        the tool dict from staging and would otherwise drop these).
+
+        getattr-guarded: tests construct ToolRegistry via ``__new__``
+        and call reload() directly, so instance attributes from
+        ``__init__`` may not exist."""
+        self._remote_connectors = {}
+        for cname, entry in getattr(self, "_remote_payload", {}).items():
+            tools_list = entry.get("tools") or []
+            self._remote_connectors[cname] = {
+                "state": "error" if entry.get("error") else "running",
+                "tools_count": len(tools_list),
+                "error": entry.get("error"),
+            }
+            for t in tools_list:
+                original = str(t.get("name", "") or "")
+                if not original:
+                    continue
+                name = original
+                # The stdio short-circuit in execute() runs FIRST, so a
+                # same-named stdio tool would silently shadow a remote
+                # one — prefix against the union of both namespaces
+                # (same convention as MCPClient.start()).
+                taken = name in self.tools or (
+                    self._mcp_client is not None
+                    and self._mcp_client.has_tool(name)
+                )
+                if taken:
+                    name = f"mcp_{cname}_{original}"
+                    if name in self.tools:
+                        logger.warning(
+                            "Remote tool %r from connector %r conflicts "
+                            "even after prefixing; skipped", original, cname,
+                        )
+                        continue
+                self.tools[name] = {
+                    "name": name,
+                    "description": t.get("description", ""),
+                    "parameters": t.get("parameters")
+                    or {"type": "object", "properties": {}},
+                    "function": "mcp_remote",
+                    "_connector": cname,
+                    "_remote_original_name": original,
+                }
+        self._tool_defs_cache = {}
+        self._descriptions_cache = {}
+
+    def remote_connector_statuses(self) -> list[dict]:
+        """Per-connector status for /capabilities — the remote
+        counterpart of MCPClient.list_server_statuses()."""
+        return [
+            {"name": n, **s}
+            for n, s in getattr(self, "_remote_connectors", {}).items()
+        ]
+
     def reload(self) -> int:
         """Re-discover tools from builtins and tools_dir. Returns new tool count."""
         with _tool_staging_lock:
@@ -233,6 +308,7 @@ class ToolRegistry:
             self._discover(self.MARKETPLACE_TOOLS_DIR)
             self.tools = dict(_tool_staging)
         self._register_mcp_tools()
+        self._apply_remote_tools()
         self._tool_defs_cache = {}
         self._descriptions_cache = {}
         logger.info(f"Reloaded {len(self.tools)} tools")
@@ -251,6 +327,25 @@ class ToolRegistry:
         """Execute a tool by name with given arguments."""
         if self._mcp_client and self._mcp_client.has_tool(name):
             return await self._mcp_client.call_tool(name, arguments)
+
+        remote_info = self.tools.get(name)
+        if remote_info is not None and remote_info.get("function") == "mcp_remote":
+            # Remote connector tools route through the mesh gateway —
+            # same {"result"}/{"error"} contract as stdio MCP above.
+            if mesh_client is None:
+                return {"error": (
+                    f"Remote tool '{name}' needs the mesh client, which "
+                    "is not available in this context"
+                )}
+            try:
+                return await mesh_client.call_connector_tool(
+                    remote_info["_connector"],
+                    remote_info["_remote_original_name"],
+                    arguments if isinstance(arguments, dict) else {},
+                )
+            except Exception as e:
+                # Mesh/gateway errors are already masked mesh-side.
+                return {"error": str(e)}
 
         if name not in self.tools:
             raise ValueError(f"Unknown tool: {name}")
@@ -406,7 +501,7 @@ class ToolRegistry:
             elif exclude and name in exclude:
                 continue
             func = info.get("function")
-            if func == "mcp":
+            if func in ("mcp", "mcp_remote"):
                 result[name] = "mcp"
             elif func in self._builtin_functions:
                 result[name] = "builtin"
@@ -485,8 +580,9 @@ class ToolRegistry:
             elif exclude and name in exclude:
                 continue
             raw_params = _normalize_params_dict(info["parameters"])
-            # MCP tools have full JSON Schema; extract from "properties"
-            if info.get("function") == "mcp":
+            # MCP tools (both transports) have full JSON Schema;
+            # extract from "properties"
+            if info.get("function") in ("mcp", "mcp_remote"):
                 props = raw_params.get("properties", {})
                 params = ", ".join(f"{k}: {v.get('type', 'any')}" for k, v in props.items())
             else:
@@ -534,9 +630,10 @@ class ToolRegistry:
                 continue
             params = info["parameters"]
 
-            # MCP tools provide a full JSON Schema (with "type": "object",
-            # "properties", etc.) — use it directly.
-            if info.get("function") == "mcp":
+            # MCP tools (both transports) provide a full JSON Schema
+            # (with "type": "object", "properties", etc.) — use it
+            # directly.
+            if info.get("function") in ("mcp", "mcp_remote"):
                 tools.append({
                     "type": "function",
                     "function": {

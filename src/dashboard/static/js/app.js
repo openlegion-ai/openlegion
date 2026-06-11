@@ -583,6 +583,10 @@ function dashboard() {
     // edits never auto-restart; the operator confirms.
     connectorRestartPrompt: null,
     connectorRestarting: false,
+    // "Test connection" (remote connectors): name → {ok, tools_count,
+    // error, needs_auth} from POST /api/connectors/{name}/probe.
+    connectorProbeResult: {},
+    connectorProbing: null,
     skillInstallRepo: '',
     skillInstallRef: '',
     skillInstalling: false,
@@ -6636,6 +6640,39 @@ function dashboard() {
     // The catalog applies on agent restart; saves return the affected
     // agents and the UI prompts restart-now/later (never auto-restarts).
 
+    async probeConnector(name) {
+      // "Test connection" for a remote connector: the mesh gateway
+      // does a fresh initialize + tool discovery. needs_auth drives
+      // the future Connect affordance (OAuth, Phase 3).
+      if (this.connectorProbing) return;
+      this.connectorProbing = name;
+      try {
+        const resp = await fetch(
+          `${window.__config.apiBase}/connectors/${encodeURIComponent(name)}/probe`,
+          { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+        );
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          const detail = typeof data.detail === 'string' ? data.detail : 'Probe failed';
+          this.connectorProbeResult[name] = { ok: false, error: detail };
+          this.showToast(`Error: ${detail}`);
+          return;
+        }
+        this.connectorProbeResult[name] = data;
+        if (data.ok) {
+          this.showToast(`"${name}" connected — ${data.tools_count} tool${data.tools_count === 1 ? '' : 's'} discovered.`);
+        } else if (data.needs_auth) {
+          this.showToast(`"${name}" needs authentication: ${data.error}`);
+        } else {
+          this.showToast(`"${name}" test failed: ${data.error}`);
+        }
+      } catch (e) {
+        this.connectorProbeResult[name] = { ok: false, error: e.message || String(e) };
+      } finally {
+        this.connectorProbing = null;
+      }
+    },
+
     async loadConnectors() {
       if (this.connectorsLoading) return;
       this.connectorsLoading = true;
@@ -6807,15 +6844,13 @@ function dashboard() {
       let body;
       if (isRemote) {
         body = { transport: 'http', url, agents };
-        // OAuth bindings are managed by the Connect flow, not this
-        // form — omit auth so the backend preserves what's persisted.
-        if (d._authKind !== 'oauth') {
-          body.auth = {
-            kind: d._authKind,
-            cred: d._authKind === 'bearer' ? (d._authCred || '').trim() : null,
-            connection: null,
-          };
-        }
+        body.auth = {
+          kind: d._authKind,
+          cred: d._authKind === 'bearer' ? (d._authCred || '').trim() : null,
+          // The Connect flow sets the connection; the form round-trips
+          // whatever GET returned so a save never wipes the binding.
+          connection: d._authKind === 'oauth' ? (d._authConnection || null) : null,
+        };
       } else {
         body = {
           command,
@@ -6865,6 +6900,14 @@ function dashboard() {
           this.connectorRestartPrompt = { name, affected: data.affected_agents };
         } else {
           this.showToast(`Connector "${name}" saved.`);
+        }
+        // Detection-driven auth: probe every saved remote connector
+        // immediately so the row shows its real state without a manual
+        // Test click — a 401-with-OAuth-metadata server renders the
+        // Connect button right away (the auth dropdown is for explicit
+        // API keys, not a decision the user should have to get right).
+        if (isRemote && d._authKind !== 'oauth') {
+          this.probeConnector(name);
         }
       } catch (e) {
         this.connectorGlobalError = e.message || String(e);

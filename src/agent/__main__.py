@@ -172,6 +172,27 @@ def main() -> None:
             except Exception as e:
                 logger.error(f"Failed to start MCP servers: {e}")
 
+        # Remote (http) connectors: fetch sanitized tool schemas from
+        # the mesh gateway and register them AFTER stdio MCP so the
+        # conflict-prefix check sees both namespaces. Calls route back
+        # through the mesh per-call; no token enters this container.
+        # Degrades to no remote tools (warn) — the mesh being briefly
+        # unreachable must not crash-loop the agent.
+        try:
+            remote_connectors = await mesh_client.list_connector_tools()
+            if remote_connectors:
+                tools.register_remote_tools(remote_connectors)
+                logger.info(
+                    "Registered remote connector tools for agent '%s': %s",
+                    agent_id,
+                    ", ".join(sorted(remote_connectors)),
+                )
+        except Exception as e:
+            logger.warning(
+                "Remote connector discovery failed (%s); starting "
+                "without remote tools — restart the agent to retry", e,
+            )
+
         registered = False
         for attempt in range(1, _MAX_REGISTRATION_ATTEMPTS + 1):
             try:

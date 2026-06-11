@@ -289,6 +289,13 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         if mcp_client is not None:
             result["mcp_servers"] = mcp_client.list_server_statuses()
             result["mcp_tool_to_server"] = mcp_client.get_tool_to_server()
+        remote_statuses = getattr(
+            loop.tools, "remote_connector_statuses", None,
+        )
+        if remote_statuses is not None:
+            statuses = remote_statuses()
+            if statuses:
+                result["remote_connectors"] = statuses
         return result
 
     @app.post("/invoke")

@@ -25,6 +25,11 @@ dependencies = [
     "websockets>=13.0",
     "pypdf>=4.0",
     "python-multipart>=0.0.9",
+    # Mesh-side MCP gateway (streamable-HTTP client for remote
+    # connectors). Promoted from the [mcp] extra: the gateway makes the
+    # SDK host-critical, and install.sh never installed that extra.
+    # Floor 1.9 — streamablehttp_client stabilized there.
+    "mcp>=1.9",
     # Floor raised to >=10.3.0 to exclude CVE-2023-50447 and CVE-2024-28219,
     # reachable via browser-screenshot image processing. NOTE: these are
     # minimum bounds only (no lock file) — for reproducible builds, generate
@@ -43,8 +48,11 @@ dev = [
     "ruff>=0.8.0",
 ]
 
+# Back-compat alias: mcp is a core dependency since the mesh gateway
+# (Phase 2b); the extra remains so documented `pip install -e '.[mcp]'`
+# invocations keep working.
 mcp = [
-    "mcp>=1.0",
+    "mcp>=1.9",
 ]
 
 channels = [

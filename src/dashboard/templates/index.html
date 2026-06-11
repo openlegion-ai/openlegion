@@ -3173,7 +3173,7 @@
                               <div class="flex items-center gap-3 text-xs py-1.5">
                                 <span class="w-2 h-2 rounded-full shrink-0"
                                       :class="srv.transport === 'http' ? 'bg-gray-600' : mcpStatusDotClass(mcpStatusFor(srv.name).state)"
-                                      :title="srv.transport === 'http' ? 'Remote connector — activates when the mesh gateway update lands' : (mcpStatusFor(srv.name).error || mcpStatusFor(srv.name).state)"></span>
+                                      :title="srv.transport === 'http' ? 'Remote connector — calls proxied by the mesh gateway' : (mcpStatusFor(srv.name).error || mcpStatusFor(srv.name).state)"></span>
                                 <span class="text-gray-200 font-mono font-medium shrink-0" x-text="srv.name"></span>
                                 <span x-show="srv.transport === 'http'"
                                       class="text-[10px] px-1.5 py-0.5 rounded font-medium leading-none uppercase tracking-wide bg-indigo-900/40 text-indigo-300 border border-indigo-800/40 shrink-0"
@@ -5149,7 +5149,7 @@
         <div x-show="systemTab === 'integrations'">
 
         <!-- MCP connectors — fleet catalog: connect a server once, assign it to all agents or specific ones -->
-        <div class="text-xs text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">MCP connectors<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Connect MCP (Model Context Protocol) tool servers once and enable them for your whole fleet or specific agents. Remote servers are reached through the mesh — credentials stay in the vault and never enter a container. Local commands run inside each assigned agent's container with $CRED values resolved into it. Server and assignment changes apply when the affected agents restart; remote auth changes apply immediately.</span></span></div>
+        <div class="text-xs text-gray-400 uppercase tracking-wider mb-3 flex items-center gap-1.5">MCP connectors<span class="setting-hint" tabindex="0">?<span class="setting-hint-text">Connect MCP (Model Context Protocol) tool servers once and enable them for your whole fleet or specific agents. Remote servers are reached through the mesh — credentials stay in the vault and never enter a container. Local commands run inside each assigned agent's container with $CRED values resolved into it. Server and assignment changes apply when the affected agents restart; remote auth key rotation applies immediately (switching auth mode or the first Connect prompts a restart so agents can register the tools).</span></span></div>
         <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 mb-6">
           <!-- Post-save restart prompt (explicit — catalog edits never auto-restart) -->
           <div x-show="connectorRestartPrompt" x-cloak
@@ -5203,9 +5203,19 @@
                   <span class="text-gray-500 shrink-0">&rarr;</span>
                   <span class="text-gray-400 text-[11px] font-mono flex-1 truncate"
                         x-text="c.transport === 'http' ? (c.url || '') : ((c.command || '') + (c.args && c.args.length ? ' ' + c.args.join(' ') : ''))"></span>
-                  <span x-show="c.transport === 'http'"
-                        class="text-[11px] px-1.5 py-0.5 rounded leading-none bg-amber-900/20 text-amber-400/80 border border-amber-800/30 shrink-0"
-                        title="Remote connectors are saved but not yet live — the mesh gateway that proxies their calls ships in the next update.">not active yet</span>
+                  <span x-show="c.transport === 'http' && connectorProbeResult[c.name]"
+                        class="text-[11px] px-1.5 py-0.5 rounded leading-none shrink-0"
+                        :class="connectorProbeResult[c.name]?.ok ? 'bg-emerald-900/30 text-emerald-400 border border-emerald-800/40' : 'bg-red-900/20 text-red-400 border border-red-800/30'"
+                        :title="connectorProbeResult[c.name]?.ok ? (connectorProbeResult[c.name].tools_count + ' tools discovered') : (connectorProbeResult[c.name]?.error || 'Connection failed')"
+                        x-text="connectorProbeResult[c.name]?.ok ? (connectorProbeResult[c.name].tools_count + ' tools') : 'failed'"></span>
+                  <a x-show="c.transport === 'http' && ((c.auth?.kind === 'oauth' && !c.auth?.connection) || connectorProbeResult[c.name]?.needs_auth)"
+                     :href="'/dashboard/integrations/mcp/' + encodeURIComponent(c.name) + '/connect'"
+                     class="text-[11px] px-2 py-0.5 rounded bg-indigo-600 hover:bg-indigo-500 text-white transition-colors shrink-0"
+                     title="Authorize via the server's OAuth flow — endpoints are auto-discovered">Connect</a>
+                  <button type="button" x-show="c.transport === 'http'" @click="probeConnector(c.name)"
+                          :disabled="connectorProbing === c.name"
+                          class="opacity-0 group-hover:opacity-100 focus:opacity-100 text-[11px] px-1.5 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-all shrink-0 disabled:opacity-50"
+                          x-text="connectorProbing === c.name ? 'Testing…' : 'Test'"></button>
                   <span x-show="c.transport !== 'http' && (c.env_keys || []).length"
                         class="text-[11px] px-1.5 py-0.5 rounded leading-none bg-gray-800 text-gray-500 border border-gray-700 shrink-0"
                         :title="'Env vars: ' + (c.env_keys || []).join(', ')"
@@ -5269,11 +5279,10 @@
             <div x-show="connectorDraft?._transport === 'http'">
               <label class="text-[11px] text-gray-400 block mb-0.5">Authentication</label>
               <div class="flex items-center gap-1.5 flex-wrap">
-                <select x-model="connectorDraft._authKind" class="dash-select text-[11px]"
-                        :disabled="connectorDraft?._authKind === 'oauth'">
-                  <option value="none">None</option>
+                <select x-model="connectorDraft._authKind" class="dash-select text-[11px]">
+                  <option value="none">Auto-detect (OAuth offered if the server requires it)</option>
                   <option value="bearer">API key (vault credential)</option>
-                  <option value="oauth" disabled>OAuth — coming soon</option>
+                  <option value="oauth">OAuth (auto-discover)</option>
                 </select>
                 <template x-if="connectorDraft?._authKind === 'bearer'">
                   <select x-model="connectorDraft._authCred" class="dash-select flex-1 min-w-40">
@@ -5284,10 +5293,16 @@
                   </select>
                 </template>
                 <template x-if="connectorDraft?._authKind === 'oauth'">
-                  <span class="text-[11px] text-gray-400">Connection: <span class="font-mono" x-text="connectorDraft?._authConnection || '—'"></span> (managed by the Connect flow)</span>
+                  <span class="text-[11px] text-gray-400"
+                        x-text="connectorDraft?._authConnection
+                          ? 'Connected as: ' + connectorDraft._authConnection
+                          : 'Save, then click Connect on the connector row — endpoints are auto-discovered from the server.'"></span>
                 </template>
               </div>
-              <div class="text-[11px] text-gray-500 italic mt-1">The key stays in the vault — the mesh sends it per call; agents never see it. Auth changes apply immediately, no restart.</div>
+              <div class="text-[11px] text-gray-500 italic mt-1"
+                   x-text="connectorDraft?._authKind === 'none'
+                     ? 'On save the server is tested automatically — if it requires OAuth, a Connect button appears on the row. Public servers just work.'
+                     : 'The key stays in the vault — the mesh sends it per call; agents never see it. Key rotation applies immediately; switching auth mode prompts a restart (agents register tools at boot).'"></div>
               <div x-show="connectorErrors.auth" class="text-[11px] text-red-400 mt-1" x-text="connectorErrors.auth"></div>
             </div>
             <div x-show="connectorDraft?._transport === 'stdio'">
@@ -5392,7 +5407,7 @@
             <div class="flex items-center justify-between gap-2 pt-1">
               <span class="text-[11px] text-gray-500"
                     x-text="connectorDraft?._transport === 'http'
-                      ? 'Server & assignment changes apply after the affected agents restart; auth changes apply immediately.'
+                      ? 'Server & assignment changes apply after the affected agents restart; auth key rotation applies immediately.'
                       : 'Applies after the affected agents restart — you\'ll be prompted.'"></span>
               <div class="flex items-center gap-2">
                 <button type="button" @click="connectorCancelDraft()"
