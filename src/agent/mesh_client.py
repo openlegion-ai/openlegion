@@ -660,9 +660,15 @@ class MeshClient:
         assigned to this agent — fetched from the mesh gateway at
         startup. Shape: ``{connector_name: {"tools": [...], "error"?}}``.
         """
+        # Timeout sits ABOVE the gateway's per-connector DISCOVERY
+        # deadline (20s, connectors discovered in parallel) so a slow
+        # remote degrades to a per-connector error entry mesh-side
+        # instead of this whole request timing out and stripping every
+        # healthy connector's tools from the boot.
         response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/connectors/tools",
             params={"agent_id": self.agent_id},
+            timeout=60,
         )
         _raise_with_body(response)
         return response.json().get("connectors", {})

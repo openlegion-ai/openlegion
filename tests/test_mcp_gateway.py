@@ -20,9 +20,11 @@ import pytest
 
 from src.host.connectors import ConnectorStore
 from src.host.mcp_gateway import (
+    MAX_TOOLS_PER_CONNECTOR,
     RESULT_MAX_BYTES,
     ConnectorAuthError,
     ConnectorSSRFError,
+    ConnectorUnreachableError,
     GatewayUnavailable,
     MCPGateway,
     UnknownConnectorError,
@@ -314,7 +316,6 @@ class TestDiscoveryCache:
             transport="http", name="broken",
             url="https://93.184.216.99/mcp", agents=["*"],
         ))
-        calls = {"n": 0}
         real_list = gw.list_tools
 
         async def flaky(name):
@@ -405,6 +406,79 @@ class TestProbe:
         gw, _ = _gateway(tmp_path)
         probe = await gw.probe("ghost")
         assert probe["ok"] is False and probe["needs_auth"] is False
+
+    @pytest.mark.asyncio
+    async def test_unresolvable_host_is_reachability_not_auth(self, tmp_path):
+        # A typo'd / dead hostname must NOT render the Connect
+        # affordance — the OAuth flow would die against the same host.
+        gw, store = _gateway(tmp_path)
+        moved = store.get("linear").model_copy(
+            update={"url": "https://does-not-exist.invalid/mcp"},
+        )
+        store.upsert(moved)
+        probe = await gw.probe("linear")
+        assert probe["ok"] is False
+        assert probe["needs_auth"] is False
+        assert "resolve" in probe["error"]
+        with pytest.raises(ConnectorUnreachableError):
+            await gw.call_tool("linear", "t", {}, agent_id="a")
+
+    @pytest.mark.asyncio
+    async def test_tool_count_capped(self, tmp_path):
+        FakeSession.current_behavior = {"list_tools": [
+            _tool(name=f"t{i}") for i in range(MAX_TOOLS_PER_CONNECTOR + 50)
+        ]}
+        gw, _ = _gateway(tmp_path)
+        tools = await gw.list_tools("linear")
+        assert len(tools) == MAX_TOOLS_PER_CONNECTOR
+
+
+class TestToolsForAgent:
+    @pytest.mark.asyncio
+    async def test_blackholed_connector_degrades_without_stalling(self, tmp_path):
+        # B2 pin: discovery is parallel with a per-connector deadline —
+        # one hung server yields an error entry while healthy
+        # connectors' tools still come back, well inside the agent's
+        # HTTP timeout.
+        import src.host.mcp_gateway as gw_mod
+        gw, store = _gateway(tmp_path)
+        store.upsert(HttpConnector(
+            transport="http", name="hung",
+            url="https://93.184.216.99/mcp", agents=["*"],
+        ))
+        real_list = gw.list_tools
+
+        async def routed(name):
+            if name == "hung":
+                await asyncio.sleep(3600)
+            return await real_list(name)
+
+        gw.list_tools = routed
+        original = gw_mod.DISCOVERY_TIMEOUT
+        gw_mod.DISCOVERY_TIMEOUT = 0.2
+        try:
+            out = await asyncio.wait_for(gw.tools_for_agent("a"), 5)
+        finally:
+            gw_mod.DISCOVERY_TIMEOUT = original
+        assert out["linear"]["tools"]
+        assert out["hung"]["tools"] == []
+        assert "timed out" in out["hung"]["error"]
+
+    @pytest.mark.asyncio
+    async def test_auth_error_text_passes_through_unmasked(self, tmp_path):
+        # B3 pin: an unbound-OAuth connector must report its actionable
+        # auth state in /capabilities — not be misread as "upstream
+        # unreachable" by the substring heuristics in _mask (its text
+        # contains the word "Connect").
+        gw, store = _gateway(tmp_path)
+        bound = store.get("linear").model_copy(update={
+            "auth": ConnectorAuth(kind="oauth"),
+        })
+        store.upsert(bound)
+        out = await gw.tools_for_agent("a")
+        assert out["linear"]["tools"] == []
+        assert "Connect" in out["linear"]["error"]
+        assert "unreachable" not in out["linear"]["error"]
 
 
 # ── SSRF (D16) ───────────────────────────────────────────────

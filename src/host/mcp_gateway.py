@@ -53,6 +53,14 @@ logger = setup_logging("host.mcp_gateway")
 INIT_TIMEOUT = 30   # parity with MCPClient startup (agent/mcp_client.py)
 CALL_TIMEOUT = 60   # parity with MCPClient.call_tool
 RESULT_MAX_BYTES = 262_144  # plan D13 (§11-Q6): cap + truncated flag
+# Whole-connector deadline for the agent-BOOT discovery path
+# (tools_for_agent): must sit well under the agent's HTTP timeout, or a
+# blackholed server outlives the agent's request and strips every
+# healthy connector's tools from the boot response.
+DISCOVERY_TIMEOUT = 20
+# Context-flood guard: one hostile/bloated server must not flood every
+# assigned agent's tool list (descriptions are separately byte-capped).
+MAX_TOOLS_PER_CONNECTOR = 200
 
 # Tool descriptions byte-capped exactly like the agent-side stdio path
 # (mcp_client._MCP_DESCRIPTION_MAX_BYTES) so one connector can't flood
@@ -84,6 +92,16 @@ class ConnectorAuthError(RuntimeError):
     """Auth could not be resolved or was rejected upstream → needs_auth."""
 
 
+class ConnectorUnreachableError(RuntimeError):
+    """The host doesn't resolve / the server can't be reached.
+
+    Deliberately distinct from :class:`ConnectorAuthError`: an
+    unresolvable host is reachability (typo'd URL, dead server), and
+    classifying it as auth would render the Connect affordance for a
+    flow that is guaranteed to fail against the same dead host.
+    """
+
+
 class ConnectorSSRFError(RuntimeError):
     """URL host resolves into a blocked range."""
 
@@ -92,20 +110,33 @@ class UnknownConnectorError(KeyError):
     """No http connector with that name in the catalog."""
 
 
-async def _assert_public_host(url: str) -> None:
+async def _assert_public_host(url: str, *, allow_loopback: bool = True) -> None:
     """Resolve the URL host; reject private/reserved destinations.
 
-    Explicit loopback hostnames pass (self-hosted dev); everything else
-    must resolve to public addresses only — one private A/AAAA record
-    among many fails the whole check (the SDK may pick any of them).
+    ``allow_loopback`` controls the explicit-loopback hostname
+    carve-out. True is for OPERATOR-pasted connector URLs (self-hosted
+    dev MCP on the mesh host is legitimate). Pass False for
+    SERVER-CONTROLLED URLs — OAuth-discovery endpoints, blob-embedded
+    token endpoints — where a malicious remote could otherwise point
+    the mesh's authenticated POSTs at local services.
+
+    Everything that isn't an allowed loopback must resolve to public
+    addresses only — one private A/AAAA record among many fails the
+    whole check (the SDK may pick any of them).
     """
     host = urlparse(url).hostname or ""
     if host.lower() in _LOOPBACK_HOSTS:
-        return
+        if allow_loopback:
+            return
+        raise ConnectorSSRFError(
+            f"loopback host {host!r} is not allowed for discovered URLs",
+        )
     try:
         infos = await asyncio.get_running_loop().getaddrinfo(host, None)
     except OSError as e:
-        raise ConnectorAuthError(f"cannot resolve host {host!r}: {e}") from e
+        raise ConnectorUnreachableError(
+            f"cannot resolve host {host!r}: {e}",
+        ) from e
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
         if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
@@ -344,27 +375,65 @@ class MCPGateway:
             lambda s: asyncio.wait_for(s.list_tools(), CALL_TIMEOUT),
         )
         tools = [self._sanitize_tool(t) for t in getattr(listed, "tools", [])]
+        if len(tools) > MAX_TOOLS_PER_CONNECTOR:
+            logger.warning(
+                "Connector %r advertises %d tools; keeping the first %d "
+                "(context-flood guard)", name, len(tools),
+                MAX_TOOLS_PER_CONNECTOR,
+            )
+            tools = tools[:MAX_TOOLS_PER_CONNECTOR]
         self._tools_cache[key] = (gen, tools)
         return tools
 
     async def tools_for_agent(self, agent_id: str) -> dict[str, dict]:
-        """Discovery for /mesh/connectors/tools — caller-scoped. A
-        connector that fails discovery degrades to an error entry
-        rather than failing the whole response: one broken remote must
-        not strip every other connector's tools from an agent."""
-        out: dict[str, dict] = {}
-        for c in self._store.http_for_agent(agent_id):
+        """Discovery for /mesh/connectors/tools — caller-scoped.
+
+        Connectors are discovered IN PARALLEL with a per-connector
+        deadline well under the agent's own request timeout: this runs
+        on the agent-boot path, and a single TCP-blackholed server must
+        neither stall boot nor — by outliving the agent's HTTP timeout —
+        strip every HEALTHY connector's tools from the response.
+
+        Per-connector degradation: a failed connector yields an error
+        entry. Auth/reachability errors keep their actionable text
+        (gateway-authored, no upstream body); everything else is masked.
+        """
+        connectors = self._store.http_for_agent(agent_id)
+        if not connectors:
+            return {}
+
+        async def _one(c: HttpConnector) -> tuple[str, dict]:
             try:
-                out[c.name] = {"tools": await self.list_tools(c.name)}
+                tools = await asyncio.wait_for(
+                    self.list_tools(c.name), DISCOVERY_TIMEOUT,
+                )
+                return c.name, {"tools": tools}
             except GatewayUnavailable:
                 raise
+            except (ConnectorAuthError, ConnectorUnreachableError) as e:
+                logger.warning(
+                    "Connector %r discovery failed for agent %r: %s",
+                    c.name, agent_id, e,
+                )
+                return c.name, {"tools": [], "error": str(e)}
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Connector %r discovery timed out for agent %r",
+                    c.name, agent_id,
+                )
+                return c.name, {
+                    "tools": [],
+                    "error": "discovery timed out — server unreachable?",
+                }
             except Exception as e:
                 logger.warning(
                     "Connector %r discovery failed for agent %r: %s",
                     c.name, agent_id, e,
                 )
-                out[c.name] = {"tools": [], "error": self._mask(e)}
-        return out
+                return c.name, {"tools": [], "error": self._mask(e)}
+
+        results = await asyncio.gather(*(_one(c) for c in connectors))
+        return dict(results)
 
     async def call_tool(
         self, name: str, tool: str, arguments: dict, *, agent_id: str,
@@ -383,7 +452,12 @@ class MCPGateway:
                     s.call_tool(tool, arguments), CALL_TIMEOUT,
                 ),
             )
-        except (GatewayUnavailable, ConnectorAuthError, ConnectorSSRFError):
+        except (
+            GatewayUnavailable,
+            ConnectorAuthError,
+            ConnectorSSRFError,
+            ConnectorUnreachableError,
+        ):
             raise
         except Exception as e:
             # Full text mesh-side, masked for the agent (LLM-proxy
@@ -406,6 +480,10 @@ class MCPGateway:
             return {"ok": False, "error": str(e), "needs_auth": False}
         except ConnectorAuthError as e:
             return {"ok": False, "error": str(e), "needs_auth": True}
+        except ConnectorUnreachableError as e:
+            # Reachability, NOT auth: rendering Connect for a typo'd /
+            # dead host would send the OAuth flow at the same dead host.
+            return {"ok": False, "error": str(e), "needs_auth": False}
         except ConnectorSSRFError as e:
             return {"ok": False, "error": str(e), "needs_auth": False}
         except asyncio.TimeoutError:
@@ -433,7 +511,16 @@ class MCPGateway:
     @staticmethod
     def _mask(e: Exception) -> str:
         """Agent/dashboard-safe error string: exception type + a short
-        classification, never the upstream body."""
+        classification, never the upstream body.
+
+        The gateway's OWN error classes are typed first — their text is
+        gateway-authored and the substring heuristics below would
+        misread it (e.g. "use Connect on the Connectors page" contains
+        "connect")."""
+        if isinstance(e, ConnectorAuthError):
+            return f"auth not accepted: {e}"
+        if isinstance(e, ConnectorUnreachableError):
+            return str(e)
         if MCPGateway._looks_like_auth_failure(e):
             return "upstream rejected authorization (401)"
         name = type(e).__name__

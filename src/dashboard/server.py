@@ -2618,11 +2618,10 @@ def create_dashboard_router(
         adjacent route (it makes a mesh-originated outbound request)."""
         if mcp_gateway is None:
             raise HTTPException(503, "Connector gateway not configured")
-        from src.host.mcp_gateway import GatewayUnavailable
-        try:
-            return await mcp_gateway.probe(name)
-        except GatewayUnavailable as exc:
-            raise HTTPException(503, str(exc)) from exc
+        # probe() classifies every failure (incl. GatewayUnavailable)
+        # into its {ok: False, error, needs_auth} shape — no exception
+        # mapping needed here.
+        return await mcp_gateway.probe(name)
 
     # Agents with a batch-initiated restart currently in flight. Guards
     # against overlapping batches interleaving stop/start on the same

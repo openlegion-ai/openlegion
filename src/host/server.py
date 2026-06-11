@@ -2378,6 +2378,7 @@ def create_mesh_app(
         from src.host.mcp_gateway import (
             ConnectorAuthError,
             ConnectorSSRFError,
+            ConnectorUnreachableError,
             GatewayUnavailable,
             UnknownConnectorError,
         )
@@ -2396,10 +2397,17 @@ def create_mesh_app(
         except GatewayUnavailable as exc:
             raise HTTPException(503, str(exc)) from exc
         except ConnectorSSRFError as exc:
-            raise HTTPException(400, str(exc)) from exc
-        except ConnectorAuthError as exc:
-            # Auth problems are operator-actionable (reconnect/rotate),
-            # not agent-actionable — masked detail is fine for both.
+            # Full detail (incl. the resolved address) stays mesh-side;
+            # agents are an untrusted zone and don't get topology hints.
+            logger.warning("Connector %r SSRF rejection: %s", connector, exc)
+            raise HTTPException(
+                400, "connector URL failed security validation",
+            ) from exc
+        except (ConnectorAuthError, ConnectorUnreachableError) as exc:
+            # Operator-actionable states (reconnect / fix the URL). The
+            # detail is gateway-authored but MAY embed bounded vault
+            # error text — the agent loop sanitizes all tool output
+            # before it reaches the LLM.
             raise HTTPException(502, str(exc)) from exc
         except RuntimeError as exc:
             # Gateway already masked the upstream error (full text in
