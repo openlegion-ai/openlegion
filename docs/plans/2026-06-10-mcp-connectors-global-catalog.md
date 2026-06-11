@@ -1,117 +1,165 @@
 # MCP Connectors — Global Catalog, Fleet Assignment, Remote Transport & OAuth
 
-**Date:** 2026-06-10
-**Status:** Phase 1 implemented 2026-06-10 (stricter no-backcompat variant: the per-agent
-`mcp_servers` layer was REMOVED rather than kept alongside — the catalog is the sole source of
-truth and an agent-specific server is a connector assigned to one agent; `agents: []` defaults
-to unassigned rather than D3's two-layer coexistence). Phases 2-3 proposed.
-**Scope:** Promote MCP from a per-agent config field to a fleet-level **Connectors** catalog
-(connect once, enable for all agents or specific agents — the Skills-page interaction model),
-housed on the existing Integrations settings page (relabelled "Connectors"). Phase 2 adds a
-**remote (HTTP) transport with a mesh-side gateway** so connector credentials stay in the vault
-and are proxied — never entering the agent container. Phase 3 adds the Claude-style
-**"paste URL → Connect → OAuth redirect"** flow on top of the already-built Option-B OAuth
-machinery.
+**Date:** 2026-06-10 · **Re-baselined:** 2026-06-11
+**Status:** Phase 1 implemented 2026-06-10 (stricter no-backcompat variant — see §4).
+Phases 2a/2b/3 re-planned 2026-06-11 after a two-pass principal review (two independent
+passes, findings reconciled and verified against the code at `7cf92c6b`). All file:line
+references below are pinned to that commit. Open product decisions live in §11 — each
+phase's gating decisions must be confirmed before that phase merges.
+**Scope:** Phase 1 promoted MCP from per-agent config to a fleet-level **Connectors** catalog
+(connect once, assign to all agents or specific agents). Phase 2a adds the remote-connector
+**data model and dashboard surface**; Phase 2b adds the **mesh-side `MCPGateway`** so remote
+(HTTP) MCP servers work end-to-end with vault-held, proxied credentials — never entering the
+agent container. Phase 3 adds the Claude-style **"paste URL → Connect → OAuth redirect"** flow
+on top of the existing Option-B OAuth machinery.
 **Related:**
-- `docs/mcp.md` (current per-agent stdio MCP design)
+- `docs/mcp.md` (stdio MCP design; D8's human-only decision is recorded there at `:141`)
 - `docs/plans/2026-06-04-oauth-integrations-connect-flow.md` (Option-B OAuth: state store,
-  callback, `store_connection`, refresh-on-resolve — Phase 3 reuses all of it)
-- `docs/plans/2026-06-04-integrations-oauth-strategy.md` (§4 already names MCP connectors as
-  the long-tail integration strategy; this plan is that section made concrete)
-- `docs/plans/2026-05-31-tools-skills-rename-and-skill-packs.md` (the fleet/per-agent
-  assignment pattern this plan mirrors)
+  callback, `store_connection`, refresh-on-resolve — Phase 3 reuses the back half; §7.1 lists
+  what the front half must generalize first)
+- `docs/plans/2026-06-04-integrations-oauth-strategy.md` (§4 names MCP connectors as the
+  long-tail integration strategy; this plan is that section made concrete)
 
 ---
 
 ## 1. Problem
 
-Three gaps, in increasing order of architectural weight:
+Three gaps, in increasing order of architectural weight. **Gap 1 is closed** (Phase 1 shipped);
+gaps 2–3 are what Phases 2–3 exist for:
 
-1. **No global enablement.** `mcp_servers` lives on each agent's entry in `config/agents.yaml`
-   (`AgentConfig.mcp_servers`, `src/shared/types.py:526`). Connecting the same Linear MCP to five
-   agents means entering the same config five times, keeping five copies in sync, and rotating a
-   credential in five places. Skills already solved this shape (`fleet_skills` ∪ per-agent
-   `allowed_skills`, `src/host/permissions.py:186-196`); MCP has no equivalent.
+1. ~~**No global enablement.**~~ Closed by Phase 1: `config/connectors.json` +
+   `ConnectorStore` (`src/host/connectors.py`) is the single source of MCP servers; an
+   agent-specific server is a connector assigned to one agent. The per-agent `mcp_servers`
+   config layer was **removed**, not wrapped.
 
-2. **stdio-only.** `MCPServerConfig` (`src/shared/types.py:414-450`) is `command`/`args`/`env` —
-   a subprocess inside the agent container. There is no way to point at a remote MCP server URL
+2. **stdio-only.** `MCPConnector` (`src/shared/types.py:504`) is `command`/`args`/`env` — a
+   subprocess inside the agent container. There is no way to point at a remote MCP server URL
    (`https://mcp.linear.app/mcp`), which is where the ecosystem has standardized. Worse, the
-   default agent image is Python-only, so the large npm-based server catalog doesn't run at all
-   (`docs/mcp.md` "Node.js MCP servers").
+   default agent image is Python-only (`Dockerfile.agent` — no Node, no `npx`/`uvx`), so the
+   large npm-based server catalog doesn't run at all. The transport users actually want —
+   paste a URL — doesn't exist.
 
 3. **Credentials are vault-*stored* but not vault-*proxied*.** Config holds `$CRED{name}`
-   handles (good: never plaintext on disk, masked on GET, redacted in audit), but
-   `RuntimeBackend._build_mcp_servers_env` (`src/host/runtime.py:102-168`) resolves them to
-   plaintext at container start and ships them in the `MCP_SERVERS` env var. This is *inherent*
-   to stdio (the subprocess needs the secret) and is a documented asymmetry vs `http_tool`
-   (`docs/mcp.md` §security) — but it means every MCP credential is exposed to the agent
-   process. Only a remote transport with a mesh-side session can close this.
+   handles, but `RuntimeBackend._build_mcp_servers_env` (`src/host/runtime.py:137`) resolves
+   them to plaintext at container start and ships them in the `MCP_SERVERS` env var. This is
+   *inherent* to stdio (the subprocess needs the secret) — but it means every MCP credential
+   is exposed to the agent process. Only a remote transport with a mesh-side session closes
+   this.
 
 ## 2. Decisions
 
+D1–D8 are the original decisions; annotations record how Phase 1 actually shipped.
+D9–D17 were added at the 2026-06-11 re-baseline and are **binding on Phases 2a/2b/3**.
+
 | # | Decision | Rationale |
 |---|---|---|
-| **D1** | Relabel the Integrations tab **"Connectors"**; keep the tab **ID `integrations`** | Labels are free, IDs are frozen — the exact pattern already used for `fleet`→"Teams" (Known Constraint #5). The label changes in one place (`app.js:508`); deep-links and persisted prefs keep working. "Connectors" is the industry term (Claude's naming) and honestly covers what the page already holds: OAuth connections, channels, API keys. |
-| **D2** | New file **`config/connectors.json`** + new `ConnectorStore`, not more keys in `permissions.json` | Connectors are *definitions + assignment* (config), not ACLs. `permissions.json` already carries a documented lost-update race (`src/cli/config.py:269-277`); a new store holds its lock across the whole load→mutate→save from day one instead of inheriting the gap. Fail-closed load mirrors `PermissionMatrix._load`. |
-| **D3** | Assignment lives **on the connector**: `agents: ["*"]` or `agents: ["researcher", "writer"]` — one surface, one source of truth | The user's mental model is "connect a service, choose who gets it" (the Claude connectors model). Skills needed the two-surface union (fleet list + per-agent list edited on the agent) because skills are ambient discoverability; a connector is a deliberate grant. One control on one card is simpler to build, audit, and explain. `"*"` matches the existing glob convention in `AgentPermissions.can_message`. |
-| **D4** | Merge fleet connectors into the agent's server list at **one choke point in `RuntimeBackend`** | Six call sites pass `mcp_servers` into `start_agent` (`cli/repl.py:478,1429`, `cli/runtime.py:627,659`, `dashboard/server.py:3162,6631`, plus `host/health.py:603` via the registry). Merging inside the backend means every start/restart path — CLI boot, dashboard restart, health-watchdog restart — inherits the behavior with zero call-site edits and zero chance of a forgotten path. |
-| **D5** | Name-collision policy: **agent-local wins** over a fleet connector with the same (case-insensitive) name; log a warning | More-specific beats more-general; deterministic; lets an operator override one agent's variant of a fleet connector without touching the catalog. |
-| **D6** | stdio connectors keep today's resolve-into-container-env semantics; **remote connectors are the proxied path**, and the UI labels the difference honestly | We do not pretend stdio can be proxied — it can't (the subprocess runs in the container). The Add-Connector UI says: *Remote — credentials stay in the vault; calls proxied by the mesh* vs *Local — runs inside the agent container; credentials are exposed to that agent*. Security-relevant difference surfaced at decision time, not buried in docs. |
-| **D7** | Restarts are **explicit and confirmed, never automatic mass-restarts** | `MCP_SERVERS` is startup-only. A catalog edit returns the affected agent list; the UI offers "Restart now / Later" with pending-restart badges until bounced. A fleet-wide toggle silently bouncing 20 agents mid-task is not acceptable. |
-| **D8** | Connector management stays **human-only** (dashboard); no operator-agent tool to add/remove connectors | Consistent with the decision already recorded in `docs/mcp.md` ("operator-requested MCP setup" deferred): chat-driven installation of arbitrary tool servers is a prompt-injection-shaped hole. The request-card pattern (agent requests, human approves) remains the tracked follow-up. |
+| **D1** | Relabel the Integrations tab **"Connectors"**; keep the tab **ID `integrations`** | Shipped. Labels are free, IDs are frozen (Known Constraint #5). |
+| **D2** | New file **`config/connectors.json`** + `ConnectorStore`, not more keys in `permissions.json` | Shipped. The store holds its lock across whole load→mutate→save; atomic writes; fail-closed load. |
+| **D3** | Assignment lives **on the connector**: `agents: ["*"]` or explicit ids | Shipped — *stricter than planned*: the per-agent `mcp_servers` layer was removed entirely rather than coexisting. `agents: []` = unassigned. One surface, one source of truth. |
+| **D4** | ~~Merge fleet connectors into the agent's list at one choke point~~ | **Moot.** There is no agent-local list to merge. The runtime reads the catalog directly via `_mcp_snapshot_for` (`runtime.py:112`). |
+| **D5** | ~~Agent-local wins on name collision~~ | **Moot** with D4. Catalog-internal name uniqueness (case-insensitive) is enforced at the store. |
+| **D6** | stdio keeps resolve-into-container-env semantics; **remote connectors are the proxied path**; the UI labels the difference honestly | Unchanged. *Remote — credentials stay in the vault; calls proxied by the mesh* vs *Local — runs inside the agent container; credentials are exposed to that agent*. |
+| **D7** | Restarts are **explicit and confirmed, never automatic mass-restarts** | Shipped: catalog edits return `affected_agents`; `/api/agents/restart-batch` runs in the **background** (not sequentially as originally sketched) with per-agent restart events; pending-restart badges until bounced. |
+| **D8** | Connector management stays **human-only** (dashboard); no operator-agent write tool | Shipped; recorded in `docs/mcp.md:141`. The request-card pattern remains the tracked follow-up. |
+| **D9** | **Per-call gateway sessions.** The gateway opens `streamablehttp_client` + `ClientSession` per tool call — open → initialize → call → close, inside the single request task | The SDK's clients are anyio task-group context managers: entered in request task A and exited in task B (a later call, a 401 reopen, shutdown `aclose`) they raise `RuntimeError: attempted to exit cancel scope in a different task`. The agent's `MCPClient` survives long-lived sessions only because one owner task holds the `AsyncExitStack`; a gateway serving concurrent requests from N agents cannot. Per-call costs ~1 extra round-trip (noise against LLM-paced tool calls) and deletes the 401-retry state machine, the shared-session concurrency question, and `tools/list_changed` staleness. Long-lived sessions are a later optimization behind a dedicated owner-task design, if latency ever demands it. |
+| **D10** | **`mcp>=1.9` becomes a core host dependency** (lazy import + loud degrade) | The host does NOT have the SDK today: `mcp` is an optional extra (`pyproject.toml:46`), `install.sh:194` installs `.[dev,channels,wallet]` without it, and `README.md:911` documents that. Only agent containers install it (`Dockerfile.agent`). The `>=1.0` floor predates `streamablehttp_client` (~1.8). Missing SDK at runtime → gateway endpoints return 503 with an actionable reason, mirroring the agent-side degrade (`src/agent/mcp_client.py:104-119`); never a silent no-op. |
+| **D11** | **`/mesh/connectors/*` stays OUT of the operator bypass set.** Assignment is the authz gate for every agent, operator included | Connectors front third-party credentials — they belong with the still-gated family (`can_use_wallet*`, `can_access_credential`; Known Constraint #12), not the coordination bypass. Because assignment isn't a `permissions.can_*` gate, the grep trip-wire (`tests/test_operator_trust_tier.py:490`) covers it in neither direction — an explicit HTTP-level test pins it: operator with no assignment → 403. |
+| **D12** | **Dirty matrix:** stdio any-change → pending-restart; http URL/assignment change → pending-restart; **http auth-only change → NOT pending-restart** (+ explicit gateway cache invalidation) | Remote auth is resolved per call on the mesh (D9), so connecting/rotating it needs no container bounce — marking dirty would manufacture false "restart to apply" nags and contradict the UI promise. URL/assignment changes DO need a bounce (tool schemas register at agent boot). UI copy "auth changes apply immediately" is **scoped to remote connectors** — for stdio, rotating a vault credential does *not* reach running containers (plaintext baked into env at start; pre-existing gap, see §10). |
+| **D13** | **Byte-cap remote tool results at the gateway**: 256 KiB default + `truncated` flag (the `http_tool` convention) | The agent loop serializes dict tool results uncapped; a remote server returning a base64 blob otherwise lands whole in the agent's context. The gateway is the natural choke point. Cap value is §11-Q6. |
+| **D14** | **No per-agent `can_access_credential` check on `auth.cred`** — vault-existence check only at PUT time | The bearer token is mesh-held and injected by the gateway; agents never see it. Requiring per-agent grants would force granting agents the secret precisely to avoid giving it to them. (stdio `$CRED` pre-flight keeps its per-agent check — those secrets DO enter the container.) |
+| **D15** | **Server-initiated `sampling/createMessage` and elicitation are rejected**, pinned by test | A mesh-side `ClientSession` is a juicier target than an in-container one — a malicious server would be asking the credential holder to run LLM calls. Pass no callbacks (the SDK default rejects); the pin test ensures an SDK upgrade or a helpful refactor can't flip it. |
+| **D16** | **SSRF posture on every mesh-originated MCP fetch**: https-only (loopback http exempt), private-range IP blocklist on resolved hosts (RFC1918, loopback, link-local, CGNAT — the `http_tool` ranges), `follow_redirects=False`, and in Phase 3 the same checks applied to **discovered** URLs (AS metadata, token, registration endpoints) plus 64 KB caps and content-type checks on discovery responses | `oauth_providers.py:5-6` pins today's invariant ("Provider endpoints are fixed here — never user-supplied — so the connect/callback flow adds no SSRF surface"); Phase 3 deletes it: the *remote server* — not the trusted operator — controls everything discovery returns. `https://169.254.169.254/` must not pass. Operator trust covers the pasted URL, not what its owner serves back. |
+| **D17** | **Remote is the default-selected type in the Add-connector modal** once Phase 2b ships; Local (stdio) is the secondary option | Confirmed by user 2026-06-11. Matches the ecosystem default (Claude/ChatGPT connectors are URL-first) and our reality: the Python-only agent image can't run most published stdio servers anyway. |
 
 ## 3. Phasing
 
 | Phase | Ships | Depends on |
 |---|---|---|
-| **1** | Global catalog + assignment + Connectors UI + restart orchestration (stdio transport, all existing plumbing) | nothing |
-| **2** | `http` transport + mesh-side `MCPGateway` — vault-held, proxied credentials | Phase 1 |
-| **3** | OAuth 2.1 connect flow (discovery + DCR + PKCE) for remote connectors | Phase 2 + existing Option-B OAuth machinery |
+| **1** | Global catalog + assignment + Connectors UI + restart orchestration (stdio) | **DONE** |
+| **2a** | Remote data model (`HttpConnector` union) + transport-aware dashboard PUT/GET + UI transport chooser. Shippable dark: http connectors storable, inert until 2b | Phase 1 |
+| **2b** | `MCPGateway` (per-call sessions) + `/mesh/connectors/*` + agent-side registration/dispatch. Delivers **bearer/no-auth remote connectors end-to-end** — standalone value before any OAuth | 2a |
+| **3** | OAuth 2.1 connect flow (discovery + DCR + PKCE) | 2b + refresh-machinery extension (§7.1) + discovery SSRF posture (D16) |
 
-Each phase is independently shippable and independently valuable. Phase 1 is pure recombination
-of proven pieces; the architectural risk is concentrated in Phase 2 and isolated to one new
-module.
+Each phase is independently shippable and testable. The architectural risk is concentrated in
+2b's gateway and 3's refresh extension; both have their load-bearing constraints resolved by
+decision (D9, §7.1) before code.
 
 ---
 
-## 4. Phase 1 — Global catalog & fleet assignment
+## 4. Phase 1 — as shipped (baseline for everything below)
 
-### 4.1 Data model — `src/shared/types.py`
+This section describes **reality**, not proposal. Phases 2a/2b are written against these APIs.
+(The original §4 proposal — two-layer merge, `_effective_mcp_servers`, dirty-set tracking — is
+in git history; none of it shipped in that form.)
 
-A discriminated union keeps stdio validation byte-identical to today (`StdioConnector` inherits
-every `MCPServerConfig` validator) and gives Phase 2 a clean slot:
+### 4.1 Types — `src/shared/types.py`
+
+- `MCPServerConfig` (`types.py:431`) — name/command/args/env, `extra="forbid"`, `$CRED`
+  rejected in `command`, args/env caps. This is the `MCP_SERVERS` container-env contract.
+- `MCPConnector(MCPServerConfig)` (`types.py:504`) — adds `transport: Literal["stdio"] =
+  "stdio"` and `agents: list[str]` (`["*"]` sentinel `CONNECTOR_ALL_AGENTS`, `applies_to()`,
+  dedup + id validation). `server_dict()` strips `{agents, transport}`. The `transport` field
+  exists precisely so this plan's union lands without breaking persisted records.
+- There is **no per-agent MCP config**: `AgentConfig` has no `mcp_servers`; `start_agent`
+  takes no such param.
+
+### 4.2 Store — `src/host/connectors.py`
+
+Real API (the original plan's `assigned_agents()`, `http_for_agent()`, `reload()`, and
+`dirty_agents` set were never built):
+
+| Method | Behavior |
+|---|---|
+| `list()` / `get(name)` | mtime-based auto-reload (`_maybe_reload`) for hand-edited files |
+| `upsert(connector)` | case-insensitive replace-by-name; touches old∪new agents |
+| `remove(name)` / `remove_agent(agent_id)` | lifecycle hooks; `remove_agent` drops explicit assignments + generation stamps |
+| `snapshot_for_agent(agent_id)` (`connectors.py:228`) | `(server_dicts, generation)` under one lock — **the runtime merge input** |
+| `stdio_for_agent(agent_id)` | display convenience = `snapshot_for_agent()[0]` |
+| `mark_dirty(agents)` / `record_agent_start(agent_id, gen)` / `pending_restart()` | pending-restart is a **generation derivation**: every mutation bumps `_generation` and stamps touched agents; the runtime snapshots the generation at container-env build and records it post-start; dirty ⇔ touch-gen > start-gen. Immune to the edit-during-container-build race. In-memory by design (a full mesh reboot restarts every container). |
+
+Failure policy: missing/corrupt file → empty catalog + error log; malformed records dropped
+per-record with error logs.
+
+### 4.3 Runtime — `src/host/runtime.py`
+
+`set_connector_store` (`:106`) → `_mcp_snapshot_for` (`:112`) → `_build_mcp_servers_env`
+(`:137`, resolves `$CRED` with per-connector degradation — a missing/denied cred drops THAT
+connector, never blocks boot) → env injection at both backends (`:464` Docker, `:1156`
+Sandbox) → `record_agent_start` post-start (`:595`, `:1246`).
+
+### 4.4 Dashboard — `src/dashboard/server.py`
+
+- `_expand_assignment` (`:2294`), `_connector_to_api` (`:2301` — masks env to `env_keys` via
+  the stdio masking helper).
+- `GET /api/connectors` (`:2310`), `PUT /api/connectors/{name}` (`:2334` — validates via
+  `MCPConnector.model_validate` at `:2365`, stdio env preserve-or-replace, `$CRED` pre-flight
+  per assigned agent, no-op detection, affected = before∪after at `:2439`), `DELETE`
+  (`:2473`), `POST /api/agents/restart-batch` (`:2536` — background task + in-flight guard +
+  restart events).
+- UI: Connectors sub-tab (`index.html:5150+`) with a **single stdio form** — there is no
+  transport chooser; 2a adds it from scratch. Per-agent view shows assigned connectors
+  read-only (`index.html:3109-3116`).
+
+---
+
+## 5. Phase 2a — remote data model & dashboard surface
+
+Everything here is shippable dark: http connectors become storable and visible but inert
+(no gateway yet). Independently testable at the store/endpoint layer.
+
+### 5.1 Types union — `src/shared/types.py`
+
+Keep the shipped `MCPConnector` name for the stdio variant (it is referenced across store,
+runtime, dashboard, and tests; renaming to `StdioConnector` is churn with no behavior). Add:
 
 ```python
-# Sentinel for "assigned to every agent" in Connector.agents. Matches the
-# glob convention used by AgentPermissions.can_message.
-CONNECTOR_ALL_AGENTS = "*"
-
-
-def _validate_connector_agents(cls, v: list[str]) -> list[str]:
-    """Shared `agents` validator: '*' must be the sole element; ids deduped,
-    order preserved. Defined before the models so both can bind it via
-    ``field_validator("agents")(classmethod(_validate_connector_agents))``.
-    """
-    if CONNECTOR_ALL_AGENTS in v and len(v) > 1:
-        raise ValueError("agents: '*' (all agents) cannot be combined with explicit ids")
-    seen: set[str] = set()
-    out: list[str] = []
-    for a in v:
-        if a not in seen:
-            seen.add(a)
-            out.append(a)
-    return out
-
-
 class ConnectorAuth(BaseModel):
-    """Auth binding for a remote (http) connector — Phase 2/3.
-
-    The secret itself always lives in the vault; this only names it.
-    ``bearer`` → vault credential (``$CRED``-tier name) injected as
-    ``Authorization: Bearer <value>`` by the mesh gateway.
-    ``oauth`` → vault connection key (refresh-on-resolve, same machinery
-    as the Google Option-B flow).
-    """
+    """Auth binding for a remote (http) connector. The secret always lives
+    in the vault; this only names it.
+    ``bearer`` → vault credential injected as ``Authorization: Bearer`` by
+    the mesh gateway (D14: vault-existence checked at PUT; NO per-agent
+    can_access_credential — agents never see this value).
+    ``oauth`` → vault connection key (Phase 3 sets it; refresh-on-resolve)."""
     model_config = {"extra": "forbid"}
 
     kind: Literal["none", "bearer", "oauth"] = "none"
@@ -125,25 +173,10 @@ class ConnectorAuth(BaseModel):
         return self
 
 
-class StdioConnector(MCPServerConfig):
-    """Fleet-level stdio MCP server: an MCPServerConfig plus assignment.
-
-    Inherits every MCPServerConfig validator (name pattern, no $CRED in
-    command, args/env caps) unchanged.
-    """
-    model_config = {"extra": "forbid"}
-
-    transport: Literal["stdio"] = "stdio"
-    agents: list[str] = Field(default_factory=list, max_length=128)
-
-    _validate_agents = field_validator("agents")(
-        classmethod(_validate_connector_agents),
-    )
-
-
 class HttpConnector(BaseModel):
-    """Fleet-level remote MCP server — Phase 2. Mesh-gateway only; never
-    serialized into MCP_SERVERS, so its credentials never enter a container."""
+    """Fleet-level remote MCP server. Mesh-gateway only; NEVER serialized
+    into MCP_SERVERS (pinned by test — §8-1), so its auth never enters a
+    container."""
     model_config = {"extra": "forbid"}
 
     transport: Literal["http"]
@@ -151,553 +184,376 @@ class HttpConnector(BaseModel):
     url: str = Field(min_length=1, max_length=512)
     auth: ConnectorAuth = Field(default_factory=ConnectorAuth)
     agents: list[str] = Field(default_factory=list, max_length=128)
-
-    _validate_agents = field_validator("agents")(
-        classmethod(_validate_connector_agents),
-    )
-
-    @field_validator("url")
-    @classmethod
-    def _https_only(cls, v: str) -> str:
-        from urllib.parse import urlparse
-        p = urlparse(v)
-        if p.scheme == "https":
-            return v
-        # Self-hosted/dev MCP on the mesh host itself is legitimate.
-        if p.scheme == "http" and p.hostname in ("localhost", "127.0.0.1"):
-            return v
-        raise ValueError("Connector URL must be https:// (http:// allowed for localhost only)")
+    # url validator: https:// required; http:// allowed for localhost/127.0.0.1
+    # only (self-hosted dev). agents validator shared with MCPConnector.
 
 
-Connector = Annotated[StdioConnector | HttpConnector, Field(discriminator="transport")]
+Connector = Annotated[MCPConnector | HttpConnector, Field(discriminator="transport")]
 ```
 
-Notes:
-- `transport: Literal["stdio"] = "stdio"` lets pre-Phase-2 files (and hand-written ones) omit
-  the key; Pydantic v2 supports defaulted discriminators.
-- `MCPServerConfig` and `AgentConfig.mcp_servers` are **untouched**. No migration, no shim.
+`MCPConnector.transport: Literal["stdio"] = "stdio"` already defaults, so pre-2a files and
+hand-written records omit the key and still validate (Pydantic v2 defaulted discriminators).
 
-### 4.2 Storage — `config/connectors.json`
+### 5.2 Store changes — `src/host/connectors.py`
 
-```json
-{
-  "connectors": [
-    {
-      "name": "linear",
-      "transport": "http",
-      "url": "https://mcp.linear.app/mcp",
-      "auth": { "kind": "oauth", "connection": "mcp_linear" },
-      "agents": ["*"]
-    },
-    {
-      "name": "sqlite",
-      "transport": "stdio",
-      "command": "mcp-server-sqlite",
-      "args": ["--db", "/data/analytics.db"],
-      "env": { "DB_KEY": "$CRED{analytics_db_key}" },
-      "agents": ["researcher", "analyst"]
-    }
-  ]
-}
-```
+1. **`_load` validates against the `Connector` union** (`TypeAdapter`), keeping the
+   per-record drop-with-error-log policy.
+2. **`snapshot_for_agent` filters `transport == "stdio"`** before `server_dict()`. As shipped
+   it serializes *every* connector passing `applies_to()` (`connectors.py:228-240`) — without
+   this filter an http record, **including `auth`, would enter `MCP_SERVERS` and the
+   container**, which is the exact exposure the gateway exists to prevent. Highest-severity
+   item in the whole plan; pinned by test (§8-1). The generation half of the tuple still
+   covers the *whole* catalog, so pending-restart keeps working for http edits on agents with
+   no stdio connectors.
+3. **`http_for_agent(agent_id) -> list[HttpConnector]`** — new, for the gateway and the mesh
+   tools endpoint.
+4. **Dirty matrix in `upsert` (D12):** when old and new are both http and differ only in
+   `auth`, save WITHOUT `_touch` (no generation bump, no pending-restart). All other
+   mutations touch old∪new as today. Return whether the edit was auth-only so the dashboard
+   can (a) skip the restart prompt and (b) call the gateway's cache invalidation hook (§6.3 —
+   the generation can't serve as the tools-cache key for auth edits precisely because auth
+   edits don't bump it).
 
-A **list**, not a name-keyed dict: order is operator-meaningful because it feeds the existing
-first-server-wins tool-name conflict policy in `MCPClient.start()`. Name uniqueness
-(case-insensitive) is enforced at the store layer, mirroring `AgentConfig._no_duplicate_mcp_names`.
+### 5.3 Dashboard — transport-aware in one deliberate step
 
-### 4.3 `ConnectorStore` — `src/host/connectors.py` (new, ~150 lines)
+All four stdio-blind sites in `src/dashboard/server.py` change together, not incrementally:
 
-```python
-class ConnectorStore:
-    """Fleet-level MCP connector catalog backed by config/connectors.json.
+1. **Validation** (`:2365`): `MCPConnector.model_validate` → `TypeAdapter(Connector)`.
+   Per-field 400 shape unchanged (the UI's inline-error rendering keys off it).
+2. **No-op detection** (`:2425-2432`): per-transport — stdio compares `command/args/env`;
+   http compares `url/auth/agents`, and an auth-only diff routes to the no-restart path (D12).
+3. **GET masking** (`_connector_to_api`, `:2301`): http connectors emit `url`, `auth.kind`,
+   and the cred/connection *names* only — never token values. stdio masking unchanged.
+4. **Pre-flight** (`:2391+`): stdio keeps the per-agent `can_access_credential` check
+   (secrets enter the container). http: `auth.cred` vault-**existence** check only (D14).
 
-    Concurrency: one reentrant lock held across the whole load→mutate→save
-    inside every mutator — this store does NOT inherit the lost-update gap
-    documented on permissions.json (src/cli/config.py:269-277). Saves are
-    atomic (tempfile + os.replace), identical to _save_permissions.
+`affected_agents` stays before∪after; auth-only http edits return `restart_required: false`.
 
-    Failure policy: missing or corrupt file loads as an EMPTY catalog with
-    an error log. Fleet connectors silently absent is strictly safer than
-    blocking agent start; agent-local mcp_servers are unaffected either way.
-    """
+### 5.4 UI — transport chooser (net-new; nothing to "enable")
 
-    def __init__(self, config_path: str = "config/connectors.json") -> None: ...
+Add-connector modal becomes two-step:
 
-    def list(self) -> list[StdioConnector | HttpConnector]: ...
-    def get(self, name: str) -> StdioConnector | HttpConnector | None: ...
+1. *Type*: two radio cards — **Remote server** ("Credentials stay in the vault; calls are
+   proxied by the mesh") **default-selected (D17)**, and **Local command** ("Runs inside each
+   agent's container; credentials are exposed to that agent"). Until 2b ships, Remote saves
+   but its card shows an *inactive — gateway not yet deployed* state; do not block storage
+   (dark shipping is what makes 2a/2b independently mergeable).
+2. *Details*: Local = the existing stdio form unchanged. Remote = URL + auth picker
+   (None / API key → credential dropdown / OAuth → Connect button, Phase 3) + the existing
+   Assignment control.
 
-    def upsert(self, connector: StdioConnector | HttpConnector) -> None:
-        """Insert or replace by case-insensitive name. Lock held throughout."""
-
-    def remove(self, name: str) -> bool: ...
-
-    def assigned_agents(self, name: str, known_agents: list[str]) -> list[str]:
-        """Concrete agent ids a connector applies to ('*' expanded against
-        the live registry). Used to compute restart-affected sets."""
-
-    def stdio_for_agent(self, agent_id: str) -> list[dict]:
-        """MCP_SERVERS-shaped dicts (name/command/args/env only — transport
-        and agents stripped) for every stdio connector assigned to this
-        agent, in catalog order. This is the runtime merge input."""
-
-    def http_for_agent(self, agent_id: str) -> list[HttpConnector]:
-        """Phase 2: remote connectors assigned to this agent."""
-
-    def reload(self) -> None: ...
-```
-
-Assignment check is trivial and inlined: `"*" in c.agents or agent_id in c.agents`.
-
-### 4.4 Runtime merge — `src/host/runtime.py`
-
-Mirror the existing `set_credential_resolver` wiring pattern exactly (class-level `None` default
-so `__new__`-style tests stay safe, `src/host/runtime.py:63-71`):
-
-```python
-class RuntimeBackend(abc.ABC):
-    _vault: CredentialVault | None = None
-    _permissions: PermissionMatrix | None = None
-    _connectors: "ConnectorStore | None" = None          # NEW
-
-    def set_connector_store(self, store: "ConnectorStore | None") -> None:
-        """Wire the fleet connector catalog. Until called, behavior is
-        byte-identical to today (agent-local mcp_servers only)."""
-        self._connectors = store
-
-    def _effective_mcp_servers(
-        self, agent_id: str, mcp_servers: list[dict] | None,
-    ) -> list[dict] | None:
-        """Agent-local servers ∪ assigned fleet stdio connectors.
-
-        Agent-local wins on case-insensitive name collision (D5). A store
-        read error degrades to local-only — a corrupt catalog must never
-        block an agent from starting.
-        """
-        local = list(mcp_servers or [])
-        if self._connectors is None:
-            return local or None
-        try:
-            fleet = self._connectors.stdio_for_agent(agent_id)
-        except Exception:
-            logger.exception(
-                "Connector catalog unreadable; starting %r with agent-local "
-                "MCP servers only", agent_id,
-            )
-            fleet = []
-        local_names = {str(s.get("name", "")).lower() for s in local}
-        for s in fleet:
-            if s["name"].lower() in local_names:
-                logger.warning(
-                    "Agent-local MCP server %r overrides fleet connector of "
-                    "the same name for agent %r", s["name"], agent_id,
-                )
-                continue
-            local.append(s)
-        return local or None
-```
-
-Then a two-line change at each of the two (and only two) `MCP_SERVERS` construction sites —
-`DockerBackend._start_agent_container` (`runtime.py:423-426`) and the `SandboxBackend`
-equivalent (`runtime.py:1106-1109`). **Bind the merged list to a new name** — do NOT reassign
-the `mcp_servers` parameter, because the same variable is stored into the runtime registry a few
-lines down (`agent_info["mcp_servers"]`, `runtime.py:548`) and must stay agent-local:
-
-```python
-effective_mcp = self._effective_mcp_servers(agent_id, mcp_servers)
-if effective_mcp:
-    environment["MCP_SERVERS"] = self._build_mcp_servers_env(
-        effective_mcp, agent_id=agent_id,
-    )
-```
-
-Why this is correct everywhere with no other edits:
-- The registry entry `agent_info["mcp_servers"]` (`runtime.py:548`) keeps storing the
-  **agent-local** list (this is why the merged list gets its own variable above — reassigning
-  the parameter would leak merged fleet entries into the registry, and a later health-watchdog
-  restart would then treat them as agent-local: stale against catalog edits, spurious
-  collision warnings, and they'd shadow the updated catalog under the D5 local-wins rule).
-  Health-watchdog restarts (`host/health.py:603`) pass the agent-local list back through
-  `start_agent`, where the merge re-applies **fresh** — so a catalog edit made between crash and
-  auto-restart is picked up, and fleet servers are never double-merged. Pin this with a test:
-  registry contents equal the pre-merge input.
-- `$CRED{...}` resolution is downstream of the merge, so fleet-connector credentials flow
-  through the existing `resolve_cred_handles` path with the existing per-agent
-  `allowed_credentials` permission gate and the existing loud-failure semantics
-  (`runtime.py:131-139`).
-
-**Wiring:** instantiate `ConnectorStore` once in the runtime bootstrap and call
-`set_connector_store` at both existing `set_credential_resolver` call sites
-(`src/cli/runtime.py:381` and `:648`); pass the same instance into the dashboard router factory
-alongside `permissions` (same dependency-injection style — no new module-level globals,
-Known Constraint #8).
-
-### 4.5 Dashboard API — `src/dashboard/server.py`
-
-Three endpoints plus one batch-restart helper, in the existing closure style. All state-changing
-routes are covered by the existing `X-Requested-With` CSRF middleware; all writes are
-audit-logged with env values redacted via the existing `_redact_mcp_env_for_audit`
-(`dashboard/server.py:235-259`).
-
-```
-GET    /api/connectors
-       → {"connectors": [{...connector fields, env masked to env_keys,
-                          assigned_agents: [...expanded...],
-                          pending_restart: [...agent ids not yet bounced...]}]}
-
-PUT    /api/connectors/{name}
-       Body: full connector record (upsert; name in path is authoritative).
-       Validation, in order:
-         1. Pydantic Connector union → structured 400 with per-field errors
-            (same shape as the existing mcp_servers PUT, server.py:2929-2945,
-            so the UI reuses its inline-error rendering).
-         2. stdio env preserve-or-replace: omitted `env` key preserves the
-            persisted env (matched by name) — the exact GET→edit→PUT contract
-            the agent-config editor already implements (server.py:2890-2922).
-         3. $CRED{...} handles: for each handle, (a) vault has the credential,
-            (b) every CURRENTLY-assigned agent passes
-            permissions.can_access_credential. Failures → 400 listing the
-            blocked agents and the fix ("grant analytics_db_key to
-            'researcher' or narrow the assignment"). Agents created later
-            under a '*' assignment fail at restart through the existing loud
-            path (red status dot + captured stderr) — documented, not silent.
-       → {"connector": {...}, "affected_agents": [...], "restart_required": true}
-
-DELETE /api/connectors/{name}
-       → {"removed": true, "affected_agents": [...]}
-
-POST   /api/agents/restart-batch
-       Body: {"agents": ["a", "b", ...]}  (cap: 32 per call)
-       Sequentially runs the existing single-agent restart logic
-       (api_restart_agent, server.py:3076+) so every agent gets the same
-       event choreography (agent_restarting → agent_restarted /
-       restart_failed) the SPA already renders.
-       → {"results": {"a": "ok", "b": "failed: <reason>"}}
-```
-
-`affected_agents` = union of the assignment **before and after** the edit (an agent removed from
-a connector needs a bounce to *lose* the tools, too). Each successful write emits
-`_emit_config_changed("connectors")`.
-
-Pending-restart tracking: the store keeps an in-memory `dirty_agents: set[str]` updated on every
-write and cleared per-agent on successful restart (hook the existing restart success path). On
-mesh reboot it resets to empty — correct, because a full reboot restarts every container anyway.
-
-### 4.6 UI — Connectors page & per-agent view
-
-**Tab rename** — `src/dashboard/static/js/app.js:508`:
-
-```js
-{ id: 'integrations', label: 'Connectors' },
-```
-
-ID untouched (D1). Update the page's `<h2>`/intro copy in `index.html`; existing sections
-(Connected Services, Channels, Developer & API) become subsections of the relabelled page.
-
-**New first section: "MCP Connectors"** (above Connected Services, since it's the page's new
-headline capability). Follows the established card-list grammar of the Skills catalog
-(`index.html:5302-5353`):
-
-- **Card per connector:** name · transport badge (`Local` slate / `Remote` indigo) · assignment
-  summary ("All agents" / "3 agents") · aggregated status dots reusing the existing per-server
-  capabilities surface (green running / red failed / amber *pending restart*) · **Edit** /
-  **Remove** on hover (the inline-webhooks hover pattern already used by the per-agent MCP
-  editor).
-- **Empty state:** "No connectors yet. Connect an MCP server once and enable it for your whole
-  fleet." + **Add connector**.
-- **Add/Edit modal**, two-step:
-  1. *Type*: two radio cards —
-     **Remote server (recommended)** "Credentials stay in the vault; calls are proxied by the
-     mesh." *(disabled with a "Phase 2" tooltip until the gateway ships)* /
-     **Local command** "Runs inside each agent's container; credentials are exposed to that
-     agent."
-  2. *Details*: Local reuses the existing agent-config MCP form components verbatim — name,
-     command, args rows, env rows with the **Credential | Plain text** toggle, credential
-     dropdown, and the looks-like-a-secret inline warning (`index.html:3402-3450`). Plus the new
-     **Assignment** control: radio **All agents** / **Specific agents** with a checkbox list of
-     the fleet. Remote (Phase 2): URL + auth picker (None / API key → credential dropdown /
-     OAuth → Connect button, Phase 3) + the same Assignment control.
-- **Save flow (D7):** on a response with `affected_agents`, show a confirm dialog —
-  "This change affects **N agents** and takes effect after restart." **[Restart now]**
-  (calls `restart-batch`, per-agent progress via the existing restart events)
-  **[Later]** (amber *pending restart* chip on the connector card and on each affected agent's
-  row until bounced).
-
-**Per-agent view** (agent identity → existing MCP Servers section, `index.html:3104-3126`):
-inherited fleet connectors render as **locked rows** with an indigo `fleet` badge — exactly the
-Skills tab's fleet-badge convention (`index.html:3874-3924`) — linking to the Connectors page to
-edit. Agent-local servers stay editable in place, unchanged. The read path is
-`GET /api/connectors` filtered client-side by the selected agent; no new endpoint.
-
-**CLI parity:** `openlegion status`-style listing (`cli/repl.py:1195-1205`) appends
-`(+N fleet connectors)` when the store is non-empty. Read-only; CLI editing of the catalog is
-out of scope.
-
-### 4.7 Phase 1 explicitly does NOT
-
-- Touch `MCPServerConfig`, `AgentConfig`, agent-container code, or `MCP_SERVERS` semantics.
-- Migrate any existing per-agent config (none needed — both layers coexist by design).
-- Change credential exposure for stdio (that's Phase 2's job, via a different transport).
-- Give the operator agent any connector-management tool (D8).
+Connector cards: transport badge (`Local` slate / `Remote` indigo). Save flow keeps D7's
+confirm-restart dialog, skipped entirely for auth-only edits. Remote auth section copy:
+"Auth changes apply immediately — no restart" (scoped to remote per D12).
 
 ---
 
-## 5. Phase 2 — Remote transport & mesh gateway (the proxied path)
+## 6. Phase 2b — mesh gateway & wire-up
 
-### 5.1 Architecture
+### 6.1 Architecture
 
 ```
-Agent container                      Mesh host                        Remote MCP server
-┌──────────────────┐   tool call    ┌──────────────────────┐  HTTPS  ┌─────────────────┐
-│ ToolRegistry     │ ─────────────▶ │ POST /mesh/connectors │ ──────▶ │ streamable-http │
-│  "mcp_remote" ───┼── mesh_client  │   /call               │  +Bearer│  MCP endpoint   │
-│  entries         │ ◀───────────── │ MCPGateway            │ ◀────── │                 │
-└──────────────────┘    result      │  vault.resolve (token │         └─────────────────┘
-                                    │  never leaves mesh)   │
-                                    └──────────────────────┘
+Agent container                      Mesh host                          Remote MCP server
+┌──────────────────┐   tool call    ┌────────────────────────┐  HTTPS  ┌─────────────────┐
+│ ToolRegistry     │ ─────────────▶ │ POST /mesh/connectors/ │ ──────▶ │ streamable-http │
+│  "mcp_remote"  ──┼── mesh_client  │   call                 │ +Bearer │  MCP endpoint   │
+│  entries         │ ◀───────────── │ MCPGateway             │ ◀────── │                 │
+└──────────────────┘    result      │  per-call session;     │         └─────────────────┘
+                                    │  vault token never     │
+                                    │  leaves the mesh       │
+                                    └────────────────────────┘
 ```
 
-The mesh owns the HTTP session and the `Authorization` header. The agent sees tool schemas and
-results — never the token. This is the same trust shape as `execute_api_call` / `_handle_llm`
-(`src/host/credentials.py:1043-1272`), applied to MCP.
+Same trust shape as `execute_api_call`/`_handle_llm` (`src/host/credentials.py`): the mesh
+owns the HTTP session and the `Authorization` header; the agent sees schemas and results.
 
-### 5.2 `MCPGateway` — `src/host/mcp_gateway.py` (new, ~250 lines)
+### 6.2 Dependency (D10)
+
+`pyproject.toml`: add `mcp>=1.9` to core `dependencies`; the `[mcp]` extra remains as an
+alias for one release (install docs reference it). Update `README.md:911`'s "NOT installed
+by `./install.sh`" note. `Dockerfile.agent` unchanged (already installs it explicitly).
+Gateway imports lazily; SDK missing → `/mesh/connectors/*` return 503 with "mcp SDK not
+installed on the mesh host — re-run ./install.sh", mirroring `mcp_client.py:104-119`.
+
+### 6.3 `MCPGateway` — `src/host/mcp_gateway.py` (new)
 
 ```python
 class MCPGateway:
-    """Mesh-side sessions to remote (http) MCP connectors.
+    """Mesh-side access to remote (http) MCP connectors.
 
-    One lazily-opened session per connector, via the mcp SDK's
-    streamable-HTTP client (same package the agent already uses for stdio).
-    Auth header resolved through the vault at session open and re-resolved
-    once on a 401 mid-session — refresh-on-resolve means OAuth connections
-    (Phase 3) renew with no restart and no agent involvement.
+    PER-CALL sessions (D9): every operation opens streamablehttp_client +
+    ClientSession, initializes, executes, and closes — all inside the one
+    request task. No session state survives a request; there is nothing to
+    reopen on 401 (the next call re-resolves auth from the vault) and no
+    cross-task cancel-scope hazard.
+
+    SSRF posture (D16): before opening, the URL host is resolved and every
+    address checked against the private-range blocklist (the http_tool
+    ranges); the httpx client is built with follow_redirects=False via
+    httpx_client_factory. https enforced by the model validator (loopback
+    http exempt — and loopback exempt from the blocklist for that case).
+
+    No client callbacks are passed (D15): server-initiated sampling /
+    elicitation is rejected by the SDK default; pinned by test.
     """
 
-    INIT_TIMEOUT = 30   # parity with MCPClient.start (mcp_client.py:148-151)
-    CALL_TIMEOUT = 60   # parity with MCPClient.call_tool (mcp_client.py:270-272)
+    INIT_TIMEOUT = 30   # parity with MCPClient startup (mcp_client.py:148-151)
+    CALL_TIMEOUT = 60   # parity with MCPClient.call_tool (mcp_client.py:270-273)
+    RESULT_MAX_BYTES = 262_144  # D13; truncated results carry {"truncated": true}
 
     def __init__(self, store: ConnectorStore, vault: CredentialVault) -> None: ...
 
     async def list_tools(self, name: str) -> list[dict]:
-        """Sanitized tool schemas for one connector. Discovery result cached
-        until the connector record changes (catalog write bumps a per-name
-        generation counter) — remote servers are not re-walked per agent boot."""
+        """Sanitized tool schemas for one connector. Cached keyed on
+        (name, catalog generation); auth-only edits don't bump the
+        generation (D12), so the dashboard invalidates explicitly via
+        invalidate(name) after auth changes — a connector that 401'd
+        before Connect has no tools cached and must re-discover after."""
 
-    async def call_tool(
-        self, name: str, tool: str, arguments: dict, *, agent_id: str,
-    ) -> dict:
-        """Execute one tool call. Raises PermissionError unless the
-        connector is assigned to agent_id — assignment IS the authz gate."""
+    def invalidate(self, name: str) -> None: ...
+
+    async def call_tool(self, name, tool, arguments, *, agent_id) -> dict:
+        """PermissionError unless the connector is assigned to agent_id —
+        assignment IS the authz gate (operator included, D11). Result
+        byte-capped (D13). Upstream error bodies masked for the agent,
+        full text logged mesh-side (LLM-proxy policy)."""
 
     async def probe(self, name: str) -> dict:
-        """Dashboard 'Test connection': initialize + list_tools, returning
-        {ok, tools_count} or {ok: False, error, needs_auth: bool}.
-        needs_auth=True on 401 → the UI surfaces the Connect button (Phase 3)."""
-
-    async def aclose(self) -> None: ...
+        """Dashboard 'Test connection': initialize + list_tools →
+        {ok, tools_count} | {ok: False, error, needs_auth: bool}.
+        needs_auth=True on 401 → UI surfaces Connect (Phase 3).
+        Distinguishes DNS/timeout (server unreachable) from 4xx
+        (misconfigured) in the error string."""
 ```
 
-Implementation notes:
-- Transport: `mcp.client.streamable_http.streamablehttp_client` — already a dependency (the
-  agent image ships the `mcp` SDK; the host shares `pyproject.toml`).
-- **Sanitization at the trust boundary:** tool names/descriptions/schemas from a remote server
-  are untrusted text that will reach LLM prompts. The gateway applies the same metadata
-  sanitization `MCPClient.start()` applies for stdio (`mcp_client.py:164-179`) before caching.
-  Results flow back as ordinary tool output (identical posture to stdio results).
-- Auth resolution: `await vault.resolve_credential_async(auth.cred)` for `bearer`;
-  connection-key resolution (existing refresh-on-resolve) for `oauth`. One retry with a fresh
-  resolve on 401, then fail the call with a masked error (full text logged mesh-side, same
-  policy as the LLM proxy's masked upstream errors).
-- Session failure → next call reopens. No background reconnect loops (KISS; first failing call
-  pays the reconnect).
+- Auth resolution per call: `bearer` → `vault.resolve_credential_async(auth.cred)`
+  (`credentials.py:791`); `oauth` → `ensure_connection_token` (`credentials.py:1042`,
+  refresh-on-resolve; rotated refresh tokens already persisted at `:1142`).
+- Tool metadata sanitization mirrors the agent's stdio path (`mcp_client.py:154-188`):
+  `sanitize_for_prompt` on names/descriptions/schema strings, description caps, before
+  caching. Results flow back as ordinary tool output (identical posture to stdio results).
+- The private-range check duplicates `http_tool`'s ranges initially; extracting a shared
+  helper into `src/shared/` is welcome if it falls out naturally, not a prerequisite.
 
-### 5.3 Mesh endpoints — `src/host/server.py`
+### 6.4 Mesh endpoints — `src/host/server.py`
 
-Both agent-authenticated (standard `X-Agent-ID` + token), both rate-limited under a new
-`_RATE_LIMITS` category `"connectors"` (same budget as the API-proxy category):
+Agent-authenticated, new `_RATE_LIMITS["connectors"]` category (`server.py:1028`; same
+6000/60 budget as `api_proxy`):
 
 ```
-GET  /mesh/connectors/tools
-     → {"connectors": {"linear": {"tools": [...sanitized schemas...]}}}
-     Scope: only connectors assigned to the CALLER (store.http_for_agent).
-
-POST /mesh/connectors/call
-     Body: {"connector": "linear", "tool": "create_issue", "arguments": {...}}
-     Authz: assignment check inside gateway.call_tool (deny → 403).
-     Audit: audit_log(kind="connector_call", agent, connector, tool) —
-     arguments truncated to 500 chars, never logged raw.
-     → {"result": ...} | {"error": "..."}  (masked upstream errors)
+GET  /mesh/connectors/tools     → caller-scoped: store.http_for_agent(caller) only
+POST /mesh/connectors/call      → authz inside gateway.call_tool (unassigned → 403,
+                                  operator included — D11, pinned by an HTTP-level test)
+                                  audit_log(kind="connector_call", agent, connector, tool;
+                                  arguments truncated to 500 chars, never raw)
 ```
 
-### 5.4 Agent side — registration & routing
+Dashboard additions: `POST /api/connectors/{name}/probe` (CSRF-covered like every
+state-adjacent route) and the auth-edit → `gateway.invalidate(name)` hook.
 
-Minimal, additive, no loop changes (Known Constraint #2):
+### 6.5 Agent side — registration & dispatch
 
-- `src/agent/mesh_client.py`: `list_connector_tools()` and
-  `call_connector_tool(connector, tool, arguments)` — thin wrappers over the two endpoints.
-- `src/agent/__main__.py` (startup, after stdio MCP registration): fetch remote tools, register
-  each into `ToolRegistry` with `"function": "mcp_remote"` and the originating connector name.
-  Name conflicts reuse the existing policy verbatim: builtin collision or duplicate →
-  `mcp_{connector}_{tool}` (`mcp_client.py:154-162`). Mesh unreachable → warn and skip; the
-  agent boots without remote tools rather than crash-looping.
-- `src/agent/tools.py` `ToolRegistry.execute()`: one new dispatch arm next to the existing
-  `"mcp"` arm (`tools.py:259-265`) routing `"mcp_remote"` → `mesh_client.call_connector_tool`.
+No loop changes (Known Constraint #2). Note the original plan misdescribed dispatch: there is
+no `"mcp"` string arm — stdio dispatch is the `self._mcp_client.has_tool(name)` short-circuit
+at `src/agent/tools.py:252`, which runs FIRST. Remote registration must account for that:
 
-Tool *lists* are fetched at agent startup, so editing a remote connector's tools still follows
-the uniform restart-to-apply rule (D7) — predictable and identical across transports. What does
-**not** need a restart: token rotation, OAuth refresh, or re-connecting auth — all resolved
-per-call on the mesh. That asymmetry is the payoff of the gateway and gets a line in the UI
-("Auth changes apply immediately; server changes apply on restart").
+- `src/agent/mesh_client.py`: `list_connector_tools()` / `call_connector_tool(...)` — thin
+  wrappers over the two mesh endpoints.
+- `src/agent/__main__.py` (after stdio MCP startup): fetch remote tools, register each into
+  `ToolRegistry` with `"function": "mcp_remote"` + the originating connector name.
+  **Conflict policy:** a remote tool whose name collides with a builtin OR an
+  stdio-registered tool registers as `mcp_{connector}_{tool}` — checked against the union of
+  both namespaces, because the `has_tool` short-circuit would otherwise silently shadow it.
+  Mesh unreachable at boot → warn, register nothing, boot anyway; the agent's
+  `/capabilities` payload includes remote connector status (name, tool count, last error)
+  for stdio-parity status dots on the Connectors page.
+- `ToolRegistry.execute()`: route registered `"mcp_remote"` entries →
+  `mesh_client.call_connector_tool`.
 
-### 5.5 Security posture (Phase 2)
-
-| Property | Mechanism |
-|---|---|
-| Token never enters container | Resolved mesh-side in `MCPGateway`; agents receive schemas/results only |
-| Authorization | Assignment check on every `/mesh/connectors/call` (deny-all default: unassigned = 403) |
-| Prompt injection via tool metadata | Gateway sanitizes schemas at discovery (stdio-parity) |
-| Abuse / runaway loops | `_RATE_LIMITS["connectors"]` per-agent; 60 s call timeout |
-| Audit | `connector_call` audit rows (agent, connector, tool; args truncated) |
-| Egress | Mesh-host outbound to an **operator-supplied** URL — operator is full-trust, but `HttpConnector._https_only` still enforces TLS (loopback exempt for self-hosted dev) |
-| Secret leakage in errors | Upstream error bodies masked for the agent, full text logged mesh-side (LLM-proxy policy) |
+Tool lists are fetched at agent boot, so URL/assignment edits follow the uniform
+restart-to-apply rule (D7/D12). Auth changes apply per-call with no restart — that asymmetry
+is the payoff of the gateway and is stated in the UI (§5.4).
 
 ---
 
-## 6. Phase 3 — "Paste URL → Connect" OAuth flow
+## 7. Phase 3 — "paste URL → Connect" OAuth flow
 
-Everything hard here is already built and battle-tested in the Option-B Google flow
-(`2026-06-04-oauth-integrations-connect-flow.md`): CSRF state store (single-use, TTL,
-session-bound), callback handling, `store_connection`, vault refresh-on-resolve, redaction.
-Phase 3 generalizes the *front half* (where the authorize/token endpoints come from) for MCP's
-OAuth 2.1 profile.
+The back half is shipped and verified: `OAuthStateStore` (`src/host/oauth_state.py:37` —
+single-use, TTL, session-bound), `generate_pkce` (`oauth_providers.py:173`),
+`GET /integrations/{provider}/connect` (`dashboard/server.py:4742`) + `/callback` (`:4782`),
+`store_connection` (`credentials.py:990`, called at `dashboard/server.py:4820`),
+refresh-on-resolve with rotated-refresh-token persistence (`credentials.py:1142`).
 
-### 6.1 Flow
+The front half does **not** generalize as the original plan claimed — two prerequisite
+changes land before any flow code:
+
+### 7.1 Prerequisite: refresh machinery extension — `src/host/credentials.py`
+
+As shipped, `ensure_connection_token` resolves the provider from the **static registry** and
+**silently returns the stale access token** when `get_provider()` misses
+(`credentials.py:1077`); client id/secret come from system-env keys; and
+`exchange_oauth_code` hard-requires a `client_secret` (`credentials.py:933`) — OAuth 2.1
+public clients (DCR + PKCE, no secret) cannot exchange at all. "Refresh-on-resolve keeps it
+fresh forever" is false for MCP connections until this lands:
+
+- At callback time, persist **inside the connection blob**: `token_endpoint`, `client_id`,
+  optional `client_secret`, `uses_pkce`, `resource`. (The blob already holds refresh tokens —
+  equivalent custody; no parallel registry of dynamic providers to garbage-collect.)
+- `ensure_connection_token`: prefer blob-embedded endpoint/credentials over the registry;
+  unknown-provider-with-no-blob-endpoint keeps the legacy stale-return path so existing
+  Google connections are untouched.
+- `exchange_oauth_code`: support public clients (no secret; PKCE verifier).
+
+### 7.2 Flow
 
 ```
-1. Operator adds a Remote connector. probe() returns 401 + needs_auth
-   → card shows [Connect].
+1. Operator adds a Remote connector; probe() → 401 + needs_auth → card shows [Connect].
 2. GET /integrations/mcp/{name}/connect
-   a. Discovery: GET {mcp_origin}/.well-known/oauth-protected-resource
-      (RFC 9728) → authorization_servers[0]
-   b. GET AS metadata (RFC 8414) → authorization/token/registration endpoints
-   c. Client identity: if registration_endpoint present → Dynamic Client
-      Registration (RFC 7591), client_id (+secret) persisted on the connector
-      record / vault. Else → operator-supplied client_id/secret fields in the
-      modal (the BYO fallback, exactly Option B's posture).
-   d. Build authorize URL: PKCE S256 (always), resource={mcp_url} (RFC 8707),
+   a. Discovery: {mcp_origin}/.well-known/oauth-protected-resource (RFC 9728)
+      → authorization_servers[0]
+   b. AS metadata (RFC 8414) → authorization/token/registration endpoints
+   c. Client identity: registration_endpoint present → DCR (RFC 7591);
+      client_secret (if any) → connection blob via the vault, never the
+      connector record on disk; deep_redact on all flow logging.
+      No DCR → §11-Q4 (BYO fallback: proposed CUT from v1).
+   d. Authorize URL: PKCE S256 always, resource={mcp_url} (RFC 8707),
       state from the EXISTING state store.
-   e. 302 → provider consent screen.
+   e. 302 → provider consent.
 3. GET /integrations/mcp/{name}/callback?code&state
-   → validate state → token exchange with code_verifier
-   → store_connection(f"mcp_{name}", access, refresh, expiry, scopes)
+   → validate state → exchange (public-client capable, §7.1)
+   → store_connection(f"mcp_{name}", …including blob-embedded endpoints…)
    → connector.auth = {kind: "oauth", connection: f"mcp_{name}"} persisted
+     (auth-only edit → no pending-restart, D12; gateway.invalidate(name))
    → 302 → /#system/integrations?connected={name}
-4. Gateway resolves the connection per call; refresh-on-resolve keeps it
-   fresh forever. No restart needed (5.4).
+4. Gateway resolves per call; refresh-on-resolve keeps it fresh. No restart.
 ```
 
-### 6.2 Phase-3 specifics to get right
+### 7.3 Phase-3 specifics to get right
 
-- **Deployment:** engines sit behind the Caddy `forward_auth` SSO gate. The callback arrives on
-  an already-authenticated operator session, but **verify in staging that the gate passes
-  `?code&state` query params through untouched** — same verification the Google callback
-  needed; if it passed there, this path is identical.
-- **Discovery fetches are mesh-side requests to an operator-supplied origin.** Operator is
-  full-trust (it's their server), but: https enforced by the model validator, responses size-capped
-  (64 KB) and content-type-checked, and discovered endpoint URLs must themselves be https.
-- **DCR responses** can include a `client_secret` → straight to the vault, never the connector
-  record on disk; `deep_redact` on all flow logging (existing redaction module).
-- **Servers without protected-resource metadata** (non-compliant): fall back to the BYO
-  client-id fields rather than failing the whole add flow. The error message says exactly which
-  discovery step failed.
+- **Discovery SSRF (D16) is a merge gate, not a footnote.** Every discovered URL — AS
+  metadata, authorize, token, registration — gets https + public-IP-blocklist validation;
+  discovery fetches run with `follow_redirects=False`, a 64 KB cap, and content-type checks.
+  The validator on the *pasted* URL covers nothing the server serves back.
+- **Caddy `forward_auth` staging check stays a gate:** verify `?code&state` pass through
+  untouched on an engine subdomain before merge (same verification the Google callback
+  needed).
+- **Servers issuing no refresh token:** the Google callback path rejects connections lacking
+  one when `refresh_required`. Many MCP AS implementations issue short-lived tokens with no
+  refresh. Policy is §11-Q3 (proposed: accept; expiry surfaces as `needs_auth` on probe →
+  reconnect card). Don't inherit the Google default silently.
 
 ---
 
-## 7. Non-regression contract
+## 8. Non-regression contract
 
-Run-through before each phase merges:
+Run-through before each phase merges (rewritten for shipped reality):
 
-1. **No `connectors.json` ⇒ bit-identical behavior.** `set_connector_store(None)` (or absent
-   file ⇒ empty catalog) makes `_effective_mcp_servers` return the local list unchanged; both
-   `MCP_SERVERS` sites then behave exactly as today. Pin with a test asserting env equality.
-2. **Per-agent `mcp_servers` editor untouched.** GET masking (`_mask_mcp_servers_for_get`),
-   PUT preserve-or-replace, `_canonicalize_mcp_servers` diffing, restart-on-touch: zero changes.
-3. **Fail-closed catalog, fail-open agent start.** Corrupt `connectors.json` ⇒ empty catalog +
-   error log (matches `PermissionMatrix._load` policy); a store *exception* during start ⇒
-   local-only merge, never a blocked agent.
-4. **Credential gates unchanged.** Fleet stdio connectors flow through the same
-   `resolve_cred_handles` + `can_access_credential` path; an unauthorized `$CRED{}` still fails
-   the start loudly (`runtime.py:131-139`), now *also* pre-flighted at PUT time per assigned
-   agent (4.5).
-5. **No mass-restart surprises.** No code path restarts an agent without an explicit operator
-   action (`restart-batch` is only ever called from the confirm dialog).
-6. **Frozen surfaces respected.** Tab ID `integrations` unchanged (Constraint #5); no new
-   module-level globals (Constraint #8); no agent-loop changes (Constraint #2); operator cannot
-   manage connectors (D8, `docs/mcp.md` decision).
-7. **Token-hygiene parity.** Remote-connector secrets must never appear in: connector GET
-   responses (auth shows `kind` + names only), audit rows, event payloads, agent-visible errors,
-   or `MCP_SERVERS` (http connectors are excluded from serialization by construction —
-   `stdio_for_agent` only).
+1. **http connectors never reach a container.** An `HttpConnector` assigned `["*"]` appears
+   in NEITHER backend's `MCP_SERVERS` env (pin on both `runtime.py:464` and `:1156` paths) —
+   §5.2's `snapshot_for_agent` filter, the highest-severity pin in this plan.
+2. **No `connectors.json` ⇒ behavior unchanged**; corrupt file ⇒ empty catalog + error log;
+   malformed records dropped per-record. (Existing Phase-1 pins stay green.)
+3. **stdio semantics byte-identical**: env masking, `$CRED` per-agent pre-flight,
+   per-connector degradation at start (`runtime.py:137+`), generation-based pending-restart.
+4. **Dirty matrix (D12)**: http auth-only edit → no generation bump, no restart prompt,
+   gateway cache invalidated; URL/assignment edit → pending-restart as today.
+5. **No mass-restart surprises** (D7): restart-batch only from the confirm dialog.
+6. **Operator gating (D11)**: unassigned operator → 403 on `/mesh/connectors/call`
+   (HTTP-level test; the `can_*` grep trip-wire at `tests/test_operator_trust_tier.py:490`
+   does not cover assignment gates).
+7. **Sampling/elicitation rejected (D15)** — pinned.
+8. **Token hygiene**: remote secrets never in connector GET responses (kind + names only),
+   audit rows, event payloads, agent-visible errors, or `MCP_SERVERS`.
+9. **Frozen surfaces**: tab ID `integrations`; no new module-level globals (Constraint #8);
+   no agent-loop changes (Constraint #2); connector writes human-only (D8).
 
-## 8. Testing plan
+## 9. Testing plan
 
-**Phase 1**
-- `tests/test_connectors_store.py` — CRUD; atomic save (inject crash between tempfile and
-  replace, assert old file intact); fail-closed corrupt load; `"*"` vs explicit assignment;
-  case-insensitive name uniqueness; `stdio_for_agent` strips catalog-only fields.
-- `tests/test_runtime.py` (extend) — merge precedence (local wins, warning logged); fleet-only
-  agent gets `MCP_SERVERS`; no-store ⇒ env byte-identical to today (regression pin #1); store
-  exception ⇒ local-only; merged `$CRED{}` resolution still permission-gated; registry
-  `agent_info["mcp_servers"]` stays agent-local after a merged start (§4.4 pin).
-- `tests/test_dashboard_connectors.py` — PUT validation error shape matches the existing
-  mcp_servers 400 contract; env preserve-or-replace round-trip; per-agent cred pre-flight
-  (blocked agent named in detail); affected-agents = before ∪ after; DELETE; restart-batch
-  sequencing + per-agent results; CSRF header required.
+**Phase 2a**
+- types: union round-trip; defaulted discriminator accepts legacy stdio records (no
+  `transport` key); http url validator (https required, localhost http allowed —
+  `https://169.254.169.254` is ACCEPTED at the model layer by design; the gateway is the
+  SSRF layer); `ConnectorAuth` kind/field coupling.
+- store: `snapshot_for_agent` excludes http (regression pin §8-1); `http_for_agent`;
+  auth-only upsert skips `_touch` (generation unchanged, `pending_restart()` empty) while
+  URL/assignment edits bump; per-record drop of malformed/unknown-transport records.
+- dashboard: `TypeAdapter` 400 shape parity; per-transport no-op detection; http GET masking
+  (no token values); `auth.cred` existence-only pre-flight (D14 — explicitly assert NO
+  per-agent permission check); auth-only PUT returns `restart_required: false`.
 
-**Phase 2**
-- `tests/test_mcp_gateway.py` — mocked streamable-http session: discovery caching +
-  invalidation on catalog write; metadata sanitization applied; 401 → single re-resolve retry;
-  call timeout; assignment denial raises.
-- Mesh endpoint tests — unassigned agent gets 403; rate-limit category enforced; audit row
-  shape; masked upstream errors.
-- Agent-side — `mcp_remote` registration with conflict prefixing; `ToolRegistry.execute`
-  routing; mesh-unreachable-at-boot degrades gracefully.
+**Phase 2b**
+- gateway (mocked streamable-http): per-call open/close (no state across calls — assert via
+  open/close counts); concurrent calls from multiple agents don't interfere; discovery cache
+  keyed on generation + explicit `invalidate`; metadata sanitization applied; 401 →
+  `needs_auth` on probe; result > cap → truncated + flag; **no sampling/elicitation
+  callbacks registered** (D15 pin); redirects not followed; private-IP host rejected before
+  connect (D16); SDK-missing → 503 with reason (D10).
+- mesh endpoints: unassigned agent 403; **operator unassigned 403** (D11 pin); rate-limit
+  category; audit row shape (args truncated); masked upstream errors.
+- agent side: `mcp_remote` registration; conflict prefix against builtin AND stdio names
+  (the `tools.py:252` short-circuit shadow case); `execute()` routing; mesh-unreachable boot
+  degrade; `/capabilities` includes remote connector status.
 
 **Phase 3**
-- httpx `MockTransport` end-to-end: RFC 9728 → RFC 8414 → DCR → PKCE exchange; state replay
-  rejected; missing protected-resource metadata falls back to BYO fields; size-capped discovery
-  responses; secrets absent from logs (assert via `deep_redact` spy).
+- httpx `MockTransport` end-to-end: RFC 9728 → RFC 8414 → DCR → PKCE exchange (public
+  client, no secret); state replay rejected; discovery responses size-capped +
+  content-type-checked; **discovered private-IP/non-https endpoints rejected** (D16);
+  blob-embedded refresh: token endpoint taken from blob (not registry), rotated refresh
+  token persisted, legacy Google connections unaffected; no-refresh-token policy per §11-Q3;
+  secrets absent from logs (`deep_redact` spy).
 
-**E2E** (existing skip-without-Docker pattern): one fleet stdio connector assigned `["*"]`,
-two agents, assert both report it in `/capabilities` and the tool round-trips on each.
-
-## 9. File-by-file change summary
-
-| File | Phase | Change |
-|---|---|---|
-| `src/shared/types.py` | 1 (+2) | `ConnectorAuth`, `StdioConnector`, `HttpConnector`, `Connector` union, `CONNECTOR_ALL_AGENTS` |
-| `src/host/connectors.py` | 1 | **New** — `ConnectorStore` |
-| `src/host/runtime.py` | 1 | `set_connector_store`, `_effective_mcp_servers`; 2-line edits at `:423` and `:1106` |
-| `src/cli/runtime.py` | 1 | Instantiate store; wire at `:381` and `:648`; pass to dashboard factory |
-| `src/dashboard/server.py` | 1 | `GET/PUT/DELETE /api/connectors*`, `POST /api/agents/restart-batch`; audit + events |
-| `src/dashboard/static/js/app.js` | 1 | Label `'Connectors'` at `:508`; connectors state + methods (mirroring the skills-state block at `:518-529`) |
-| `src/dashboard/templates/index.html` | 1 | MCP Connectors section on the Integrations page; fleet-badge rows in the per-agent MCP section |
-| `src/cli/repl.py` | 1 | Status line `(+N fleet connectors)` |
-| `src/host/mcp_gateway.py` | 2 | **New** — `MCPGateway` |
-| `src/host/server.py` | 2 | `/mesh/connectors/tools`, `/mesh/connectors/call`; `_RATE_LIMITS["connectors"]` |
-| `src/agent/mesh_client.py` | 2 | `list_connector_tools`, `call_connector_tool` |
-| `src/agent/__main__.py`, `src/agent/tools.py` | 2 | Remote-tool registration; `mcp_remote` dispatch arm |
-| `src/host/oauth_providers.py` + dashboard routes | 3 | MCP discovery/DCR/PKCE connect + callback (reusing Option-B state store + `store_connection`) |
-| `docs/mcp.md`, `docs/dashboard.md`, `CLAUDE.md` | each | Document the layer shipped in that phase |
+**E2E** (existing skip-without-Docker pattern): one stdio + one bearer http connector
+assigned `["*"]`, two agents; both report both in `/capabilities`; the http tool round-trips
+through the gateway; the stdio connector's container env never contains http auth.
 
 ## 10. Out of scope / tracked follow-ups
 
-- **Operator-agent connector requests** (request-card pattern) — deferred per `docs/mcp.md`; D8.
-- **Per-tool enable/disable within a connector** — YAGNI until a real connector ships too many
-  tools; the schema leaves room (`tools_allow: list[str]` on the record) without committing now.
-- **Hot tool-list refresh without restart** — uniform restart rule (D7) until demand exists.
-- **Curated connector directory** ("one-click Linear/GitHub/Slack") — a static JSON of presets
-  that pre-fills the Add modal; pure UI sugar once Phase 3 lands. Pin installs to verified
-  endpoints when this becomes agent-reachable in any form (security review M1/H15 posture).
+- **Vault credential rotation does not pending-restart stdio-assigned agents** — plaintext
+  baked into container env at start; rotating `$CRED{x}` leaves running containers on the
+  stale secret with no badge. Pre-existing gap, surfaced by D12's copy-scoping. Cheap fix
+  when picked up: vault store/update → `mark_dirty` agents assigned any stdio connector
+  referencing the handle.
+- **Operator-agent connector requests** (request-card pattern) — deferred per `docs/mcp.md`;
+  D8.
+- **Per-tool enable/disable within a connector** — YAGNI; schema leaves room
+  (`tools_allow: list[str]`) without committing.
+- **Hot tool-list refresh without restart** — uniform restart rule until demand exists.
+- **Long-lived gateway sessions** — only behind a dedicated owner-task design, only if
+  per-call latency ever matters (D9).
+- **Curated connector directory** ("one-click Linear/GitHub/Slack" presets) — UI sugar once
+  Phase 3 lands; pin to verified endpoints if it ever becomes agent-reachable (M1/H15
+  posture).
 - **`If-Match` concurrency on connector PUT** — last-write-wins, consistent with every other
   dashboard config edit under the single-operator model.
+
+## 11. Open product decisions — confirm before the named phase merges
+
+| # | Question | Proposed default | Gates |
+|---|---|---|---|
+| **Q1** | Does `"*"` assignment include the **operator agent**? It does today — every fleet-wide connector's tool schemas land in the operator's context, feeding the known operator token-bloat problem. | Keep `"*"` = truly all (matches shipped semantics + the `can_message` glob convention); revisit if operator context telemetry shows connector schemas as a material contributor. | 2b |
+| **Q2** | **Remote edits still bounce containers** (tools register at agent boot): adding/changing a URL restarts N agents even though nothing in the container changed but schemas. Acceptable story? | Yes for v1 — uniform with D7; hot refresh is a tracked follow-up. | 2b |
+| **Q3** | **MCP servers issuing no refresh token**: reject at connect (the Google path's `refresh_required` default) or accept short-lived? | Accept; expiry surfaces as `needs_auth` on probe → reconnect card. | 3 |
+| **Q4** | **BYO client-id fallback** for non-DCR servers: extra form fields + a second secret-entry path. Launch targets (Linear, GitHub, …) support DCR. | Cut from v1; DCR-only. The add-flow error names the missing discovery step so the gap is diagnosable. | 3 |
+| **Q5** | **Downgrade data loss**: an older engine drops http records on load (by design, per-record) but its next *save* permanently deletes them from the file. | Accept + document in `docs/mcp.md` (single-operator, short rollback windows); revisit a `version` key only if a rollback actually bites. | 2a |
+| **Q6** | **Result cap value** (D13) — caps change observable agent behavior. | 256 KiB + `truncated` flag. | 2b |
+
+Resolved: **Remote as the default-selected Add-connector type** — confirmed by user
+2026-06-11 (D17).
+
+## 12. File-by-file change summary
+
+| File | Phase | Change |
+|---|---|---|
+| `src/shared/types.py` | 2a | `ConnectorAuth`, `HttpConnector`, `Connector` union (`MCPConnector` keeps its name as the stdio variant) |
+| `src/host/connectors.py` | 2a | Union-aware `_load`; `snapshot_for_agent` stdio filter (§5.2 — leak pin); `http_for_agent`; auth-only dirty matrix in `upsert` |
+| `src/dashboard/server.py` | 2a | Transport-aware PUT/GET/no-op/pre-flight (§5.3) |
+| `src/dashboard/templates/index.html`, `static/js/app.js` | 2a | Transport chooser (net-new), Remote default-selected (D17), remote card states |
+| `pyproject.toml`, `README.md` | 2b | `mcp>=1.9` to core deps; update the install note (D10) |
+| `src/host/mcp_gateway.py` | 2b | **New** — per-call-session `MCPGateway` (D9, D13, D15, D16) |
+| `src/host/server.py` | 2b | `/mesh/connectors/tools`, `/mesh/connectors/call`; `_RATE_LIMITS["connectors"]` |
+| `src/dashboard/server.py` | 2b | `POST /api/connectors/{name}/probe`; auth-edit → `gateway.invalidate` |
+| `src/agent/mesh_client.py` | 2b | `list_connector_tools`, `call_connector_tool` |
+| `src/agent/__main__.py`, `src/agent/tools.py` | 2b | Remote-tool registration (conflict prefix vs builtin∪stdio), `mcp_remote` dispatch, capabilities status |
+| `src/host/credentials.py` | 3 | Blob-embedded token endpoints; public-client `exchange_oauth_code` (§7.1) |
+| dashboard routes | 3 | `/integrations/mcp/{name}/connect` + `/callback` (discovery, DCR, PKCE; D16 posture) |
+| `docs/mcp.md`, `docs/dashboard.md`, `CLAUDE.md` | each | Document the layer shipped in that phase |
