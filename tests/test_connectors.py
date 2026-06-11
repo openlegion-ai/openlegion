@@ -755,22 +755,44 @@ class TestConnectorEndpointsHttp:
         assert resp.status_code == 400
         assert "linear_token" in resp.json()["detail"]
 
-    def test_auth_only_edit_no_restart(self, connector_env):
+    def test_auth_rotation_no_restart(self, connector_env):
+        # Same kind, new secret: applies on the gateway's next per-call
+        # resolve — nothing the agent registered at boot changes.
         client, store, *_ = connector_env
         client.put("/dashboard/api/connectors/linear", json=self._BODY)
         for agent in ("alpha", "beta"):
             _, gen = store.snapshot_for_agent(agent)
             store.record_agent_start(agent, gen)
-        store.mark_dirty([])  # no-op; pending should be empty now
+        resp = client.put("/dashboard/api/connectors/linear", json={
+            **self._BODY,
+            "auth": {"kind": "bearer", "cred": "linear_token_v2"},
+        })
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["restart_required"] is False
+        assert data["affected_agents"] == []
+        assert store.pending_restart() == []
+        assert store.get("linear").auth.cred == "linear_token_v2"
+
+    def test_auth_mode_change_requires_restart(self, connector_env):
+        # bearer→none (or none→oauth, …) changes what agents would
+        # register at boot — a connector that 401'd registered zero
+        # tools — so the restart prompt fires even though the edit is
+        # auth-only. Rotation (above) stays restart-free.
+        client, store, *_ = connector_env
+        client.put("/dashboard/api/connectors/linear", json=self._BODY)
+        for agent in ("alpha", "beta"):
+            _, gen = store.snapshot_for_agent(agent)
+            store.record_agent_start(agent, gen)
         resp = client.put("/dashboard/api/connectors/linear", json={
             **self._BODY, "auth": {"kind": "none"},
         })
         assert resp.status_code == 200
         data = resp.json()
-        assert data["restart_required"] is False
-        assert data["affected_agents"] == []
-        assert store.pending_restart() == []
-        # ...and the auth change IS live in the catalog.
+        assert data["restart_required"] is True
+        assert data["affected_agents"] == ["alpha", "beta"]
+        assert store.pending_restart() == ["alpha", "beta"]
+        # ...and the auth change is live in the catalog regardless.
         assert store.get("linear").auth.kind == "none"
 
     def test_url_edit_requires_restart(self, connector_env):

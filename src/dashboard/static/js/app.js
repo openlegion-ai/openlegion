@@ -6901,6 +6901,14 @@ function dashboard() {
         } else {
           this.showToast(`Connector "${name}" saved.`);
         }
+        // Detection-driven auth: probe every saved remote connector
+        // immediately so the row shows its real state without a manual
+        // Test click — a 401-with-OAuth-metadata server renders the
+        // Connect button right away (the auth dropdown is for explicit
+        // API keys, not a decision the user should have to get right).
+        if (isRemote && d._authKind !== 'oauth') {
+          this.probeConnector(name);
+        }
       } catch (e) {
         this.connectorGlobalError = e.message || String(e);
       } finally {

@@ -475,7 +475,7 @@ class TestConnectCallback:
         assert params["resource"] == MCP_URL
         assert params["state"]
 
-    def test_callback_binds_connection_no_restart(self, oauth_dash_env):
+    def test_callback_first_bind_marks_pending_restart(self, oauth_dash_env):
         client, store, gateway, vault = oauth_dash_env
         # Simulate "agent already running current catalog".
         _, gen = store.snapshot_for_agent("alpha")
@@ -489,12 +489,14 @@ class TestConnectCallback:
         assert resp.status_code == 302
         assert "integration_connected=mcp_linear" in resp.headers["location"]
         vault.store_connection.assert_called_once()
-        # Connector now bound; auth-only edit → NO pending restart;
-        # gateway cache invalidated for re-discovery.
         bound = store.get("linear")
         assert bound.auth.kind == "oauth"
         assert bound.auth.connection == "mcp_linear"
-        assert store.pending_restart() == []
+        # FIRST bind: the agent registered zero tools at its last boot
+        # (the connector 401'd), so it must be marked pending-restart —
+        # nothing else would ever prompt the bounce that registers the
+        # now-reachable tools.
+        assert store.pending_restart() == ["alpha"]
         gateway.invalidate.assert_called_with("linear")
         # The discovered endpoint + DCR identity went to the exchange.
         kwargs = vault.exchange_code_dynamic.await_args.kwargs
@@ -502,6 +504,30 @@ class TestConnectCallback:
         assert kwargs["client_id"] == "cid"
         assert kwargs["client_secret"] is None
         assert kwargs["resource"] == MCP_URL
+
+    def test_callback_reconnect_is_rotation_no_restart(self, oauth_dash_env):
+        client, store, gateway, vault = oauth_dash_env
+        # First bind.
+        params = self._connect(client)
+        client.get(
+            "/dashboard/integrations/mcp/linear/callback",
+            params={"code": "c0de", "state": params["state"]},
+            follow_redirects=False,
+        )
+        # Agent restarts onto the bound catalog.
+        _, gen = store.snapshot_for_agent("alpha")
+        store.record_agent_start("alpha", gen)
+        assert store.pending_restart() == []
+        # RE-connect (already bound): rotation semantics — no new
+        # pending-restart, the fresh token applies per call.
+        params = self._connect(client)
+        resp = client.get(
+            "/dashboard/integrations/mcp/linear/callback",
+            params={"code": "c0de", "state": params["state"]},
+            follow_redirects=False,
+        )
+        assert "integration_connected" in resp.headers["location"]
+        assert store.pending_restart() == []
 
     def test_callback_state_replay_rejected(self, oauth_dash_env):
         client, *_ = oauth_dash_env
