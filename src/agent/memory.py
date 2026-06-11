@@ -28,7 +28,7 @@ import sqlite_vec
 from sqlite_vec import serialize_float32
 
 from src.shared.sqlite_helpers import open_db
-from src.shared.types import MemoryFact, MemoryLog
+from src.shared.types import MemoryFact
 from src.shared.utils import dumps_safe, generate_id, setup_logging
 
 logger = setup_logging("agent.memory")
@@ -726,27 +726,6 @@ class MemoryStore:
             task_id, tokens_used, duration_ms,
         )
 
-    def get_recent_logs(self, limit: int = 50) -> list[MemoryLog]:
-        """Return recent action log entries."""
-        rows = self.db.execute(
-            "SELECT id, action, input_summary, output_summary, task_id, "
-            "tokens_used, duration_ms, timestamp FROM logs ORDER BY timestamp DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-        return [
-            MemoryLog(
-                id=r[0],
-                action=r[1],
-                input_summary=r[2],
-                output_summary=r[3],
-                task_id=r[4],
-                tokens_used=r[5],
-                duration_ms=r[6],
-                timestamp=r[7],
-            )
-            for r in rows
-        ]
-
     # ── Tool outcome tracking ─────────────────────────────────
 
     @staticmethod
@@ -787,8 +766,9 @@ class MemoryStore:
         tool_name: str | None = None,
         limit: int = 20,
         params_hash: str | None = None,
+        success: bool | None = None,
     ) -> list[dict]:
-        """Query recent tool outcomes, optionally filtered by tool and/or params_hash."""
+        """Query recent tool outcomes, optionally filtered by tool, params_hash, and/or success."""
         query = "SELECT tool_name, params_hash, outcome, success, created_at FROM tool_outcomes"
         conditions: list[str] = []
         params: list[Any] = []
@@ -798,6 +778,9 @@ class MemoryStore:
         if params_hash:
             conditions.append("params_hash = ?")
             params.append(params_hash)
+        if success is not None:
+            conditions.append("success = ?")
+            params.append(1 if success else 0)
         if conditions:
             query += " WHERE " + " AND ".join(conditions)
         query += " ORDER BY created_at DESC LIMIT ?"

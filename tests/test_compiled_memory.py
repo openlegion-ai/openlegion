@@ -219,6 +219,7 @@ class TestConsolidateMemory:
         memory.get_high_salience_facts = AsyncMock(
             return_value=[_fake_fact("pref", "dark mode")]
         )
+        memory.get_tool_history = MagicMock(return_value=[])
 
         cm = ContextManager(
             max_tokens=1000, llm=llm, workspace=ws, memory=memory,
@@ -229,6 +230,53 @@ class TestConsolidateMemory:
         ws.write_compiled_memory.assert_called_once()
         assert "NEW COMPILED HEAD" in ws.write_compiled_memory.call_args[0][0]
         ws.mark_consolidated.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_consolidation_includes_failures_section(self):
+        """Recent tool failures feed the consolidation prompt so the pass
+        can distill a repeating cause into one durable lesson."""
+        ws = self._make_workspace(due=True, log="L" * 2_000)
+        llm = MagicMock()
+        llm.chat = AsyncMock(
+            return_value=LLMResponse(content="HEAD", tokens_used=10)
+        )
+        memory = MagicMock()
+        memory.get_high_salience_facts = AsyncMock(return_value=[])
+        memory.get_tool_history = MagicMock(return_value=[
+            {"tool_name": "http_request", "params_hash": "h",
+             "outcome": "error: 500 from api.example.com",
+             "success": False, "created_at": "2026-06-11 09:00:00"},
+        ])
+
+        cm = ContextManager(
+            max_tokens=1000, llm=llm, workspace=ws, memory=memory,
+        )
+        await cm._maybe_consolidate_memory()
+
+        memory.get_tool_history.assert_called_once_with(limit=15, success=False)
+        prompt = llm.chat.call_args.kwargs["messages"][0]["content"]
+        assert "## Recent tool failures" in prompt
+        assert "http_request" in prompt
+
+    @pytest.mark.asyncio
+    async def test_consolidation_skips_failures_section_when_clean(self):
+        """No recorded failures → the prompt carries no failures section."""
+        ws = self._make_workspace(due=True, log="L" * 2_000)
+        llm = MagicMock()
+        llm.chat = AsyncMock(
+            return_value=LLMResponse(content="HEAD", tokens_used=10)
+        )
+        memory = MagicMock()
+        memory.get_high_salience_facts = AsyncMock(return_value=[])
+        memory.get_tool_history = MagicMock(return_value=[])
+
+        cm = ContextManager(
+            max_tokens=1000, llm=llm, workspace=ws, memory=memory,
+        )
+        await cm._maybe_consolidate_memory()
+
+        prompt = llm.chat.call_args.kwargs["messages"][0]["content"]
+        assert "## Recent tool failures" not in prompt
 
     @pytest.mark.asyncio
     async def test_skips_when_not_due(self):

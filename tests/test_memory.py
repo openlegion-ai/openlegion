@@ -137,9 +137,11 @@ async def test_high_salience_facts(memory):
 @pytest.mark.asyncio
 async def test_log_action(memory):
     await memory.log_action(action="test_action", input_summary="input", output_summary="output")
-    logs = memory.get_recent_logs(limit=10)
-    assert len(logs) == 1
-    assert logs[0].action == "test_action"
+    # Assert via the table directly — the read-side accessor (get_recent_logs)
+    # was dead code and has been removed; only the write path is production.
+    rows = memory.db.execute("SELECT action FROM logs").fetchall()
+    assert len(rows) == 1
+    assert rows[0][0] == "test_action"
 
 
 @pytest.mark.asyncio
@@ -418,6 +420,40 @@ class TestToolOutcomes:
         await memory.store_tool_outcome("web_search", {}, "results")
         history = memory.get_tool_history(limit=10)
         assert len(history) == 2
+
+    @pytest.mark.asyncio
+    async def test_get_tool_history_success_filter(self, memory):
+        await memory.store_tool_outcome("exec", {"command": "ls"}, "file.txt", success=True)
+        await memory.store_tool_outcome("exec", {"command": "bad"}, "error: not found", success=False)
+        await memory.store_tool_outcome("web_search", {"q": "x"}, "timeout", success=False)
+        failures = memory.get_tool_history(limit=10, success=False)
+        assert len(failures) == 2
+        assert all(h["success"] is False for h in failures)
+        successes = memory.get_tool_history(limit=10, success=True)
+        assert len(successes) == 1
+        assert successes[0]["outcome"] == "file.txt"
+        # Default (success=None) stays unfiltered — backward compatible.
+        assert len(memory.get_tool_history(limit=10)) == 3
+
+    @pytest.mark.asyncio
+    async def test_record_failure_hash_matches_store(self, memory):
+        """A5 hash-parity proof: loop._record_failure recomputes the params
+        hash via ``_compute_params_hash(arguments or {})`` to count repeat
+        failures — that hash MUST match the one store_tool_outcome just
+        wrote (which passes ``arguments`` through unchanged), including the
+        ``arguments=None`` case, or the repeat counter is always 0."""
+        await memory.store_tool_outcome("exec", None, "boom", success=False)
+        await memory.store_tool_outcome("exec", {"command": "bad"}, "boom", success=False)
+
+        h_none = memory._compute_params_hash(None or {})
+        assert len(memory.get_tool_history(
+            tool_name="exec", params_hash=h_none, limit=5, success=False,
+        )) == 1
+
+        h_args = memory._compute_params_hash({"command": "bad"} or {})
+        assert len(memory.get_tool_history(
+            tool_name="exec", params_hash=h_args, limit=5, success=False,
+        )) == 1
 
     def test_tool_outcomes_table_created(self, tmp_path):
         store = MemoryStore(db_path=str(tmp_path / "schema.db"))
