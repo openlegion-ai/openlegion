@@ -429,7 +429,10 @@ class AgentLoop:
         # of distinct in-flight tasks (small); the entry for a task is wiped
         # in ``chat()`` when it reaches a terminal status.
         self._task_round_counts: dict[str, int] = {}
-        self._steer_queue: asyncio.Queue[str] = asyncio.Queue()
+        # Entries are (text, system_note) — system_note marks
+        # mesh-composed messages so transcript persistence uses the
+        # honest ``system`` role at every drain site.
+        self._steer_queue: asyncio.Queue[tuple[str, bool]] = asyncio.Queue()
         self._fleet_roster: list[dict] | None = None  # cached fleet info
         self._fleet_roster_ts: float = 0  # timestamp of last fetch
         self._introspect_cache: dict | None = None
@@ -921,17 +924,22 @@ class AgentLoop:
         )
         return block[:600]
 
-    async def inject_steer(self, message: str) -> bool:
-        """Inject a steer message. Returns True if agent is working."""
-        await self._steer_queue.put(message)
+    async def inject_steer(self, message: str, system_note: bool = False) -> bool:
+        """Inject a steer message. Returns True if agent is working.
+
+        ``system_note`` marks a SYSTEM-composed message (mesh wake, cron,
+        webhook) so the drained transcript entry uses role ``system``
+        instead of impersonating the user.
+        """
+        await self._steer_queue.put((message, system_note))
         return self.state == "working"
 
     def _has_pending_steers(self) -> bool:
         """Check if steer messages are waiting without draining them."""
         return not self._steer_queue.empty()
 
-    def _drain_steer_messages(self) -> list[str]:
-        """Non-blocking drain of all pending steer messages."""
+    def _drain_steer_messages(self) -> list[tuple[str, bool]]:
+        """Non-blocking drain of pending steers as (text, system_note)."""
         messages = []
         while not self._steer_queue.empty():
             try:
@@ -939,6 +947,29 @@ class AgentLoop:
             except asyncio.QueueEmpty:
                 break
         return messages
+
+    def _persist_steer_entries(self, steered: list[tuple[str, bool]]) -> None:
+        """Write drained steer entries to the transcript with honest roles.
+
+        Human steers keep the historical ``[steer]`` user-row rendering;
+        system-composed ones become ``system`` rows (dim divider in the
+        dashboard) so a wake prompt never renders as the user's bubble.
+        """
+        if not self.workspace:
+            return
+        for text, is_system in steered:
+            if is_system:
+                self.workspace.append_chat_message("system", text)
+            else:
+                self.workspace.append_chat_message("user", f"[steer] {text}")
+
+    @staticmethod
+    def _steer_interjection(steered: list[tuple[str, bool]]) -> str:
+        """LLM-facing join of drained steers, labelled by provenance."""
+        return "\n\n".join(
+            f"[System]: {text}" if is_system else f"[User interjection]: {text}"
+            for text, is_system in steered
+        )
 
     def _check_tool_loop_terminate(self, tool_calls) -> str | None:
         """Pre-scan all tool calls in a batch for the terminate condition.
@@ -2405,7 +2436,7 @@ class AgentLoop:
                 # Drain any pending coordination signals into the heartbeat
                 steered = self._drain_steer_messages()
                 if steered:
-                    steer_context = "\n".join(f"- {s}" for s in steered)
+                    steer_context = "\n".join(f"- {text}" for text, _ in steered)
                     message = (
                         f"{message}\n\n"
                         f"## Pending Coordination Signals\n\n{steer_context}"
@@ -2921,6 +2952,7 @@ class AgentLoop:
         self, user_message: str, *, trace_id: str | None = None,
         origin: "MessageOrigin | None" = None,
         task_id: str | None = None,
+        system_note: bool = False,
     ) -> dict:
         """Handle a single chat turn with persistent conversation history.
 
@@ -2970,7 +3002,7 @@ class AgentLoop:
                     "tool_outputs": [],
                     "tokens_used": 0,
                 }
-            await self._steer_queue.put(user_message)
+            await self._steer_queue.put((user_message, system_note))
             return {
                 "response": (
                     "Agent is working on a task. Your message has been queued "
@@ -3008,7 +3040,9 @@ class AgentLoop:
                     await self._apply_task_thinking(task_id)
                 try:
                     try:
-                        result = await self._chat_inner(user_message)
+                        result = await self._chat_inner(
+                            user_message, system_note=system_note,
+                        )
                     except asyncio.CancelledError:
                         # Codex r10 (MEDIUM): _chat_inner re-raises
                         # CancelledError, which is BaseException and slips
@@ -3366,15 +3400,27 @@ class AgentLoop:
 
     # ── Chat helpers (shared by streaming and non-streaming) ────
 
-    async def _prepare_chat_turn(self, user_message: str) -> tuple[str, str]:
+    async def _prepare_chat_turn(
+        self, user_message: str, *, system_note: bool = False,
+    ) -> tuple[str, str]:
         """Set up chat context: corrections, memory, steer, system prompt.
 
         Returns (possibly-enriched user_message, system_prompt).
+
+        ``system_note`` marks a mesh-composed message (wake/cron/webhook).
+        Three behavioural differences: the transcript row gets role
+        ``system`` (never a fake user bubble), the correction detector is
+        skipped (wake boilerplate must not pollute the corrections store),
+        and the first-message memory auto-search is skipped (boilerplate
+        would seed irrelevant context). The in-memory LLM message stays
+        role ``user`` — the model API requires it and the transcript is
+        display-only.
         """
         # Correction check uses only workspace + _chat_messages — no I/O,
         # safe to run before the parallel fetch.
         if (
-            self.workspace
+            not system_note
+            and self.workspace
             and self._chat_messages
             and self.workspace.looks_like_correction(user_message)
         ):
@@ -3388,11 +3434,14 @@ class AgentLoop:
                     correction=user_message,
                 )
 
-        # Persist clean user message to transcript before enrichment
+        # Persist clean message to transcript before enrichment — honest
+        # role: ``system`` for mesh-composed notes, ``user`` otherwise.
         if self.workspace:
-            self.workspace.append_chat_message("user", user_message)
+            self.workspace.append_chat_message(
+                "system" if system_note else "user", user_message,
+            )
 
-        if not self._chat_messages and self.workspace:
+        if not system_note and not self._chat_messages and self.workspace:
             memory_hits = self.workspace.search(
                 user_message, max_results=3, exclude_files=_BOOTSTRAP_SEARCH_EXCLUDE,
             )
@@ -3412,7 +3461,7 @@ class AgentLoop:
         self._chat_messages.append({"role": "user", "content": llm_content, "_origin": "user"})
         steered = self._drain_steer_messages()
         if steered:
-            combined = "\n\n".join(steered)
+            combined = "\n\n".join(text for text, _ in steered)
             steer_suffix = f"\n\n[Additional context]: {combined}"
             current = self._chat_messages[-1]["content"]
             if isinstance(current, list):
@@ -3423,9 +3472,7 @@ class AgentLoop:
             else:
                 self._chat_messages[-1]["content"] += steer_suffix
             # Persist steers as separate transcript entries
-            if self.workspace:
-                for s in steered:
-                    self.workspace.append_chat_message("user", f"[steer] {s}")
+            self._persist_steer_entries(steered)
 
         self._age_operator_playbooks()
 
@@ -3753,11 +3800,9 @@ class AgentLoop:
 
         steered = self._drain_steer_messages()
         if steered:
-            combined = "\n\n".join(f"[User interjection]: {s}" for s in steered)
+            combined = self._steer_interjection(steered)
             self._chat_messages.append({"role": "user", "content": combined})
-            if self.workspace:
-                for s in steered:
-                    self.workspace.append_chat_message("user", f"[steer] {s}")
+            self._persist_steer_entries(steered)
 
     @staticmethod
     def _resolve_content(llm_response) -> str:
@@ -3858,7 +3903,9 @@ class AgentLoop:
 
     # ── Non-streaming chat ────────────────────────────────────
 
-    async def _chat_inner(self, user_message: str) -> dict:
+    async def _chat_inner(
+        self, user_message: str, *, system_note: bool = False,
+    ) -> dict:
         self.state = "working"
         total_tokens = 0
         tool_outputs: list[dict] = []
@@ -3880,7 +3927,9 @@ class AgentLoop:
         turn_content_parts: list[str] = []
 
         try:
-            user_message, system = await self._prepare_chat_turn(user_message)
+            user_message, system = await self._prepare_chat_turn(
+                user_message, system_note=system_note,
+            )
 
             # Pre-flight wedge guard (defense-in-depth). Reactive compaction
             # only runs at the BOTTOM of the round loop, so a turn that STARTS
@@ -4008,13 +4057,9 @@ class AgentLoop:
                         steer_interrupts += 1
                         self._chat_messages.append({"role": "assistant", "content": content})
                         steered = self._drain_steer_messages()
-                        combined = "\n\n".join(
-                            f"[User interjection]: {s}" for s in steered
-                        )
+                        combined = self._steer_interjection(steered)
                         self._chat_messages.append({"role": "user", "content": combined})
-                        if self.workspace:
-                            for s in steered:
-                                self.workspace.append_chat_message("user", f"[steer] {s}")
+                        self._persist_steer_entries(steered)
                         self._chat_total_rounds += 1
                         await self._compact_chat_context(system)
                         continue
@@ -4893,7 +4938,9 @@ class AgentLoop:
         """
         # Redirect to steer queue if a task is running.
         if self.current_task is not None:
-            await self._steer_queue.put(user_message)
+            # Stream path is human-only (dashboard/REPL) — never a
+            # system note.
+            await self._steer_queue.put((user_message, False))
             yield {
                 "type": "text_delta",
                 "content": (
@@ -5060,13 +5107,9 @@ class AgentLoop:
                             yield {"type": "text_delta", "content": content}
                         self._chat_messages.append({"role": "assistant", "content": content})
                         steered = self._drain_steer_messages()
-                        combined = "\n\n".join(
-                            f"[User interjection]: {s}" for s in steered
-                        )
+                        combined = self._steer_interjection(steered)
                         self._chat_messages.append({"role": "user", "content": combined})
-                        if self.workspace:
-                            for s in steered:
-                                self.workspace.append_chat_message("user", f"[steer] {s}")
+                        self._persist_steer_entries(steered)
                         self._chat_total_rounds += 1
                         await self._compact_chat_context(system)
                         continue

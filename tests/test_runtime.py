@@ -2471,3 +2471,40 @@ class TestVerificationWake:
             assert ok is True  # bell already written — delivery stands
         finally:
             loop.call_soon_threadsafe(loop.stop)
+
+
+class TestSystemNoteCallSites:
+    """Source-level pin (grep-style, same pattern as the operator-bypass
+    pin): every SYSTEM-composed wake/dispatch site must flag
+    ``system_note=True`` so the recipient transcript never renders it as
+    the user. Human-relayed paths must stay unflagged."""
+
+    def _src(self, rel: str) -> str:
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+        return (root / rel).read_text(encoding="utf-8")
+
+    def test_mesh_server_wake_sites_flagged(self):
+        src = self._src("src/host/server.py")
+        # Five system-composed sites: blackboard watch steer, hand_off
+        # wake, operator recovery wake, back-edge wake, admin-action wake.
+        assert src.count("system_note=True") == 5
+
+    def test_runtime_sites_flagged(self):
+        src = self._src("src/cli/runtime.py")
+        # cron_dispatch + verification wake.
+        assert src.count("system_note=True") == 2
+
+    def test_webhooks_flagged(self):
+        src = self._src("src/host/webhooks.py")
+        assert src.count("system_note=True") == 2
+
+    def test_channel_inbound_not_flagged(self):
+        """Genuine human messages relayed from chat channels must never
+        carry the system marker."""
+        src = self._src("src/channels/base.py")
+        assert "system_note" not in src
+
+    def test_direct_dispatch_emits_header(self):
+        src = self._src("src/cli/runtime.py")
+        assert 'extra_headers["x-system-wake"] = "1"' in src

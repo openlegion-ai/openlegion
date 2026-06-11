@@ -2064,7 +2064,7 @@ async def test_steer_appended_correctly_to_multimodal_content():
         [LLMResponse(content="Sure, I can see the image.", tokens_used=50)],
     )
     # Inject a steer message as if the user typed it mid-turn
-    loop._steer_queue.put_nowait("Please focus on the chart legend.")
+    loop._steer_queue.put_nowait(("Please focus on the chart legend.", False))
 
     # Inject a multimodal content list directly (simulates enrichment result)
     multimodal_content = [
@@ -2077,7 +2077,7 @@ async def test_steer_appended_correctly_to_multimodal_content():
     steered = loop._drain_steer_messages()
     assert steered  # steer was present
 
-    combined = "\n\n".join(steered)
+    combined = "\n\n".join(text for text, _ in steered)
     steer_suffix = f"\n\n[Additional context]: {combined}"
     current = loop._chat_messages[-1]["content"]
     if isinstance(current, list):
@@ -3096,7 +3096,7 @@ class TestChatEmptyResponseFallback:
     async def test_chat_empty_response_with_tools_gets_fallback(self):
         loop = _make_loop()
 
-        async def fake_inner(_msg):
+        async def fake_inner(_msg, **_kw):
             return {
                 "response": "",
                 "tool_outputs": [{"name": "noop"}, {"name": "noop2"}],
@@ -3121,7 +3121,7 @@ class TestChatEmptyResponseFallback:
         leaves it alone — covered by the silent-token tests)."""
         loop = _make_loop()
 
-        async def fake_inner(_msg):
+        async def fake_inner(_msg, **_kw):
             return {"response": "", "tool_outputs": [], "tokens_used": 0}
         loop._chat_inner = fake_inner
 
@@ -3139,7 +3139,7 @@ class TestChatEmptyResponseFallback:
         ``chat()`` final net rescues it even in task_id mode."""
         loop = _make_loop()
 
-        async def fake_inner(_msg):
+        async def fake_inner(_msg, **_kw):
             return {
                 "response": "",
                 "tool_outputs": [{"name": "x"}],
@@ -3534,7 +3534,7 @@ class TestOutboundEffectLazyGuard:
         guard strengthening."""
         loop = _make_loop()
 
-        async def fake_inner(_msg):
+        async def fake_inner(_msg, **_kw):
             return {
                 "response": "",
                 "tool_outputs": [
@@ -3582,7 +3582,7 @@ class TestOutboundEffectLazyGuard:
         ``done`` (the outbound work proves the turn wasn't lazy)."""
         loop = _make_loop()
 
-        async def fake_inner(_msg):
+        async def fake_inner(_msg, **_kw):
             return {
                 "response": "",
                 "tool_outputs": [
@@ -3623,7 +3623,7 @@ class TestOutboundEffectLazyGuard:
         instead of ``failed`` (which polluted failure metrics)."""
         loop = _make_loop()
 
-        async def fake_inner(_msg):
+        async def fake_inner(_msg, **_kw):
             return {
                 "response": (
                     "Already a pending dedup entry on the blackboard for "
@@ -5219,3 +5219,115 @@ async def test_apply_task_thinking_sets_validates_and_survives_errors():
     loop.mesh_client.get_task = AsyncMock(return_value=None)
     await loop._apply_task_thinking("t4")
     assert loop.llm.thinking_override is None
+
+
+# ── system_note: honest transcript roles for mesh-composed messages ──
+
+
+class TestSystemNoteTranscriptRole:
+    """A system wake (``system_note=True``) persists to the transcript with
+    role ``system`` — never as the user's own bubble. The in-memory LLM
+    message stays role ``user`` (model API requirement)."""
+
+    @pytest.mark.asyncio
+    async def test_system_note_chat_persists_system_role(self, tmp_path):
+        from src.agent.workspace import WorkspaceManager
+
+        loop = _make_loop([LLMResponse(content="verified", tokens_used=10)])
+        loop.workspace = WorkspaceManager(workspace_dir=str(tmp_path))
+        loop.tools.get_tool_definitions = MagicMock(return_value=[])
+
+        await loop.chat("WAKE-MARKER chain completed, verify it", system_note=True)
+
+        rows = loop.workspace.load_chat_transcript()
+        inbound = [r for r in rows if "WAKE-MARKER" in (r.get("content") or "")]
+        assert inbound, "wake message missing from transcript"
+        assert inbound[0]["role"] == "system"
+        assert not [
+            r for r in rows
+            if r["role"] == "user" and "WAKE-MARKER" in (r.get("content") or "")
+        ], "wake message must not persist as a user row"
+        # LLM still saw it as a user message (API requires the role).
+        assert loop._chat_messages[0]["role"] == "user"
+
+    @pytest.mark.asyncio
+    async def test_default_chat_persists_user_role(self, tmp_path):
+        from src.agent.workspace import WorkspaceManager
+
+        loop = _make_loop([LLMResponse(content="hi", tokens_used=10)])
+        loop.workspace = WorkspaceManager(workspace_dir=str(tmp_path))
+        loop.tools.get_tool_definitions = MagicMock(return_value=[])
+
+        await loop.chat("USER-MARKER hello")
+
+        rows = loop.workspace.load_chat_transcript()
+        inbound = [r for r in rows if "USER-MARKER" in (r.get("content") or "")]
+        assert inbound and inbound[0]["role"] == "user"
+
+    @pytest.mark.asyncio
+    async def test_system_note_skips_correction_recording(self, tmp_path):
+        """Wake boilerplate must not pollute the corrections store even when
+        it pattern-matches the correction detector."""
+        from src.agent.workspace import WorkspaceManager
+
+        loop = _make_loop([LLMResponse(content="ok", tokens_used=10)])
+        loop.workspace = WorkspaceManager(workspace_dir=str(tmp_path))
+        loop.tools.get_tool_definitions = MagicMock(return_value=[])
+        loop._chat_messages = [{"role": "assistant", "content": "prior reply"}]
+        loop.workspace.looks_like_correction = MagicMock(return_value=True)
+        loop.workspace.record_correction = MagicMock()
+
+        await loop.chat("no, that's wrong — do NOT re-announce", system_note=True)
+
+        loop.workspace.looks_like_correction.assert_not_called()
+        loop.workspace.record_correction.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_system_note_skips_memory_auto_search(self, tmp_path):
+        """First-message memory auto-search is boilerplate pollution for a
+        wake — skipped when system_note is set, kept for real users."""
+        from src.agent.workspace import WorkspaceManager
+
+        loop = _make_loop([LLMResponse(content="ok", tokens_used=10)])
+        loop.workspace = WorkspaceManager(workspace_dir=str(tmp_path))
+        loop.tools.get_tool_definitions = MagicMock(return_value=[])
+        loop.workspace.search = MagicMock(return_value=[])
+
+        await loop.chat("wake text", system_note=True)
+        loop.workspace.search.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_busy_system_wake_queues_flagged_tuple(self):
+        """A system wake hitting a busy agent (current_task set) rides the
+        steer queue WITH its flag — the drain must not render it as a
+        '[steer]' user bubble."""
+        loop = _make_loop()
+        loop.current_task = "task_in_flight"
+
+        result = await loop.chat("wake while busy", system_note=True)
+
+        assert "queued" in result["response"].lower()
+        assert loop._drain_steer_messages() == [("wake while busy", True)]
+
+    @pytest.mark.asyncio
+    async def test_inject_steer_round_trips_flag(self):
+        loop = _make_loop()
+        await loop.inject_steer("watch update", system_note=True)
+        await loop.inject_steer("human ping")
+        assert loop._drain_steer_messages() == [
+            ("watch update", True), ("human ping", False),
+        ]
+
+    def test_persist_steer_entries_uses_honest_roles(self):
+        loop = _make_loop()
+        loop.workspace = MagicMock()
+        loop._persist_steer_entries([("sys note", True), ("human", False)])
+        calls = loop.workspace.append_chat_message.call_args_list
+        assert calls[0].args == ("system", "sys note")
+        assert calls[1].args == ("user", "[steer] human")
+
+    def test_steer_interjection_labels_by_provenance(self):
+        from src.agent.loop import AgentLoop
+        out = AgentLoop._steer_interjection([("a", True), ("b", False)])
+        assert "[System]: a" in out
+        assert "[User interjection]: b" in out

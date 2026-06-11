@@ -861,7 +861,7 @@ class TestChatTaskIsolationGuard:
         assert result["tool_outputs"] == []
         assert result["tokens_used"] == 0
         # Message should be in the steer queue
-        assert loop._steer_queue.get_nowait() == "hello"
+        assert loop._steer_queue.get_nowait() == ("hello", False)
 
     @pytest.mark.asyncio
     async def test_chat_normal_when_idle(self):
@@ -903,7 +903,7 @@ class TestChatTaskIsolationGuard:
         assert len(done_events) == 1
         assert done_events[0]["tokens_used"] == 0
         # Message should be in the steer queue
-        assert loop._steer_queue.get_nowait() == "hello stream"
+        assert loop._steer_queue.get_nowait() == ("hello stream", False)
 
     @pytest.mark.asyncio
     async def test_chat_stream_normal_when_idle(self):

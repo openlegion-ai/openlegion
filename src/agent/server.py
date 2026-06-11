@@ -170,6 +170,21 @@ def _origin_from_mesh_request(request: Request):
     return parse_origin_header(raw)
 
 
+def _system_note_from_mesh_request(request: Request) -> bool:
+    """True when the mesh marked this message as SYSTEM-composed.
+
+    ``x-system-wake`` makes the transcript record the inbound message with
+    role ``system`` (a dim divider in the dashboard) instead of role
+    ``user`` (the human's own bubble). Same trust rule as the origin kind:
+    honoured only on the mesh-internal hop, so a direct caller can't make
+    its message vanish into the de-emphasized style.
+    """
+    return bool(
+        request.headers.get("x-system-wake")
+        and request.headers.get("x-mesh-internal")
+    )
+
+
 def create_agent_app(loop: AgentLoop) -> FastAPI:
     """Create the FastAPI application for an agent container."""
     # M19: disable interactive API docs / OpenAPI schema by default; gate dev
@@ -368,6 +383,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             trace_id=request.headers.get("x-trace-id"),
             origin=origin,
             task_id=task_id,
+            system_note=_system_note_from_mesh_request(request),
         )
         # Round-4 forensic trace (Bug 3 still reproduces post-PR#952).
         # The operator reported turns ending with no visible chat
@@ -391,9 +407,12 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         return ChatResponse(**result)
 
     @app.post("/chat/steer")
-    async def chat_steer(msg: SteerMessage) -> dict:
+    async def chat_steer(msg: SteerMessage, request: Request) -> dict:
         """Inject a message into the active conversation. Does NOT acquire _chat_lock."""
-        injected = await loop.inject_steer(sanitize_for_prompt(msg.message))
+        injected = await loop.inject_steer(
+            sanitize_for_prompt(msg.message),
+            system_note=_system_note_from_mesh_request(request),
+        )
         return {"injected": injected, "agent_state": loop.state}
 
     @app.post("/chat/stream")

@@ -1089,7 +1089,12 @@ def create_mesh_app(
 
         async def _do_notify():
             results = await asyncio.gather(
-                *(lane_manager.enqueue(wid, msg, mode="steer") for wid in watcher_ids),
+                *(
+                    lane_manager.enqueue(
+                        wid, msg, mode="steer", system_note=True,
+                    )
+                    for wid in watcher_ids
+                ),
                 return_exceptions=True,
             )
             for wid, result in zip(watcher_ids, results, strict=True):
@@ -1672,7 +1677,7 @@ def create_mesh_app(
                     lane_manager.enqueue(
                         target, wake_msg, mode="followup",
                         origin=origin, auto_notify=had_origin,
-                        task_id=task_id,
+                        task_id=task_id, system_note=True,
                     ),
                     dispatch_loop,
                 )
@@ -5651,7 +5656,7 @@ def create_mesh_app(
                 lane_manager.enqueue(
                     "operator", wake_msg, mode="followup",
                     origin=wake_origin, auto_notify=False,
-                    task_id=None,
+                    task_id=None, system_note=True,
                 ),
                 dispatch_loop,
             )
@@ -5802,7 +5807,7 @@ def create_mesh_app(
                     lane_manager.enqueue(
                         origin_user, wake_msg, mode="followup",
                         origin=wake_origin, auto_notify=False,
-                        task_id=task_id,
+                        task_id=task_id, system_note=True,
                     ),
                     dispatch_loop,
                 )
@@ -6413,7 +6418,7 @@ def create_mesh_app(
         # would emit a "coroutine was never awaited" warning.
         coro = lane_manager.enqueue(
             target, sanitize_for_prompt(message), mode="followup",
-            origin=eff_origin, auto_notify=had_origin,
+            origin=eff_origin, auto_notify=had_origin, system_note=True,
         )
         try:
             asyncio.run_coroutine_threadsafe(coro, dispatch_loop)

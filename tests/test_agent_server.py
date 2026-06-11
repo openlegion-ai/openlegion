@@ -1092,3 +1092,76 @@ class TestChatStreamContextSeeding:
             ) as resp:
                 lines = [ln async for ln in resp.aiter_lines() if ln]
         assert any("ok" in ln for ln in lines)
+
+
+class TestChatSystemNoteHeader:
+    """``x-system-wake`` marks mesh-composed messages so the transcript
+    records them with role ``system``. Same trust rule as the origin
+    kind: honoured only with ``x-mesh-internal`` present."""
+
+    def _chat_app(self):
+        app, mock_loop = _make_app()
+        mock_loop.chat = AsyncMock(return_value={
+            "response": "ok", "tool_outputs": [], "tokens_used": 0,
+        })
+        mock_loop.current_task = None
+        return app, mock_loop
+
+    @pytest.mark.asyncio
+    async def test_trusted_header_passes_system_note(self):
+        app, mock_loop = self._chat_app()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/chat", json={"message": "wake"},
+                headers={"x-system-wake": "1", "x-mesh-internal": "1"},
+            )
+        assert resp.status_code == 200
+        assert mock_loop.chat.call_args.kwargs.get("system_note") is True
+
+    @pytest.mark.asyncio
+    async def test_header_without_mesh_internal_is_ignored(self):
+        """A direct caller can't push its message into the de-emphasized
+        system style — the marker is mesh-internal only."""
+        app, mock_loop = self._chat_app()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/chat", json={"message": "wake"},
+                headers={"x-system-wake": "1"},
+            )
+        assert resp.status_code == 200
+        assert mock_loop.chat.call_args.kwargs.get("system_note") is False
+
+    @pytest.mark.asyncio
+    async def test_no_header_defaults_false(self):
+        app, mock_loop = self._chat_app()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/chat", json={"message": "hello"},
+                headers={"x-mesh-internal": "1"},
+            )
+        assert resp.status_code == 200
+        assert mock_loop.chat.call_args.kwargs.get("system_note") is False
+
+    @pytest.mark.asyncio
+    async def test_steer_endpoint_threads_system_note(self):
+        app, mock_loop = _make_app()
+        mock_loop.inject_steer = AsyncMock(return_value=True)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/chat/steer", json={"message": "watch update"},
+                headers={"x-system-wake": "1", "x-mesh-internal": "1"},
+            )
+        assert resp.status_code == 200
+        assert mock_loop.inject_steer.call_args.kwargs.get("system_note") is True
+
+    @pytest.mark.asyncio
+    async def test_steer_endpoint_untrusted_header_ignored(self):
+        app, mock_loop = _make_app()
+        mock_loop.inject_steer = AsyncMock(return_value=False)
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            resp = await client.post(
+                "/chat/steer", json={"message": "watch update"},
+                headers={"x-system-wake": "1"},
+            )
+        assert resp.status_code == 200
+        assert mock_loop.inject_steer.call_args.kwargs.get("system_note") is False

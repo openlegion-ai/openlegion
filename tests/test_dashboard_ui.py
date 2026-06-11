@@ -2608,3 +2608,26 @@ class TestAgentGoalsSection:
         # Loader + save handler wired into the SPA.
         assert "loadAgentGoals" in app_js
         assert "saveAgentGoals" in app_js
+
+
+class TestSystemDividerExpandable:
+    """System-role transcript rows (compaction markers, system wakes)
+    render as a dim divider; long content (wake prompts) truncates to
+    one line with a click-to-expand block. Pins the PR-1 'system wakes
+    stop rendering as the user' UI contract."""
+
+    def test_system_template_truncates_and_expands(self):
+        # Both chat surfaces (operator panel + messenger panel) carry the
+        # upgraded system template: truncated label + expandable block.
+        assert _INDEX_HTML.count('x-if="msg.role === \'system\'"') >= 2
+        # Expand block: full content, pre-wrap, gated on the local `open`.
+        assert _INDEX_HTML.count(
+            'whitespace-pre-wrap break-words" x-text="msg.content"'
+        ) >= 2
+        # Truncated label line.
+        assert _INDEX_HTML.count('<span class="truncate" x-text="msg.content">') >= 2
+
+    def test_system_template_click_gated_on_length(self):
+        # Short markers (session-continued etc.) stay non-interactive;
+        # only long content gets the pointer + toggle.
+        assert _INDEX_HTML.count("(msg.content || '').length > 96") >= 4

@@ -255,7 +255,11 @@ class WebhookManager:
             message = _build_message(hook, dumps_safe(body, indent=2))
 
             if manager.dispatch_fn:
-                await manager.dispatch_fn(hook["agent"], message)
+                # system_note: webhook payloads are machine-delivered —
+                # the transcript must not render them as the user.
+                await manager.dispatch_fn(
+                    hook["agent"], message, system_note=True,
+                )
 
             return {"status": "processed", "hook": hook["name"]}
 
@@ -272,6 +276,8 @@ class WebhookManager:
         )
 
         if self.dispatch_fn:
-            response = await self.dispatch_fn(hook["agent"], message)
+            response = await self.dispatch_fn(
+                hook["agent"], message, system_note=True,
+            )
             return {"status": "processed", "response": response}
         return {"status": "no_dispatch_fn"}
