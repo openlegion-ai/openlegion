@@ -1038,7 +1038,7 @@ async def get_team_outputs(
     if mesh_client is None:
         return {"error": "No mesh_client available"}
     try:
-        return await mesh_client.project_outputs(project_id, since=since)
+        return await mesh_client.team_outputs(project_id, since=since)
     except Exception as e:
         return {"error": f"Failed to read outputs for {project_id}: {e}"}
 

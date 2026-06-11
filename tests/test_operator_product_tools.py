@@ -100,9 +100,9 @@ async def test_list_agent_queue_calls_mesh(monkeypatch):
 async def test_get_team_outputs_passes_since(monkeypatch):
     from src.agent.builtins.operator_tools import get_team_outputs
     mc = MagicMock()
-    mc.project_outputs = AsyncMock(return_value={"outputs": []})
+    mc.team_outputs = AsyncMock(return_value={"outputs": []})
     await get_team_outputs("p1", since="24h", mesh_client=mc)
-    mc.project_outputs.assert_awaited_once_with("p1", since="24h")
+    mc.team_outputs.assert_awaited_once_with("p1", since="24h")
 
 
 @pytest.mark.asyncio

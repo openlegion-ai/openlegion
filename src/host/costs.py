@@ -70,8 +70,6 @@ class CostTracker:
         self._budget_lock = threading.Lock()
         self.budgets: dict[str, dict[str, float]] = {}
         self._load_budgets()
-        # ``_team_budgets`` (formerly ``_project_budgets``). Back-compat
-        # property below exposes the legacy attribute name.
         self._team_budgets: dict[str, dict] = {}
 
     def _load_budgets(self) -> None:
@@ -337,12 +335,6 @@ class CostTracker:
 
     # ── Team-level budget enforcement (formerly "project-level") ──────────
 
-    # Back-compat alias for the legacy attribute name.
-    @property
-    def _project_budgets(self) -> dict[str, dict]:
-        """DEPRECATED: alias for :attr:`_team_budgets`."""
-        return self._team_budgets
-
     def set_team_budget(
         self,
         team: str,
@@ -356,16 +348,6 @@ class CostTracker:
             "daily_usd": daily_usd,
             "monthly_usd": monthly_usd,
         }
-
-    def set_project_budget(
-        self,
-        project: str,
-        members: list[str],
-        daily_usd: float = 50.0,
-        monthly_usd: float = 1000.0,
-    ) -> None:
-        """DEPRECATED: alias for :meth:`set_team_budget`."""
-        self.set_team_budget(project, members, daily_usd, monthly_usd)
 
     def get_team_spend(self, team: str, period: str = "today") -> dict:
         """Aggregate spend across all member agents for a team.
@@ -399,10 +381,6 @@ class CostTracker:
             "monthly_limit": tbudget["monthly_usd"],
             "agents": agent_breakdown,
         }
-
-    def get_project_spend(self, project: str, period: str = "today") -> dict:
-        """DEPRECATED: alias for :meth:`get_team_spend`."""
-        return self.get_team_spend(project, period)
 
     def get_all_agents_spend(self, period: str = "today") -> list[dict]:
         since = _period_to_since(period)
