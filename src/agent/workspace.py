@@ -104,6 +104,12 @@ MEMORY_COMPILED_END = "<!-- compiled:end -->"
 _MEMORY_FILE_MAX = 64_000
 # Newest slice of the log injected alongside the compiled head.
 _MEMORY_RECENT_LOG_CHARS = 5_000
+# The compiled head's injection budget: room left for the head once the
+# recent-log slice (plus the "## Recent" header overhead) is reserved under
+# the per-file bootstrap cap. Also the consolidation trigger threshold for
+# oversized/legacy heads (see context.py:_maybe_consolidate_memory) — a head
+# beyond this budget injects clipped every turn until it is re-compiled.
+_MEMORY_HEAD_BUDGET = max(0, _MAX_MEMORY - _MEMORY_RECENT_LOG_CHARS - 32)
 
 
 # Public mapping for external consumers (tool response, dashboard).
@@ -350,6 +356,21 @@ class WorkspaceManager:
                 f.write("\n" + _PLAYBOOK_V4_ADDENDUM + "\n")
             logger.info("Appended watch-mode guidance to operator instructions (v4)")
 
+        # Migration v5 (verification wake): the system wakes the operator
+        # once per completed chain to verify side effects; promise nothing
+        # beyond that. Same append-only contract as v2-v4.
+        if (
+            instructions_file.exists()
+            and self._initial_instructions
+            and "<!-- playbook_v5_verification_wake -->" in self._initial_instructions
+            and "<!-- playbook_v5_verification_wake -->"
+            not in instructions_file.read_text(errors="replace")
+        ):
+            from src.shared.operator_playbooks import _PLAYBOOK_V5_ADDENDUM
+            with open(instructions_file, "a") as f:
+                f.write("\n" + _PLAYBOOK_V5_ADDENDUM + "\n")
+            logger.info("Appended verification-wake guidance to operator instructions (v5)")
+
         for filename, default_content in _SCAFFOLD_FILES.items():
             path = self.root / filename
             if not path.exists():
@@ -578,9 +599,8 @@ class WorkspaceManager:
             return head
         # Reserve room for the recent slice so a large head can't crowd it out
         # under the per-file cap applied by get_bootstrap_content.
-        head_cap = max(0, _MAX_MEMORY - _MEMORY_RECENT_LOG_CHARS - 32)
-        if len(head) > head_cap:
-            head = head[:head_cap]
+        if len(head) > _MEMORY_HEAD_BUDGET:
+            head = head[:_MEMORY_HEAD_BUDGET]
         return f"{head}\n\n## Recent\n\n{recent}".strip()
 
     def load_daily_logs(self, days: int = 2) -> str:

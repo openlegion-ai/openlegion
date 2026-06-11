@@ -2226,6 +2226,11 @@ class TestDeliverChainOutcomeBellKind:
         class _Stub:
             _notification_store = _Store()
             event_bus = None
+            lane_manager = None
+            _dispatch_loop = None
+            _maybe_wake_operator_verification = (
+                RuntimeContext._maybe_wake_operator_verification
+            )
 
         stub = _Stub()
         root = {
@@ -2339,3 +2344,130 @@ class TestChannelPushRetry:
             timeout=5,  # the whole call must finish well under this
         )
         assert stub.calls == 3  # each attempt timed out → gave up
+
+
+# ── Post-completion verification wake (success path) ───────────────────────
+
+
+class TestVerificationWake:
+    """A completed user chain wakes the operator ONCE for side-effect
+    verification; failed/stall outcomes do not (the mesh recovery wake
+    covers failures). Fire-and-forget onto the dispatch loop; rate-capped."""
+
+    def _ctx_stub(self):
+        import asyncio as _asyncio
+        import threading
+        from collections import deque as _deque
+
+        from src.cli.runtime import RuntimeContext
+
+        class _Store:
+            def add(self, **kw):
+                return "n1"
+
+        class _Lane:
+            def __init__(self):
+                self.calls = []
+
+            async def enqueue(self, agent, message, **kw):
+                self.calls.append((agent, message, kw))
+                return "ok"
+
+        loop = _asyncio.new_event_loop()
+        t = threading.Thread(target=loop.run_forever, daemon=True)
+        t.start()
+
+        class _Stub:
+            _notification_store = _Store()
+            event_bus = None
+            lane_manager = _Lane()
+            _dispatch_loop = loop
+            _verify_wake_times = _deque()
+            _VERIFY_WAKE_MAX = RuntimeContext._VERIFY_WAKE_MAX
+            _VERIFY_WAKE_WINDOW_S = RuntimeContext._VERIFY_WAKE_WINDOW_S
+            _maybe_wake_operator_verification = (
+                RuntimeContext._maybe_wake_operator_verification
+            )
+
+        return RuntimeContext, _Stub(), loop
+
+    def _root(self):
+        return {
+            "id": "t-root", "assignee": "worker", "title": "ship the thing",
+            "origin": {"kind": "human", "channel": "dashboard", "user": "u1"},
+        }
+
+    def _drain(self, loop, until=None):
+        # run_coroutine_threadsafe queues task CREATION as one callback and
+        # the task's first step as a later one — a single round-trip lands
+        # between them. Poll briefly so the enqueue body has actually run.
+        import concurrent.futures
+        import time as _t
+        for _ in range(100):
+            done = concurrent.futures.Future()
+            loop.call_soon_threadsafe(lambda: done.set_result(True))
+            done.result(timeout=5)
+            if until is None or until():
+                if until is not None:
+                    return
+            if until is None:
+                return
+            _t.sleep(0.02)
+
+    def test_done_chain_wakes_operator_for_verification(self):
+        RuntimeContext, stub, loop = self._ctx_stub()
+        try:
+            ok = RuntimeContext._deliver_chain_outcome(
+                stub, self._root(), "done", "summary",
+            )
+            assert ok is True
+            self._drain(loop, until=lambda: stub.lane_manager.calls)
+            assert len(stub.lane_manager.calls) == 1
+            agent, message, kw = stub.lane_manager.calls[0]
+            assert agent == "operator"
+            assert "t-root" in message
+            assert "rate_delivery" in message
+            assert "ALREADY notified" in message
+            assert kw["auto_notify"] is False
+            assert kw["origin"].kind == "human"
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+
+    def test_failed_and_stall_do_not_wake(self):
+        RuntimeContext, stub, loop = self._ctx_stub()
+        try:
+            for kind in ("failed", "stall"):
+                RuntimeContext._deliver_chain_outcome(
+                    stub, self._root(), kind, "summary",
+                )
+            self._drain(loop)
+            assert stub.lane_manager.calls == []
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+
+    def test_wake_rate_cap_suppresses_burst(self):
+        import time as _time
+
+        RuntimeContext, stub, loop = self._ctx_stub()
+        try:
+            now = _time.time()
+            for _ in range(stub._VERIFY_WAKE_MAX):
+                stub._verify_wake_times.append(now)
+            RuntimeContext._deliver_chain_outcome(
+                stub, self._root(), "done", "summary",
+            )
+            self._drain(loop)
+            assert stub.lane_manager.calls == []
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
+
+    def test_wake_failure_does_not_flip_delivery(self):
+        RuntimeContext, stub, loop = self._ctx_stub()
+        try:
+            stub._dispatch_loop = None  # wake guard path
+            ok = RuntimeContext._deliver_chain_outcome(
+                stub, self._root(), "done", "summary",
+            )
+            assert ok is True  # bell already written — delivery stands
+        finally:
+            loop.call_soon_threadsafe(loop.stop)
