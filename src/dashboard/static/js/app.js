@@ -37,11 +37,45 @@ const _IDENTITY_FILE_MAP = {
     { file: 'INTERFACE.md', label: 'Interface', cap: 4000, access: 'both', desc: 'Public collaboration contract — what this agent accepts, produces, and how other agents should interact with it. Teammates read this via get_agent_profile.' },
   ],
   memory: [
-    { file: 'MEMORY.md', label: 'Memory', cap: 16000, access: 'auto', desc: 'Facts and context the agent remembers across sessions. Auto-updated during conversations — you can also edit directly.' },
+    { file: 'MEMORY.md', label: 'Memory', cap: 16000, access: 'auto', desc: 'Facts and context the agent remembers across sessions. Auto-updated during conversations — you can also edit directly. Only the compiled head + newest log entries are injected into the prompt; older log entries stay on disk, recalled via memory search.' },
     { file: 'USER.md', label: 'Preferences', cap: 4000, access: 'both', desc: 'Your preferences, communication style, and project context. Helps the agent serve you better over time.' },
     { file: 'HEARTBEAT.md', label: 'Auto-checkup', cap: null, access: 'both', desc: 'Rules for what the agent does during periodic autonomous wakeups — what to check, what to work on, when to notify you.' },
   ],
 };
+
+// MEMORY.md head/log split markers + injection caps. Source of truth:
+// src/agent/workspace.py (MEMORY_COMPILED_BEGIN/END, _MAX_MEMORY,
+// _MEMORY_RECENT_LOG_CHARS, _MEMORY_FILE_MAX). The on-disk file is a
+// compiled head + append-only log bounded at 64,000 chars, but only the
+// head (capped at 16000 - 5000 - 32 = 10968) plus the newest 5,000 log
+// chars are ever injected into the prompt — so the budget bar must
+// measure the injected slice, not the raw file.
+const _MEMORY_COMPILED_BEGIN = '<!-- compiled:begin -->';
+const _MEMORY_COMPILED_END = '<!-- compiled:end -->';
+const _MEMORY_HEAD_CAP = 10968;
+const _MEMORY_RECENT_LOG_CHARS = 5000;
+
+// Approximate the prompt-injected size of raw MEMORY.md content,
+// mirroring WorkspaceManager._split_memory + get_memory_injection:
+// strip the "# Long-Term Memory" title, head = between markers, log =
+// after the end marker; a marker-less file is ALL head with an empty log.
+function _memoryInjectedLength(raw) {
+  let body = raw.trim();
+  if (body.startsWith('# Long-Term Memory')) {
+    body = body.slice('# Long-Term Memory'.length).trimStart();
+  }
+  let head = raw.trim();
+  let log = '';
+  if (body.startsWith(_MEMORY_COMPILED_BEGIN)) {
+    const inner = body.slice(_MEMORY_COMPILED_BEGIN.length);
+    const end = inner.indexOf(_MEMORY_COMPILED_END);
+    if (end !== -1) {
+      head = inner.slice(0, end).trim();
+      log = inner.slice(end + _MEMORY_COMPILED_END.length).trim();
+    }
+  }
+  return Math.min(head.length, _MEMORY_HEAD_CAP) + Math.min(log.length, _MEMORY_RECENT_LOG_CHARS);
+}
 
 function dashboard() {
   return {
@@ -1143,8 +1177,11 @@ function dashboard() {
 
     fileBudgetPct(file, cap) {
       if (!cap) return 0;
-      const text = (this.identityEditing && this.identityEditingFile === file) ? this.identityEditBuffer : (this.identityContent[file] || '');
-      return Math.min(100, (text.length / cap) * 100);
+      // MEMORY.md's cap applies to the injected slice (head + recent log),
+      // not the raw file — the on-disk log is bounded separately at 64K, so
+      // raw length pegs the bar at 100% by design once the log grows.
+      const len = file === 'MEMORY.md' ? this.memoryInjectedCharCount() : this.fileCharCount(file);
+      return Math.min(100, (len / cap) * 100);
     },
 
     fileBudgetColor(file, cap) {
@@ -1157,6 +1194,11 @@ function dashboard() {
     fileCharCount(file) {
       const text = (this.identityEditing && this.identityEditingFile === file) ? this.identityEditBuffer : (this.identityContent[file] || '');
       return text.length;
+    },
+
+    memoryInjectedCharCount() {
+      const text = (this.identityEditing && this.identityEditingFile === 'MEMORY.md') ? this.identityEditBuffer : (this.identityContent['MEMORY.md'] || '');
+      return _memoryInjectedLength(text);
     },
 
     get filteredTraces() {

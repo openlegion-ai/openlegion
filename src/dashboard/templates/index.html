@@ -2786,7 +2786,10 @@
                         <!-- Budget bar (for files with cap) -->
                         <div x-show="section.cap && !(identityEditing && identityEditingFile === section.file)" class="mb-2">
                           <div class="flex justify-between items-center text-[11px] text-gray-400 mb-1">
-                            <span x-text="fileCharCount(section.file).toLocaleString() + ' / ' + section.cap.toLocaleString() + ' chars'"></span>
+                            <!-- MEMORY.md: the cap applies to the prompt-injected slice, not the raw file (see _memoryInjectedLength in app.js) -->
+                            <span x-text="section.file === 'MEMORY.md'
+                              ? 'Injected into prompt: ' + memoryInjectedCharCount().toLocaleString() + ' / ' + section.cap.toLocaleString() + ' chars · On-disk: ' + fileCharCount(section.file).toLocaleString() + ' (log auto-trimmed at 64,000)'
+                              : fileCharCount(section.file).toLocaleString() + ' / ' + section.cap.toLocaleString() + ' chars'"></span>
                             <span x-text="Math.round(fileBudgetPct(section.file, section.cap)) + '%'"></span>
                           </div>
                           <div class="w-full bg-gray-800 rounded-full h-1">
