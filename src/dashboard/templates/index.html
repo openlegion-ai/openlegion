@@ -2828,6 +2828,52 @@
                       </div>
                     </template>
                   </div>
+                  <!-- ═══ Standing goals (Memory tab) — blackboard goals/{agent_id} ═══ -->
+                  <div x-show="identityTab === 'memory' && !identityContentLoading && !identityLoading"
+                    data-testid="agent-goals-section"
+                    class="border border-gray-800 rounded-lg p-3 mt-4">
+                    <div class="flex items-center justify-between mb-1">
+                      <div class="flex items-center gap-2">
+                        <span class="text-xs font-medium text-gray-300">Standing goals</span>
+                        <span class="setting-hint setting-hint-sm" tabindex="0">?<span class="setting-hint-text">Standing direction for this agent — injected into every prompt and pursued during idle heartbeats. One goal per line, max 5. The operator can also manage these via set_agent_goals.</span></span>
+                      </div>
+                      <button x-show="selectedAgent !== 'operator' && !agentGoalsEditing"
+                        @click="startAgentGoalsEdit()"
+                        class="text-xs px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Edit</button>
+                    </div>
+                    <!-- Operator: standing goals don't apply — its goals live in GOALS.json -->
+                    <div x-show="selectedAgent === 'operator'" class="text-sm text-gray-500">
+                      The operator's fleet and business goals live on the Work tab.
+                    </div>
+                    <!-- Read view -->
+                    <div x-show="selectedAgent !== 'operator' && !agentGoalsEditing">
+                      <div x-show="agentGoals.length > 0" class="flex flex-wrap gap-1.5">
+                        <template x-for="(g, gi) in agentGoals" :key="gi">
+                          <span class="inline-flex items-center text-[11px] px-2 py-0.5 rounded-full bg-gray-800/60 border border-gray-700/50 text-gray-200"
+                            data-testid="agent-goal-chip" x-text="g"></span>
+                        </template>
+                      </div>
+                      <div x-show="agentGoals.length === 0" class="text-sm text-gray-500">No standing goals set.</div>
+                      <div x-show="agentGoalsMeta && agentGoalsMeta.updated_at" class="text-[11px] text-gray-500 mt-1.5"
+                        x-text="'Updated ' + (agentGoalsMeta?.updated_at || '')"></div>
+                    </div>
+                    <!-- Edit view -->
+                    <div x-show="selectedAgent !== 'operator' && agentGoalsEditing">
+                      <textarea x-model="agentGoalsBuffer"
+                        placeholder="One goal per line (max 5, one sentence each)"
+                        class="w-full bg-gray-800 border border-gray-700 rounded p-3 text-sm text-gray-200 font-mono resize-y focus:border-indigo-500 focus:outline-none"
+                        rows="4" spellcheck="false"></textarea>
+                      <div class="flex items-center gap-2 mt-2 justify-end">
+                        <button @click="saveAgentGoals(selectedAgent)"
+                          :disabled="agentGoalsSaving"
+                          class="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 text-white rounded disabled:opacity-50 transition-colors">
+                          <span x-text="agentGoalsSaving ? 'Saving...' : 'Save'"></span>
+                        </button>
+                        <button @click="cancelAgentGoalsEdit()" :disabled="agentGoalsSaving"
+                          class="px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 rounded transition-colors disabled:opacity-50">Cancel</button>
+                      </div>
+                    </div>
+                  </div>
                   <!-- ═══ Activity tab: Heartbeat + autonomous work timeline ═══ -->
                   <div x-show="identityTab === 'activity' && !agentActivityLoading && !identityLoading" class="space-y-2">
                     <div class="flex items-center justify-between mb-2">

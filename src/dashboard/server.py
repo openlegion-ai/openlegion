@@ -7400,6 +7400,138 @@ def create_dashboard_router(
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
 
+    # ── Agent standing goals (blackboard ``goals/{agent_id}``) ─
+
+    # Human/dashboard surface for the per-agent standing goals the
+    # operator writes via ``set_agent_goals`` — injected into the
+    # agent's every prompt as "## Your Current Goals" and pursued
+    # during idle heartbeats. Trust model: the dashboard is the
+    # full-trust human surface writing through the trusted store
+    # directly, so the ``goals/``-namespace fail-close in
+    # ``PermissionMatrix.can_write_blackboard`` (which blocks AGENT
+    # writers — a worker's wildcard can never cover a peer's goals
+    # key) is not bypassed-for-agents by this path: no agent identity
+    # is involved here.
+
+    _MAX_AGENT_GOALS = 5
+    _MAX_AGENT_GOAL_CHARS = 300
+
+    def _agent_goals_key(agent_id: str) -> str:
+        """Resolve the scoped goals key for an agent.
+
+        Mirrors the agent-side reader (``AgentLoop._fetch_goals`` reads
+        via ``mesh_client._scope_key``): team agents read
+        ``projects/{team}/goals/{agent_id}``, solo agents read the raw
+        ``goals/{agent_id}`` key.
+        """
+        from src.cli.config import _load_projects
+        for pname, pdata in _load_projects().items():
+            if agent_id in pdata.get("members", []):
+                return f"projects/{pname}/goals/{agent_id}"
+        return f"goals/{agent_id}"
+
+    @api_router.get("/api/agents/{agent_id}/goals")
+    async def api_agent_goals_get(agent_id: str) -> dict:
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        entry = blackboard.read(_agent_goals_key(agent_id))
+        if entry is None:
+            return {"goals": [], "updated_at": None}
+        value = entry.value if isinstance(entry.value, dict) else {}
+        raw = value.get("goals", [])
+        goals = [str(g) for g in raw] if isinstance(raw, list) else []
+        return {
+            "goals": goals,
+            "updated_at": value.get("updated_at"),
+            "set_by": value.get("set_by"),
+        }
+
+    @api_router.put("/api/agents/{agent_id}/goals")
+    async def api_agent_goals_put(agent_id: str, request: Request) -> dict:
+        if agent_id not in agent_registry:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        if agent_id == "operator":
+            # Parity with the ``set_agent_goals`` tool, which refuses
+            # the operator — its fleet/business goals live in GOALS.json
+            # and are managed from the Work tab.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "The operator's fleet/business goals live in "
+                    "GOALS.json — manage them from the Work tab's goals "
+                    "strip, not here."
+                ),
+            )
+        body = await request.json()
+        goals = body.get("goals")
+        if not isinstance(goals, list):
+            raise HTTPException(status_code=400, detail="goals must be a list of strings")
+        if len(goals) > _MAX_AGENT_GOALS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"goals exceeds max length {_MAX_AGENT_GOALS}",
+            )
+        cleaned: list[str] = []
+        for g in goals:
+            if not isinstance(g, str):
+                raise HTTPException(status_code=400, detail="each goal must be a string")
+            s = sanitize_for_prompt(g).strip()
+            if not s:
+                raise HTTPException(status_code=400, detail="each goal must be a non-empty string")
+            if len(s) > _MAX_AGENT_GOAL_CHARS:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"each goal must be <={_MAX_AGENT_GOAL_CHARS} chars (one sentence)",
+                )
+            cleaned.append(s)
+
+        key = _agent_goals_key(agent_id)
+        prior = blackboard.read(key)
+        prior_goals = []
+        if prior is not None and isinstance(prior.value, dict):
+            prior_goals = prior.value.get("goals", []) or []
+
+        if not cleaned:
+            # Blackboard.delete is idempotent — clearing unset goals is fine.
+            blackboard.delete(key, deleted_by="user")
+            blackboard.log_audit(
+                action="clear_goals",
+                target=agent_id,
+                field="goals",
+                before_value="\n".join(str(g) for g in prior_goals),
+                actor="user",
+                provenance="dashboard",
+            )
+            return {"cleared": True, "agent_id": agent_id}
+
+        from datetime import datetime, timezone
+        blackboard.write(
+            key,
+            {
+                "goals": cleaned,
+                "set_by": "user",
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            written_by="user",
+        )
+        blackboard.log_audit(
+            action="edit_goals",
+            target=agent_id,
+            field="goals",
+            before_value="\n".join(str(g) for g in prior_goals),
+            after_value="\n".join(cleaned),
+            actor="user",
+            provenance="dashboard",
+        )
+        return {
+            "set": True,
+            "agent_id": agent_id,
+            "count": len(cleaned),
+            "note": (
+                "Takes effect on the agent's next prompt build (<=5 min cache)."
+            ),
+        }
+
     # ── Agent Activity Log ────────────────────────────────────
 
     @api_router.get("/api/agents/{agent_id}/activity")
