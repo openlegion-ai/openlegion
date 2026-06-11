@@ -1301,3 +1301,77 @@ class TestCanAccessCredentialSystemTier:
         # Even with an EMPTY tier registry, provider-key shapes stay blocked.
         cred_matrix.set_system_credential_names([])
         assert cred_matrix.can_access_credential("worker", "anthropic_api_key") is False
+
+
+# ── Goals namespace hardening (set_agent_goals PR) ─────────────────────
+#
+# Goals (``goals/{agent_id}`` / ``projects/{team}/goals/{agent_id}``) are
+# standing instructions injected into the target agent's every prompt.
+# The write side is operator-only (endpoint carve-out in server.py), so
+# ``can_write_blackboard`` fail-closes the namespace for workers — a
+# teammate's ``projects/{team}/*`` write wildcard must NOT cover a peer's
+# goals key (prompt-injection channel into persistent context). The read
+# side gets a tight self-carve-out so goal delivery never depends on
+# per-template ACL variance.
+
+
+@pytest.fixture()
+def goals_matrix(tmp_path):
+    """PermissionMatrix exercising the goals-namespace guards."""
+    cfg = {
+        "permissions": {
+            # Team-scoped write wildcard — must NOT reach the goals keys.
+            "dev": {
+                "blackboard_read": [],
+                "blackboard_write": ["projects/alpha/*"],
+            },
+            # Full write wildcard — must NOT reach the goals keys either.
+            "rogue": {
+                "blackboard_read": [],
+                "blackboard_write": ["*"],
+            },
+        },
+    }
+    path = tmp_path / "permissions.json"
+    path.write_text(json.dumps(cfg))
+    return PermissionMatrix(config_path=str(path))
+
+
+class TestGoalsNamespaceHardening:
+    def test_worker_cannot_write_peer_goals_key(self, goals_matrix):
+        """Wildcard ACLs do not cover the goals namespace (raw or scoped)."""
+        m = goals_matrix
+        assert m.can_write_blackboard("dev", "projects/alpha/goals/peer") is False
+        assert m.can_write_blackboard("dev", "projects/alpha/goals/dev") is False
+        assert m.can_write_blackboard("rogue", "goals/peer") is False
+        assert m.can_write_blackboard("rogue", "projects/alpha/goals/peer") is False
+        # Non-goals keys under the same wildcards still work.
+        assert m.can_write_blackboard("dev", "projects/alpha/context/x") is True
+        assert m.can_write_blackboard("rogue", "context/x") is True
+
+    def test_goals_write_guard_short_projects_key_no_error(self, goals_matrix):
+        """``projects/x`` (no third segment) must not IndexError."""
+        m = goals_matrix
+        assert m.can_write_blackboard("rogue", "projects/x") is True
+
+    def test_mesh_can_still_write_goals(self, goals_matrix):
+        """Trusted internal caller bypasses the namespace guard."""
+        assert goals_matrix.can_write_blackboard("mesh", "goals/dev") is True
+
+    def test_agent_can_always_read_own_goals_key(self, goals_matrix):
+        """Self-read carve-out: raw and team-scoped forms, empty ACL."""
+        m = goals_matrix
+        assert m.can_read_blackboard("dev", "goals/dev") is True
+        assert m.can_read_blackboard("dev", "projects/alpha/goals/dev") is True
+        assert m.can_read_blackboard("dev", "projects/beta/goals/dev") is True
+
+    def test_agent_cannot_read_other_agents_goals_via_carveout(self, goals_matrix):
+        """The carve-out is strictly self-scoped and shape-exact."""
+        m = goals_matrix
+        # Another agent's goals key — denied absent a matching ACL.
+        assert m.can_read_blackboard("dev", "goals/lead") is False
+        assert m.can_read_blackboard("dev", "projects/alpha/goals/lead") is False
+        # Deeper keys that merely END in /goals/{id} do NOT match.
+        assert m.can_read_blackboard("dev", "projects/alpha/x/goals/dev") is False
+        # ID-prefix collision: "dev" must not match "dev-lead".
+        assert m.can_read_blackboard("dev", "goals/dev-lead") is False

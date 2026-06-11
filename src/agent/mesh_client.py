@@ -252,13 +252,25 @@ class MeshClient:
         _raise_with_body(response)
         return response.json()
 
-    async def delete_blackboard(self, key: str, *, global_scope: bool = False) -> dict:
+    async def delete_blackboard(
+        self, key: str, *, project: str | None = None, global_scope: bool = False,
+    ) -> dict:
         """Delete an entry from the shared blackboard.
 
-        If *global_scope* is True, the key is sent as-is, bypassing project
-        scoping. Used for keys in the fleet-global namespace.
+        If *project* is given, scope the key to that project instead of
+        this agent's own project.  Used by cross-project coordination
+        (e.g. operator clearing a project-scoped agent's goals key).
+
+        If *global_scope* is True, the key is sent as-is — bypassing both
+        the explicit ``project=`` override and the auto project prefix.
+        Used for keys in the fleet-global namespace.
         """
-        scoped = key if global_scope else self._scope_key(key)
+        if global_scope:
+            scoped = key
+        elif project is not None:
+            scoped = f"projects/{project}/{key}"
+        else:
+            scoped = self._scope_key(key)
         client = await self._get_client()
         response = await client.delete(
             f"{self.mesh_url}/mesh/blackboard/{scoped}",
