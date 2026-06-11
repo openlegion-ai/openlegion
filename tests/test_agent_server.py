@@ -1008,3 +1008,87 @@ class TestLearningsFeedbackEndpoint:
                 headers={"x-mesh-internal": "1"},
             )
         assert r.status_code == 400
+
+
+class TestChatStreamContextSeeding:
+    """The /chat/stream pump wraps every ``__anext__`` in its own task,
+    and tasks run in context COPIES — sets made inside the generator
+    don't survive to the next step. The route must seed
+    ``current_origin`` / ``current_trace_id`` in the pump's own context
+    so every per-step copy (where tools execute) inherits them.
+    Regression for the production NULL-origin chain roots that disabled
+    chain delivery, stall nudges, and recovery wakes for every
+    dashboard-stream chat."""
+
+    @pytest.mark.asyncio
+    async def test_tools_see_origin_and_trace_across_stream_steps(self):
+        from httpx import ASGITransport, AsyncClient
+
+        app, loop = _make_app()
+        captured: list[tuple] = []
+
+        async def fake_chat_stream(message, *, trace_id=None, origin=None):
+            from src.shared.trace import current_origin, current_trace_id
+            # Each yield forces the pump to resume us in a NEW task
+            # (fresh context copy) — capture what a tool running in the
+            # SECOND step would see.
+            yield {"type": "text_delta", "content": "step1"}
+            captured.append(
+                (current_origin.get(), current_trace_id.get()),
+            )
+            yield {"type": "text_delta", "content": "step2"}
+
+        loop.chat_stream = fake_chat_stream
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t",
+        ) as client:
+            async with client.stream(
+                "POST", "/chat/stream",
+                json={"message": "hi"},
+                headers={
+                    "x-mesh-internal": "1",
+                    "x-trace-id": "tr_streamtest1",
+                    "X-Origin": (
+                        '{"kind": "human", "channel": "dashboard",'
+                        ' "user": "admin"}'
+                    ),
+                },
+            ) as resp:
+                assert resp.status_code == 200
+                async for _ in resp.aiter_lines():
+                    pass
+
+        assert captured, "stream never reached the second step"
+        origin, trace_id = captured[0]
+        assert origin is not None, (
+            "current_origin was lost between stream steps — tools in "
+            "streamed chats create NULL-origin chain roots again"
+        )
+        assert origin.kind == "human"
+        assert origin.channel == "dashboard"
+        assert trace_id == "tr_streamtest1"
+
+    @pytest.mark.asyncio
+    async def test_stream_completes_without_context_token_error(self):
+        """The end-of-turn reset must not raise 'Token was created in a
+        different Context' (fired on every streamed turn before the
+        fix)."""
+        from httpx import ASGITransport, AsyncClient
+
+        app, loop = _make_app()
+
+        async def fake_chat_stream(message, *, trace_id=None, origin=None):
+            yield {"type": "text_delta", "content": "ok"}
+
+        loop.chat_stream = fake_chat_stream
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t",
+        ) as client:
+            async with client.stream(
+                "POST", "/chat/stream", json={"message": "hi"},
+                headers={"x-mesh-internal": "1"},
+            ) as resp:
+                lines = [ln async for ln in resp.aiter_lines() if ln]
+        assert any("ok" in ln for ln in lines)

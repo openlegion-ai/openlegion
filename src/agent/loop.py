@@ -7,6 +7,7 @@ Max 20 iterations per task. Proper LLM tool-calling message roles.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
@@ -4877,6 +4878,19 @@ class AgentLoop:
             return
 
         from src.shared.trace import current_origin, current_trace_id
+        # NOTE: when this generator is driven by the server's
+        # task-per-__anext__ pump (``/chat/stream`` in agent/server.py),
+        # each resume runs in a fresh context COPY, so these sets do NOT
+        # persist across steps — tools like hand_off saw
+        # ``current_origin = None`` and every dashboard-stream chat
+        # created NULL-origin chain roots, silently disabling chain
+        # delivery / stall nudges / recovery wakes. The server now seeds
+        # the same vars in the pump's own context (inherited by every
+        # per-step copy); the sets here still cover single-task consumers
+        # (tests, direct iteration). The reset is suppressed because the
+        # token may have been minted in a different context copy than the
+        # one running this ``finally`` — that exact ValueError fired at
+        # the end of every streamed turn in production and was the tell.
         current_trace_id.set(trace_id)
         origin_token = current_origin.set(origin)
         try:
@@ -4888,7 +4902,8 @@ class AgentLoop:
                 finally:
                     await self._checkpoint_chat_session()
         finally:
-            current_origin.reset(origin_token)
+            with contextlib.suppress(ValueError):
+                current_origin.reset(origin_token)
 
     async def _chat_stream_inner(self, user_message: str):
         from src.agent.llm import LLMContextOverflowError
