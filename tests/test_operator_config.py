@@ -572,6 +572,11 @@ class TestOperatorConstants:
             _OPERATOR_HEARTBEAT,
             _OPERATOR_HEARTBEAT_TOOLS,
         )
+        from src.shared.types import HEARTBEAT_SENTINELS
+
+        # Roll-forward keys off HEARTBEAT_SENTINELS[-1] — v6 must be the
+        # newest entry or deployed fleets never pick the step up.
+        assert HEARTBEAT_SENTINELS[-1] == "heartbeat_v6_agent_retro"
         assert "Agent retro" in _OPERATOR_HEARTBEAT
         assert "at most ONE agent per heartbeat" in _OPERATOR_HEARTBEAT
         assert (
