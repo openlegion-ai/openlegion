@@ -104,6 +104,12 @@ MEMORY_COMPILED_END = "<!-- compiled:end -->"
 _MEMORY_FILE_MAX = 64_000
 # Newest slice of the log injected alongside the compiled head.
 _MEMORY_RECENT_LOG_CHARS = 5_000
+# The compiled head's injection budget: room left for the head once the
+# recent-log slice (plus the "## Recent" header overhead) is reserved under
+# the per-file bootstrap cap. Also the consolidation trigger threshold for
+# oversized/legacy heads (see context.py:_maybe_consolidate_memory) — a head
+# beyond this budget injects clipped every turn until it is re-compiled.
+_MEMORY_HEAD_BUDGET = max(0, _MAX_MEMORY - _MEMORY_RECENT_LOG_CHARS - 32)
 
 
 # Public mapping for external consumers (tool response, dashboard).
@@ -578,9 +584,8 @@ class WorkspaceManager:
             return head
         # Reserve room for the recent slice so a large head can't crowd it out
         # under the per-file cap applied by get_bootstrap_content.
-        head_cap = max(0, _MAX_MEMORY - _MEMORY_RECENT_LOG_CHARS - 32)
-        if len(head) > head_cap:
-            head = head[:head_cap]
+        if len(head) > _MEMORY_HEAD_BUDGET:
+            head = head[:_MEMORY_HEAD_BUDGET]
         return f"{head}\n\n## Recent\n\n{recent}".strip()
 
     def load_daily_logs(self, days: int = 2) -> str:
