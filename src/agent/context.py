@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
+from src.agent.workspace import _MEMORY_HEAD_BUDGET
 from src.shared.models import get_context_window
 from src.shared.utils import sanitize_for_prompt, setup_logging
 
@@ -618,8 +619,9 @@ class ContextManager:
     async def _maybe_consolidate_memory(self) -> None:
         """Re-derive the compiled MEMORY.md head from the append-only log +
         high-salience facts. Time-gated (>=6h) and material-gated (>=1.5k log
-        chars) so it adds at most one LLM call per cycle. Best-effort: never
-        raises into the caller (compaction or the maintenance pass).
+        chars, OR a head exceeding its injection budget) so it adds at most
+        one LLM call per cycle. Best-effort: never raises into the caller
+        (compaction or the maintenance pass).
         """
         ws, llm = self.workspace, self.llm
         if not ws or not llm:
@@ -629,9 +631,13 @@ class ContextManager:
         if not ws.consolidation_due(_CONSOLIDATION_MIN_INTERVAL_S):
             return
         log = ws.load_memory_log()
-        if len(log) < _CONSOLIDATION_MIN_LOG_CHARS:
-            return
         head = ws.load_compiled_memory()
+        # An oversized head is either a legacy marker-less MEMORY.md (split as
+        # all-head, empty log) or an LLM-overshot compile; both must be
+        # re-compiled even with no new log material — otherwise they inject
+        # clipped + stale at the head budget forever.
+        if len(log) < _CONSOLIDATION_MIN_LOG_CHARS and len(head) <= _MEMORY_HEAD_BUDGET:
+            return
         salient = ""
         if self.memory:
             try:
