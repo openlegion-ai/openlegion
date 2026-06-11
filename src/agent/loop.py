@@ -1902,10 +1902,13 @@ class AgentLoop:
         # sites run inside the tool-execution except handlers, where a raise
         # here would replace the error envelope the LLM needs to see.
         try:
+            # limit=50 matches the tool_outcomes prune cap so the logged
+            # count stays truthful — limit=5 would report count=5 on the
+            # 10th identical failure.
             repeats = len(self.memory.get_tool_history(
                 tool_name=tool_name,
                 params_hash=self.memory._compute_params_hash(arguments or {}),
-                limit=5,
+                limit=50,
                 success=False,
             ))
             if repeats >= 3:
