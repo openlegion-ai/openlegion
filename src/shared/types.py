@@ -676,19 +676,6 @@ class MemoryFact(BaseModel):
     date: datetime | None = None
 
 
-class MemoryLog(BaseModel):
-    """An entry in the agent's action log."""
-
-    id: str = Field(default_factory=lambda: _generate_id("log_", 8))
-    action: str
-    input_summary: str
-    output_summary: str
-    task_id: str | None = None
-    tokens_used: int = 0
-    duration_ms: int = 0
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-
 # === API Proxy (agent -> mesh -> external service) ===
 
 

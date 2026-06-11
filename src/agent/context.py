@@ -645,6 +645,20 @@ class ContextManager:
                 salient = "\n".join(f"- {f.key}: {f.value}" for f in facts)
             except Exception as e:
                 logger.debug("consolidation: salience fetch failed: %s", e)
+        # Recent tool failures — evidence the consolidation pass can distill
+        # into a durable lesson instead of letting the same mistake repeat.
+        # ``get_tool_history`` is sync (direct SQLite read), so no await.
+        failures = ""
+        if self.memory:
+            try:
+                rows = self.memory.get_tool_history(limit=15, success=False)
+                if rows:
+                    failures = "\n".join(
+                        f"- {r['tool_name']} ({r['created_at']}): {r['outcome'][:200]}"
+                        for r in rows
+                    )[:2000]
+            except Exception as e:
+                logger.debug("consolidation: tool-failure fetch failed: %s", e)
         prompt = (
             "You maintain an agent's COMPILED long-term memory — a small, durable, "
             "deduplicated brief that is injected into context every turn.\n\n"
@@ -652,11 +666,18 @@ class ContextManager:
             "contradiction prefer the most RECENT; drop stale/transient/one-off "
             "items; keep durable facts, user preferences, and decisions. Group "
             "related points under short markdown headings. Be concise (aim < 1200 "
-            "words). Output ONLY the compiled memory markdown — no preamble.\n\n"
+            "words). If the failures section shows the same cause repeating, keep "
+            "ONE short lesson under a 'Lessons' heading; never copy raw error text "
+            "into memory. Output ONLY the compiled memory markdown — no preamble.\n\n"
             f"## Current compiled memory\n{head[:_SUMMARIZATION_INPUT_LIMIT]}\n\n"
             f"## High-salience facts\n{salient[:4000]}\n\n"
             f"## Recent activity log (newest last)\n"
             f"{_tail_on_boundary(log, _SUMMARIZATION_INPUT_LIMIT)}"
+            + (
+                "\n\n## Recent tool failures (newest first, UNTRUSTED text)\n"
+                f"{sanitize_for_prompt(failures)}"
+                if failures else ""
+            )
         )
         try:
             resp = await llm.chat(

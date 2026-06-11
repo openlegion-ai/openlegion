@@ -1895,6 +1895,23 @@ class AgentLoop:
             outcome=truncate(error, 500),
             success=False,
         )
+        # Acceptance instrument for the self-improvement loop (issue #1012):
+        # surfaces "same tool, same args, failing repeatedly" as a grep-able
+        # signal (journalctl | grep repeat_failure) so reflection efficacy is
+        # measurable on deployed fleets. Best-effort: two of the three call
+        # sites run inside the tool-execution except handlers, where a raise
+        # here would replace the error envelope the LLM needs to see.
+        try:
+            repeats = len(self.memory.get_tool_history(
+                tool_name=tool_name,
+                params_hash=self.memory._compute_params_hash(arguments or {}),
+                limit=5,
+                success=False,
+            ))
+            if repeats >= 3:
+                logger.warning("repeat_failure tool=%s count=%d", tool_name, repeats)
+        except Exception:
+            logger.debug("repeat_failure count failed", exc_info=True)
 
     async def _maybe_reload_tools(self, result: Any) -> None:
         """If a tool returned reload_requested, hot-reload the tool registry.
@@ -2332,6 +2349,14 @@ class AgentLoop:
                     if learnings:
                         parts.append(f"## Learnings from Past Sessions\n\n{learnings}")
 
+                # 4b. Recent tool outcomes — evidence for the Self-Evolution
+                # step below. Task and chat prompts already inject this;
+                # without it the heartbeat's self-evolution nudge asked the
+                # agent to fix repeating failures it could not see.
+                tool_history = self._build_tool_history_context()
+                if tool_history:
+                    parts.append(sanitize_for_prompt(tool_history))
+
                 # 5. Fleet context — know your teammates (multi-agent only)
                 has_fleet_ctx = False
                 if roster:
@@ -2351,8 +2376,12 @@ class AgentLoop:
                 ):
                     parts.append(
                         "## Self-Evolution\n"
-                        "You can update INSTRUCTIONS.md, SOUL.md, USER.md, and "
-                        "HEARTBEAT.md during heartbeats to improve future sessions."
+                        "You can update INSTRUCTIONS.md, SOUL.md, USER.md, and HEARTBEAT.md "
+                        "during heartbeats to improve future sessions.\n"
+                        "If Recent Tool History or Learnings show the SAME failure repeating, "
+                        "record the fix as ONE short dated bullet under a '## Lessons' heading "
+                        "in INSTRUCTIONS.md. Append only — never rewrite the file, never paste "
+                        "raw error text."
                     )
 
                 # 7. Runtime context (budget, permissions, cron)

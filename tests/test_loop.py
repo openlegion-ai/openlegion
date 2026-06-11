@@ -10,6 +10,7 @@ Uses mock LLM to verify:
 
 import asyncio
 import json
+import logging
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -1111,6 +1112,36 @@ class TestToolMemory:
         history = loop.memory.get_tool_history("exec")
         assert len(history) == 1
         assert history[0]["success"] is False
+
+    @pytest.mark.asyncio
+    async def test_record_failure_logs_repeat_warning(self, caplog):
+        """3+ failures with the same tool + args emit the grep-able
+        ``repeat_failure`` warning (issue #1012 acceptance instrument);
+        below the threshold stays silent."""
+        loop = _make_loop(real_memory=True)
+        with caplog.at_level(logging.WARNING, logger="agent.loop"):
+            for _ in range(2):
+                await loop._record_failure(
+                    "exec", "command not found", arguments={"command": "bad"},
+                )
+            assert "repeat_failure" not in caplog.text  # 2 < threshold
+            await loop._record_failure(
+                "exec", "command not found", arguments={"command": "bad"},
+            )
+        assert "repeat_failure" in caplog.text
+        assert "tool=exec count=3" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_record_failure_no_repeat_warning_for_different_args(self, caplog):
+        """Same tool failing with DIFFERENT args is not a repeat — the
+        counter keys on (tool_name, params_hash)."""
+        loop = _make_loop(real_memory=True)
+        with caplog.at_level(logging.WARNING, logger="agent.loop"):
+            for i in range(4):
+                await loop._record_failure(
+                    "exec", "command not found", arguments={"command": f"bad_{i}"},
+                )
+        assert "repeat_failure" not in caplog.text
 
     @pytest.mark.asyncio
     async def test_chat_mode_learns_from_tools(self):
@@ -2253,6 +2284,43 @@ async def test_heartbeat_simple_completion():
     assert result["duration_ms"] >= 0
     assert result["tools_used"] == []
     assert loop.state == "idle"
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_injects_tool_history():
+    """The heartbeat system prompt carries Recent Tool History — the
+    evidence the Self-Evolution nudge tells the agent to act on."""
+    loop = _make_loop()
+    loop.llm.chat = AsyncMock(return_value=LLMResponse(content="HEARTBEAT_OK", tokens_used=50))
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+    loop.memory.get_tool_history = MagicMock(return_value=[
+        {"tool_name": "exec", "params_hash": "h1", "outcome": "file.txt",
+         "success": True, "created_at": "2026-06-11 09:00:00"},
+        {"tool_name": "exec", "params_hash": "h2", "outcome": "command not found",
+         "success": False, "created_at": "2026-06-11 09:01:00"},
+    ])
+
+    result = await loop.execute_heartbeat("Check stuff")
+
+    assert result["skipped"] is False
+    system_prompt = loop.llm.chat.call_args.kwargs["system"]
+    assert "## Recent Tool History" in system_prompt
+    assert "exec [OK]" in system_prompt
+    assert "exec [FAILED]" in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_omits_tool_history_when_empty():
+    """No tool outcomes recorded → no Recent Tool History section."""
+    loop = _make_loop()  # fixture stubs get_tool_history to []
+    loop.llm.chat = AsyncMock(return_value=LLMResponse(content="HEARTBEAT_OK", tokens_used=50))
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+
+    result = await loop.execute_heartbeat("Check stuff")
+
+    assert result["skipped"] is False
+    system_prompt = loop.llm.chat.call_args.kwargs["system"]
+    assert "## Recent Tool History" not in system_prompt
 
 
 @pytest.mark.asyncio
