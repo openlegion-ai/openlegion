@@ -137,7 +137,10 @@ _RESERVED_ENVELOPE_KEYS: frozenset[str] = frozenset(
         "lightweight handoffs where the summary is enough context, omit "
         "'data' and 'brief'.\n\n"
         "The target agent sees the task in their inbox (via check_inbox) "
-        "with your summary, your brief, and a pointer to your output."
+        "with your summary, your brief, and a pointer to your output.\n\n"
+        "If the recipient can't execute your task they will block it "
+        "with a question — you'll see it in check_inbox() events[]; "
+        "answer and re-hand-off rather than waiting."
     ),
     parameters={
         "to": {
@@ -517,7 +520,13 @@ async def hand_off(
         "- When you receive a coordination notification\n\n"
         "After reading a task, use read_blackboard to fetch the full "
         "output data via the output_key. When done processing, call "
-        "complete_task to mark it finished so it won't appear again."
+        "complete_task to mark it finished so it won't appear again.\n\n"
+        "The result also includes events[] — task_failed / task_blocked "
+        "notices for tasks YOU created via hand_off. For each one, read "
+        "blocker_note / error: if the recipient asked a question, answer "
+        "it with a corrected hand_off (new brief, same goal); if it "
+        "failed terminally, decide whether to retry, reroute, or report "
+        "the failure upstream. Do not ignore these events."
     ),
     parameters={},
 )
@@ -611,7 +620,15 @@ async def check_inbox(*, mesh_client=None) -> dict:
         "When you have multiple active tasks, pass task_id explicitly "
         "to disambiguate which one this status update applies to. "
         "Otherwise the call returns ambiguous_task with the active task "
-        "ids so you can pick the right one."
+        "ids so you can pick the right one.\n\n"
+        "'blocked' is your pushback channel. If a handed-off task is "
+        "malformed, missing inputs, or outside your role, call "
+        "update_status(state='blocked', summary='<the specific question "
+        "or missing input>', task_id=...) instead of guessing. Your "
+        "summary is delivered back to the task's creator as "
+        "blocker_note, and the operator is alerted on user-facing "
+        "chains. NEVER mark work done that you did not do, and NEVER "
+        "silently drop a task you can't execute."
     ),
     parameters={
         "state": {
