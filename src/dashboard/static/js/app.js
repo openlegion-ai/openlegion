@@ -6844,15 +6844,13 @@ function dashboard() {
       let body;
       if (isRemote) {
         body = { transport: 'http', url, agents };
-        // OAuth bindings are managed by the Connect flow, not this
-        // form — omit auth so the backend preserves what's persisted.
-        if (d._authKind !== 'oauth') {
-          body.auth = {
-            kind: d._authKind,
-            cred: d._authKind === 'bearer' ? (d._authCred || '').trim() : null,
-            connection: null,
-          };
-        }
+        body.auth = {
+          kind: d._authKind,
+          cred: d._authKind === 'bearer' ? (d._authCred || '').trim() : null,
+          // The Connect flow sets the connection; the form round-trips
+          // whatever GET returned so a save never wipes the binding.
+          connection: d._authKind === 'oauth' ? (d._authConnection || null) : null,
+        };
       } else {
         body = {
           command,
