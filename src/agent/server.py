@@ -438,11 +438,28 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
                     next_event.cancel()
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await next_event
+                # Deterministically finalize the inner generator. On a
+                # client disconnect it is suspended INSIDE loop.chat_stream
+                # while still holding _chat_lock — without an explicit
+                # aclose() the lock is only released when the GC's
+                # async-gen finalizer eventually runs, and until then the
+                # agent's next chat blocks on the lock. aclose() also runs
+                # chat_stream's finally (session checkpoint) now, in this
+                # context, instead of at an unspecified later point.
+                with contextlib.suppress(Exception):
+                    await stream_iter.aclose()
                 # Tokens were minted in THIS context, so the resets are
-                # safe (unlike the in-generator reset, which lands in a
-                # per-step context copy and is suppressed there).
-                current_origin.reset(_origin_token)
-                current_trace_id.reset(_tid_token)
+                # safe for normal completion AND client-disconnect
+                # cancellation (Starlette cancels the same task). The
+                # suppress covers the one remaining path: a GC-driven
+                # async-generator finalization can run this ``finally``
+                # in a different context, where reset raises ValueError —
+                # functionally irrelevant (the context dies anyway) but
+                # it would surface as 'Exception ignored in <async_gen>'
+                # noise during cleanup.
+                with contextlib.suppress(ValueError):
+                    current_origin.reset(_origin_token)
+                    current_trace_id.reset(_tid_token)
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 
     @app.post("/chat/reset")
