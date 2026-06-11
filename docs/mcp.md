@@ -68,11 +68,23 @@ key is omitted) or **remote** (`transport: "http"`):
 Remote records validate via the `Connector` discriminated union
 (`src.shared.types.CONNECTOR_ADAPTER`) and are **excluded from
 `MCP_SERVERS` by construction** (`snapshot_for_agent` serializes stdio
-records only — pinned by test). Status: the data model and dashboard
-surface are live; the mesh gateway that proxies remote calls ships next
-(plan `docs/plans/2026-06-10-mcp-connectors-global-catalog.md`, Phase
-2b) — until then remote connectors are storable but inert, and the UI
-marks them "not active yet".
+records only — pinned by test).
+
+**How remote calls flow:** at agent start, the agent fetches sanitized
+tool schemas from `GET /mesh/connectors/tools` (caller-scoped) and
+registers them as `mcp_remote` tools; each invocation routes through
+`POST /mesh/connectors/call` to the mesh-side `MCPGateway`
+(`src/host/mcp_gateway.py`), which opens a **per-call** streamable-HTTP
+session (no long-lived session state), resolves auth from the vault,
+applies the resolved-IP SSRF blocklist with redirects disabled, rejects
+server-initiated sampling/elicitation, byte-caps results (256 KiB +
+`truncated` flag), and masks upstream error bodies. Assignment is the
+authorization gate — deny-all default, **operator included** (the
+trust-tier carve-out does not extend here; pinned by an HTTP-level
+test). The dashboard's **Test** button calls
+`POST /api/connectors/{name}/probe` for a fresh initialize + discovery;
+`needs_auth: true` marks connectors awaiting the OAuth Connect flow
+(Phase 3).
 
 **Downgrade note:** an older engine version loads a catalog containing
 `http` records by dropping them per-record with an error log (stdio
