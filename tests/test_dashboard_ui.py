@@ -427,6 +427,27 @@ class TestNotificationsBellRemoved:
         ):
             assert evt in block, evt
 
+    def test_fan_in_excludes_quarantined_to_avoid_double_ping(self):
+        """`quarantined` reroutes through _system_signal_producer into a
+        /chat/note whose `notification` event already pings — so it must
+        NOT be in the fan-in health_change kinds, or it double-pings."""
+        js = _read(_APP_JS)
+        idx = js.index("Desktop-ping fan-in (bell removed)")
+        block = js[idx:idx + 2600]
+        # the health_change branch lists degraded/unhealthy/failed only
+        assert "['degraded', 'unhealthy', 'failed']" in block
+        assert "'quarantined'].includes" not in block
+
+    def test_fan_in_skips_replayed_events_on_fresh_load(self):
+        """A fresh page load has an empty _seenEventIds and the bus replays
+        its ring buffer — the fan-in must guard on _initTs (like the
+        `notification` handler) so a backgrounded fresh load doesn't ping
+        for stale buffered events."""
+        js = _read(_APP_JS)
+        idx = js.index("Desktop-ping fan-in (bell removed)")
+        block = js[idx:idx + 2600]
+        assert "this._normalizeEventTs(evt) < this._initTs - 5000" in block
+
 
 # ── Activity translation (formatActivityForUser) ──────────────────────
 

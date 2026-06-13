@@ -434,7 +434,7 @@ function dashboard() {
     // Goals chip strip renders above when the operator has tracked
     // any business goals. Needs You panel sits on top; Stuck Tasks
     // panel below summaries; Cancel modal + Task drill-in are
-    // reachable from Needs You and the notification bell.
+    // reachable from Needs You and the Work tab.
     // ``workplaceEnabled`` reflects whether the tasks store
     // responded — kept for graceful empty-state rendering on
     // transient errors.
@@ -4491,16 +4491,25 @@ function dashboard() {
       }
 
       // Desktop-ping fan-in (bell removed): synthesize the row shape
-      // _maybeFireBrowserNotification expects from the underlying
-      // events, preserving the old bell coverage (approval / credential
-      // / health alert / credit) — chain outcomes + notify_user ping
-      // via the `notification` handler below. Replays are already
-      // filtered by the event-id dedupe above; the hook itself gates on
-      // opt-in + permission + tab-hidden.
+      // _maybeFireBrowserNotification expects from the underlying events,
+      // preserving the old bell coverage (approval / credential / health
+      // alert / credit). Chain outcomes + notify_user ping via the
+      // `notification` handler below. The hook gates on opt-in +
+      // permission + tab-hidden. Replay guard: the event-id dedupe above
+      // covers in-session reconnects, but a fresh page load has an empty
+      // _seenEventIds and the bus replays its ring buffer — so skip events
+      // older than _initTs (matching the `notification` handler), else a
+      // backgrounded fresh load could ping for stale buffered events.
+      // ``quarantined`` is intentionally absent: it reroutes via
+      // _system_signal_producer into a /chat/note whose notification event
+      // already pings (with richer remediation text) — listing it here too
+      // would double-ping.
       try {
         const fanAgent = evt.agent || '';
         const d = evt.data || {};
-        if (evt.type === 'pending_action_created') {
+        if (this._normalizeEventTs(evt) < this._initTs - 5000) {
+          // replayed buffered event (fresh load) — no desktop ping
+        } else if (evt.type === 'pending_action_created') {
           this._maybeFireBrowserNotification({
             kind: 'approval',
             id: 'pa-' + (d.action_id || d.id || Date.now()),
@@ -4517,7 +4526,7 @@ function dashboard() {
             payload: { agent_id: fanAgent },
           });
         } else if (evt.type === 'health_change'
-                   && ['degraded', 'unhealthy', 'failed', 'quarantined'].includes(d.current)) {
+                   && ['degraded', 'unhealthy', 'failed'].includes(d.current)) {
           this._maybeFireBrowserNotification({
             kind: 'alert',
             id: 'hc-' + fanAgent + '-' + d.current,
