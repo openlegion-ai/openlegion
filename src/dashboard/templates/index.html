@@ -1418,6 +1418,30 @@
               </div>
             </div>
 
+            <!-- Live pipeline watch chips — in-flight dashboard-origin
+                 chains pinned above the composer: pulsing while working,
+                 amber when stalled, "finishing…" ghost while the chain
+                 settles, gone when the outcome bubble lands. Click jumps
+                 to the Work-tab drill-in. -->
+            <template x-if="chatWatchChips().length > 0">
+              <div class="px-3 pb-1 space-y-1 shrink-0" data-testid="chat-watch-chips">
+                <template x-for="p in chatWatchChips()" :key="p.root_task_id">
+                  <button type="button" @click="openPipelineFromChat(p)"
+                    class="w-full text-left flex items-center gap-2 px-3 py-1.5 rounded-lg border text-[11px] transition-colors"
+                    :class="p._ghost ? 'border-gray-800 bg-gray-900/40 text-gray-500 cursor-default'
+                            : (p.stalled ? 'border-amber-700/40 bg-amber-900/15 text-amber-300 hover:bg-amber-900/25'
+                                         : 'border-gray-800 bg-gray-900/60 text-gray-400 hover:bg-gray-800/60')">
+                    <span class="relative flex h-2 w-2 shrink-0" aria-hidden="true">
+                      <span x-show="!p._ghost && !p.stalled" class="animate-ping absolute inline-flex h-full w-full rounded-full bg-indigo-400 opacity-60"></span>
+                      <span class="relative inline-flex rounded-full h-2 w-2"
+                        :class="p._ghost ? 'bg-gray-600' : (p.stalled ? 'bg-amber-400' : 'bg-indigo-400')"></span>
+                    </span>
+                    <span class="truncate font-medium" x-text="p.title || 'pipeline'"></span>
+                    <span class="shrink-0 ml-auto text-gray-500" x-text="chipStageLabel(p)"></span>
+                  </button>
+                </template>
+              </div>
+            </template>
             <!-- Input area -->
             <div x-show="operatorReady" class="px-3 py-3 border-t border-gray-800/80 shrink-0"
               x-data="{ opMsg: '', opPendingFile: '', opSpeechActive: false, _opRecognition: null }">

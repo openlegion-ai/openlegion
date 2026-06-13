@@ -8043,6 +8043,10 @@ def create_dashboard_router(
                     "title": root.get("title") or "",
                     "assignee": root.get("assignee") or "",
                     "created_at": root.get("created_at"),
+                    # origin lets the chat tab filter to ITS chains
+                    # (channel == "dashboard") for the watch chips.
+                    "origin": root.get("origin") or {},
+                    "updated_at": root.get("updated_at"),
                     "stages": stages,
                     "summary": snap.get("summary", {}),
                     "stalled": stalled,

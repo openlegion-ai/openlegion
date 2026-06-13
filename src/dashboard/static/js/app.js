@@ -458,6 +458,12 @@ function dashboard() {
     // Loaded from /api/workplace/pipelines, WS-debounce-refreshed on task
     // status changes so the card tracks chains as they move.
     workplacePipelines: [],
+    // Chat watch chips — "finishing…" ghosts for dashboard-origin chains
+    // that left the pipelines payload (terminal, settling) but whose
+    // outcome bubble hasn't landed yet. Keyed by root_task_id; cleared
+    // by the notification event or a 90s timeout.
+    _chipGhosts: {},
+    _chipPrevDash: {},
     // Per-summary inline feedback box state. Keyed by summary id;
     // value is the current draft feedback string. The user opens the
     // box by clicking the rework icon → enters reason → submits →
@@ -1492,6 +1498,11 @@ function dashboard() {
         this.browserNotifyPermission = Notification.permission;
       }
 
+      // Chat watch chips: the chat tab is the default landing surface,
+      // so seed the pipelines state on mount (the Work-tab loader and
+      // the WS task-event debounce keep it fresh afterwards).
+      this.loadWorkplacePipelines();
+
       // Command palette: Cmd+K / Ctrl+K + tab shortcuts 1/2/3
       this._cmdPaletteHandler = (e) => {
         if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
@@ -2465,6 +2476,11 @@ function dashboard() {
         if (!this.openChats.includes('operator')) {
           this.openChats.push('operator');
         }
+        // Watch chips bind to workplacePipelines — refresh on entry so
+        // the chat shows in-flight chains without a task event first.
+        if (typeof this.loadWorkplacePipelines === 'function') {
+          this.loadWorkplacePipelines();
+        }
         this.activeChatId = 'operator';
         this._loadChatHistory('operator');
         this.$nextTick(() => {
@@ -2675,6 +2691,7 @@ function dashboard() {
         }
         const data = await resp.json();
         if (serial !== this._pipelinesFetchSerial) return;  // superseded
+        this._trackChipGhosts(data.pipelines || []);
         this.workplacePipelines = data.pipelines || [];
       } catch (e) {
         if (serial !== this._pipelinesFetchSerial) return;  // superseded
@@ -3997,6 +4014,65 @@ function dashboard() {
     // state so the user sees changes without reloading. Each handler is
     // a small upsert into one of the lists; misses are tolerated (the
     // periodic full-load is the source of truth on reconnect).
+    // ── Chat watch chips ─────────────────────────────────────
+    //
+    // The chat-thread mirror of the Work tab's live pipeline card:
+    // in-flight dashboard-origin chains render as a pulsing chip under
+    // the operator conversation, resolve to a "finishing…" ghost while
+    // the chain settles (terminal but undelivered), and disappear as
+    // the outcome bubble lands. Data rides the existing
+    // workplacePipelines state + WS task-event debounce — no extra
+    // endpoints or polling.
+
+    _trackChipGhosts(pipelines) {
+      const current = {};
+      for (const p of pipelines) {
+        if (p.origin && p.origin.channel === 'dashboard') {
+          current[p.root_task_id] = p;
+        }
+      }
+      for (const [id, p] of Object.entries(this._chipPrevDash || {})) {
+        if (!current[id]) {
+          this._chipGhosts[id] = {
+            root_task_id: id, title: p.title || '',
+            _ghost: true, stalled: false, stages: [],
+          };
+          setTimeout(() => { delete this._chipGhosts[id]; }, 90_000);
+        }
+      }
+      this._chipPrevDash = current;
+    },
+
+    chatWatchChips() {
+      const live = (this.workplacePipelines || [])
+        .filter(p => p.origin && p.origin.channel === 'dashboard')
+        .slice(0, 3);
+      const liveIds = new Set(live.map(p => p.root_task_id));
+      const ghosts = Object.values(this._chipGhosts || {})
+        .filter(g => !liveIds.has(g.root_task_id));
+      return [...live, ...ghosts].slice(0, 3);
+    },
+
+    chipStageLabel(p) {
+      if (p._ghost) return 'finishing…';
+      const stages = p.stages || [];
+      const total = stages.length;
+      const terminal = ['done', 'failed', 'cancelled'];
+      const done = stages.filter(s => terminal.includes(s.status)).length;
+      const cur = stages.find(s => !terminal.includes(s.status));
+      const who = cur && cur.assignee ? ' · ' + cur.assignee : '';
+      const stalled = p.stalled ? ' · stalled' : '';
+      return 'stage ' + Math.min(done + 1, total || 1) + '/' + (total || 1) + who + stalled;
+    },
+
+    openPipelineFromChat(p) {
+      if (p._ghost) return;
+      this.switchTab('workplace');
+      if (typeof this.openTaskDrillIn === 'function') {
+        this.openTaskDrillIn(p.root_task_id);
+      }
+    },
+
     handleWorkplaceEvent(evt) {
       if (!evt || !evt.type) return;
       const data = evt.data || {};
@@ -4976,6 +5052,10 @@ function dashboard() {
       // page loaded) — _loadChatHistory handles restoring them from the
       // server transcript and localStorage.
       if (evt.type === 'notification' && agent && evt.data && evt.data.message) {
+        // Chain outcome arrived — its watch-chip ghost can go.
+        if (evt.data.root_task_id) {
+          delete this._chipGhosts[evt.data.root_task_id];
+        }
         const msg = evt.data.message;
         const evtTs = this._normalizeEventTs(evt);
         const isReplay = evtTs < this._initTs - 5000;  // 5s grace for clock skew

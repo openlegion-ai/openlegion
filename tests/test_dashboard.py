@@ -4967,6 +4967,10 @@ class TestWorkplaceTabRoutes:
         assert p["title"] == "research trends"
         assert p["stages"] and p["summary"]["total"] >= 1
         assert p["stalled"] is False  # working but not old
+        # Chat watch chips filter on origin.channel — the payload must
+        # carry the root's origin (and updated_at for freshness).
+        assert p["origin"]["channel"] == "dashboard"
+        assert "updated_at" in p
 
     def test_workplace_pipelines_excludes_terminal_and_non_human(self):
         client = self._client_with_v2(True)

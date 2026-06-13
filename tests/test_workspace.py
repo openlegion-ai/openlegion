@@ -1490,3 +1490,32 @@ class TestAppendChatMessageRaiseOnError:
         monkeypatch.setattr("pathlib.Path.open", _boom)
         with _pytest.raises(OSError):
             ws.append_chat_message("notification", "x", raise_on_error=True)
+
+
+class TestPlaybookV6ChatDeliveryMigration:
+    """v6 addendum — same append-only contract as v2-v5."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_appends_v6_once_and_idempotent(self):
+        from src.shared.operator_playbooks import _OPERATOR_CORE
+        (Path(self._tmpdir) / "INSTRUCTIONS.md").write_text(
+            "# Mine\n<!-- playbook_v2 -->\n"
+            "<!-- playbook_v3_handoff_briefs -->\n"
+            "<!-- playbook_v4_watch_mode -->\n"
+            "<!-- playbook_v5_verification_wake -->\n"
+        )
+        WorkspaceManager(
+            workspace_dir=self._tmpdir, initial_instructions=_OPERATOR_CORE,
+        )
+        WorkspaceManager(
+            workspace_dir=self._tmpdir, initial_instructions=_OPERATOR_CORE,
+        )
+        text = (Path(self._tmpdir) / "INSTRUCTIONS.md").read_text()
+        assert text.count("<!-- playbook_v6_chat_delivery -->") == 1
+        assert "Chat-Native Delivery" in text
+        assert "# Mine" in text

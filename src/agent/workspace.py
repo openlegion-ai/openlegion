@@ -371,6 +371,21 @@ class WorkspaceManager:
                 f.write("\n" + _PLAYBOOK_V5_ADDENDUM + "\n")
             logger.info("Appended verification-wake guidance to operator instructions (v5)")
 
+        # Migration v6 (chat-native delivery): progress + outcomes land in
+        # the user's chat (watch chip, outcome bubble, desktop ping); the
+        # bell is gone. Same append-only contract as v2-v5.
+        if (
+            instructions_file.exists()
+            and self._initial_instructions
+            and "<!-- playbook_v6_chat_delivery -->" in self._initial_instructions
+            and "<!-- playbook_v6_chat_delivery -->"
+            not in instructions_file.read_text(errors="replace")
+        ):
+            from src.shared.operator_playbooks import _PLAYBOOK_V6_ADDENDUM
+            with open(instructions_file, "a") as f:
+                f.write("\n" + _PLAYBOOK_V6_ADDENDUM + "\n")
+            logger.info("Appended chat-delivery guidance to operator instructions (v6)")
+
         for filename, default_content in _SCAFFOLD_FILES.items():
             path = self.root / filename
             if not path.exists():
