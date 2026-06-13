@@ -923,9 +923,10 @@ class DashboardEvent(BaseModel):
         "credential_stored",
         # OAuth connection refresh hard-failed (e.g. ``invalid_grant`` after
         # the user revoked access at the provider). Emitted once per failure
-        # episode from the mesh ``/mesh/vault/resolve`` catch site; the
-        # notifications producer maps it to a ``credential`` bell entry so
-        # the operator knows to reconnect via Settings → Integrations.
+        # episode from the mesh ``/mesh/vault/resolve`` catch site;
+        # ``runtime._system_signal_producer`` reroutes it into a ``/chat/note``
+        # in the operator thread so the operator knows to reconnect via the
+        # Connectors page.
         "connection_refresh_failed",
         "browser_login_request",
         "browser_login_completed",
@@ -960,8 +961,8 @@ class DashboardEvent(BaseModel):
         # ``task_outcome`` is emitted by ``host/orchestration.py:set_outcome``
         # when an operator (or system) rates a delivered task. Without this
         # literal, ``DashboardEvent`` validation rejects the emit and the
-        # event silently disappears (swallowed by ``_safe_emit``), so the
-        # notifications producer below never sees deliveries.
+        # event silently disappears (swallowed by ``_safe_emit``), so
+        # Work-tab consumers never see deliveries.
         "task_outcome",
         "task_artifact_added",
         # Work summaries — emitted by ``host/summaries.WorkSummariesStore``
