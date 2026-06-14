@@ -181,7 +181,6 @@ Alpine.js SPA + Tailwind via CDN (no build step) with Jinja `autoescape=True` an
 | `server.py` | Dashboard FastAPI router with 160 API endpoints + VNC URL injection. Top-nav tabs: Chat / Teams / Work / Settings (internal IDs `chat` / `fleet` / `workplace` / `system` — frozen for URL stability). |
 | `events.py` | `EventBus` for real-time WebSocket streaming on `/ws/events` (mounted on the mesh app, not the dashboard router). |
 | `auth.py` | Session cookie verification — HMAC-SHA256 over `{expiry}.{signature}`, 24h max lifetime, 5-min skew tolerance. |
-| `notifications.py` | Persistent notifications store (SQLite WAL) — backs the top-nav bell. |
 | `telemetry.py` | Telemetry event sink for the SPA (`dashboard_telemetry` table). |
 | `platform_success.py` | Per-tenant success scoring. |
 
@@ -224,7 +223,7 @@ All persistent state is SQLite (WAL mode, `busy_timeout=30000` except `traces` w
 | `data/captcha_costs.json` | CAPTCHA cost ledger in millicents (1/100,000 USD) | `src/browser/captcha_cost_counter.py` |
 | Mesh-side blackboard / pubsub / audit-log SQLite | Inter-agent state, atomic CAS, undo/archive | `src/host/mesh.py` |
 | `data/traces.db` | Request traces (lower `busy_timeout=5000`) | `src/host/traces.py` |
-| `data/dashboard.db` | Notifications + telemetry | `src/dashboard/notifications.py`, `src/dashboard/telemetry.py` |
+| `data/dashboard.db` | Telemetry | `src/dashboard/telemetry.py` |
 | Per-agent Docker volume `openlegion_data_{name}` → `/data` | Agent workspace markdown, memory DB, daily logs | `src/agent/workspace.py`, `src/agent/memory.py` |
 | `config/agents.yaml` | Per-agent config (model, role, instructions, budget, resources) | `src/cli/config.py` |
 | `config/permissions.json` | Per-agent ACL matrix | `src/host/permissions.py` |

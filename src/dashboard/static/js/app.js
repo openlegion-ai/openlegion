@@ -464,6 +464,11 @@ function dashboard() {
     // by the notification event or a 90s timeout.
     _chipGhosts: {},
     _chipPrevDash: {},
+    // Root ids whose outcome bubble already landed — suppresses a
+    // "finishing…" ghost that would otherwise be (re)created when the
+    // now-terminal chain drops out of the pipelines payload AFTER its
+    // notification fired (the two arrive in either order).
+    _chipDelivered: {},
     // Per-summary inline feedback box state. Keyed by summary id;
     // value is the current draft feedback string. The user opens the
     // box by clicking the rework icon → enters reason → submits →
@@ -4032,13 +4037,21 @@ function dashboard() {
         }
       }
       for (const [id, p] of Object.entries(this._chipPrevDash || {})) {
-        if (!current[id]) {
-          this._chipGhosts[id] = {
-            root_task_id: id, title: p.title || '',
-            _ghost: true, stalled: false, stages: [],
-          };
-          setTimeout(() => { delete this._chipGhosts[id]; }, 90_000);
+        if (current[id]) continue;
+        // Chain left the in-flight payload (terminal). Only bridge with a
+        // "finishing…" ghost if the outcome bubble hasn't ALREADY landed —
+        // otherwise the ghost would reappear right after its notification
+        // cleared it and linger the full 90s past completion.
+        if (this._chipDelivered[id]) {
+          delete this._chipDelivered[id];
+          delete this._chipGhosts[id];
+          continue;
         }
+        this._chipGhosts[id] = {
+          root_task_id: id, title: p.title || '',
+          _ghost: true, stalled: false, stages: [],
+        };
+        setTimeout(() => { delete this._chipGhosts[id]; }, 90_000);
       }
       this._chipPrevDash = current;
     },
@@ -5061,9 +5074,24 @@ function dashboard() {
       // page loaded) — _loadChatHistory handles restoring them from the
       // server transcript and localStorage.
       if (evt.type === 'notification' && agent && evt.data && evt.data.message) {
-        // Chain outcome arrived — its watch-chip ghost can go.
+        // Chain outcome arrived — clear its watch chip. Mark it delivered
+        // so _trackChipGhosts won't recreate a "finishing…" ghost when the
+        // terminal chain later drops out of the pipelines payload, and
+        // refresh the live pipelines so the in-flight chip clears even if
+        // this chain's task-lifecycle event was dropped.
         if (evt.data.root_task_id) {
-          delete this._chipGhosts[evt.data.root_task_id];
+          const rid = evt.data.root_task_id;
+          this._chipDelivered[rid] = true;
+          delete this._chipGhosts[rid];
+          // Backstop cleanup: _trackChipGhosts clears the flag promptly in
+          // the common ordering (notification before the chain drops out),
+          // but in the reverse ordering the id is already gone from
+          // _chipPrevDash and would never be re-evaluated — so expire it.
+          setTimeout(() => { delete this._chipDelivered[rid]; }, 5000);
+          if (typeof this.loadWorkplacePipelines === 'function') {
+            if (this._pipelinesDebounce) clearTimeout(this._pipelinesDebounce);
+            this._pipelinesDebounce = setTimeout(() => this.loadWorkplacePipelines(), 300);
+          }
         }
         const msg = evt.data.message;
         const evtTs = this._normalizeEventTs(evt);

@@ -420,7 +420,6 @@ openlegion/
 │   │   ├── server.py            # FastAPI router + API endpoints
 │   │   ├── events.py            # EventBus for real-time streaming
 │   │   ├── auth.py              # Session cookie verification
-│   │   ├── notifications.py     # Persistent notifications store
 │   │   ├── telemetry.py         # SPA telemetry event sink
 │   │   ├── platform_success.py  # Per-tenant success scoring
 │   │   ├── templates/           # Dashboard HTML (Alpine.js + Tailwind)

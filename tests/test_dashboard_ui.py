@@ -2543,7 +2543,7 @@ class TestDispatchChatDoneContract:
         assert "'delivered'" in js.split("_browserNotifyKinds:")[1].split("]")[0]
         # The live notification handler synthesizes the hook's row shape.
         idx = js.index("evt.type === 'notification' && agent")
-        block = js[idx:idx + 1600]
+        block = js[idx:idx + 2400]
         assert "_maybeFireBrowserNotification" in block
 
 
@@ -2567,8 +2567,23 @@ class TestChatWatchChips:
             assert marker in js, marker
         # Ghost lifecycle: created when a dashboard chain leaves the
         # payload, cleared by the outcome notification or a 90s timeout.
-        assert "delete this._chipGhosts[evt.data.root_task_id]" in js
+        assert "delete this._chipGhosts[rid]" in js
         assert "90_000" in js
+
+    def test_chip_ghost_not_recreated_after_outcome(self):
+        """Ordering fix: when the outcome notification arrives before the
+        terminal chain drops out of the pipelines payload, _trackChipGhosts
+        must NOT recreate a 'finishing…' ghost (which would linger 90s past
+        completion). The notification marks the root in _chipDelivered, and
+        _trackChipGhosts skips ghost creation for a delivered root."""
+        js = _read(_APP_JS)
+        assert "_chipDelivered" in js
+        # notification handler marks delivered + refreshes live pipelines
+        assert "this._chipDelivered[rid] = true" in js
+        # _trackChipGhosts honours the delivered guard
+        track = js[js.index("_trackChipGhosts(pipelines) {"):]
+        track = track[:track.index("},")]
+        assert "this._chipDelivered[id]" in track
 
     def test_chips_filter_dashboard_origin(self):
         js = _read(_APP_JS)

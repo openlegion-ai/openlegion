@@ -25,9 +25,16 @@ The defaults — `tabs` array and `activeTab: 'chat'` — live in `src/dashboard
 
 A command palette (**Cmd+K** / **Ctrl+K**) provides quick access to agents, actions, and navigation. The search button in the nav bar also opens it.
 
-### Top-Nav Bell
+### Chat-native delivery (replaced the top-nav bell)
 
-- **Notifications bell** (top-right) — driven by `/dashboard/api/notifications`. Subtle gray dot when unread items exist; click to open the dropdown. See [Notifications](#notifications-system).
+The top-nav notifications bell was **removed** (2026-06 chat-native delivery overhaul). Delegated-work results now arrive in the operator chat instead:
+
+- **Chain outcomes** are written into the operator transcript as a `notification`-role row (via the agent `POST /chat/note` endpoint — the durability point the ChainWatcher claims on) and surfaced live via the `notification` WebSocket event (amber bubble + toast).
+- **Live progress** shows as a watch chip pinned above the operator composer while a delegated chain is in flight (stage k/n, amber when stalled).
+- **Off-tab desktop notifications** fire from a fan-in over the underlying WS events (approval / credential / health alert / credit) plus chain outcomes, gated on the user's opt-in.
+- The two formerly bell-only signals — `connection_refresh_failed` and agent quarantine — reroute into operator-thread notes via `runtime._system_signal_producer`.
+
+See [Notifications](#notifications-system).
 
 ## Team Management
 
@@ -294,44 +301,16 @@ When an agent's LLM call fails due to depleted credits (HTTP 402), a styled card
 - "Use Own API Key" button navigates to Settings → API Keys
 - Deduplicates against the last 3 messages so rapid-fire failures don't stack identical cards
 
-## Notifications System
+## Notifications System (chat-native, bell removed)
 
-Phase 2 Board UX overhaul added a persistent notifications store (separate from transient toasts and the Needs-You badge). A notification represents a past event the user should know about; the bell badge survives page reloads and cross-device viewing.
+The persistent notifications bell + store (`src/dashboard/notifications.py`, the `/dashboard/api/notifications` endpoints, and the `notification_added` WS event) were **removed** in the 2026-06 chat-native delivery overhaul. There is no longer a separate notifications surface — events the user should know about are delivered into the chat or as desktop pings.
 
-### Endpoints
+### Delivery surfaces
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/dashboard/api/notifications` | Top 10 notifications, unread first then by `ts DESC` |
-| `POST` | `/dashboard/api/notifications/{notification_id}/read` | Mark a single notification read |
-| `POST` | `/dashboard/api/notifications/read-all` | Mark every unread notification read |
-
-### Storage
-
-SQLite-backed via `src/dashboard/notifications.py` (`NotificationStore`). Schema:
-
-```
-dashboard_notifications(
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    agent_id     TEXT,                 -- optional originating agent (NULL = system)
-    ts           REAL NOT NULL,        -- Unix epoch seconds
-    kind         TEXT NOT NULL,        -- short tag from _KNOWN_KINDS
-    title        TEXT NOT NULL,        -- one-line headline
-    body         TEXT,                 -- optional longer body
-    read_at      REAL,                 -- Unix epoch when read (NULL = unread)
-    payload_json TEXT                  -- optional JSON for click-through targets
-)
-```
-
-WAL mode, `busy_timeout=30000`. Composite index `idx_notifications_unread_ts(read_at, ts DESC)` optimises the unread-first read pattern.
-
-### Frozen Kinds
-
-`_KNOWN_KINDS = {"delivered", "approval", "alert", "info", "blocker", "credential"}`. Unknown kinds are **accepted** (the log warns) so a producer typo never drops an event — the bell falls back to a generic icon. Add a value to `_KNOWN_KINDS` rather than coining ad-hoc kinds; the bell renders an icon per kind.
-
-### Live Updates
-
-The mesh emits `notification_added` immediately after each `NotificationStore.add` call (via `_notifications_producer`) so the bell badge updates without waiting for the 60-second poll cycle. Subscribers listen for the WS event and refetch `/dashboard/api/notifications` for the top page.
+- **Chain outcomes** → a `notification`-role row in the operator transcript, written by the agent `POST /chat/note` endpoint. This write is the deliver-then-claim durability point: the ChainWatcher claims the chain only on a positive `{ "ok": true }` ack, so a failed write is retried, never silently lost. On success the mesh emits the `notification` WebSocket event (agent `operator`, `data.message` + `data.root_task_id`), rendered as the amber notification bubble + a toast.
+- **Live progress** → the watch chip pinned above the operator composer for in-flight dashboard-origin chains (binds to `workplacePipelines`; refreshed by the WS task-event debounce). A `_chipDelivered` guard + a "finishing…" ghost bridge the settle window so the chip clears exactly as the outcome bubble lands.
+- **Off-tab desktop notifications** → `_maybeFireBrowserNotification`, fed by a fan-in in `onWsEvent` over the underlying events (`pending_action_created` → approval, `credential_request` / `browser_login_request` → credential, `health_change` degraded/unhealthy/failed → alert, `credit_exhausted`) plus the `notification` chain-outcome event. Triple-gated on opt-in + OS permission + tab-hidden, and replay-guarded on `_initTs` so a fresh load doesn't ping for buffered events.
+- **Rerouted system signals** → `connection_refresh_failed` and `health_change → quarantined` are turned into operator-thread `/chat/note` rows by `runtime._system_signal_producer` (sync EventBus listener; the POST is marshalled onto the dispatch loop with bounded retry). `quarantined` is intentionally excluded from the desktop fan-in so it doesn't double-ping.
 
 ## Telemetry System
 
@@ -436,7 +415,7 @@ The dashboard connects to the mesh via WebSocket at `/ws/events`. Events are str
 |--------|--------|
 | **Agent runtime** | `agent_state`, `tool_start`, `tool_result`, `text_delta`, `llm_call`, `health_change`, `workspace_updated`, `heartbeat_complete` |
 | **Chat** | `chat_user_message`, `chat_done`, `chat_reset`, `message_sent`, `message_received`, `credit_exhausted` |
-| **Notifications** | `notification`, `notification_added` |
+| **Notifications** | `notification` (chain outcomes + `notify_user`; the bell's `notification_added` was removed) |
 | **Blackboard** | `blackboard_write`, `blackboard_delete` |
 | **Automation** | `cron_change` |
 | **Credentials / handoffs** | `credential_request`, `credential_request_cancelled`, `credential_stored`, `browser_login_request`, `browser_login_completed`, `browser_login_cancelled`, `browser_captcha_help_request`, `browser_captcha_help_completed`, `browser_captcha_help_cancelled` |
@@ -617,13 +596,7 @@ These endpoints power the Work tab. They cover the summary cards, Needs-You pane
 | `POST` | `/dashboard/api/workplace/pending/{nonce}/cancel` | Cancel a pending action |
 | `POST` | `/dashboard/api/changes/undo/{undo_token}` | Undo a soft-edit change inside its TTL window |
 
-**Notifications**
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/dashboard/api/notifications` | Top 10 notifications, unread first then `ts DESC` |
-| `POST` | `/dashboard/api/notifications/{notification_id}/read` | Mark a single notification read |
-| `POST` | `/dashboard/api/notifications/read-all` | Mark every unread notification read |
+**Notifications** — removed (chat-native delivery; see [Notifications System](#notifications-system-chat-native-bell-removed)). The `/dashboard/api/notifications*` endpoints no longer exist.
 
 **Telemetry**
 
@@ -856,6 +829,5 @@ The dashboard includes several accessibility features:
 | `src/dashboard/static/css/dashboard.css` | Custom styles |
 | `src/dashboard/events.py` | EventBus for real-time event distribution (ring buffer, lock-protected emit, in-process listener API) |
 | `src/dashboard/auth.py` | `ol_session` cookie verification, hosted-mode detection via `/opt/openlegion/.subdomain`, 24h `COOKIE_MAX_AGE` + 5m skew |
-| `src/dashboard/notifications.py` | Persistent SQLite notifications store backing the top-nav bell |
 | `src/dashboard/telemetry.py` | Frontend telemetry sink with `_MAX_EVENTS=100_000` retention + 60/min per-session rate limit |
 | `src/dashboard/platform_success.py` | Per-tenant success scoring (backs `/dashboard/api/dashboard/platform-success`) |
