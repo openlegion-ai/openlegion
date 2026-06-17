@@ -861,9 +861,16 @@ def build_launch_options(
     # detection signal).
     try:
         from browserforge.fingerprints import Screen
+
         options["screen"] = Screen(max_width=width, max_height=height)
     except ImportError:
-        pass  # browserforge only available in browser container
+        # browserforge ships in the browser container; if it's ever missing we
+        # lose the window.innerWidth <= window.screen.width lock (a fingerprint
+        # coherence signal). Surface it rather than degrading stealth silently.
+        logger.warning(
+            "browserforge unavailable - screen fingerprint lock skipped; "
+            "innerWidth/screen.width coherence not enforced",
+        )
 
     # GeoIP: maps egress IP → timezone/locale for the fingerprint.
     # Only enable when a proxy is configured so the resolved location matches

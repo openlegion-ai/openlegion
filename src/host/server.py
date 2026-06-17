@@ -9414,7 +9414,14 @@ def create_mesh_app(
             if nav_url:
                 from src.agent.builtins.http_tool import _resolve_and_pin
                 try:
-                    _resolve_and_pin(nav_url)
+                    # Blocking DNS resolution — run off the event loop so a slow
+                    # resolver can't stall the mesh's shared loop (it carries all
+                    # fleet traffic, not just browser commands).
+                    await asyncio.get_running_loop().run_in_executor(
+                        None,
+                        _resolve_and_pin,
+                        nav_url,
+                    )
                 except ValueError as e:
                     raise HTTPException(400, str(e))
 
