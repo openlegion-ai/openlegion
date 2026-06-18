@@ -5131,7 +5131,14 @@ class BrowserManager:
         # M21: SSRF parity — reject private/loopback/metadata/CGNAT hosts.
         # Second defence layer independent of the container iptables egress
         # filter. ``hostname`` strips port + userinfo; only public IPs pass.
-        if _browser_host_is_blocked(parsed.hostname or ""):
+        # Run blocking DNS resolution off the event loop — the browser service
+        # shares one asyncio loop across all agents, so a slow resolver here
+        # would head-of-line-block every agent's browser ops.
+        if await asyncio.get_running_loop().run_in_executor(
+            None,
+            _browser_host_is_blocked,
+            parsed.hostname or "",
+        ):
             return {
                 "success": False,
                 "error": "URL host resolves to a blocked (private/loopback/metadata) address",
@@ -10896,7 +10903,14 @@ class BrowserManager:
         if not parsed.netloc:
             return _err("invalid_input", "URL missing host component")
         # M21: SSRF parity — reject private/loopback/metadata/CGNAT hosts.
-        if _browser_host_is_blocked(parsed.hostname or ""):
+        # Run blocking DNS resolution off the event loop — the browser service
+        # shares one asyncio loop across all agents, so a slow resolver here
+        # would head-of-line-block every agent's browser ops.
+        if await asyncio.get_running_loop().run_in_executor(
+            None,
+            _browser_host_is_blocked,
+            parsed.hostname or "",
+        ):
             return _err(
                 "invalid_input",
                 "URL host resolves to a blocked (private/loopback/metadata) address",
