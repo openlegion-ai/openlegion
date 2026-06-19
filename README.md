@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/openlegion-ai-openlegion-badge.png)](https://mseep.ai/app/openlegion-ai-openlegion)
+
 <p align="center">
   <img width="450" alt="openlegion-logo-new" src="https://github.com/user-attachments/assets/08912b04-8df1-4473-b679-6bbac0c3ae2f" />
 </p>
