@@ -148,10 +148,21 @@ class CostTracker:
                 completion_tokens INTEGER DEFAULT 0,
                 total_tokens INTEGER DEFAULT 0,
                 cost_usd REAL DEFAULT 0.0,
-                timestamp TEXT DEFAULT (datetime('now'))
+                timestamp TEXT DEFAULT (datetime('now')),
+                trace_id TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_usage_agent_ts ON usage(agent, timestamp);
         """)
+        # Session observability (Phase 1) — additive, nullable trace_id so
+        # a cost row JOINs to its task/trace by the per-turn correlation
+        # id. ALTER ... ADD COLUMN is a metadata-only op in SQLite, fast
+        # and safe to re-run (we filter on the introspected column set so
+        # an already-migrated DB is a no-op). Existing rows keep NULL.
+        existing = {
+            row[1] for row in self.db.execute("PRAGMA table_info(usage)").fetchall()
+        }
+        if "trace_id" not in existing:
+            self.db.execute("ALTER TABLE usage ADD COLUMN trace_id TEXT")
         self.db.commit()
 
     def close(self) -> None:
@@ -217,10 +228,16 @@ class CostTracker:
             if bill else 0.0
         )
 
+        # Session observability (Phase 1) — stamp the active per-turn
+        # trace_id (seeded from the inbound X-Trace-Id header on the mesh
+        # proxy path) so spend attributes to a task/session. NULL when no
+        # trace is active.
+        from src.shared.trace import current_trace_id
+        trace_id = current_trace_id.get()
         self.db.execute(
-            "INSERT INTO usage (agent, model, prompt_tokens, completion_tokens, total_tokens, cost_usd) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (agent, model, prompt_tokens, completion_tokens, total, cost),
+            "INSERT INTO usage (agent, model, prompt_tokens, completion_tokens, total_tokens, cost_usd, trace_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (agent, model, prompt_tokens, completion_tokens, total, cost, trace_id),
         )
         self.db.commit()
 
@@ -237,10 +254,12 @@ class CostTracker:
         Inserts a row with zero tokens and the given USD cost.
         Returns {"cost": float, "over_budget": bool}.
         """
+        from src.shared.trace import current_trace_id
+        trace_id = current_trace_id.get()
         self.db.execute(
-            "INSERT INTO usage (agent, model, prompt_tokens, completion_tokens, total_tokens, cost_usd) "
-            "VALUES (?, ?, 0, 0, 0, ?)",
-            (agent, model, cost_usd),
+            "INSERT INTO usage (agent, model, prompt_tokens, completion_tokens, total_tokens, cost_usd, trace_id) "
+            "VALUES (?, ?, 0, 0, 0, ?, ?)",
+            (agent, model, cost_usd, trace_id),
         )
         self.db.commit()
 

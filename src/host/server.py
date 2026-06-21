@@ -2016,6 +2016,14 @@ def create_mesh_app(
             )
 
         req_trace_id = request.headers.get("x-trace-id")
+        # Session observability (Phase 1) — seed the trace contextvar from
+        # the inbound header so the cost write inside execute_api_call
+        # (CostTracker.track) stamps the usage row with the originating
+        # trace_id. The endpoint runs in its own request task context, so
+        # the set is request-scoped and self-cleaning.
+        if req_trace_id:
+            from src.shared.trace import current_trace_id
+            current_trace_id.set(req_trace_id)
         prompt_preview = _extract_prompt_preview(api_request.params)
         t0 = time.time()
         result = await credential_vault.execute_api_call(api_request, agent_id=agent_id)
@@ -2141,6 +2149,14 @@ def create_mesh_app(
             )
 
         req_trace_id = request.headers.get("x-trace-id")
+        # Session observability (Phase 1) — seed the trace contextvar so
+        # the cost write inside stream_llm (CostTracker.track, fired on the
+        # terminal 'done' chunk) stamps the usage row. Set here, before the
+        # generator is created, so it is captured into the streaming
+        # context that Starlette later iterates.
+        if req_trace_id:
+            from src.shared.trace import current_trace_id
+            current_trace_id.set(req_trace_id)
         prompt_preview = _extract_prompt_preview(api_request.params)
 
         try:
@@ -5934,6 +5950,16 @@ def create_mesh_app(
         origin = _validated_origin(request, caller)
         origin_dict = origin.model_dump() if origin is not None else None
 
+        # Session observability (Phase 1) — seed the trace contextvar from
+        # the inbound header so ``store.create`` stamps the task row with
+        # the originating per-turn trace_id (the agent forwards X-Trace-Id
+        # on its hand_off / create_task calls). Request-scoped, self-
+        # cleaning; NULL when the caller carried no trace.
+        _req_trace_id = request.headers.get("x-trace-id")
+        if _req_trace_id:
+            from src.shared.trace import current_trace_id
+            current_trace_id.set(_req_trace_id)
+
         try:
             record = store.create(
                 creator=caller,
@@ -6576,6 +6602,14 @@ def create_mesh_app(
             )
         origin = _validated_origin(request, caller)
         origin_dict = origin.model_dump() if origin is not None else None
+        # Session observability (Phase 1) — a retry continues the original
+        # human-rooted session, so seed the contextvar with the original
+        # task's trace_id (falling back to the inbound header) before the
+        # clone so ``store.create`` stamps the same correlation id.
+        _retry_trace_id = original.get("trace_id") or request.headers.get("x-trace-id")
+        if _retry_trace_id:
+            from src.shared.trace import current_trace_id
+            current_trace_id.set(_retry_trace_id)
         try:
             clone = store.create(
                 creator=caller,

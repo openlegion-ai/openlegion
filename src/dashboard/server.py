@@ -3608,8 +3608,14 @@ def create_dashboard_router(
         # Task 2b: stamp dashboard chat as human-origin so downstream
         # authorization gates can distinguish a user-driven chat from
         # an agent-initiated wake.
-        from src.shared.trace import origin_header, trace_headers
+        # Session observability (Phase 1): mint a per-turn trace_id and
+        # seed the contextvar BEFORE trace_headers() — mirrors the CLI
+        # (repl.py: current_trace_id.set(new_trace_id())). Without this the
+        # dashboard's outbound /chat call carried an empty X-Trace-Id and
+        # the resulting LLM/task/transcript rows were uncorrelatable.
+        from src.shared.trace import current_trace_id, new_trace_id, origin_header, trace_headers
         from src.shared.types import MessageOrigin
+        current_trace_id.set(new_trace_id())
         origin = MessageOrigin(
             kind="human",
             channel="dashboard",
@@ -3654,8 +3660,12 @@ def create_dashboard_router(
                 data={"message": message, "session": chat_session})
 
         # Task 2b: stamp dashboard streaming chat as human-origin.
-        from src.shared.trace import origin_header, trace_headers
+        # Session observability (Phase 1): mint a per-turn trace_id and
+        # seed the contextvar before trace_headers() so the outbound
+        # /chat/stream call carries X-Trace-Id (see api_chat above).
+        from src.shared.trace import current_trace_id, new_trace_id, origin_header, trace_headers
         from src.shared.types import MessageOrigin
+        current_trace_id.set(new_trace_id())
         _origin = MessageOrigin(
             kind="human",
             channel="dashboard",

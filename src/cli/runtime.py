@@ -252,6 +252,25 @@ class RuntimeContext:
 
         click.echo(" done.")
 
+    @staticmethod
+    def _resolve_dispatch_trace_id(trace_id: str | None) -> str:
+        """Resolve the per-turn trace_id for a dispatch (Phase 1).
+
+        Order of precedence — never clobber an existing trace (per the
+        session-observability plan):
+        1. An explicit ``trace_id`` argument (cron / CLI mint it upstream).
+        2. The active ``current_trace_id`` contextvar — set by
+           ``Channel.dispatch`` for channel-originated messages, so the
+           lane worker reuses it rather than losing it.
+        3. A freshly minted id — covers callers with neither (e.g. the
+           webhook manager dispatching directly), so every human/external
+           -rooted message correlates end-to-end.
+        """
+        if trace_id:
+            return trace_id
+        from src.shared.trace import current_trace_id, new_trace_id
+        return current_trace_id.get() or new_trace_id()
+
     def dispatch(
         self, agent: str, message: str, mode: str = "followup",
         trace_id: str | None = None,
@@ -264,6 +283,7 @@ class RuntimeContext:
         Schedules the coroutine on the dedicated dispatch loop and blocks
         until the result is ready.  For async callers, use async_dispatch().
         """
+        trace_id = self._resolve_dispatch_trace_id(trace_id)
         future = asyncio.run_coroutine_threadsafe(
             self.lane_manager.enqueue(
                 agent, message, mode=mode, trace_id=trace_id,
@@ -282,6 +302,7 @@ class RuntimeContext:
         system_note: bool = False,
     ) -> str:
         """Async dispatch: schedules onto the dedicated dispatch loop."""
+        trace_id = self._resolve_dispatch_trace_id(trace_id)
         future = asyncio.run_coroutine_threadsafe(
             self.lane_manager.enqueue(
                 agent, message, mode=mode, trace_id=trace_id,

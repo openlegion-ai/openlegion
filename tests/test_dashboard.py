@@ -6016,3 +6016,59 @@ class TestAgentGoalsEndpoints:
             "/dashboard/api/agents/alpha/goals", json={"goals": ["x"]},
         )
         assert resp.status_code == 403
+
+
+class TestDashboardChatMintsTraceId:
+    """Session observability (Phase 1) — the dashboard chat entry points
+    mint a per-turn trace_id and forward it as the ``X-Trace-Id`` header
+    on the outbound agent call. Regression for the dashboard-untraceable
+    defect (server.py:3611 region) where trace_headers() ran without a
+    seeded contextvar and emitted an empty correlation id.
+    """
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        # Capture the headers the dashboard forwards to the agent.
+        self._captured: dict = {}
+
+        async def _fake_request(agent_id, method, path, **kwargs):
+            self._captured["headers"] = kwargs.get("headers") or {}
+            self._captured["agent_id"] = agent_id
+            self._captured["path"] = path
+            return {"response": "ack"}
+
+        self.components["transport"].request = AsyncMock(side_effect=_fake_request)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_chat_forwards_minted_trace_id(self):
+        resp = self.client.post(
+            "/dashboard/api/agents/alpha/chat", json={"message": "hi"},
+        )
+        assert resp.status_code == 200
+        hdrs = self._captured["headers"]
+        # The fix: a non-empty trace_id is minted and forwarded. Header
+        # keys can be either case; the trace module emits "X-Trace-Id".
+        trace_val = hdrs.get("X-Trace-Id") or hdrs.get("x-trace-id")
+        assert trace_val, f"expected X-Trace-Id header, got {hdrs!r}"
+        assert trace_val.startswith("tr_")
+        # Origin is still stamped human/dashboard alongside the trace.
+        origin_val = hdrs.get("X-Origin") or hdrs.get("x-origin")
+        assert origin_val and "dashboard" in origin_val
+
+    def test_two_chats_get_distinct_trace_ids(self):
+        self.client.post(
+            "/dashboard/api/agents/alpha/chat", json={"message": "first"},
+        )
+        first = (self._captured["headers"].get("X-Trace-Id")
+                 or self._captured["headers"].get("x-trace-id"))
+        self.client.post(
+            "/dashboard/api/agents/alpha/chat", json={"message": "second"},
+        )
+        second = (self._captured["headers"].get("X-Trace-Id")
+                  or self._captured["headers"].get("x-trace-id"))
+        assert first and second and first != second

@@ -135,6 +135,110 @@ class TestCostTracking:
         assert models == []
 
 
+class TestTraceIdStamping:
+    """Session observability (Phase 1) — usage rows carry the active
+    per-turn ``trace_id`` from the contextvar, and the migration is
+    idempotent on a pre-existing (trace-less) DB.
+    """
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self._tmpdir, "costs.db")
+        self.budgets_path = os.path.join(self._tmpdir, "agent_budgets.json")
+        self.tracker = CostTracker(db_path=self.db_path, budgets_path=self.budgets_path)
+
+    def teardown_method(self):
+        self.tracker.close()
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _trace_ids(self, agent: str) -> list:
+        rows = self.tracker.db.execute(
+            "SELECT trace_id FROM usage WHERE agent = ? ORDER BY id", (agent,)
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def test_track_stamps_active_trace_id(self):
+        from src.shared.trace import current_trace_id
+
+        token = current_trace_id.set("tr_abc123abc123")
+        try:
+            self.tracker.track("agent1", "openai/gpt-4o-mini", 100, 50)
+        finally:
+            current_trace_id.reset(token)
+        assert self._trace_ids("agent1") == ["tr_abc123abc123"]
+
+    def test_track_fixed_cost_stamps_active_trace_id(self):
+        from src.shared.trace import current_trace_id
+
+        token = current_trace_id.set("tr_fixed0000001")
+        try:
+            self.tracker.track_fixed_cost("agent1", "openai/dall-e-3", 0.04)
+        finally:
+            current_trace_id.reset(token)
+        assert self._trace_ids("agent1") == ["tr_fixed0000001"]
+
+    def test_track_without_trace_is_null(self):
+        # No active trace → NULL column, never an empty string.
+        from src.shared.trace import current_trace_id
+
+        assert current_trace_id.get() is None
+        self.tracker.track("agent1", "openai/gpt-4o-mini", 100, 50)
+        assert self._trace_ids("agent1") == [None]
+
+    def test_migration_idempotent_on_legacy_db(self):
+        """A pre-existing usage table without trace_id gets the column
+        added once; re-opening the same DB is a no-op (no duplicate ALTER).
+        """
+        import sqlite3
+
+        legacy_path = os.path.join(self._tmpdir, "legacy_costs.db")
+        # Build a legacy schema WITHOUT the trace_id column + seed a row.
+        conn = sqlite3.connect(legacy_path)
+        conn.executescript(
+            """
+            CREATE TABLE usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent TEXT NOT NULL,
+                model TEXT NOT NULL,
+                prompt_tokens INTEGER DEFAULT 0,
+                completion_tokens INTEGER DEFAULT 0,
+                total_tokens INTEGER DEFAULT 0,
+                cost_usd REAL DEFAULT 0.0,
+                timestamp TEXT DEFAULT (datetime('now'))
+            );
+            """
+        )
+        conn.execute(
+            "INSERT INTO usage (agent, model, total_tokens) VALUES (?, ?, ?)",
+            ("legacy", "openai/gpt-4o-mini", 100),
+        )
+        conn.commit()
+        conn.close()
+
+        # First open migrates: adds the nullable column, old row keeps NULL.
+        t1 = CostTracker(
+            db_path=legacy_path,
+            budgets_path=os.path.join(self._tmpdir, "legacy_budgets.json"),
+        )
+        cols = {r[1] for r in t1.db.execute("PRAGMA table_info(usage)").fetchall()}
+        assert "trace_id" in cols
+        old = t1.db.execute(
+            "SELECT trace_id FROM usage WHERE agent = 'legacy'"
+        ).fetchone()
+        assert old[0] is None
+        t1.close()
+
+        # Second open over the same file is a no-op (the introspection
+        # guard skips the ALTER) and does not raise.
+        t2 = CostTracker(
+            db_path=legacy_path,
+            budgets_path=os.path.join(self._tmpdir, "legacy_budgets.json"),
+        )
+        cols2 = {r[1] for r in t2.db.execute("PRAGMA table_info(usage)").fetchall()}
+        assert "trace_id" in cols2
+        t2.close()
+
+
 class TestBudgetEnforcement:
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()

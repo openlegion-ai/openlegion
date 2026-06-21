@@ -951,6 +951,124 @@ def test_row_to_dict_exposes_new_fields_default_null(tmp_path):
     assert rec["previous_task_id"] is None
 
 
+# ── Session observability (Phase 1) — trace_id stamping ───────────
+
+
+def test_trace_id_column_exists_after_init(tmp_path):
+    t = _make_store(tmp_path)
+    with t._conn() as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+    assert "trace_id" in cols
+
+
+def test_create_stamps_active_trace_id(tmp_path):
+    """create() reads the contextvar at write time and persists it."""
+    from src.shared.trace import current_trace_id
+
+    t = _make_store(tmp_path)
+    token = current_trace_id.set("tr_task00000001")
+    try:
+        rec = t.create(creator="scout", assignee="analyst", title="dig")
+    finally:
+        current_trace_id.reset(token)
+    assert rec["trace_id"] == "tr_task00000001"
+    # And it round-trips through get().
+    assert t.get(rec["id"])["trace_id"] == "tr_task00000001"
+
+
+def test_create_without_trace_is_null(tmp_path):
+    from src.shared.trace import current_trace_id
+
+    assert current_trace_id.get() is None
+    t = _make_store(tmp_path)
+    rec = t.create(creator="scout", assignee="analyst", title="dig")
+    assert rec["trace_id"] is None
+
+
+def test_rework_inherits_original_trace_id(tmp_path):
+    """A rework continues the same session — it inherits the parent's
+    trace_id regardless of whether a trace is active at rework time.
+    """
+    from src.shared.trace import current_trace_id
+
+    t = _make_store(tmp_path)
+    token = current_trace_id.set("tr_session00001")
+    try:
+        rec = t.create(creator="scout", assignee="analyst", title="dig")
+    finally:
+        current_trace_id.reset(token)
+    # No active trace when the rework is spawned — inheritance must still
+    # carry the original session's id.
+    assert current_trace_id.get() is None
+    rework = t.create_rework_task(rec["id"], "go deeper on the legal angle")
+    assert rework["trace_id"] == "tr_session00001"
+
+
+def test_trace_id_migration_idempotent_on_legacy_db(tmp_path):
+    """A pre-existing tasks DB without trace_id gets the column added once;
+    re-opening the same file is a no-op and existing rows keep NULL.
+    """
+    import sqlite3
+
+    db_path = str(tmp_path / "legacy_tasks.db")
+    # Minimal legacy schema WITHOUT trace_id + a seeded row.
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        """
+        CREATE TABLE tasks (
+            id TEXT PRIMARY KEY,
+            team_id TEXT,
+            parent_task_id TEXT,
+            title TEXT NOT NULL,
+            description TEXT,
+            creator TEXT NOT NULL,
+            assignee TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            priority INTEGER NOT NULL DEFAULT 0,
+            dependencies_json TEXT,
+            artifact_refs_json TEXT,
+            blocker_note TEXT,
+            origin_kind TEXT,
+            origin_channel TEXT,
+            origin_user TEXT,
+            created_at REAL NOT NULL,
+            updated_at REAL NOT NULL,
+            completed_at REAL,
+            retention_until REAL
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO tasks (id, title, creator, assignee, created_at, updated_at) "
+        "VALUES ('task_legacy01', 'old', 'scout', 'analyst', 1.0, 1.0)",
+    )
+    conn.commit()
+    conn.close()
+
+    # First open migrates (adds trace_id); old row keeps NULL.
+    t1 = Tasks(db_path=db_path)
+    legacy = t1.get("task_legacy01")
+    assert legacy is not None
+    assert legacy["trace_id"] is None
+    t1.close()
+
+    # Second open is a no-op — the introspection guard skips the ALTER.
+    t2 = Tasks(db_path=db_path)
+    with t2._conn() as conn:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+    assert "trace_id" in cols
+    # New writes against the migrated DB stamp the active trace.
+    from src.shared.trace import current_trace_id
+
+    token = current_trace_id.set("tr_postmigrate1")
+    try:
+        new_rec = t2.create(creator="scout", assignee="analyst", title="fresh")
+    finally:
+        current_trace_id.reset(token)
+    assert new_rec["trace_id"] == "tr_postmigrate1"
+    t2.close()
+
+
 def test_set_outcome_happy_path_done(tmp_path):
     t = _make_store(tmp_path)
     rec = t.create(creator="scout", assignee="analyst", title="dig")
