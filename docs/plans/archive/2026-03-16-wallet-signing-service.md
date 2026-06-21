@@ -1,5 +1,7 @@
 # Wallet Signing Service — Implementation Plan
 
+**Status:** SHIPPED — archived. Wallet signing service live (keys mesh-side only).
+
 **Goal:** Give every agent in the fleet secure access to EVM and Solana wallets for onchain transactions, with private keys that never enter agent containers.
 
 **Core invariant:** Private keys exist ONLY in `WalletService` memory within the mesh process. Agents describe what they want; the mesh decides whether to allow it and executes it.

@@ -1,5 +1,7 @@
 # Operator Orchestration Roadmap
 
+**Status:** SHIPPED — archived. Operator control plane (durable tasks, routing, dashboard + CLI) shipped.
+
 **Goal:** Give operators a coherent control plane for project-scoped fleets — durable task records, hard project isolation, structured routing, dashboard + CLI surfaces — so a human can drive a multi-agent team end-to-end without inspecting blackboard keys.
 
 **Core invariant:** A worker only ever sees its own project's agents and tasks. The operator and trusted internal callers (mesh, dashboard, CLI manager) remain fleet-global.

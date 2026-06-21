@@ -1,7 +1,7 @@
 # Operator Memory & Context Overhaul — Implementation Plan
 
 **Created:** 2026-06-09. **Author:** Claude (principal-eng review, pre-implementation).
-**Status:** Plan approved in spirit ("we want all 4"); Phase-1 scope below is the authorized core. Phase 2 needs explicit go-ahead. Resolve the Decision Gates before coding.
+**Status:** SHIPPED — archived. Operator memory & context overhaul shipped (all phases merged + de-flagged, all agents).
 
 > **How to use this doc (post-compaction entry point):** This is self-contained. Read §1–§4 for context + diagnosis, resolve §5 Decision Gates with the user, then implement Phase 1 (§6) in the Sequencing order (§8). Every integration point is pinned to `file:line` against `origin/main` as of 2026-06-09 (HEAD `9dc1210`/`8cbfb55d` region) — re-grep to confirm line numbers haven't drifted before editing. Verify on cake using §9 (no-secrets discipline is mandatory).
 

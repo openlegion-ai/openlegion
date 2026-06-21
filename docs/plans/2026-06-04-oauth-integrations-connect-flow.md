@@ -1,7 +1,7 @@
 # One-Click Integrations — OAuth "Connect" Flow
 
 **Date:** 2026-06-04
-**Status:** Proposed
+**Status:** ACTIVE — proposed.
 **Scope:** Replace the manual "go fetch a token and paste it" flow for third-party data
 integrations with an in-engine OAuth authorization-code flow. Ship **Option B** (bring-your-own
 OAuth app, engine handles the dance + refresh) first, with **Google** (Drive / Gmail / Calendar)

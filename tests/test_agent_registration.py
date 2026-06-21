@@ -5,7 +5,7 @@ Tests the cryptographic gate on ``POST /mesh/register`` for the reserved
 and ``canary-probe``. Identity is anchored to the per-agent bearer token
 pool that ``src/host/runtime.py`` already generates; no new env var.
 
-See ``docs/plans/2026-05-02-operator-orchestration-roadmap.md`` Task 4
+See ``docs/plans/archive/2026-05-02-operator-orchestration-roadmap.md`` Task 4
 for the full rationale.
 """
 

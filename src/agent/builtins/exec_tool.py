@@ -17,7 +17,7 @@ _MAX_OUTPUT = 100_000
 _MAX_TIMEOUT = 300
 
 # ── execute_code (code-as-action) — Phase 2 of the operator memory/context
-# overhaul (docs/plans/2026-06-09-operator-memory-context-overhaul.md §7, C2).
+# overhaul (docs/plans/archive/2026-06-09-operator-memory-context-overhaul.md §7, C2).
 #
 # Lets the model write ONE Python block and get back only what it ``print()``s,
 # collapsing several shell/tool rounds into a single turn. Intermediate values

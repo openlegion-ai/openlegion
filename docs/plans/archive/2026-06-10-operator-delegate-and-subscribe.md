@@ -1,6 +1,6 @@
 # Operator orchestration: delegate-and-subscribe (no more silent stalls)
 
-**Status:** REVISED after principal-engineer + Codex review (2026-06-10). Phase 0 implemented in the same PR as this revision. Phases 1–3 ready to implement.
+**Status:** SHIPPED — archived. Delegate-and-subscribe shipped/deployed/live-verified (PRs #1086–#1096, all phases).
 **One-line:** Stop the operator from *blocking* to watch a pipeline. Make watching a durable, origin-aware **system** behavior that **pushes** progress + a **guaranteed terminal outcome** to the user's channel. The operator delegates and releases; it never holds a turn open to babysit a poll loop.
 
 > **Review note (2026-06-10).** The original draft mislocated the root cause and overstated how much of Phase 1 is "just wiring." Both were corrected against the actual code (and an independent Codex pass). The *product direction* — no silent death; delegate-and-release — survived review unchanged. The corrections are folded in below; the superseded claims are called out where they mattered.
@@ -212,4 +212,4 @@ Per-hop origin is deliberately **downgraded** for worker-originated calls (`_val
 
 **Reconciliation note.** This revision merges a principal-engineer review with an independent Codex pass. Both independently concluded: the root cause was mislocated (it's the browser leg, not `transport.py`), "reuse not new machinery" was overstated, and `CancelledError` must not be swallowed. Codex additionally pinned the exact browser-abort site (`app.js:8608-8620`) and surfaced the origin-downgrade / back-edge-skip security collision (`server.py:458-466,5351-5374`) that the §4 trust model now addresses.
 
-**Related prior art:** `docs/plans/2026-05-02-operator-orchestration-roadmap.md`, `docs/plans/2026-06-09-operator-memory-context-overhaul.md`. PR #1068 (await_task_event polling — partial fix this supersedes for the watch path).
+**Related prior art:** `docs/plans/archive/2026-05-02-operator-orchestration-roadmap.md`, `docs/plans/archive/2026-06-09-operator-memory-context-overhaul.md`. PR #1068 (await_task_event polling — partial fix this supersedes for the watch path).
