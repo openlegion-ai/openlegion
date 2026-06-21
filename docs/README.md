@@ -17,6 +17,12 @@ Comprehensive documentation for OpenLegion - a secure, self-hosted AI agent runt
 | [Triggering & Automation](triggering.md) | Cron, heartbeats, webhooks |
 | [Development & Testing](development.md) | Testing guide, code patterns, adding new components |
 
+## Internal / Maintainer Ops
+
+Operating, observing, and debugging a running fleet (maintainer-facing):
+
+- [Session Observability](internal/session-observability.md) — reconstruct any session (intent → action → outcome → cost); on-box/VPS debugging.
+
 ## Quick Links
 
 - [Quick Start Guide](../QUICKSTART.md)
