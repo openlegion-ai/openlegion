@@ -1405,3 +1405,90 @@ async def test_task_run_aggregates_traces_in_window(tmp_path, monkeypatch):
         traces.close()
         monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
         importlib.reload(server_module)
+
+
+# ── Session observability (Phase 1): X-Trace-Id seed → stamped task row ──
+#
+# Store-level tests (test_orchestration.py) already verify ``Tasks.create``
+# stamps ``trace_id`` when the contextvar is pre-set. These tests close the
+# end-to-end gap: the HTTP endpoint must seed ``current_trace_id`` from the
+# inbound ``X-Trace-Id`` header so the row the store writes carries the
+# originating per-turn trace. If that seed regresses, the row silently gets
+# a NULL trace_id (no crash) and sessions can no longer be JOINed.
+
+
+@pytest.mark.asyncio
+async def test_create_task_stamps_trace_id_from_header(v2_app):
+    """``POST /mesh/tasks`` with ``X-Trace-Id`` → the created task row's
+    ``trace_id`` equals the header value (endpoint → contextvar → store
+    → row chain)."""
+    app, _, _ = v2_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "traced handoff"},
+            headers={"X-Agent-ID": "scout", "X-Trace-Id": "tr_test00000001"},
+        )
+    assert r.status_code == 200, r.text
+    assert r.json()["trace_id"] == "tr_test00000001"
+
+
+@pytest.mark.asyncio
+async def test_create_task_without_trace_id_is_null(v2_app):
+    """Negative guard: no ``X-Trace-Id`` header → the row's ``trace_id``
+    stays NULL (the seed must be header-driven, never invented)."""
+    from src.shared.trace import current_trace_id
+
+    app, _, _ = v2_app
+    # ASGITransport runs the endpoint in the test's own task context, so a
+    # trace set by an earlier request could otherwise bleed in — reset to
+    # the genuine "no active trace" state this guard is asserting about.
+    token = current_trace_id.set(None)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post(
+                "/mesh/tasks",
+                json={"assignee": "analyst", "title": "untraced handoff"},
+                headers={"X-Agent-ID": "scout"},
+            )
+    finally:
+        current_trace_id.reset(token)
+    assert r.status_code == 200, r.text
+    assert r.json()["trace_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_retry_clone_inherits_original_trace_id(v2_app):
+    """``POST /mesh/tasks/{id}/retry`` clones the failed task into a fresh
+    pending one that continues the SAME session — the clone must inherit
+    the original's ``trace_id`` even when the retry request itself carries
+    no header (the endpoint seeds from ``original.get('trace_id')``)."""
+    app, _, _ = v2_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        # Create the original WITH a trace, then drive it to failed.
+        r = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "retry target"},
+            headers={"X-Agent-ID": "scout", "X-Trace-Id": "tr_retry0000001"},
+        )
+        assert r.status_code == 200, r.text
+        tid = r.json()["id"]
+        assert r.json()["trace_id"] == "tr_retry0000001"
+        for status in ("working", "failed"):
+            r = await c.post(
+                f"/mesh/tasks/{tid}/status",
+                json={"status": status},
+                headers={"X-Agent-ID": "analyst"},
+            )
+            assert r.status_code == 200, r.text
+        # Retry as operator, deliberately WITHOUT an X-Trace-Id header —
+        # the clone must still inherit the original's trace.
+        r = await c.post(
+            f"/mesh/tasks/{tid}/retry",
+            json={},
+            headers={"X-Agent-ID": "operator"},
+        )
+        assert r.status_code == 200, r.text
+        clone = r.json()["clone"]
+        assert clone["id"] != tid
+        assert clone["trace_id"] == "tr_retry0000001"
