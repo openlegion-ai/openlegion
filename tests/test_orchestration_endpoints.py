@@ -1434,27 +1434,36 @@ async def test_create_task_stamps_trace_id_from_header(v2_app):
 
 
 @pytest.mark.asyncio
-async def test_create_task_without_trace_id_is_null(v2_app):
-    """Negative guard: no ``X-Trace-Id`` header → the row's ``trace_id``
-    stays NULL (the seed must be header-driven, never invented)."""
-    from src.shared.trace import current_trace_id
+async def test_create_task_sequential_trace_attribution(v2_app):
+    """Sequential attribution: a ``POST /mesh/tasks`` WITH ``X-Trace-Id``
+    followed by one WITHOUT stamp the first's trace then NULL. No manual
+    contextvar clearing — the second row's NULL is the request-scoping
+    contract end-to-end (the old negative test had to ``set(None)`` by hand,
+    which masked whatever the real per-request behavior was).
 
+    Honesty note (mutation-verified): the mesh app's Starlette
+    ``BaseHTTPMiddleware`` isolates contextvars per request, so even a
+    conditional set + no reset could not actually bleed across requests here
+    — reverting the reset does NOT fail this test. The unconditional set +
+    token reset in the endpoint is defense-in-depth (explicit request-scoping
+    that does not depend on the middleware), and this test guards the
+    attribution contract rather than trapping a raw leak."""
     app, _, _ = v2_app
-    # ASGITransport runs the endpoint in the test's own task context, so a
-    # trace set by an earlier request could otherwise bleed in — reset to
-    # the genuine "no active trace" state this guard is asserting about.
-    token = current_trace_id.set(None)
-    try:
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-            r = await c.post(
-                "/mesh/tasks",
-                json={"assignee": "analyst", "title": "untraced handoff"},
-                headers={"X-Agent-ID": "scout"},
-            )
-    finally:
-        current_trace_id.reset(token)
-    assert r.status_code == 200, r.text
-    assert r.json()["trace_id"] is None
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r1 = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "traced handoff"},
+            headers={"X-Agent-ID": "scout", "X-Trace-Id": "tr_first0000001"},
+        )
+        assert r1.status_code == 200, r1.text
+        assert r1.json()["trace_id"] == "tr_first0000001"
+        r2 = await c.post(
+            "/mesh/tasks",
+            json={"assignee": "analyst", "title": "untraced handoff"},
+            headers={"X-Agent-ID": "scout"},
+        )
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["trace_id"] is None
 
 
 @pytest.mark.asyncio

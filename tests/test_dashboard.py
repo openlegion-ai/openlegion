@@ -6072,3 +6072,32 @@ class TestDashboardChatMintsTraceId:
         second = (self._captured["headers"].get("X-Trace-Id")
                   or self._captured["headers"].get("x-trace-id"))
         assert first and second and first != second
+
+    def test_chat_trace_does_not_leak_into_broadcast(self):
+        """Sequential attribution: after a /chat mints + seeds a trace, a
+        /api/broadcast (which calls trace_headers() WITHOUT minting) forwards
+        no stale X-Trace-Id. The /chat endpoint resets the contextvar via
+        token in its finally.
+
+        Honesty note (mutation-verified): the dashboard router is mounted on
+        the mesh app, which runs requests under Starlette BaseHTTPMiddleware
+        — and the bare-FastAPI TestClient harness here also isolates the
+        per-request context. So removing the /chat reset does NOT actually
+        make this fail; the set+reset is defense-in-depth (explicit, not
+        reliant on the middleware). This test guards the
+        mint-here / no-mint-there attribution contract."""
+        self.client.post(
+            "/dashboard/api/agents/alpha/chat", json={"message": "chat first"},
+        )
+        chat_trace = (self._captured["headers"].get("X-Trace-Id")
+                      or self._captured["headers"].get("x-trace-id"))
+        assert chat_trace and chat_trace.startswith("tr_")
+        # Broadcast does NOT mint a trace — it must carry no inherited one.
+        resp = self.client.post(
+            "/dashboard/api/broadcast", json={"message": "to everyone"},
+        )
+        assert resp.status_code == 200, resp.text
+        bc_trace = (self._captured["headers"].get("X-Trace-Id")
+                    or self._captured["headers"].get("x-trace-id"))
+        assert bc_trace != chat_trace
+        assert not bc_trace, f"broadcast leaked a stale trace_id: {bc_trace!r}"

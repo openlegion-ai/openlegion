@@ -3615,7 +3615,13 @@ def create_dashboard_router(
         # the resulting LLM/task/transcript rows were uncorrelatable.
         from src.shared.trace import current_trace_id, new_trace_id, origin_header, trace_headers
         from src.shared.types import MessageOrigin
-        current_trace_id.set(new_trace_id())
+        # Mint + seed, then RESET via token after the awaited outbound call.
+        # Without the reset, this minted trace_id stays on the (worker-reused)
+        # context and contaminates a later handler that calls trace_headers()
+        # without minting (e.g. /api/broadcast), so its rows inherit a trace
+        # from an unrelated chat. The finally runs after transport.request,
+        # so the outbound trace_headers() still carries X-Trace-Id.
+        _trace_tok = current_trace_id.set(new_trace_id())
         origin = MessageOrigin(
             kind="human",
             channel="dashboard",
@@ -3638,6 +3644,8 @@ def create_dashboard_router(
                 event_bus.emit("chat_done", agent=agent_id,
                     data={"response": "", "session": chat_session})
             raise HTTPException(status_code=502, detail=str(e))
+        finally:
+            current_trace_id.reset(_trace_tok)
 
     @api_router.post("/api/agents/{agent_id}/chat/stream")
     async def api_chat_stream(agent_id: str, request: Request):
@@ -3663,16 +3671,23 @@ def create_dashboard_router(
         # Session observability (Phase 1): mint a per-turn trace_id and
         # seed the contextvar before trace_headers() so the outbound
         # /chat/stream call carries X-Trace-Id (see api_chat above).
+        # The X-Trace-Id is baked into ``_hdrs`` synchronously here, so the
+        # generator reads ``_hdrs`` (not the contextvar) — set + reset around
+        # the header build, no leak onto the worker-reused context that a
+        # later non-minting handler (e.g. /api/broadcast) would inherit.
         from src.shared.trace import current_trace_id, new_trace_id, origin_header, trace_headers
         from src.shared.types import MessageOrigin
-        current_trace_id.set(new_trace_id())
-        _origin = MessageOrigin(
-            kind="human",
-            channel="dashboard",
-            user=_operator_session_id(request),
-        )
-        _hdrs = trace_headers()
-        _hdrs.update(origin_header(_origin))
+        _trace_tok = current_trace_id.set(new_trace_id())
+        try:
+            _origin = MessageOrigin(
+                kind="human",
+                channel="dashboard",
+                user=_operator_session_id(request),
+            )
+            _hdrs = trace_headers()
+            _hdrs.update(origin_header(_origin))
+        finally:
+            current_trace_id.reset(_trace_tok)
 
         async def event_generator():
             final_response = ""
