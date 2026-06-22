@@ -603,3 +603,80 @@ class TestQuarantine:
         assert monitor.agents["agent-a"].status == "unhealthy"
         # The bool flag is the real lane gate; restart doesn't fix creds.
         assert monitor.agents["agent-a"].quarantined is True
+
+
+class TestFailedSelfHeal:
+    """Regression: ``failed`` was a terminal sink — a restart storm (transient
+    upstream-LLM overload timing out /status probes) marked agents ``failed``
+    and they were never re-probed, so they showed ``Offline`` forever even
+    after becoming reachable. ``_check_agent`` must now re-probe ``failed``
+    agents and self-heal them when reachable, with a fresh restart budget.
+    """
+
+    @pytest.mark.asyncio
+    async def test_failed_agent_recovers_when_reachable(self):
+        """A ``failed`` agent flips to ``healthy`` after one reachable probe,
+        clears its restart ledger, and emits a failed->healthy event."""
+        monitor = _make_monitor({"agent-a": {"role": "x"}})
+        monitor.register("agent-a")
+        h = monitor.agents["agent-a"]
+        h.status = "failed"
+        h.restart_timestamps = [1.0, 2.0, 3.0]
+        h.consecutive_failures = 3
+        monitor.transport.is_reachable = AsyncMock(return_value=True)
+        monitor._event_bus.emit.reset_mock()
+
+        await monitor._check_agent("agent-a")
+
+        assert h.status == "healthy"
+        # Fresh restart budget so the next blip isn't judged against the storm.
+        assert h.restart_timestamps == []
+        assert h.consecutive_failures == 0
+        monitor._event_bus.emit.assert_called_once()
+        evt_name, kwargs = (
+            monitor._event_bus.emit.call_args.args,
+            monitor._event_bus.emit.call_args.kwargs,
+        )
+        assert evt_name == ("health_change",)
+        assert kwargs["data"]["previous"] == "failed"
+        assert kwargs["data"]["current"] == "healthy"
+
+    @pytest.mark.asyncio
+    async def test_failed_agent_stays_failed_when_unreachable_no_churn(self):
+        """A still-unreachable ``failed`` agent stays ``failed`` with no churn:
+        no ``consecutive_failures`` bump, no new restart attempt, no flap."""
+        monitor = _make_monitor({"agent-a": {"role": "x"}})
+        monitor.register("agent-a")
+        h = monitor.agents["agent-a"]
+        h.status = "failed"
+        h.restart_timestamps = [1.0, 2.0, 3.0]
+        h.consecutive_failures = 3
+        monitor.transport.is_reachable = AsyncMock(return_value=False)
+        monitor._try_restart = AsyncMock()
+        monitor._event_bus.emit.reset_mock()
+
+        await monitor._check_agent("agent-a")
+
+        assert h.status == "failed"
+        assert h.consecutive_failures == 3
+        assert h.restart_timestamps == [1.0, 2.0, 3.0]
+        monitor._try_restart.assert_not_called()
+        monitor._event_bus.emit.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_quarantined_failed_agent_stays_quarantined_when_reachable(self):
+        """Quarantine invariant: a reachable poll must NOT flip a quarantined
+        (and failed) agent to ``healthy`` — credentials are still broken."""
+        monitor = _make_monitor({"agent-a": {"role": "x"}})
+        monitor.register("agent-a")
+        h = monitor.agents["agent-a"]
+        h.status = "failed"
+        h.quarantined = True
+        monitor.transport.is_reachable = AsyncMock(return_value=True)
+
+        await monitor._check_agent("agent-a")
+
+        # Reachable clears the failure counters but status stays terminal/
+        # quarantined — only clear_quarantine flips it back to healthy.
+        assert h.quarantined is True
+        assert h.status != "healthy"

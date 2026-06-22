@@ -344,8 +344,16 @@ class HealthMonitor:
 
     async def _check_agent(self, agent_id: str) -> None:
         health = self.agents.get(agent_id)
-        if not health or health.status == "failed":
+        if not health:
             return
+        # "failed" used to early-return here, making it a terminal sink: a
+        # restart storm (e.g. a transient upstream-LLM overload that timed out
+        # /status probes for a whole team) tripped the restart limit, marked the
+        # agent "failed", and it was then NEVER re-probed — so it showed
+        # "Offline" on the dashboard forever, even after it answered /status 200
+        # again. We now keep probing failed agents so they self-heal via the
+        # reachable branch below once the upstream issue clears.
+        was_failed = health.status == "failed"
 
         prev_status = health.status
         now = time.time()
@@ -380,6 +388,11 @@ class HealthMonitor:
                     if not health.quarantined:
                         new_status = "healthy"
                         health.status = new_status
+                        if was_failed:
+                            # Self-healed out of a terminal failure — give it a
+                            # fresh restart budget so the next transient blip
+                            # isn't judged against the storm that failed it.
+                            health.restart_timestamps = []
                         if new_status != prev_status and self._event_bus:
                             self._event_bus.emit("health_change", agent=agent_id, data={
                                 "previous": prev_status, "current": health.status,
@@ -389,6 +402,13 @@ class HealthMonitor:
                     return
         except Exception as e:
             logger.debug("Health check transport error for '%s': %s", agent_id, e)
+
+        if was_failed:
+            # Still down and already failed — keep it failed quietly. Don't
+            # re-run the restart ladder or emit a failed->unhealthy->failed
+            # flap. It self-heals via the reachable branch above once it
+            # answers /status again.
+            return
 
         health.consecutive_failures += 1
         # Codex P2 follow-up: don't flip quarantined → unhealthy on an
