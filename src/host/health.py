@@ -206,16 +206,20 @@ class HealthMonitor:
         h.quarantine_reason = None
         h.quarantined_at = None
         # Codex r4 (principal-eng): don't clobber a more-severe runtime
-        # state. ``failed`` is terminal (MAX_FAILURES restarts exhausted
-        # — see :440/:471) and must never be revived to ``healthy`` by a
-        # credential-side clear. ``restarting`` is an in-flight state
-        # (set in :534) the restart path will reconcile on its own.
-        # ``unhealthy`` means reachability is genuinely broken — the
-        # next ``_check_agent`` poll will flip it back to ``healthy`` if
-        # the agent actually responds. Only flip to ``healthy`` when no
-        # other negative signal is in flight.
+        # state with a credential-side clear — a quarantine clear is not a
+        # liveness signal and must not masquerade as one. ``failed``
+        # (MAX_FAILURES restarts exhausted) and ``restarting`` (in-flight)
+        # are owned by the health/restart path, so we preserve them here and
+        # let ``_check_agent`` reconcile. NOTE: ``failed`` is no longer
+        # terminal — a reachable agent self-heals to ``healthy`` on its next
+        # ``_check_agent`` probe — but that recovery must come from an actual
+        # reachability check, never from clearing creds. ``restarting``
+        # settles when the restart completes. ``unhealthy`` means reachability
+        # is genuinely broken — the next ``_check_agent`` poll flips it back
+        # to ``healthy`` iff the agent responds. Only flip to ``healthy`` here
+        # when no other negative signal is in flight.
         if h.status in ("failed", "restarting"):
-            pass  # preserve — terminal or in-flight runtime state
+            pass  # preserve — health/restart-owned (failed self-heals via _check_agent)
         elif h.consecutive_failures > 0:
             h.status = "unhealthy"
         else:
@@ -359,6 +363,7 @@ class HealthMonitor:
         now = time.time()
         health.last_check = now
 
+        reachable_but_stale = False
         try:
             reachable = await self.transport.is_reachable(agent_id, timeout=5)
             if reachable:
@@ -375,6 +380,7 @@ class HealthMonitor:
                         "unhealthy",
                         agent_id, _STALE_LOOP_SECONDS,
                     )
+                    reachable_but_stale = True
                     # Fall through to the unhealthy bookkeeping below.
                 else:
                     health.consecutive_failures = 0
@@ -388,11 +394,12 @@ class HealthMonitor:
                     if not health.quarantined:
                         new_status = "healthy"
                         health.status = new_status
-                        if was_failed:
-                            # Self-healed out of a terminal failure — give it a
-                            # fresh restart budget so the next transient blip
-                            # isn't judged against the storm that failed it.
-                            health.restart_timestamps = []
+                        # NB: we deliberately do NOT clear restart_timestamps on
+                        # a failed->healthy self-heal. Status recovery rides the
+                        # reachability probe alone; the restart budget stays
+                        # governed by the RESTART_WINDOW prune in _try_restart so
+                        # a chronic flapper (heal -> blip -> heal -> blip) can't
+                        # earn an unbounded number of disruptive restarts.
                         if new_status != prev_status and self._event_bus:
                             self._event_bus.emit("health_change", agent=agent_id, data={
                                 "previous": prev_status, "current": health.status,
@@ -403,11 +410,13 @@ class HealthMonitor:
         except Exception as e:
             logger.debug("Health check transport error for '%s': %s", agent_id, e)
 
-        if was_failed:
-            # Still down and already failed — keep it failed quietly. Don't
-            # re-run the restart ladder or emit a failed->unhealthy->failed
-            # flap. It self-heals via the reachable branch above once it
-            # answers /status again.
+        if was_failed and not reachable_but_stale:
+            # Unreachable/errored AND already failed — keep it failed quietly:
+            # no restart churn, no failed->unhealthy->failed flap. It self-heals
+            # via the reachable branch above once it answers /status again.
+            # A reachable-but-stale failed agent (live /status, wedged loop) is
+            # deliberately NOT parked here — it falls through so the stale loop
+            # can still be restarted once the RESTART_WINDOW frees the budget.
             return
 
         health.consecutive_failures += 1

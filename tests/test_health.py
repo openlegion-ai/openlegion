@@ -426,11 +426,13 @@ class TestQuarantine:
         assert monitor.clear_quarantine("ghost", reason="test") is False
 
     def test_clear_quarantine_preserves_failed_status(self):
-        """Codex r4 (principal-eng): an agent that exhausted its restart
-        budget is in the terminal ``failed`` state. A credential-side
-        clear (TTL expiry or operator edit_agent) must NOT revive it to
-        ``healthy`` — the runtime is permanently stopped and the operator
-        should still see ``failed``."""
+        """Codex r4 (principal-eng): a credential-side clear (TTL expiry or
+        operator edit_agent) must NOT *itself* revive a ``failed`` agent to
+        ``healthy``. ``failed`` recovery is owned by ``_check_agent``'s
+        reachability probe (the agent self-heals once it answers /status
+        again) — a quarantine clear is not a liveness signal, so it leaves
+        ``failed`` in place and the operator keeps seeing ``failed`` until a
+        real probe says otherwise."""
         monitor = _make_monitor({})
         monitor.register("agent-a")
         # Force quarantine.
@@ -446,7 +448,8 @@ class TestQuarantine:
         cleared = monitor.clear_quarantine("agent-a", reason="auto-expiry")
         assert cleared is True
         assert monitor.agents["agent-a"].quarantined is False
-        # Status preserved — failed is terminal.
+        # clear_quarantine itself must not revive failed — recovery is owned
+        # by _check_agent's reachability probe, not a credential-side clear.
         assert monitor.agents["agent-a"].status == "failed"
 
     def test_clear_quarantine_preserves_unhealthy_status(self):
@@ -610,13 +613,16 @@ class TestFailedSelfHeal:
     upstream-LLM overload timing out /status probes) marked agents ``failed``
     and they were never re-probed, so they showed ``Offline`` forever even
     after becoming reachable. ``_check_agent`` must now re-probe ``failed``
-    agents and self-heal them when reachable, with a fresh restart budget.
+    agents and self-heal them to ``healthy`` once reachable, while leaving the
+    windowed restart budget intact so a chronic flapper can't earn unbounded
+    restarts.
     """
 
     @pytest.mark.asyncio
     async def test_failed_agent_recovers_when_reachable(self):
-        """A ``failed`` agent flips to ``healthy`` after one reachable probe,
-        clears its restart ledger, and emits a failed->healthy event."""
+        """A ``failed`` agent flips to ``healthy`` after one reachable probe
+        and emits a failed->healthy event. The restart ledger is preserved
+        (NOT reset) so the budget stays window-bounded."""
         monitor = _make_monitor({"agent-a": {"role": "x"}})
         monitor.register("agent-a")
         h = monitor.agents["agent-a"]
@@ -629,8 +635,9 @@ class TestFailedSelfHeal:
         await monitor._check_agent("agent-a")
 
         assert h.status == "healthy"
-        # Fresh restart budget so the next blip isn't judged against the storm.
-        assert h.restart_timestamps == []
+        # Restart ledger preserved on self-heal (NOT reset): the budget is
+        # bounded by the RESTART_WINDOW prune, so a flapper can't loop restarts.
+        assert h.restart_timestamps == [1.0, 2.0, 3.0]
         assert h.consecutive_failures == 0
         monitor._event_bus.emit.assert_called_once()
         evt_name, kwargs = (
@@ -664,6 +671,50 @@ class TestFailedSelfHeal:
         monitor._event_bus.emit.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_failed_reachable_but_stale_agent_falls_through_to_restart_path(self):
+        """A ``failed`` agent whose /status answers but whose loop is wedged
+        (stale) must NOT be parked as failed by the no-churn guard — it falls
+        through to the unhealthy/restart path so the wedged loop can eventually
+        be restarted once the window frees."""
+        monitor = _make_monitor({"agent-a": {"role": "x"}})
+        monitor.register("agent-a")
+        h = monitor.agents["agent-a"]
+        h.status = "failed"
+        h.consecutive_failures = 0
+        monitor.transport.is_reachable = AsyncMock(return_value=True)
+        monitor._is_loop_stale = AsyncMock(return_value=True)
+        monitor._try_restart = AsyncMock()
+
+        await monitor._check_agent("agent-a")
+
+        # Fell through (not silently parked): the failure counter advanced and
+        # status reflects the still-broken wedged loop rather than staying failed.
+        assert h.consecutive_failures == 1
+        assert h.status == "unhealthy"
+
+    @pytest.mark.asyncio
+    async def test_failed_agent_probe_exception_stays_failed_no_churn(self):
+        """If the reachability probe raises for a ``failed`` agent, it stays
+        ``failed`` quietly — same no-churn guard as the unreachable path."""
+        monitor = _make_monitor({"agent-a": {"role": "x"}})
+        monitor.register("agent-a")
+        h = monitor.agents["agent-a"]
+        h.status = "failed"
+        h.consecutive_failures = 3
+        h.restart_timestamps = [1.0, 2.0, 3.0]
+        monitor.transport.is_reachable = AsyncMock(side_effect=RuntimeError("boom"))
+        monitor._try_restart = AsyncMock()
+        monitor._event_bus.emit.reset_mock()
+
+        await monitor._check_agent("agent-a")
+
+        assert h.status == "failed"
+        assert h.consecutive_failures == 3
+        assert h.restart_timestamps == [1.0, 2.0, 3.0]
+        monitor._try_restart.assert_not_called()
+        monitor._event_bus.emit.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_quarantined_failed_agent_stays_quarantined_when_reachable(self):
         """Quarantine invariant: a reachable poll must NOT flip a quarantined
         (and failed) agent to ``healthy`` — credentials are still broken."""
@@ -676,7 +727,7 @@ class TestFailedSelfHeal:
 
         await monitor._check_agent("agent-a")
 
-        # Reachable clears the failure counters but status stays terminal/
-        # quarantined — only clear_quarantine flips it back to healthy.
+        # Reachable clears the failure counters but the quarantined+failed
+        # status is preserved — only clear_quarantine flips it back to healthy.
         assert h.quarantined is True
-        assert h.status != "healthy"
+        assert h.status == "failed"
