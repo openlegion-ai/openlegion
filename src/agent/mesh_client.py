@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
-from src.shared.trace import origin_header
+from src.shared.trace import TRACE_HEADER, origin_header
 from src.shared.types import MeshEvent
 from src.shared.utils import setup_logging
 
@@ -360,6 +360,61 @@ class MeshClient:
         )
         _raise_with_body(response)
         return response.json()
+
+    async def record_trace(
+        self,
+        event_type: str,
+        *,
+        detail: str = "",
+        status: str = "ok",
+        error: str = "",
+        duration_ms: int = 0,
+        meta: dict | None = None,
+    ) -> None:
+        """Record an agent-side trace event on the mesh (Phase 4).
+
+        The agent never writes ``traces.db`` directly — container isolation is
+        the whole reason traces are host-only — so it POSTs to ``/mesh/traces``
+        and the mesh records on its behalf under the inbound ``x-trace-id``
+        (mirroring how ``llm_call`` traces already reach the store from the API
+        proxy). Best-effort and non-blocking: callers fire-and-forget this, and
+        it swallows every error so tracing can never stall or break the loop. If
+        no trace context is active there is nothing to correlate, so it no-ops.
+        """
+        headers = self._trace_headers()
+        if TRACE_HEADER not in headers:
+            return
+        try:
+            client = await self._get_client()
+            resp = await client.post(
+                f"{self.mesh_url}/mesh/traces",
+                json={
+                    "agent_id": self.agent_id,
+                    "event_type": event_type,
+                    "detail": detail,
+                    "status": status,
+                    "error": error,
+                    "duration_ms": duration_ms,
+                    "meta": meta or {},
+                },
+                headers=headers,
+                timeout=5,
+            )
+            # Surface a silently-dropped trace (auth/rate-limit/no-store) at
+            # debug so a broken tracer is diagnosable without spamming logs or
+            # ever raising — the response is otherwise discarded.
+            if resp.status_code >= 400:
+                logger.debug(
+                    "record_trace(%s) rejected: HTTP %s", event_type, resp.status_code,
+                )
+            else:
+                try:
+                    if resp.json().get("recorded") is False:
+                        logger.debug("record_trace(%s) not recorded by mesh", event_type)
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug("record_trace(%s) failed (non-fatal): %s", event_type, e)
 
     async def publish_event(self, topic: str, payload: dict | None = None) -> dict:
         """Publish an event to the mesh pub/sub."""

@@ -48,6 +48,18 @@ current_task_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "current_task_id", default=None,
 )
 
+# Identity of the process/agent emitting work. Set once at agent boot
+# (``src/agent/__main__.py``) so every log line in an agent container can
+# be attributed without threading the id through. The mesh host process
+# leaves it ``None`` (host log lines carry the agent in ``extra_data``
+# instead). Phase 4 log correlation reads this alongside the trace/task
+# ids; the structured formatter additionally falls back to the ``AGENT_ID``
+# env var so per-request contexts that never inherited the boot ``set()``
+# are still attributed.
+current_agent_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "current_agent_id", default=None,
+)
+
 
 def new_trace_id() -> str:
     """Generate a fresh trace ID: ``tr_<12-hex-chars>``."""
@@ -95,6 +107,7 @@ __all__ = [
     "current_trace_id",
     "current_origin",
     "current_task_id",
+    "current_agent_id",
     "new_trace_id",
     "trace_headers",
     "origin_header",

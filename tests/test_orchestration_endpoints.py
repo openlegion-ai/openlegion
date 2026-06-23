@@ -1501,3 +1501,158 @@ async def test_retry_clone_inherits_original_trace_id(v2_app):
         clone = r.json()["clone"]
         assert clone["id"] != tid
         assert clone["trace_id"] == "tr_retry0000001"
+
+
+# ── Session observability (Phase 4): agent-side trace ingest endpoint ──
+#
+# Agents cannot write traces.db (host-only by container isolation), so they
+# POST tool_call/handoff/iteration events to ``/mesh/traces`` and the mesh
+# records them under the inbound ``X-Trace-Id`` — mirroring the llm_call
+# ingest in the API proxy. These tests pin: (1) a record lands with
+# source="agent" under the header trace; (2) no header → accepted no-op,
+# nothing stored (no orphan rows with a NULL/empty trace); (3) under auth the
+# recorded ``agent`` comes from the verified token, not the spoofable body.
+
+
+def _build_traces_app(tmp_path, server_module, *, auth_tokens=None):
+    """Mesh app wired with a TraceStore, for ``/mesh/traces`` ingest tests."""
+    from src.host.traces import TraceStore
+
+    blackboard = Blackboard(str(tmp_path / "bb.db"))
+    permissions = PermissionMatrix()
+    router = MessageRouter(permissions, {"analyst": "http://analyst:8400"})
+    traces = TraceStore(str(tmp_path / "traces.db"))
+    app = server_module.create_mesh_app(
+        blackboard=blackboard,
+        pubsub=PubSub(),
+        router=router,
+        permissions=permissions,
+        trace_store=traces,
+        auth_tokens=auth_tokens,
+    )
+    return app, blackboard, traces
+
+
+@pytest.mark.asyncio
+async def test_traces_ingest_records_under_header_trace_id(tmp_path, monkeypatch):
+    """``POST /mesh/traces`` with ``X-Trace-Id`` records an agent-sourced
+    event the session reader can join by trace_id. Redaction happens inside
+    ``TraceStore.record`` — a URL with embedded credentials is stripped."""
+    server_module = _reload_server(monkeypatch, tasks_db=str(tmp_path / "tasks.db"))
+    app, bb, traces = _build_traces_app(tmp_path, server_module)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post(
+                "/mesh/traces",
+                json={
+                    "agent_id": "analyst",
+                    "event_type": "tool_call",
+                    "detail": "http_request via https://u:p4ss@api.example.com/x",
+                    "duration_ms": 42,
+                    "status": "ok",
+                    "meta": {"foo": "bar"},
+                },
+                headers={"X-Agent-ID": "analyst", "X-Trace-Id": "tr_agent0000001"},
+            )
+        assert r.status_code == 200, r.text
+        assert r.json()["recorded"] is True
+        rows = traces.get_trace("tr_agent0000001")
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["source"] == "agent"
+        assert row["agent"] == "analyst"
+        assert row["event_type"] == "tool_call"
+        assert row["duration_ms"] == 42
+        # H16: embedded credentials redacted at storage.
+        assert "p4ss" not in row["detail"]
+        assert "api.example.com" in row["detail"]
+    finally:
+        bb.close()
+        traces.close()
+        monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
+        importlib.reload(server_module)
+
+
+@pytest.mark.asyncio
+async def test_traces_ingest_without_header_noops(tmp_path, monkeypatch):
+    """No ``X-Trace-Id`` → accepted no-op: nothing is stored. There is no
+    trace to correlate, and we never want an orphan row with an empty trace."""
+    server_module = _reload_server(monkeypatch, tasks_db=str(tmp_path / "tasks.db"))
+    app, bb, traces = _build_traces_app(tmp_path, server_module)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post(
+                "/mesh/traces",
+                json={"agent_id": "analyst", "event_type": "iteration"},
+                headers={"X-Agent-ID": "analyst"},
+            )
+        assert r.status_code == 200, r.text
+        assert r.json()["recorded"] is False
+        assert traces.list_recent(limit=10) == []
+    finally:
+        bb.close()
+        traces.close()
+        monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
+        importlib.reload(server_module)
+
+
+@pytest.mark.asyncio
+async def test_traces_ingest_coerces_bad_duration(tmp_path, monkeypatch):
+    """A malformed/negative ``duration_ms`` must not drop the whole trace —
+    it is coerced (bad → 0) and clamped (negative → 0) rather than raising
+    into the no-op path."""
+    server_module = _reload_server(monkeypatch, tasks_db=str(tmp_path / "tasks.db"))
+    app, bb, traces = _build_traces_app(tmp_path, server_module)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r_bad = await c.post(
+                "/mesh/traces",
+                json={"agent_id": "a", "event_type": "iteration", "duration_ms": "oops"},
+                headers={"X-Agent-ID": "a", "X-Trace-Id": "tr_dur00000001"},
+            )
+            r_neg = await c.post(
+                "/mesh/traces",
+                json={"agent_id": "a", "event_type": "iteration", "duration_ms": -5},
+                headers={"X-Agent-ID": "a", "X-Trace-Id": "tr_dur00000002"},
+            )
+        assert r_bad.json()["recorded"] is True
+        assert r_neg.json()["recorded"] is True
+        assert traces.get_trace("tr_dur00000001")[0]["duration_ms"] == 0
+        assert traces.get_trace("tr_dur00000002")[0]["duration_ms"] == 0
+    finally:
+        bb.close()
+        traces.close()
+        monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
+        importlib.reload(server_module)
+
+
+@pytest.mark.asyncio
+async def test_traces_ingest_agent_id_from_token_not_body(tmp_path, monkeypatch):
+    """Under auth the recorded ``agent`` is the verified token identity — a
+    spoofed body ``agent_id`` is ignored (``_resolve_agent_id`` derives it
+    from the Bearer token)."""
+    server_module = _reload_server(monkeypatch, tasks_db=str(tmp_path / "tasks.db"))
+    app, bb, traces = _build_traces_app(
+        tmp_path, server_module,
+        auth_tokens={"analyst": "tok_analyst", "scout": "tok_scout"},
+    )
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post(
+                "/mesh/traces",
+                json={"agent_id": "scout", "event_type": "tool_call", "detail": "x"},
+                headers={
+                    "X-Agent-ID": "scout",  # spoof attempt
+                    "Authorization": "Bearer tok_analyst",
+                    "X-Trace-Id": "tr_authagent001",
+                },
+            )
+        assert r.status_code == 200, r.text
+        rows = traces.get_trace("tr_authagent001")
+        assert len(rows) == 1
+        assert rows[0]["agent"] == "analyst"  # token wins over body/header
+    finally:
+        bb.close()
+        traces.close()
+        monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
+        importlib.reload(server_module)

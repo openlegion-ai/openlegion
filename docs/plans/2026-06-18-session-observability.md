@@ -1,7 +1,7 @@
 # Session Observability — durable, correlated session reconstruction
 
 **Date:** 2026-06-18
-**Status:** Phase 1 SHIPPED in PR #1149 (CI green; not yet merged). Phases 2–4 detailed below, not yet implemented.
+**Status:** SHIPPED. Phase 1 (#1149), Phase 2 (#1153), Phase 3 (#1154), and Phase 4 (agent-side traces + log correlation) are all merged to `main`. Off-box log shipping is the one deliberately deferred out-of-MVP hook.
 
 ## Motivation
 

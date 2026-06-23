@@ -46,6 +46,31 @@ def _make_mesh_client(agent_id="scout", standalone=False):
 
 class TestHandOff:
     @pytest.mark.asyncio
+    async def test_hand_off_emits_handoff_trace(self):
+        """Phase 4: a successful handoff records a ``handoff`` trace edge
+        (creator → assignee) carrying the new task_id. Best-effort and awaited
+        inline; a non-async record_trace (the default MagicMock) is skipped."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="scout")
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+        mc.record_trace = AsyncMock()
+
+        result = await hand_off(
+            to="analyst",
+            summary="dig into the logs",
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        mc.record_trace.assert_awaited_once()
+        args, kwargs = mc.record_trace.call_args
+        assert args[0] == "handoff"
+        assert "scout" in kwargs["detail"] and "analyst" in kwargs["detail"]
+        assert kwargs["meta"]["task_id"] == "task_abc123def456"
+        assert kwargs["meta"]["to"] == "analyst"
+
+    @pytest.mark.asyncio
     async def test_hand_off_invalid_target(self):
         from src.agent.builtins.coordination_tool import hand_off
 

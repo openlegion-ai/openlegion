@@ -178,6 +178,35 @@ def friendly_streaming_error(exc: Exception) -> str:
     return raw
 
 
+def _log_trace_context() -> dict:
+    """Return active correlation IDs (trace/task/agent) for a log line.
+
+    Lazy-imports ``src.shared.trace`` to avoid the import cycle (trace.py
+    imports ``setup_logging`` from this module). Repeated imports are a cheap
+    ``sys.modules`` lookup. Never raises — a logging path must never break.
+    ``current_agent_id`` falls back to the ``AGENT_ID`` env var so agent
+    containers attribute every line even when a per-request context never
+    inherited the boot-time ``set()``; the mesh host has no ``AGENT_ID`` so it
+    stays absent there.
+    """
+    try:
+        from src.shared.trace import current_agent_id, current_task_id, current_trace_id
+
+        ctx: dict = {}
+        tid = current_trace_id.get()
+        if tid:
+            ctx["trace_id"] = tid
+        task = current_task_id.get()
+        if task:
+            ctx["task_id"] = task
+        aid = current_agent_id.get() or os.environ.get("AGENT_ID")
+        if aid:
+            ctx["agent_id"] = aid
+        return ctx
+    except Exception:
+        return {}
+
+
 class StructuredFormatter(logging.Formatter):
     """JSON log formatter for structured logging."""
 
@@ -190,6 +219,8 @@ class StructuredFormatter(logging.Formatter):
         }
         if record.exc_info:
             log_entry["exception"] = self.formatException(record.exc_info)
+        # Correlation IDs first so an explicit ``extra_data`` key still wins.
+        log_entry.update(_log_trace_context())
         if hasattr(record, "extra_data"):
             log_entry.update(record.extra_data)
         return json.dumps(log_entry)
@@ -202,6 +233,9 @@ class TextFormatter(logging.Formatter):
         ts = datetime.now(UTC).strftime("%H:%M:%S")
         msg = record.getMessage()
         line = f"{ts} [{record.levelname:<5}] {record.name}: {msg}"
+        ctx = _log_trace_context()
+        if ctx:
+            line += " [" + " ".join(f"{k}={v}" for k, v in ctx.items()) + "]"
         if record.exc_info:
             line += "\n" + self.formatException(record.exc_info)
         return line
