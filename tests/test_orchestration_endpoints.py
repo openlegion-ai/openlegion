@@ -1597,6 +1597,36 @@ async def test_traces_ingest_without_header_noops(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_traces_ingest_coerces_bad_duration(tmp_path, monkeypatch):
+    """A malformed/negative ``duration_ms`` must not drop the whole trace —
+    it is coerced (bad → 0) and clamped (negative → 0) rather than raising
+    into the no-op path."""
+    server_module = _reload_server(monkeypatch, tasks_db=str(tmp_path / "tasks.db"))
+    app, bb, traces = _build_traces_app(tmp_path, server_module)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r_bad = await c.post(
+                "/mesh/traces",
+                json={"agent_id": "a", "event_type": "iteration", "duration_ms": "oops"},
+                headers={"X-Agent-ID": "a", "X-Trace-Id": "tr_dur00000001"},
+            )
+            r_neg = await c.post(
+                "/mesh/traces",
+                json={"agent_id": "a", "event_type": "iteration", "duration_ms": -5},
+                headers={"X-Agent-ID": "a", "X-Trace-Id": "tr_dur00000002"},
+            )
+        assert r_bad.json()["recorded"] is True
+        assert r_neg.json()["recorded"] is True
+        assert traces.get_trace("tr_dur00000001")[0]["duration_ms"] == 0
+        assert traces.get_trace("tr_dur00000002")[0]["duration_ms"] == 0
+    finally:
+        bb.close()
+        traces.close()
+        monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
+        importlib.reload(server_module)
+
+
+@pytest.mark.asyncio
 async def test_traces_ingest_agent_id_from_token_not_body(tmp_path, monkeypatch):
     """Under auth the recorded ``agent`` is the verified token identity — a
     spoofed body ``agent_id`` is ignored (``_resolve_agent_id`` derives it

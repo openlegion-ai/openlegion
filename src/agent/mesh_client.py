@@ -386,7 +386,7 @@ class MeshClient:
             return
         try:
             client = await self._get_client()
-            await client.post(
+            resp = await client.post(
                 f"{self.mesh_url}/mesh/traces",
                 json={
                     "agent_id": self.agent_id,
@@ -400,6 +400,19 @@ class MeshClient:
                 headers=headers,
                 timeout=5,
             )
+            # Surface a silently-dropped trace (auth/rate-limit/no-store) at
+            # debug so a broken tracer is diagnosable without spamming logs or
+            # ever raising — the response is otherwise discarded.
+            if resp.status_code >= 400:
+                logger.debug(
+                    "record_trace(%s) rejected: HTTP %s", event_type, resp.status_code,
+                )
+            else:
+                try:
+                    if resp.json().get("recorded") is False:
+                        logger.debug("record_trace(%s) not recorded by mesh", event_type)
+                except Exception:
+                    pass
         except Exception as e:
             logger.debug("record_trace(%s) failed (non-fatal): %s", event_type, e)
 

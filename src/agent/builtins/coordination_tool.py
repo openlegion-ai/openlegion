@@ -418,21 +418,6 @@ async def hand_off(
         record.get("parent_task_id"), record.get("project_id"),
     )
 
-    # Phase 4 trace: the handoff edge (creator → assignee) under the active
-    # trace_id, so a session timeline shows where work crossed agents. The
-    # task summary is redacted at storage (H16). Best-effort — record_trace
-    # swallows errors and no-ops without a trace context.
-    record_trace = getattr(mesh_client, "record_trace", None)
-    if asyncio.iscoroutinefunction(record_trace):
-        try:
-            await record_trace(
-                "handoff",
-                detail=f"{mesh_client.agent_id} → {to}",
-                meta={"task_id": task_id, "to": to, "summary": summary[:200]},
-            )
-        except Exception as e:
-            logger.debug("hand_off trace emit failed (non-fatal): %s", e)
-
     # Wake the target so they pick up the task immediately. The task
     # is queued in SQLite either way; wake failures surface via
     # ``handed_off=False`` + ``task_queued=True`` so the caller can
@@ -456,6 +441,23 @@ async def hand_off(
         # genuine infra failure (500 / network) below.
         wake_status = getattr(getattr(e, "response", None), "status_code", None)
         logger.warning("Wake for %s failed (task still queued): %s", to, e)
+
+    # Phase 4 trace: the handoff edge (creator → assignee) under the active
+    # trace_id, so a session timeline shows where work crossed agents. Emitted
+    # AFTER the wake so a slow trace ingest never delays the actual wake — the
+    # durable task already exists, so the edge is real regardless of wake
+    # outcome. Task summary is redacted at storage (H16); best-effort —
+    # record_trace swallows errors and no-ops without a trace context.
+    record_trace = getattr(mesh_client, "record_trace", None)
+    if asyncio.iscoroutinefunction(record_trace):
+        try:
+            await record_trace(
+                "handoff",
+                detail=f"{mesh_client.agent_id} → {to}",
+                meta={"task_id": task_id, "to": to, "summary": summary[:200]},
+            )
+        except Exception as e:
+            logger.debug("hand_off trace emit failed (non-fatal): %s", e)
 
     result = {
         "handed_off": wake_error is None,

@@ -198,6 +198,34 @@ async def test_run_tool_emits_error_status_on_soft_error():
 
 
 @pytest.mark.asyncio
+async def test_emit_trace_child_inherits_trace_after_parent_reset():
+    """The fire-and-forget trace is load-bearing only if the spawned task sees
+    the trace_id from creation time, not from whatever the parent context holds
+    when the task later runs. Reset the parent context IMMEDIATELY after
+    scheduling and prove the child still observed the original trace."""
+    from src.shared.trace import current_trace_id
+
+    seen: list = []
+
+    async def _capture(*_a, **_k):
+        # Yields control first so the parent's reset (below) has already run by
+        # the time we read the contextvar — proving inheritance, not timing.
+        await asyncio.sleep(0)
+        seen.append(current_trace_id.get())
+
+    loop = _make_loop()
+    loop.mesh_client.record_trace = _capture
+
+    tok = current_trace_id.set("tr_inherit00001")
+    loop._emit_trace("iteration", detail="x")
+    current_trace_id.reset(tok)  # parent context cleared before the child runs
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+    assert seen == ["tr_inherit00001"]
+
+
+@pytest.mark.asyncio
 async def test_emit_trace_noops_with_non_async_record_trace():
     """The common MagicMock mesh_client (record_trace is a non-coroutine
     attribute) must not schedule a broken task or raise — the

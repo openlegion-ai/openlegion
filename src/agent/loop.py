@@ -3581,6 +3581,13 @@ class AgentLoop:
             result_str = json.dumps({"error": block_error})
             result = {"error": block_error}
             self._loop_detector.record(tool_call.name, tool_call.arguments, result_str)
+            # A blocked loop IS a tool-call outcome — emit it so the session
+            # timeline shows the silent repeated-tool failure that observability
+            # exists to diagnose (rather than a gap before the loop stops).
+            self._emit_trace(
+                "tool_call", detail=tool_call.name, status="error",
+                error=f"loop detected ({loop_verdict})",
+            )
             return result_str, result
 
         _trace_t0 = time.time()

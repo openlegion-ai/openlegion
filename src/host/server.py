@@ -2758,6 +2758,13 @@ def create_mesh_app(
         req_trace_id = request.headers.get("x-trace-id")
         if not req_trace_id or trace_store is None:
             return {"recorded": False}
+        # Coerce duration defensively: a malformed value must not drop the
+        # whole trace, and a negative one must not be stored. Clamp to a sane
+        # ceiling (24h in ms) so a bogus huge value can't pollute rollups.
+        try:
+            duration_ms = max(0, min(int(data.get("duration_ms", 0) or 0), 86_400_000))
+        except (TypeError, ValueError):
+            duration_ms = 0
         try:
             meta = data.get("meta")
             trace_store.record(
@@ -2766,7 +2773,7 @@ def create_mesh_app(
                 agent=agent_id,
                 event_type=str(data.get("event_type", ""))[:64],
                 detail=str(data.get("detail", "")),
-                duration_ms=int(data.get("duration_ms", 0) or 0),
+                duration_ms=duration_ms,
                 status=str(data.get("status", "ok")),
                 error=str(data.get("error", "")),
                 meta=meta if isinstance(meta, dict) else None,
