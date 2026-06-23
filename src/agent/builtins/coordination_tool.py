@@ -12,6 +12,7 @@ production fleet was running with the kill-switch off.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 
@@ -416,6 +417,21 @@ async def hand_off(
         record.get("assignee"), record.get("creator"),
         record.get("parent_task_id"), record.get("project_id"),
     )
+
+    # Phase 4 trace: the handoff edge (creator → assignee) under the active
+    # trace_id, so a session timeline shows where work crossed agents. The
+    # task summary is redacted at storage (H16). Best-effort — record_trace
+    # swallows errors and no-ops without a trace context.
+    record_trace = getattr(mesh_client, "record_trace", None)
+    if asyncio.iscoroutinefunction(record_trace):
+        try:
+            await record_trace(
+                "handoff",
+                detail=f"{mesh_client.agent_id} → {to}",
+                meta={"task_id": task_id, "to": to, "summary": summary[:200]},
+            )
+        except Exception as e:
+            logger.debug("hand_off trace emit failed (non-fatal): %s", e)
 
     # Wake the target so they pick up the task immediately. The task
     # is queued in SQLite either way; wake failures surface via

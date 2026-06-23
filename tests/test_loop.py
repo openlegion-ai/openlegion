@@ -147,6 +147,75 @@ async def test_task_nudge_fires_when_tools_available():
 
 
 @pytest.mark.asyncio
+async def test_run_tool_emits_tool_call_trace():
+    """Phase 4: ``_run_tool`` fire-and-forgets a ``tool_call`` trace under the
+    active trace context. The emit is non-blocking (a scheduled task), so we
+    let the loop tick once to flush it before asserting."""
+    from src.shared.trace import current_trace_id
+
+    loop = _make_loop()
+    loop.tools.execute = AsyncMock(return_value={"results": ["r1"]})
+    loop.mesh_client.record_trace = AsyncMock()
+
+    tok = current_trace_id.set("tr_tool0000001")
+    try:
+        await loop._run_tool(ToolCallInfo(name="web_search", arguments={"q": "x"}))
+        # Flush the fire-and-forget create_task scheduled by _emit_trace.
+        for _ in range(3):
+            await asyncio.sleep(0)
+    finally:
+        current_trace_id.reset(tok)
+
+    loop.mesh_client.record_trace.assert_awaited()
+    args, kwargs = loop.mesh_client.record_trace.call_args
+    assert args[0] == "tool_call"
+    assert kwargs["detail"] == "web_search"
+    assert kwargs["status"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_run_tool_emits_error_status_on_soft_error():
+    """A builtin's ``{"error": ...}`` envelope (no raise) is traced with
+    ``status='error'`` and the error text."""
+    from src.shared.trace import current_trace_id
+
+    loop = _make_loop()
+    loop.tools.execute = AsyncMock(return_value={"error": "bad input"})
+    loop.mesh_client.record_trace = AsyncMock()
+
+    tok = current_trace_id.set("tr_tool0000002")
+    try:
+        await loop._run_tool(ToolCallInfo(name="file_read", arguments={}))
+        for _ in range(3):
+            await asyncio.sleep(0)
+    finally:
+        current_trace_id.reset(tok)
+
+    loop.mesh_client.record_trace.assert_awaited()
+    _, kwargs = loop.mesh_client.record_trace.call_args
+    assert kwargs["status"] == "error"
+    assert "bad input" in kwargs["error"]
+
+
+@pytest.mark.asyncio
+async def test_emit_trace_noops_with_non_async_record_trace():
+    """The common MagicMock mesh_client (record_trace is a non-coroutine
+    attribute) must not schedule a broken task or raise — the
+    ``iscoroutinefunction`` guard skips it even WITH an active trace context."""
+    from src.shared.trace import current_trace_id
+
+    loop = _make_loop()  # mesh_client is a MagicMock → record_trace is MagicMock
+    tok = current_trace_id.set("tr_guard0000001")
+    try:
+        # Must not raise despite a non-async record_trace.
+        loop._emit_trace("iteration", detail="x")
+        await asyncio.sleep(0)
+    finally:
+        current_trace_id.reset(tok)
+    assert loop._trace_tasks == set()
+
+
+@pytest.mark.asyncio
 async def test_lazy_completion_guard_fails_text_only_after_nudge():
     """Bug F: LLM responds with text-only acknowledgment ("I'll do it now")
     on iteration 0, gets nudged, then responds with text-only again on

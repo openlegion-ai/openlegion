@@ -518,15 +518,61 @@ class AgentLoop:
         # inner loop with a live FastAPI thread.
         self._last_iteration_ts: float | None = None
         self._iterations_since_boot: int = 0
+        # Strong refs to in-flight fire-and-forget trace POSTs so the event
+        # loop doesn't garbage-collect them mid-flight (Phase 4 observability).
+        self._trace_tasks: set = set()
+
+    def _emit_trace(
+        self, event_type: str, *, detail: str = "", status: str = "ok",
+        error: str = "", duration_ms: int = 0, meta: dict | None = None,
+    ) -> None:
+        """Fire-and-forget an agent-side trace event to the mesh (Phase 4).
+
+        Non-blocking by design: schedules ``mesh_client.record_trace`` as a
+        background task (which itself swallows all errors and no-ops without an
+        active trace context) so the loop never waits on or fails from tracing.
+        ``asyncio.create_task`` copies the current context, so the spawned task
+        sees the same ``current_trace_id`` set on this turn.
+        """
+        # Nothing to correlate without an active trace — skip scheduling a
+        # task at all (heartbeat/free-chat iterations have no trace context).
+        from src.shared.trace import current_trace_id
+        if current_trace_id.get() is None:
+            return
+        client = getattr(self, "mesh_client", None)
+        record = getattr(client, "record_trace", None)
+        # Only schedule a real coroutine. Guards the common test setup where
+        # mesh_client is a plain MagicMock (record_trace is then a non-async
+        # attribute and create_task would TypeError). AsyncMock passes.
+        if record is None or not asyncio.iscoroutinefunction(record):
+            return
+        try:
+            task = asyncio.create_task(
+                record(
+                    event_type, detail=detail, status=status,
+                    error=error, duration_ms=duration_ms, meta=meta,
+                )
+            )
+            self._trace_tasks.add(task)
+            task.add_done_callback(self._trace_tasks.discard)
+        except Exception:
+            # Best-effort: tracing must never break the loop (no running loop,
+            # scheduling failure, etc.).
+            return
 
     def _bump_liveness(self) -> None:
         """Stamp the last-iteration timestamp + bump the boot-relative counter.
 
         Called at the head of every iteration in execute_task and per-round
-        in the chat loops. Cheap on purpose — no I/O, no lock.
+        in the chat loops. Cheap on purpose — no I/O, no lock. The trace emit
+        is fire-and-forget (a scheduled task, not an awaited call), so this
+        stays non-blocking.
         """
         self._last_iteration_ts = time.time()
         self._iterations_since_boot += 1
+        self._emit_trace(
+            "iteration", detail=f"iteration {self._iterations_since_boot}",
+        )
 
     @property
     def _tool_filter_kw(self) -> dict:
@@ -3537,6 +3583,7 @@ class AgentLoop:
             self._loop_detector.record(tool_call.name, tool_call.arguments, result_str)
             return result_str, result
 
+        _trace_t0 = time.time()
         try:
             result = await asyncio.wait_for(
                 self.tools.execute(
@@ -3600,6 +3647,20 @@ class AgentLoop:
                         "soft-error learnings write failed: %s", learn_err,
                     )
 
+            # Phase 4 trace: one tool_call event per executed tool. Status
+            # reflects the soft-error envelope ({"error": ...}) that most
+            # builtins return without raising. Fire-and-forget — never blocks.
+            _tool_err = (
+                str(result["error"])[:500]
+                if isinstance(result, dict) and result.get("error")
+                else ""
+            )
+            self._emit_trace(
+                "tool_call", detail=tool_call.name,
+                status="error" if _tool_err else "ok", error=_tool_err,
+                duration_ms=int((time.time() - _trace_t0) * 1000),
+            )
+
             # Build multimodal content when an image is present
             if image_block and isinstance(image_block, dict) and image_block.get("data"):
                 media_type = image_block.get("media_type", "image/png")
@@ -3617,6 +3678,11 @@ class AgentLoop:
             self._loop_detector.record(tool_call.name, tool_call.arguments, result_str)
             result = {"error": f"Timed out after {_TOOL_TIMEOUT}s"}
             logger.error(f"Tool {tool_call.name} timed out after {_TOOL_TIMEOUT}s")
+            self._emit_trace(
+                "tool_call", detail=tool_call.name, status="error",
+                error=f"Timed out after {_TOOL_TIMEOUT}s",
+                duration_ms=int((time.time() - _trace_t0) * 1000),
+            )
             await self._record_failure(
                 tool_call.name, f"Timed out after {_TOOL_TIMEOUT}s",
                 truncate(str(tool_call.arguments), 200),
@@ -3629,6 +3695,11 @@ class AgentLoop:
             self._loop_detector.record(tool_call.name, tool_call.arguments, result_str)
             result = {"error": str(e)}
             logger.error(f"Tool {tool_call.name} failed: {e}")
+            self._emit_trace(
+                "tool_call", detail=tool_call.name, status="error",
+                error=str(e)[:500],
+                duration_ms=int((time.time() - _trace_t0) * 1000),
+            )
             await self._record_failure(
                 tool_call.name, str(e),
                 truncate(str(tool_call.arguments), 200),

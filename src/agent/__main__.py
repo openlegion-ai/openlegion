@@ -45,6 +45,13 @@ def main() -> None:
     agent_id = os.environ["AGENT_ID"]
     role = os.environ["AGENT_ROLE"]
     mesh_url = os.environ["MESH_URL"]
+
+    # Phase 4 log correlation: stamp this process's identity so every log line
+    # in the container is attributable. The structured formatter also falls
+    # back to the AGENT_ID env var for per-request contexts that never inherit
+    # this set(), but setting it here covers code that reads the contextvar.
+    from src.shared.trace import current_agent_id
+    current_agent_id.set(agent_id)
     tools_dir = os.environ.get("TOOLS_DIR", "/app/tools")
 
     llm_model = os.environ.get("LLM_MODEL", "openai/gpt-4o-mini")

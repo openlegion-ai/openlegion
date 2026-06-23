@@ -1078,6 +1078,12 @@ def create_mesh_app(
         # cap notification-store writes when a runaway agent retries on a
         # broken credential before its lane gate latches.
         "auth_failure": (60, 60),
+        # Agent-side trace ingest (Phase 4 observability). One write per tool
+        # call / handoff / loop iteration — paced by the agent loop itself, so
+        # this ceiling only catches a genuinely runaway loop. Generous like the
+        # other forensic write paths; dropped traces only degrade observability,
+        # never correctness.
+        "trace_ingest": (12000, 60),
     }
 
     async def _check_rate_limit(endpoint: str, agent_id: str) -> None:
@@ -2732,6 +2738,43 @@ def create_mesh_app(
         except Exception as e:
             logger.debug("user_notification_log.record failed: %s", e)
         return {"sent": True}
+
+    @app.post("/mesh/traces")
+    async def record_agent_trace(data: dict, request: Request) -> dict:
+        """Ingest an agent-side trace event (Phase 4 observability).
+
+        Agents cannot write ``traces.db`` directly — host-only by container
+        isolation — so they POST tool_call / handoff / iteration events here
+        and the mesh records them under the inbound ``x-trace-id``, the same
+        indirection the API proxy uses for ``llm_call`` traces. Gated by
+        standard agent auth (``_resolve_agent_id`` derives the unforgeable id
+        from the Bearer token; the body ``agent_id`` is never trusted when auth
+        is active). Best-effort: no trace context or no store → accepted no-op;
+        a record failure never propagates back to the agent. Redaction happens
+        inside ``TraceStore.record`` (H16), so detail/error/meta pass through.
+        """
+        agent_id = _resolve_agent_id(str(data.get("agent_id", "")), request)
+        await _check_rate_limit("trace_ingest", agent_id)
+        req_trace_id = request.headers.get("x-trace-id")
+        if not req_trace_id or trace_store is None:
+            return {"recorded": False}
+        try:
+            meta = data.get("meta")
+            trace_store.record(
+                trace_id=req_trace_id,
+                source="agent",
+                agent=agent_id,
+                event_type=str(data.get("event_type", ""))[:64],
+                detail=str(data.get("detail", "")),
+                duration_ms=int(data.get("duration_ms", 0) or 0),
+                status=str(data.get("status", "ok")),
+                error=str(data.get("error", "")),
+                meta=meta if isinstance(meta, dict) else None,
+            )
+        except Exception:
+            logger.debug("trace ingest failed for agent=%s", agent_id, exc_info=True)
+            return {"recorded": False}
+        return {"recorded": True}
 
     @app.post("/mesh/credential-request")
     async def credential_request(data: dict, request: Request) -> dict:

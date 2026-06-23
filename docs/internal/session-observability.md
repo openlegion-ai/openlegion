@@ -1,9 +1,11 @@
 # Session Observability
 
-> **Status:** partly built. **Phase 1** (trace_id correlation) shipped in PR #1149.
-> Everything else on this page is the documented *design* — see the
-> [Availability / phase status](#availability--phase-status) table for what works
-> today. Design doc: [`../plans/2026-06-18-session-observability.md`](../plans/2026-06-18-session-observability.md) (plan #1147).
+> **Status:** shipped (Phases 1–4). `trace_id` correlation (#1149), verbatim
+> intent capture (#1153), the `openlegion session`/`sessions` reader (#1154),
+> and agent-side traces + log correlation (Phase 4) are all on `main`. See the
+> [Availability / phase status](#availability--phase-status) table for the
+> per-capability breakdown. Design doc:
+> [`../plans/2026-06-18-session-observability.md`](../plans/2026-06-18-session-observability.md) (plan #1147).
 
 ## What it is & why
 
@@ -54,10 +56,10 @@ conversation around it.
 
 | Store | Holds | Keyed / filtered by |
 |---|---|---|
-| `data/traces.db` | trace events (the action timeline) | `trace_id` |
+| `data/traces.db` | trace events (the action timeline): `llm_call` (mesh-recorded) + `tool_call` / `handoff` / `iteration` (agent-emitted, Phase 4) | `trace_id` |
 | `data/tasks.db` | tasks: `status`, `blocker_note`, `result_summary`, the DAG, `origin_user` | `trace_id` (Phase 1 column), task id |
 | `data/costs.db` | per-call token usage / cost | `trace_id` (Phase 1 column on `usage`) |
-| `data/intent.db` | verbatim user intent | `trace_id` (**Phase 2 — planned**) |
+| `data/intent.db` | verbatim user intent | `trace_id` (Phase 2) |
 
 > **Transcripts are container-local.** Full agent transcripts live inside each
 > agent container, not on the host. The host-side reconstruction is built from
@@ -65,11 +67,6 @@ conversation around it.
 > cost, but not the agent's full internal transcript.
 
 ## Using the reader
-
-> **Phase 3 — planned.** The `openlegion session` / `openlegion sessions`
-> commands below are the documented design. They are **not available today**;
-> until Phase 3 ships, reconstruct sessions with raw SQL (see
-> [Finding the data manually](#finding-the-data-manually)).
 
 ### One session, full timeline — `openlegion session <trace_id>`
 
@@ -137,21 +134,20 @@ runs on its own box.
    directory on that box.
 
    ```bash
-   openlegion session tr_9f3a1c0b7e21    # (Phase 3 — planned)
+   openlegion session tr_9f3a1c0b7e21
    ```
 
-The reader opens the SQLite stores **read-only**, so it **works even when the
-mesh is down** — which is exactly when forensics matter most. You do not need to
-restart, and you cannot make things worse by reading.
-
-> Until the Phase 3 reader ships, do the same investigation on-box with the raw
-> SQL below — `sqlite3` is also read-only when you only `SELECT`.
+The reader opens the SQLite stores **read-only** (`mode=ro` + an existence
+guard — it never creates, migrates, or GCs), so it **works even when the mesh is
+down** — which is exactly when forensics matter most. You do not need to restart,
+and you cannot make things worse by reading. Pass `--data-dir <path>` if the
+stores are not under `./data`, and `--json` for machine-readable output.
 
 ### Getting a `trace_id` to investigate
 
 - **From the dashboard** — a turn's `trace_id` is surfaced in the UI (the
   dashboard mints/propagates it correctly as of Phase 1).
-- **From `sessions --since`** (Phase 3) — list recent sessions and copy the id.
+- **From `sessions --since`** — list recent sessions and copy the id.
 - **From raw SQL** — query `tasks` / `usage` for the user/time window and read
   the `trace_id` column (below).
 
@@ -164,7 +160,7 @@ under `data/` on the host:
 - `data/tasks.db` — `tasks` table: filter `WHERE trace_id = ?`, then read
   `status`, `blocker_note`, `result_summary` (and the DAG / `origin_user`).
 - `data/costs.db` — `usage` table: filter `WHERE trace_id = ?` to roll up cost.
-- `data/intent.db` — verbatim intent (**Phase 2 — planned**).
+- `data/intent.db` — verbatim intent, `intent` table: filter `WHERE trace_id = ?`.
 
 Example — outcome + cost for one turn:
 
@@ -185,6 +181,29 @@ sqlite3 data/costs.db \
 (Open with `sqlite3 -readonly` if you want to be certain you can't mutate the
 live DB.)
 
+## Correlated logs
+
+As of Phase 4 every structured log line carries the active correlation IDs when
+they are set, so logs join to the same session as the stores:
+
+```json
+{"timestamp": "...", "level": "INFO", "module": "agent.loop",
+ "message": "...", "trace_id": "tr_9f3a1c0b7e21", "task_id": "t_4412",
+ "agent_id": "analyst"}
+```
+
+- `trace_id` / `task_id` / `agent_id` are injected by `StructuredFormatter`
+  (and appended as a `[trace_id=… task_id=… agent_id=…]` suffix by the
+  human-readable `TextFormatter`) from the request contextvars. An explicit
+  `extra_data` key always wins over the injected value.
+- `agent_id` inside an agent container falls back to the `AGENT_ID` env var, so
+  every container line is attributable even for code paths that never set the
+  contextvar. The mesh host has no `AGENT_ID`, so host lines omit it (the agent
+  is carried per-event instead).
+- To trace one session through the logs: `grep tr_9f3a1c0b7e21` across the host
+  and container stdout. (Container logs are still ephemeral — off-box shipping
+  is a deliberately deferred, out-of-MVP hook.)
+
 ## Limitations
 
 - **Transcripts are container-local.** The host timeline is reconstructed from
@@ -204,14 +223,10 @@ live DB.)
 | Capability | Phase | Status |
 |---|---|---|
 | `trace_id` correlation across tasks + usage (`trace_id` columns) | Phase 1 | **Shipped — PR #1149** |
-| Verbatim intent capture (`data/intent.db`) | Phase 2 | Planned |
-| `openlegion session` / `openlegion sessions` reader CLI | Phase 3 | Planned |
-| Agent-side tool/handoff traces + log correlation | Phase 4 | Planned |
-
-> Commands marked **(Phase 3 — planned)** above do **not** work today. Until
-> they ship, use the [raw SQL](#finding-the-data-manually) path. Phase 1 is the
-> only shipped piece — it makes the correlation key (`trace_id`) present in the
-> data so the later phases can read it.
+| Verbatim intent capture (`data/intent.db`) | Phase 2 | **Shipped — PR #1153** |
+| `openlegion session` / `openlegion sessions` reader CLI | Phase 3 | **Shipped — PR #1154** |
+| Agent-side tool/handoff/iteration traces + log correlation | Phase 4 | **Shipped** |
+| Off-box log shipping | Phase 4 | Deferred (out-of-MVP hook) |
 
 ---
 
