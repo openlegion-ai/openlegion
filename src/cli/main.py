@@ -756,6 +756,68 @@ def tasks_cmd(agent, team, status, port, as_json):
         )
 
 
+# ── Session observability — read-only forensic reader (Phase 3) ──
+#
+# Unlike sibling read commands these do NOT go through the mesh HTTP API
+# (``_mesh_get``). They open the on-box SQLite stores read-only so the reader
+# works even when the mesh is down or wedged — exactly when you debug. See
+# src/cli/session_reader.py for the read-only-direct-SQLite rationale.
+
+
+@cli.command("session")
+@click.argument("trace_id")
+@click.option(
+    "--data-dir", "data_dir", default=None,
+    help="Path to the on-box data dir holding the SQLite stores (default: ./data)",
+)
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def session_cmd(trace_id: str, data_dir: str | None, as_json: bool):
+    """Reconstruct one session's full timeline by trace_id (read-only).
+
+    Assembles intent + actions + task transitions + cost from the host SQLite
+    stores. Works even when the mesh is down. NOTE: per-turn chat transcript
+    text is container-local, so this host-side timeline does not include the
+    full conversation — only intent, traces, tasks, and costs.
+    """
+    from src.cli.session_reader import assemble_session, render_session
+
+    as_json = as_json or _json_mode
+    base = Path(data_dir) if data_dir else cli_config.DATA_DIR
+    session = assemble_session(base, trace_id)
+    if as_json:
+        click.echo(dumps_safe(session))
+        return
+    click.echo(render_session(session))
+
+
+@cli.command("sessions")
+@click.option("--since", default="7d", help="Window: today, Nh/Nd/Nm/Ns, or an ISO date (default: 7d)")
+@click.option("--user", default=None, help="Filter by originating user")
+@click.option("--agent", default=None, help="Filter by agent")
+@click.option("--limit", default=50, type=int, help="Max sessions to list")
+@click.option(
+    "--data-dir", "data_dir", default=None,
+    help="Path to the on-box data dir holding the SQLite stores (default: ./data)",
+)
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+def sessions_cmd(since: str, user, agent, limit, data_dir, as_json):
+    """List recent sessions, one summary row each, to find a trace_id (read-only).
+
+    Driven off the intent store (the human-rooted index). NOTE: per-turn chat
+    transcript text is container-local and not part of this host-side listing.
+    """
+    from src.cli.session_reader import list_sessions, parse_since, render_sessions
+
+    as_json = as_json or _json_mode
+    base = Path(data_dir) if data_dir else cli_config.DATA_DIR
+    floor = parse_since(since)
+    summaries = list_sessions(base, since=floor, user=user, agent=agent, limit=limit)
+    if as_json:
+        click.echo(dumps_safe({"sessions": summaries}))
+        return
+    click.echo(render_sessions(summaries))
+
+
 @cli.command("pending")
 @click.option("--port", default=8420, type=int, help="Mesh host port")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")

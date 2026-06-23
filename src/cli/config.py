@@ -54,6 +54,12 @@ def _find_project_root() -> Path:
 
 
 PROJECT_ROOT = _find_project_root()
+# Canonical on-box data directory holding the SQLite stores (tasks.db,
+# traces.db, costs.db, intent.db, …). Historically DB paths were bare
+# strings (``data/<name>.db``) relative to CWD in runtime.py/server.py;
+# this constant makes the location resolvable for read-only tooling like
+# the session reader (``openlegion session``).
+DATA_DIR = PROJECT_ROOT / "data"
 ENV_FILE = PROJECT_ROOT / ".env"
 CONFIG_FILE = PROJECT_ROOT / "config" / "mesh.yaml"
 AGENTS_FILE = PROJECT_ROOT / "config" / "agents.yaml"
