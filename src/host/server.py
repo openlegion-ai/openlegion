@@ -283,6 +283,7 @@ if TYPE_CHECKING:
     from src.host.credentials import CredentialVault
     from src.host.cron import CronScheduler
     from src.host.health import HealthMonitor
+    from src.host.intent import IntentStore
     from src.host.lanes import LaneManager
     from src.host.mcp_gateway import MCPGateway
     from src.host.mesh import Blackboard, MessageRouter, PubSub
@@ -764,6 +765,7 @@ def create_mesh_app(
     transport: Transport | None = None,
     auth_tokens: dict[str, str] | None = None,
     trace_store: TraceStore | None = None,
+    intent_store: "IntentStore | None" = None,
     event_bus: EventBus | None = None,
     health_monitor: HealthMonitor | None = None,
     cost_tracker: CostTracker | None = None,
@@ -892,6 +894,11 @@ def create_mesh_app(
         db_path=_summaries_db_path, event_bus=event_bus,
     )
     app.summaries_store = summaries_store  # exposed for tests/dashboard
+
+    # Durable verbatim-intent store (Phase 2, session observability).
+    # Instantiated in cli/runtime and passed in; attached here so the
+    # Phase 3 read endpoints / reader can reach it off the app.
+    app.intent_store = intent_store  # exposed for tests/Phase 3 reader
 
     # Observation log of agent→user notifications. NOT a message channel:
     # agents call ``notify_user`` (intent: tell the human) and the mesh
