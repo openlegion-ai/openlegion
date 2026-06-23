@@ -1853,6 +1853,7 @@ def _capture_dispatch_fn(monkeypatch, *, app=None):
     transport_mock = AsyncMock()
     ctx.transport = transport_mock
     ctx.trace_store = None
+    ctx.intent_store = None
     ctx.event_bus = None
     ctx.health_monitor = None
     ctx._app = app

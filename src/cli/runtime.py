@@ -162,6 +162,7 @@ class RuntimeContext:
         self.channel_manager = None
         self.event_bus = None
         self.trace_store = None
+        self.intent_store = None
         self.agent_urls: dict[str, str] = {}
         self._dispatch_loop = None
         # Post-completion verification wakes (success path) — sliding
@@ -213,6 +214,8 @@ class RuntimeContext:
             self.cost_tracker.close()
         if self.trace_store:
             self.trace_store.close()
+        if self.intent_store:
+            self.intent_store.close()
         if self.pubsub:
             self.pubsub.close()
         if self.blackboard:
@@ -392,6 +395,15 @@ class RuntimeContext:
             _trace_retention = 168
         self.trace_store = TraceStore(
             max_age_hours=_trace_retention if _trace_retention > 0 else None
+        )
+        # Durable verbatim-intent store (Phase 2, session observability).
+        # Captures the FULL inbound message centrally, keyed by trace_id +
+        # origin, so intent survives container wipes / resets / deploys
+        # (container-local chat_transcript.jsonl rotates and dies with the
+        # container). Append-only with a 90-day time-based GC.
+        from src.host.intent import IntentStore
+        self.intent_store = IntentStore(
+            db_path=os.environ.get("OPENLEGION_INTENT_DB", "data/intent.db")
         )
         self.blackboard = Blackboard(event_bus=self.event_bus)
         self.pubsub = PubSub(db_path="pubsub.db")
@@ -830,6 +842,26 @@ class RuntimeContext:
                     event_type="chat", detail=message[:200],
                     meta={"message_length": len(message)},
                 )
+            # Phase 2 (session observability): capture the FULL verbatim
+            # message centrally and durably, keyed by trace_id + origin, so
+            # intent survives container wipes / resets / deploys. Best-effort
+            # — a store failure must NEVER break dispatch. Redaction happens
+            # at storage inside IntentStore.record. Webhooks are machine
+            # origin (system_note / kind=system) — still captured, stamped
+            # with origin_kind so the reader can tell human from machine.
+            if self.intent_store is not None:
+                try:
+                    self.intent_store.record(
+                        trace_id=tid,
+                        origin_kind=(origin.kind if origin else ""),
+                        origin_channel=(origin.channel if origin else ""),
+                        origin_user=(origin.user if origin else ""),
+                        agent=agent_name,
+                        message=message,
+                        meta={"system_note": system_note},
+                    )
+                except Exception as _intent_err:
+                    logger.debug("intent capture failed: %s", _intent_err)
             import time as _time
             t0 = _time.time()
             extra_headers: dict[str, str] = {"x-trace-id": tid}
@@ -1396,6 +1428,7 @@ class RuntimeContext:
             self.transport,
             auth_tokens=self.runtime.auth_tokens,
             trace_store=self.trace_store,
+            intent_store=self.intent_store,
             event_bus=self.event_bus,
             health_monitor=self.health_monitor,
             cost_tracker=self.cost_tracker,
