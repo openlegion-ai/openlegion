@@ -1,5 +1,7 @@
 # Tools / Skills Vocabulary Split + Pluggable Skill Packs
 
+**Status:** SHIPPED — archived. Tools/Skills vocabulary split + SKILL.md packs shipped.
+
 **Goal:** Expand agent use-cases without forcing agents to author their own code. Free up the word **"Skills"** for a user-pluggable, ecosystem-standard capability layer (`SKILL.md`, per [agentskills.io](https://agentskills.io)), and rename our existing executable `@skill` functions to **"Tools"** — the name the LLM API, MCP, and our own permission system already use for them.
 
 **Core distinction (the whole decision in one line):**

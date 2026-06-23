@@ -1,12 +1,14 @@
 # Blackboard Multi-Tenant Scoping — Design Doc (PR-O'.2)
 
+**Status:** SHIPPED — archived. Multi-tenant blackboard scoping (metadata column + lazy stamping + `OPENLEGION_BLACKBOARD_SCOPE_MODE`) shipped.
+
 ## TL;DR
 
 Blackboard keys today are flat (`tasks/foo`) and project-bound enforcement is unimplemented; PR-O'.1 telemetry now counts cross-project accesses but does not gate them. This document FREEZES six implementation decisions for PR-O'.3 (the enforcement migration), so that the implementer carries no open design questions. The chosen shape — metadata column + lazy stamping + dedicated `OPENLEGION_BLACKBOARD_SCOPE_MODE` flag — preserves all existing fleet-template instructions while gating multi-tenant isolation behind a soak-window pre-condition.
 
 ## Status
 
-**Locked design awaiting PR-O'.3 implementation.**
+**SHIPPED.** (Design was locked here; the PR-O'.3 enforcement migration subsequently shipped.)
 **Last updated:** 2026-05-08.
 **Audited against:** `main` at commit `f78915e`.
 **Pre-condition for advancing past Phase 1 of the rollout sequence:** PR-O'.1 telemetry (`/mesh/system/metrics → blackboard_cross_project_total`) shows zero cross-project crossings for 7 consecutive 24h windows. Operator's daily `OBSERVATIONS.md` snapshots are the source of truth for the windowing.

@@ -1,5 +1,7 @@
 # Dashboard UX Improvements Implementation Plan
 
+**Status:** SHIPPED — archived. Dashboard UX changes (timestamps, health badge, heartbeat countdown, cron fixes) shipped.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Improve dashboard UX with chat timestamps, clearer agent cards (health badge rename + heartbeat countdown), cron button fixes, and heartbeat deletion protection.

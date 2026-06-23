@@ -1,25 +1,7 @@
 # MCP Connectors — Global Catalog, Fleet Assignment, Remote Transport & OAuth
 
 **Date:** 2026-06-10 · **Re-baselined:** 2026-06-11
-**Status:** ALL PHASES IMPLEMENTED. Phase 1 2026-06-10 (stricter no-backcompat
-variant — see §4); Phases 2a/2b/3 2026-06-11 as the stacked PRs #1125 → #1130 → #1131,
-each with its own review pass. §11's Q1–Q6 proposed defaults were applied and are flagged
-in the respective PR bodies for sign-off; the Caddy `forward_auth` `?code&state` staging
-check (§7.3) remains a DEPLOY gate for #1131. File:line references below are pinned to
-`7cf92c6b` (pre-implementation) — read them as the seams the work was written against.
-**Scope:** Phase 1 promoted MCP from per-agent config to a fleet-level **Connectors** catalog
-(connect once, assign to all agents or specific agents). Phase 2a adds the remote-connector
-**data model and dashboard surface**; Phase 2b adds the **mesh-side `MCPGateway`** so remote
-(HTTP) MCP servers work end-to-end with vault-held, proxied credentials — never entering the
-agent container. Phase 3 adds the Claude-style **"paste URL → Connect → OAuth redirect"** flow
-on top of the existing Option-B OAuth machinery.
-**Related:**
-- `docs/mcp.md` (stdio MCP design; D8's human-only decision is recorded there at `:141`)
-- `docs/plans/2026-06-04-oauth-integrations-connect-flow.md` (Option-B OAuth: state store,
-  callback, `store_connection`, refresh-on-resolve — Phase 3 reuses the back half; §7.1 lists
-  what the front half must generalize first)
-- `docs/plans/2026-06-04-integrations-oauth-strategy.md` (§4 names MCP connectors as the
-  long-tail integration strategy; this plan is that section made concrete)
+**Status:** SHIPPED — archived. ALL PHASES IMPLEMENTED (Phase 1 2026-06-10; Phases 2a/2b/3 as PRs #1125 → #1130 → #1131).
 
 ---
 

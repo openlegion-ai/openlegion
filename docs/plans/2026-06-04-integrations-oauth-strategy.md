@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-04
 **Author:** Product (CPO review)
-**Status:** Accepted direction; implementation phased
+**Status:** ACTIVE — accepted direction, phased.
 **Related:** `docs/plans/2026-06-04-oauth-integrations-connect-flow.md` (the Option-B implementation)
 
 ---

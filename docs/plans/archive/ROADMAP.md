@@ -1,3 +1,5 @@
+> **Archived (historical).** This is the pre-launch roadmap, last meaningfully updated 2026-03-17. It does not reflect April–June 2026 work (operator orchestration, MCP connectors, memory overhaul, session observability). Kept for historical context.
+
 # OpenLegion Roadmap
 
 Prioritized for public launch. Ordered by adoption impact — informed by competitive analysis across OpenClaw, MemU, NanoBot, NanoClaw, HermitClaw, and ZeroClaw. Tier 4 priorities driven by deep agent-level comparative analysis of OpenClaw (Feb 2026). Items 4.8–4.9 and backlog additions (Provider Flexibility, Channel Expansion, Security Hardening) driven by deep source-level analysis of ZeroClaw (Feb 25, 2026). Tier 6 (Self-Improving Fleet) driven by analysis of fleet performance optimization opportunities and secure self-modification patterns (Feb 25, 2026).

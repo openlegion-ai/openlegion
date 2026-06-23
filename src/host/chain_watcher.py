@@ -7,7 +7,7 @@ durable, system-side behavior: it periodically sweeps user-originated task
 chains and pushes exactly ONE terminal outcome (done / failed) to the human
 who started the chain.
 
-Design (see docs/plans/2026-06-10-operator-delegate-and-subscribe.md):
+Design (see docs/plans/archive/2026-06-10-operator-delegate-and-subscribe.md):
 
 - **Periodic sweep, not an event listener.** A sweep re-derives everything
   from the durable tasks table on each pass, so it is inherently

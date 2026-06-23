@@ -1,6 +1,6 @@
 # Self-improvement loop — issue #1012 re-scoped to four surgical deltas
 
-**Status:** READY — all code refs validated against `ddabc6a2` (2026-06-11).
+**Status:** ACTIVE — implemented in PRs #1120–#1123 (unmerged).
 **Supersedes:** the 3-phase roadmap in issue #1012 as written. ~70% of that
 roadmap shipped through other PRs between 2026-05-31 and 2026-06-11 (#1053
 blocker notes, #1060–1063 memory overhaul, #1105 rating→learning loop +

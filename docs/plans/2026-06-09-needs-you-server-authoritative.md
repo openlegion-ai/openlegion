@@ -1,6 +1,6 @@
 # Plan: make "Needs you" a trustworthy, server-authoritative list of resolvable blockers
 
-Status: DRAFT for review (no code yet). Supersedes the chat-scrape parts of PR #1083.
+**Status:** ACTIVE — draft for review. (Supersedes the chat-scrape parts of PR #1083.)
 
 ## Problem (restated)
 "Needs you" must mean: something is **blocking** the user's agents, the user is

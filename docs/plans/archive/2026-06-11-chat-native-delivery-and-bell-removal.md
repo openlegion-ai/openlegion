@@ -1,14 +1,7 @@
 # Chat-native delivery + bell removal
 
 **Date:** 2026-06-11
-**Status:** planned — revised after two-pass pre-implementation review (self + independent
-fresh-context second pass; Codex proper quota-blocked until Jun 12)
-**Driver:** Dashboard users never see async operator activity. Chain outcomes go only to the
-bell (`notification_added`), wake-generated operator turns sit invisibly in the transcript until
-the user's next action, system wake prompts render as fake *user* bubbles, and there is no
-in-chat signal that a delegated pipeline is being watched. User verdict: make the chat the
-delivery surface, kill the bell ("completely useless across the entire app"), and never render
-system prompts as the user.
+**Status:** SHIPPED — archived. Chat-native delivery + bell removal shipped/deployed/live-verified (PRs #1137, #1139, #1140, #1143).
 
 ## Verified root causes (current main, `65524416`)
 
