@@ -1077,6 +1077,17 @@ class WorkspaceManager:
         """
         path = self.root / self.CHAT_TRANSCRIPT
         entry: dict = {"role": role, "content": content, "ts": time.time()}
+        # Session observability (Phase 1) — stamp the active per-turn
+        # correlation id so a transcript row JOINs to its central
+        # task/usage/trace rows by one key. The agent seeds
+        # ``current_trace_id`` from the inbound X-Trace-Id header in
+        # ``loop.chat`` / ``loop.chat_stream``; omitted when no trace is
+        # active (e.g. heartbeat-seeded rows) so legacy readers are
+        # unaffected.
+        from src.shared.trace import current_trace_id
+        _trace_id = current_trace_id.get()
+        if _trace_id:
+            entry["trace_id"] = _trace_id
         if tools:
             entry["tools"] = tools
         elif tool_names:

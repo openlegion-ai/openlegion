@@ -2016,99 +2016,113 @@ def create_mesh_app(
             )
 
         req_trace_id = request.headers.get("x-trace-id")
-        prompt_preview = _extract_prompt_preview(api_request.params)
-        t0 = time.time()
-        result = await credential_vault.execute_api_call(api_request, agent_id=agent_id)
-        duration_ms = int((time.time() - t0) * 1000)
-        response_preview = ""
-        if result.success and result.data:
-            resp_content = result.data.get("content", "")
-            if isinstance(resp_content, str):
-                response_preview = resp_content[:500]
-            elif isinstance(resp_content, list):
-                for block in resp_content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        response_preview = (block.get("text") or "")[:500]
-                        break
+        # Session observability (Phase 1) — seed the trace contextvar to the
+        # request's effective value (header, or None when absent) so the cost
+        # write inside execute_api_call (CostTracker.track) stamps the usage
+        # row with the originating trace_id. Set UNCONDITIONALLY + reset via
+        # token: a conditional set leaves a stale trace_id from a prior
+        # request in the (worker-reused) context, so a no-header request
+        # would silently inherit it. set(None) is a valid NULL stamp. The
+        # finally runs AFTER execute_api_call (and its CostTracker.track) —
+        # the call is awaited inside this same coroutine.
+        from src.shared.trace import current_trace_id
+        _trace_tok = current_trace_id.set(req_trace_id)
         try:
-            if req_trace_id and trace_store:
-                trace_meta = {
-                    "service": api_request.service,
-                    "action": api_request.action,
-                }
-                if prompt_preview:
-                    trace_meta["prompt_preview"] = prompt_preview
-                if response_preview:
-                    trace_meta["response_preview"] = response_preview
-                trace_status = "ok"
-                trace_error = ""
-                if result.success and result.data:
-                    trace_meta["model"] = result.data.get("model", "")
-                    trace_meta["tokens_used"] = result.data.get("tokens_used", 0)
-                    trace_meta["input_tokens"] = result.data.get("input_tokens", 0)
-                    trace_meta["output_tokens"] = result.data.get("output_tokens", 0)
-                elif not result.success:
-                    trace_status = "error"
-                    trace_error = result.error or "Unknown error"
-                trace_store.record(
-                    trace_id=req_trace_id,
-                    source="mesh.api_proxy",
-                    agent=agent_id,
-                    event_type="llm_call",
-                    detail=f"{api_request.service}/{api_request.action}",
-                    duration_ms=duration_ms,
-                    status=trace_status,
-                    error=trace_error,
-                    meta=trace_meta,
+            prompt_preview = _extract_prompt_preview(api_request.params)
+            t0 = time.time()
+            result = await credential_vault.execute_api_call(api_request, agent_id=agent_id)
+            duration_ms = int((time.time() - t0) * 1000)
+            response_preview = ""
+            if result.success and result.data:
+                resp_content = result.data.get("content", "")
+                if isinstance(resp_content, str):
+                    response_preview = resp_content[:500]
+                elif isinstance(resp_content, list):
+                    for block in resp_content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            response_preview = (block.get("text") or "")[:500]
+                            break
+            try:
+                if req_trace_id and trace_store:
+                    trace_meta = {
+                        "service": api_request.service,
+                        "action": api_request.action,
+                    }
+                    if prompt_preview:
+                        trace_meta["prompt_preview"] = prompt_preview
+                    if response_preview:
+                        trace_meta["response_preview"] = response_preview
+                    trace_status = "ok"
+                    trace_error = ""
+                    if result.success and result.data:
+                        trace_meta["model"] = result.data.get("model", "")
+                        trace_meta["tokens_used"] = result.data.get("tokens_used", 0)
+                        trace_meta["input_tokens"] = result.data.get("input_tokens", 0)
+                        trace_meta["output_tokens"] = result.data.get("output_tokens", 0)
+                    elif not result.success:
+                        trace_status = "error"
+                        trace_error = result.error or "Unknown error"
+                    trace_store.record(
+                        trace_id=req_trace_id,
+                        source="mesh.api_proxy",
+                        agent=agent_id,
+                        event_type="llm_call",
+                        detail=f"{api_request.service}/{api_request.action}",
+                        duration_ms=duration_ms,
+                        status=trace_status,
+                        error=trace_error,
+                        meta=trace_meta,
+                    )
+            except Exception:
+                logger.error(
+                    "Post-processing failed (trace) for %s/%s agent=%s",
+                    api_request.service, api_request.action, agent_id, exc_info=True,
                 )
-        except Exception:
-            logger.error(
-                "Post-processing failed (trace) for %s/%s agent=%s",
-                api_request.service, api_request.action, agent_id, exc_info=True,
-            )
-        try:
-            if event_bus is not None and not result.success and result.status_code == 402:
-                event_bus.emit("credit_exhausted", agent=agent_id, data={
-                    "error": result.error or "Insufficient credits",
-                })
-            if event_bus is not None and result.success and result.data:
-                model = result.data.get("model", "")
-                tokens = result.data.get("tokens_used", 0)
-                input_tok = result.data.get("input_tokens", 0)
-                output_tok = result.data.get("output_tokens", 0)
-                from src.host.costs import estimate_cost
-                fixed_cost = result.data.get("fixed_cost_usd", 0)
-                # OAuth (Anthropic/OpenAI subscription) calls have no per-call
-                # cost — the authoritative usage table already skips them in
-                # CredentialVault.execute_api_call. Mirror that here so the
-                # dashboard activity/trace feed doesn't show a metered estimate
-                # for subscription traffic.
-                is_oauth = bool(result.data.get("oauth"))
-                event_data = {
-                    "service": api_request.service, "action": api_request.action,
-                    "duration_ms": duration_ms,
-                    "model": model,
-                    "total_tokens": tokens,
-                    "input_tokens": input_tok,
-                    "output_tokens": output_tok,
-                    "oauth": is_oauth,
-                    "cost_usd": 0.0 if is_oauth else (
-                        fixed_cost if fixed_cost else estimate_cost(
-                            model, input_tokens=input_tok, output_tokens=output_tok, total_tokens=tokens,
-                        )
-                    ),
-                }
-                if prompt_preview:
-                    event_data["prompt_preview"] = prompt_preview
-                if response_preview:
-                    event_data["response_preview"] = response_preview
-                event_bus.emit("llm_call", agent=agent_id, data=event_data)
-        except Exception:
-            logger.error(
-                "Post-processing failed (events) for %s/%s agent=%s",
-                api_request.service, api_request.action, agent_id, exc_info=True,
-            )
-        return result
+            try:
+                if event_bus is not None and not result.success and result.status_code == 402:
+                    event_bus.emit("credit_exhausted", agent=agent_id, data={
+                        "error": result.error or "Insufficient credits",
+                    })
+                if event_bus is not None and result.success and result.data:
+                    model = result.data.get("model", "")
+                    tokens = result.data.get("tokens_used", 0)
+                    input_tok = result.data.get("input_tokens", 0)
+                    output_tok = result.data.get("output_tokens", 0)
+                    from src.host.costs import estimate_cost
+                    fixed_cost = result.data.get("fixed_cost_usd", 0)
+                    # OAuth (Anthropic/OpenAI subscription) calls have no per-call
+                    # cost — the authoritative usage table already skips them in
+                    # CredentialVault.execute_api_call. Mirror that here so the
+                    # dashboard activity/trace feed doesn't show a metered estimate
+                    # for subscription traffic.
+                    is_oauth = bool(result.data.get("oauth"))
+                    event_data = {
+                        "service": api_request.service, "action": api_request.action,
+                        "duration_ms": duration_ms,
+                        "model": model,
+                        "total_tokens": tokens,
+                        "input_tokens": input_tok,
+                        "output_tokens": output_tok,
+                        "oauth": is_oauth,
+                        "cost_usd": 0.0 if is_oauth else (
+                            fixed_cost if fixed_cost else estimate_cost(
+                                model, input_tokens=input_tok, output_tokens=output_tok, total_tokens=tokens,
+                            )
+                        ),
+                    }
+                    if prompt_preview:
+                        event_data["prompt_preview"] = prompt_preview
+                    if response_preview:
+                        event_data["response_preview"] = response_preview
+                    event_bus.emit("llm_call", agent=agent_id, data=event_data)
+            except Exception:
+                logger.error(
+                    "Post-processing failed (events) for %s/%s agent=%s",
+                    api_request.service, api_request.action, agent_id, exc_info=True,
+                )
+            return result
+        finally:
+            current_trace_id.reset(_trace_tok)
 
     @app.post("/mesh/api/stream")
     async def proxy_api_stream(request: Request, api_request: APIProxyRequest, agent_id: str) -> StreamingResponse:
@@ -2141,6 +2155,19 @@ def create_mesh_app(
             )
 
         req_trace_id = request.headers.get("x-trace-id")
+        # Session observability (Phase 1) — the cost write inside stream_llm
+        # (CostTracker.track, fired AFTER the terminal 'done' chunk is
+        # yielded) must read this request's trace_id from the contextvar.
+        #
+        # The seed CANNOT live at the endpoint level with a finally-reset:
+        # the body generator is iterated by Starlette AFTER this coroutine
+        # returns, so an endpoint-level reset would NULL the stamp before
+        # track() runs. Instead the generator owns the lifecycle — it sets
+        # on entry (in its own execution context, so track() sees it) and
+        # resets when the stream ends (no leak into a later handler). The
+        # synchronous trace_store.record below uses req_trace_id directly,
+        # not the contextvar, so it needs no seed.
+        from src.shared.trace import current_trace_id
         prompt_preview = _extract_prompt_preview(api_request.params)
 
         try:
@@ -2165,7 +2192,7 @@ def create_mesh_app(
                 api_request.service, api_request.action, agent_id, exc_info=True,
             )
 
-        async def _stream_with_events():
+        async def _inner_stream():
             start = time.monotonic()
             done_data: dict = {}
             credit_error = False
@@ -2238,6 +2265,18 @@ def create_mesh_app(
                     "Post-processing failed (trace) for %s/%s agent=%s",
                     api_request.service, api_request.action, agent_id, exc_info=True,
                 )
+
+        async def _stream_with_events():
+            # Own the trace-contextvar lifecycle INSIDE the generator so the
+            # seed survives into the iteration Starlette drives after this
+            # endpoint returns — and resets when the stream ends. set(None)
+            # is a valid NULL stamp; reset prevents cross-request bleed.
+            _trace_tok = current_trace_id.set(req_trace_id)
+            try:
+                async for chunk in _inner_stream():
+                    yield chunk
+            finally:
+                current_trace_id.reset(_trace_tok)
 
         return StreamingResponse(_stream_with_events(), media_type="text/event-stream")
 
@@ -5934,6 +5973,17 @@ def create_mesh_app(
         origin = _validated_origin(request, caller)
         origin_dict = origin.model_dump() if origin is not None else None
 
+        # Session observability (Phase 1) — seed the trace contextvar to the
+        # inbound header value (or None when absent) so ``store.create``
+        # stamps the task row with the originating per-turn trace_id (the
+        # agent forwards X-Trace-Id on its hand_off / create_task calls).
+        # Set UNCONDITIONALLY + reset via token: a conditional set leaves a
+        # stale trace_id from a prior request in the (worker-reused) context,
+        # so a no-header request would silently inherit it. The finally runs
+        # right after ``store.create`` (the only contextvar reader here).
+        _req_trace_id = request.headers.get("x-trace-id")
+        from src.shared.trace import current_trace_id
+        _trace_tok = current_trace_id.set(_req_trace_id)
         try:
             record = store.create(
                 creator=caller,
@@ -5967,6 +6017,8 @@ def create_mesh_app(
             # "Internal Server Error" placeholder.
             logger.error("tasks.create raised RuntimeError: %s", e)
             raise HTTPException(500, str(e))
+        finally:
+            current_trace_id.reset(_trace_tok)
         # Belt-and-suspenders verify (Bug 1 post-mortem): ``Tasks.create``
         # already asserts the row exists via its own post-write SELECT and
         # returns that fresh record. Use the returned record (no second
@@ -6576,6 +6628,17 @@ def create_mesh_app(
             )
         origin = _validated_origin(request, caller)
         origin_dict = origin.model_dump() if origin is not None else None
+        # Session observability (Phase 1) — a retry continues the original
+        # human-rooted session, so seed the contextvar with the original
+        # task's trace_id (falling back to the inbound header) before the
+        # clone so ``store.create`` stamps the same correlation id. Set
+        # UNCONDITIONALLY + reset via token (precedence preserved: original's
+        # trace_id wins, else the inbound header, else None): a conditional
+        # set would leak a stale trace_id from a prior request into a retry
+        # whose original carried no trace and that arrived header-less.
+        _retry_trace_id = original.get("trace_id") or request.headers.get("x-trace-id")
+        from src.shared.trace import current_trace_id
+        _trace_tok = current_trace_id.set(_retry_trace_id)
         try:
             clone = store.create(
                 creator=caller,
@@ -6593,6 +6656,8 @@ def create_mesh_app(
             # conversion as the /mesh/tasks POST path above.
             logger.error("tasks.retry store.create RuntimeError: %s", e)
             raise HTTPException(500, str(e))
+        finally:
+            current_trace_id.reset(_trace_tok)
         # Wake the (possibly new) assignee on the clone so the retry
         # starts immediately rather than waiting for a heartbeat.
         _try_wake_agent(

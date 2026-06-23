@@ -907,6 +907,28 @@ class TestChatTranscript:
         msgs = self.ws.load_chat_transcript()
         assert "tools" not in msgs[0]
 
+    def test_trace_id_stamped_from_contextvar(self):
+        """Session observability (Phase 1): an active per-turn trace_id is
+        written onto the transcript row.
+        """
+        from src.shared.trace import current_trace_id
+
+        token = current_trace_id.set("tr_chat00000001")
+        try:
+            self.ws.append_chat_message("user", "Hello")
+        finally:
+            current_trace_id.reset(token)
+        msgs = self.ws.load_chat_transcript()
+        assert msgs[0]["trace_id"] == "tr_chat00000001"
+
+    def test_trace_id_omitted_when_no_active_trace(self):
+        from src.shared.trace import current_trace_id
+
+        assert current_trace_id.get() is None
+        self.ws.append_chat_message("user", "Hello")
+        msgs = self.ws.load_chat_transcript()
+        assert "trace_id" not in msgs[0]
+
     def test_notification_role(self):
         self.ws.append_chat_message("notification", "Task complete")
         msgs = self.ws.load_chat_transcript()

@@ -6016,3 +6016,88 @@ class TestAgentGoalsEndpoints:
             "/dashboard/api/agents/alpha/goals", json={"goals": ["x"]},
         )
         assert resp.status_code == 403
+
+
+class TestDashboardChatMintsTraceId:
+    """Session observability (Phase 1) — the dashboard chat entry points
+    mint a per-turn trace_id and forward it as the ``X-Trace-Id`` header
+    on the outbound agent call. Regression for the dashboard-untraceable
+    defect (server.py:3611 region) where trace_headers() ran without a
+    seeded contextvar and emitted an empty correlation id.
+    """
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        # Capture the headers the dashboard forwards to the agent.
+        self._captured: dict = {}
+
+        async def _fake_request(agent_id, method, path, **kwargs):
+            self._captured["headers"] = kwargs.get("headers") or {}
+            self._captured["agent_id"] = agent_id
+            self._captured["path"] = path
+            return {"response": "ack"}
+
+        self.components["transport"].request = AsyncMock(side_effect=_fake_request)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_chat_forwards_minted_trace_id(self):
+        resp = self.client.post(
+            "/dashboard/api/agents/alpha/chat", json={"message": "hi"},
+        )
+        assert resp.status_code == 200
+        hdrs = self._captured["headers"]
+        # The fix: a non-empty trace_id is minted and forwarded. Header
+        # keys can be either case; the trace module emits "X-Trace-Id".
+        trace_val = hdrs.get("X-Trace-Id") or hdrs.get("x-trace-id")
+        assert trace_val, f"expected X-Trace-Id header, got {hdrs!r}"
+        assert trace_val.startswith("tr_")
+        # Origin is still stamped human/dashboard alongside the trace.
+        origin_val = hdrs.get("X-Origin") or hdrs.get("x-origin")
+        assert origin_val and "dashboard" in origin_val
+
+    def test_two_chats_get_distinct_trace_ids(self):
+        self.client.post(
+            "/dashboard/api/agents/alpha/chat", json={"message": "first"},
+        )
+        first = (self._captured["headers"].get("X-Trace-Id")
+                 or self._captured["headers"].get("x-trace-id"))
+        self.client.post(
+            "/dashboard/api/agents/alpha/chat", json={"message": "second"},
+        )
+        second = (self._captured["headers"].get("X-Trace-Id")
+                  or self._captured["headers"].get("x-trace-id"))
+        assert first and second and first != second
+
+    def test_chat_trace_does_not_leak_into_broadcast(self):
+        """Sequential attribution: after a /chat mints + seeds a trace, a
+        /api/broadcast (which calls trace_headers() WITHOUT minting) forwards
+        no stale X-Trace-Id. The /chat endpoint resets the contextvar via
+        token in its finally.
+
+        Honesty note (mutation-verified): the dashboard router is mounted on
+        the mesh app, which runs requests under Starlette BaseHTTPMiddleware
+        — and the bare-FastAPI TestClient harness here also isolates the
+        per-request context. So removing the /chat reset does NOT actually
+        make this fail; the set+reset is defense-in-depth (explicit, not
+        reliant on the middleware). This test guards the
+        mint-here / no-mint-there attribution contract."""
+        self.client.post(
+            "/dashboard/api/agents/alpha/chat", json={"message": "chat first"},
+        )
+        chat_trace = (self._captured["headers"].get("X-Trace-Id")
+                      or self._captured["headers"].get("x-trace-id"))
+        assert chat_trace and chat_trace.startswith("tr_")
+        # Broadcast does NOT mint a trace — it must carry no inherited one.
+        resp = self.client.post(
+            "/dashboard/api/broadcast", json={"message": "to everyone"},
+        )
+        assert resp.status_code == 200, resp.text
+        bc_trace = (self._captured["headers"].get("X-Trace-Id")
+                    or self._captured["headers"].get("x-trace-id"))
+        assert bc_trace != chat_trace
+        assert not bc_trace, f"broadcast leaked a stale trace_id: {bc_trace!r}"

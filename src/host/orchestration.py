@@ -399,6 +399,13 @@ class Tasks:
                 # B4 — per-task reasoning depth ("off"/"low"/"medium"/
                 # "high", NULL = use the assignee's configured default).
                 ("thinking", "TEXT"),
+                # Session observability (Phase 1) — the per-turn
+                # correlation id (``tr_<hex12>``) that minted this task so
+                # a session can be reconstructed by JOINing tasks / usage /
+                # traces on one key instead of timestamp archaeology.
+                # Nullable: pre-existing rows and paths with no active
+                # trace keep NULL.
+                ("trace_id", "TEXT"),
             )
             for col_name, col_type in outcome_columns:
                 if col_name not in existing:
@@ -713,6 +720,7 @@ class Tasks:
             "outcome_set_at": row[22],
             "result_summary": row[23],
             "thinking": row[24],
+            "trace_id": row[25],
         }
 
     # ``{team_col}`` is filled in at query time from ``self._team_col``
@@ -725,7 +733,7 @@ class Tasks:
         "blocker_note, origin_kind, origin_channel, origin_user, "
         "created_at, updated_at, completed_at, retention_until, "
         "outcome, feedback_text, previous_task_id, outcome_set_at, "
-        "result_summary, thinking"
+        "result_summary, thinking, trace_id"
     )
 
     @property
@@ -867,6 +875,13 @@ class Tasks:
         kind = origin.get("kind") if isinstance(origin, dict) else None
         channel = origin.get("channel") if isinstance(origin, dict) else None
         user = origin.get("user") if isinstance(origin, dict) else None
+        # Session observability (Phase 1) — stamp the active per-turn
+        # correlation id so this task JOINs to its usage/trace rows.
+        # Read from the contextvar at write time: it is seeded from the
+        # inbound X-Trace-Id header on the lane / mesh paths. NULL when no
+        # trace is active (purely internal task creation).
+        from src.shared.trace import current_trace_id
+        trace_id = current_trace_id.get()
 
         with self._conn() as conn:
             conn.execute(
@@ -875,16 +890,16 @@ class Tasks:
                 f"creator, assignee, status, priority, dependencies_json, "
                 f"artifact_refs_json, blocker_note, origin_kind, "
                 f"origin_channel, origin_user, created_at, updated_at, "
-                f"completed_at, retention_until, thinking) "
+                f"completed_at, retention_until, thinking, trace_id) "
                 f"VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, NULL, "
-                f"?, ?, ?, ?, ?, NULL, NULL, ?)",
+                f"?, ?, ?, ?, ?, NULL, NULL, ?, ?)",
                 (
                     tid, project_id, parent_task_id, title, description,
                     creator, assignee, priority,
                     json.dumps(dependencies) if dependencies else None,
                     json.dumps(artifact_refs) if artifact_refs else None,
                     kind, channel, user,
-                    now, now, thinking,
+                    now, now, thinking, trace_id,
                 ),
             )
             self._emit_event(
@@ -1985,6 +2000,10 @@ class Tasks:
             )
         new_id = f"task_{uuid.uuid4().hex[:12]}"
         now = time.time()
+        # Session observability (Phase 1) — a rework is a continuation of
+        # the same human-rooted session, so inherit the original task's
+        # trace_id (NULL if the source predates trace stamping).
+        inherited_trace_id = previous.get("trace_id")
         with self._conn() as conn:
             conn.execute(
                 f"INSERT INTO tasks "
@@ -1993,9 +2012,9 @@ class Tasks:
                 f"artifact_refs_json, blocker_note, origin_kind, "
                 f"origin_channel, origin_user, created_at, updated_at, "
                 f"completed_at, retention_until, outcome, feedback_text, "
-                f"previous_task_id) "
+                f"previous_task_id, trace_id) "
                 f"VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, "
-                f"NULL, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?)",
+                f"NULL, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?)",
                 (
                     new_id,
                     previous.get("project_id"),
@@ -2010,6 +2029,7 @@ class Tasks:
                     (previous.get("origin") or {}).get("user"),
                     now, now,
                     previous_task_id,
+                    inherited_trace_id,
                 ),
             )
             self._emit_event(

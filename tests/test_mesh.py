@@ -2278,3 +2278,214 @@ async def test_proxy_api_metered_call_still_reports_cost(tmp_path):
         assert data["cost_usd"] > 0.0
     finally:
         cleanup()
+
+
+# ── Session observability (Phase 1): X-Trace-Id seed → stamped usage row ──
+#
+# Store-level tests (test_costs.py::TestTraceIdStamping) already verify
+# ``CostTracker.track`` stamps ``trace_id`` when the contextvar is pre-set.
+# These close the end-to-end gap: the proxy endpoint must seed
+# ``current_trace_id`` from the inbound ``X-Trace-Id`` header so the cost
+# write fired *inside* ``execute_api_call`` / ``stream_llm`` — which run as
+# the same request task (non-stream) or a later-iterated streaming context
+# (stream) — observes it. If the seed (or, for streaming, the context copy
+# into the generator) regresses, the usage row silently gets a NULL
+# trace_id and the session can no longer be JOINed across stores.
+
+
+def _build_proxy_trace_app(tmp_path, *, streaming: bool):
+    """Build a mesh app wired to a REAL CostTracker behind a fake vault.
+
+    The fake vault mirrors production: its ``execute_api_call`` /
+    ``stream_llm`` call ``cost_tracker.track`` (which reads the trace
+    contextvar internally), so the row written reflects whatever trace the
+    endpoint seeded. Returns ``(app, tracker, cleanup)``; read back the
+    stamped trace via ``_usage_trace_ids(tracker)``.
+    """
+    from src.host.costs import CostTracker
+    from src.host.server import create_mesh_app
+    from src.shared.types import APIProxyResponse
+
+    tracker = CostTracker(
+        db_path=str(tmp_path / "costs.db"),
+        budgets_path=str(tmp_path / "budgets.json"),
+    )
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    perms = PermissionMatrix()
+    perms.permissions["scout"] = AgentPermissions(
+        agent_id="scout", allowed_apis=["llm"],
+    )
+    router = MessageRouter(perms, {})
+    router.register_agent("scout", "http://scout:8400", [])
+
+    from unittest.mock import MagicMock
+
+    vault = MagicMock()
+    vault.is_model_compatible.return_value = (True, None)
+
+    if streaming:
+        async def _fake_stream(api_request, agent_id=""):
+            # Mirror production stream_llm ORDERING (credentials.py ~4194):
+            # emit content chunks, YIELD the terminal 'done' frame, THEN
+            # track(). track() reads current_trace_id, which the generator
+            # wrapper must keep seeded through the whole iteration (it fires
+            # AFTER 'done' is yielded, so an endpoint-level finally-reset
+            # would NULL it — the trap this ordering guards against).
+            yield 'data: {"type": "delta", "content": "hi"}\n\n'
+            yield (
+                'data: {"type": "done", "model": "anthropic/claude-sonnet-4-6", '
+                '"tokens_used": 1000, "content": "hi"}\n\n'
+            )
+            tracker.track(agent_id, "anthropic/claude-sonnet-4-6", 700, 300)
+        vault.stream_llm = _fake_stream
+    else:
+        async def _fake_call(api_request, agent_id=""):
+            # Mirror execute_api_call's cost write: track() reads the
+            # contextvar the endpoint seeded from X-Trace-Id.
+            tracker.track(agent_id, "anthropic/claude-sonnet-4-6", 700, 300)
+            return APIProxyResponse(
+                success=True,
+                data={
+                    "content": "hi", "tokens_used": 1000,
+                    "input_tokens": 700, "output_tokens": 300,
+                    "model": "anthropic/claude-sonnet-4-6",
+                },
+            )
+        vault.execute_api_call = _fake_call
+
+    app = create_mesh_app(
+        blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
+        credential_vault=vault, cost_tracker=tracker,
+    )
+
+    def _cleanup():
+        tracker.close()
+        bb.close()
+
+    return app, tracker, _cleanup
+
+
+def _usage_trace_ids(tracker) -> list:
+    return [
+        r[0] for r in tracker.db.execute(
+            "SELECT trace_id FROM usage ORDER BY id"
+        ).fetchall()
+    ]
+
+
+async def _post_proxy(app, *, path: str, trace_id: str | None):
+    from httpx import ASGITransport, AsyncClient
+
+    headers = {} if trace_id is None else {"X-Trace-Id": trace_id}
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        return await client.post(
+            path,
+            params={"agent_id": "scout"},
+            json={
+                "service": "llm", "action": "chat",
+                "params": {
+                    "model": "anthropic/claude-sonnet-4-6",
+                    "messages": [{"role": "user", "content": "hi"}],
+                },
+            },
+            headers=headers,
+        )
+
+
+@pytest.mark.asyncio
+async def test_proxy_api_call_stamps_usage_trace_id_from_header(tmp_path):
+    """``POST /mesh/api`` with ``X-Trace-Id`` → the usage row written by the
+    cost tracker inside ``execute_api_call`` carries that trace_id."""
+    from src.shared.trace import current_trace_id
+
+    app, tracker, cleanup = _build_proxy_trace_app(tmp_path, streaming=False)
+    token = current_trace_id.set(None)
+    try:
+        resp = await _post_proxy(app, path="/mesh/api", trace_id="tr_proxy0000001")
+        assert resp.status_code == 200, resp.text
+        assert _usage_trace_ids(tracker) == ["tr_proxy0000001"]
+    finally:
+        current_trace_id.reset(token)
+        cleanup()
+
+
+@pytest.mark.asyncio
+async def test_proxy_api_call_sequential_trace_attribution(tmp_path):
+    """Sequential attribution (non-stream): a request WITH ``X-Trace-Id``
+    followed by one WITHOUT, on the same app, stamp ``tr_first0000001`` then
+    NULL. No manual contextvar clearing — the second row's NULL is the
+    request-scoping contract, end-to-end.
+
+    Honesty note (mutation-verified): this asserts the *contract*, not the
+    raw leak. The mesh app installs Starlette ``@app.middleware("http")``
+    middlewares; ``BaseHTTPMiddleware`` runs each request in its OWN
+    contextvars context that does not propagate back, so even the pre-fix
+    conditional set could not bleed across requests here. The unconditional
+    set + token reset is therefore defense-in-depth: it makes attribution
+    explicit and independent of that middleware detail. Reverting the reset
+    does NOT fail this test (the harness isolates the context regardless) —
+    so this is a contract regression guard, not a leak trap."""
+    app, tracker, cleanup = _build_proxy_trace_app(tmp_path, streaming=False)
+    try:
+        r1 = await _post_proxy(app, path="/mesh/api", trace_id="tr_first0000001")
+        assert r1.status_code == 200, r1.text
+        r2 = await _post_proxy(app, path="/mesh/api", trace_id=None)
+        assert r2.status_code == 200, r2.text
+        assert _usage_trace_ids(tracker) == ["tr_first0000001", None]
+    finally:
+        cleanup()
+
+
+@pytest.mark.asyncio
+async def test_proxy_api_stream_stamps_usage_trace_id_from_header(tmp_path):
+    """FRAGILE PATH: ``POST /mesh/api/stream`` seeds the contextvar before
+    the SSE generator is created; the cost write fired inside the
+    later-iterated ``stream_llm`` generator must still see the seeded
+    trace. Guards the contextvar-survives-into-the-streaming-context
+    invariant the endpoint comment promises."""
+    from src.shared.trace import current_trace_id
+
+    app, tracker, cleanup = _build_proxy_trace_app(tmp_path, streaming=True)
+    token = current_trace_id.set(None)
+    try:
+        resp = await _post_proxy(
+            app, path="/mesh/api/stream", trace_id="tr_stream0000001",
+        )
+        assert resp.status_code == 200, resp.text
+        # Drain the SSE body so the generator (and its track() call) runs.
+        body = resp.text
+        assert '"type": "done"' in body
+        assert _usage_trace_ids(tracker) == ["tr_stream0000001"]
+    finally:
+        current_trace_id.reset(token)
+        cleanup()
+
+
+@pytest.mark.asyncio
+async def test_proxy_api_stream_sequential_trace_attribution(tmp_path):
+    """Sequential attribution (stream): a streamed request WITH ``X-Trace-Id``
+    followed by one WITHOUT stamp ``tr_first0000001`` then NULL. The generator
+    owns the contextvar (set on entry / reset on exit), so the SECOND stream's
+    late track() (fired AFTER the 'done' frame) sees its OWN value, not the
+    first's. Same honesty caveat as the non-stream sibling: BaseHTTPMiddleware
+    isolates the per-request context (incl. the streaming body), so this is a
+    contract guard, not a raw-leak trap (mutation-verified: removing the
+    generator reset does not fail it). The generator-owned set+reset is still
+    required for the late track() to see the RIGHT value at all."""
+    app, tracker, cleanup = _build_proxy_trace_app(tmp_path, streaming=True)
+    try:
+        r1 = await _post_proxy(
+            app, path="/mesh/api/stream", trace_id="tr_first0000001",
+        )
+        assert r1.status_code == 200, r1.text
+        assert '"type": "done"' in r1.text  # drain so track() fires
+        r2 = await _post_proxy(app, path="/mesh/api/stream", trace_id=None)
+        assert r2.status_code == 200, r2.text
+        assert '"type": "done"' in r2.text
+        assert _usage_trace_ids(tracker) == ["tr_first0000001", None]
+    finally:
+        cleanup()
