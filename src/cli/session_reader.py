@@ -65,21 +65,26 @@ def parse_since(since: str | None) -> float:
     default = time.time() - (7 * 24 * 60 * 60)
     if not since:
         return default
-    s = since.strip().lower()
-    if not s:
+    raw = since.strip()
+    low = raw.lower()
+    if not low:
         return default
-    if s == "today":
+    if low == "today":
         now = datetime.now()
         midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
         return midnight.timestamp()
     # Duration form: Ns / Nm / Nh / Nd
-    if s[-1] in {"s", "m", "h", "d"} and s[:-1].isdigit():
-        n = int(s[:-1])
-        mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[s[-1]]
+    if low[-1] in {"s", "m", "h", "d"} and low[:-1].isdigit():
+        n = int(low[:-1])
+        mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[low[-1]]
         return time.time() - (n * mult)
-    # ISO date / timestamp
+    # ISO date / timestamp. Parse the ORIGINAL-case string: on Python 3.10
+    # (a supported interpreter) ``datetime.fromisoformat`` rejects a lowercase
+    # ``t`` separator, so lowercasing first made a full ``2026-06-18T12:00:00``
+    # silently fall back to the 7-day default. Only the ``Z``/``z`` UTC suffix
+    # is normalized (3.10 doesn't accept it either).
     try:
-        dt = datetime.fromisoformat(s.replace("z", "+00:00"))
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00").replace("z", "+00:00"))
         return dt.timestamp()
     except (ValueError, TypeError):
         return default

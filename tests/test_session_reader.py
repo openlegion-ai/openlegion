@@ -94,6 +94,30 @@ class TestParseSince:
         assert abs(parse_since("") - default) < 5
         assert abs(parse_since("nonsense") - default) < 5
 
+    def test_full_iso_timestamp_with_T_separator(self):
+        """Regression: a full ISO timestamp with the uppercase ``T`` separator
+        must parse, not silently fall back to the 7-day default. The parser
+        used to lowercase the whole string first, which Python 3.10's
+        ``fromisoformat`` rejects (the ``t`` separator) — a supported
+        interpreter per pyproject's ``requires-python = ">=3.10"``."""
+        import time as _t
+
+        now = _t.time()
+        seven_days_ago = now - (7 * 86400)
+        # An hour ago, expressed as a full local ISO timestamp with 'T'.
+        from datetime import datetime as _dt
+
+        ts = _dt.fromtimestamp(now - 3600)
+        iso = ts.isoformat(timespec="seconds")  # e.g. 2026-06-23T12:00:00
+        assert "T" in iso
+        parsed = parse_since(iso)
+        # Must be ~1h ago, NOT the 7-day default.
+        assert abs(parsed - (now - 3600)) < 5
+        assert abs(parsed - seven_days_ago) > 60
+        # UTC 'Z' suffix also parses (folded to +00:00).
+        z = "2026-01-02T03:04:05Z"
+        assert parse_since(z) == _dt.fromisoformat("2026-01-02T03:04:05+00:00").timestamp()
+
 
 class TestAssemble:
     def setup_method(self):

@@ -420,6 +420,32 @@ async def test_origin_passed_to_dispatch_fn():
     assert received_kwargs.get("origin") == origin
 
 
+@pytest.mark.asyncio
+async def test_trace_id_propagated_to_dispatch_context():
+    """Session observability keystone: a followup enqueued with a trace_id
+    runs its dispatch_fn under that trace in ``current_trace_id`` — so a
+    handoff-woken agent's outbound /chat carries the ORIGINATING session's
+    X-Trace-Id and a multi-agent chain reconstructs as one session. Before the
+    fix the lane enqueued with no trace_id, so every handoff minted a fresh,
+    disconnected trace downstream."""
+    from src.shared.trace import current_trace_id
+
+    seen: dict = {}
+
+    async def recording_dispatch(agent, message, **kwargs):
+        seen["trace"] = current_trace_id.get()
+        return "ok"
+
+    lm = LaneManager(dispatch_fn=recording_dispatch)
+    await lm.enqueue("agent1", "handoff work", trace_id="tr_chain0000001")
+    for _ in range(50):
+        if "trace" in seen:
+            break
+        await asyncio.sleep(0.01)
+
+    assert seen.get("trace") == "tr_chain0000001"
+
+
 # ── Per-task lane watchdog (Bug 4) ─────────────────────────────
 
 
