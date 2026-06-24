@@ -246,8 +246,10 @@ async def test_edit_soft_rejects_can_use_wallet_grant(mesh_app):
 
 
 @pytest.mark.asyncio
-async def test_edit_soft_rejects_can_spawn_grant(mesh_app):
-    """H1: ``can_spawn=True`` hits the same server-side ceiling."""
+async def test_edit_soft_allows_can_spawn_grant(mesh_app):
+    """can_spawn is a default-on capability now (no longer ceiling-blocked),
+    so the operator may grant it via edit-soft — only can_use_wallet remains
+    server-side ceiling-blocked (the test above)."""
     app, _, tmp_path = mesh_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post(
@@ -259,12 +261,11 @@ async def test_edit_soft_rejects_can_spawn_grant(mesh_app):
             },
             headers=_human_origin_headers(),
         )
-    assert r.status_code == 400, r.text
-    assert "ceiling" in r.json()["detail"].lower()
+    assert r.status_code == 200, r.text
 
     import json as _json
     perms = _json.loads((tmp_path / "config" / "permissions.json").read_text())
-    assert perms["permissions"].get("writer", {}).get("can_spawn") is not True
+    assert perms["permissions"].get("writer", {}).get("can_spawn") is True
 
 
 @pytest.mark.asyncio

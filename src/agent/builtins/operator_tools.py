@@ -769,7 +769,7 @@ async def edit_agent(
     receipt is the safety net, and dropping the gate lets the operator
     self-tune during heartbeat without a human in the loop. The
     permission ceiling in :data:`_OPERATOR_PERMISSION_CEILING` still
-    blocks irreversible grants (``can_spawn``, ``can_use_wallet``).
+    blocks the one irreversible grant (``can_use_wallet`` — spending money).
     """
     if not _is_operator():
         return {"error": "This tool is only available to the operator agent."}
@@ -919,8 +919,10 @@ async def create_agent(
 
     Provenance gate dropped: operator can spawn agents autonomously
     (e.g. during heartbeat in response to its own analysis). The
-    plan-tier budget cap ``OPENLEGION_MAX_AGENTS`` and the permission
-    ceiling (``can_spawn=False`` for created agents) are the real walls.
+    plan-tier budget cap ``OPENLEGION_MAX_AGENTS`` is the wall on durable
+    named-agent creation. (New agents are spawn-capable by default now, but
+    ephemeral ``spawn-*`` agents they create cannot themselves re-spawn —
+    the recursion stays bounded one level deep.)
     """
     if not _is_operator():
         return {"error": "This tool is only available to the operator agent."}

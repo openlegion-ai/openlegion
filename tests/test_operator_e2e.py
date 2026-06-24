@@ -531,38 +531,40 @@ class TestSelfModificationPrevention:
 
 
 class TestPermissionCeiling:
-    """Verify that operator cannot grant permissions above the ceiling."""
+    """Verify that operator cannot grant permissions above the ceiling.
 
-    # The ceiling: operator can only grant permissions it itself has.
-    # Specifically, can_spawn=True and can_manage_cron with escalated
-    # privileges should be blocked.
+    can_use_wallet is the sole operator-ungrantable flag now (spending money
+    needs explicit human setup). can_spawn is a default-on capability the
+    operator may grant, so it is WITHIN the ceiling."""
 
+    # The grantable ceiling (mirrors _OPERATOR_PERMISSION_CEILING's True keys).
     _PERMISSION_CEILING = {
         "can_use_browser": True,
         "can_manage_cron": True,
-        # can_spawn is NOT in the ceiling -- operator cannot grant it
+        "can_spawn": True,
+        # can_use_wallet is NOT grantable -- operator cannot grant it
     }
 
     def test_within_ceiling_allowed(self):
         """Permissions within the ceiling should be accepted."""
-        proposed = {"can_use_browser": True}
+        proposed = {"can_use_browser": True, "can_spawn": True}
         for key, value in proposed.items():
             assert key in self._PERMISSION_CEILING
 
     def test_above_ceiling_blocked(self):
-        """can_spawn=True should be above the permission ceiling."""
-        proposed = {"can_spawn": True}
+        """can_use_wallet=True should be above the permission ceiling."""
+        proposed = {"can_use_wallet": True}
         for key in proposed:
-            if key == "can_spawn" and proposed[key]:
+            if key == "can_use_wallet" and proposed[key]:
                 assert key not in self._PERMISSION_CEILING
 
     def test_ceiling_check_logic(self):
         """Permission ceiling enforcement pattern."""
-        ceiling = frozenset({"can_use_browser", "can_manage_cron"})
-        escalating_keys = {"can_spawn"}
+        ceiling = frozenset({"can_use_browser", "can_manage_cron", "can_spawn"})
+        escalating_keys = {"can_use_wallet"}
 
         # Within ceiling
-        for key in ("can_use_browser", "can_manage_cron"):
+        for key in ("can_use_browser", "can_manage_cron", "can_spawn"):
             assert key in ceiling
 
         # Above ceiling

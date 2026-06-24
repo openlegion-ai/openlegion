@@ -10,16 +10,20 @@ host-side imports keep resolving.
 from __future__ import annotations
 
 # Permission ceiling for operator-initiated agent edits. The operator
-# (an LLM-driven agent) is NOT allowed to grant these escalations to the
-# agents it manages — ``can_spawn`` / ``can_use_wallet`` require explicit
-# human setup, and blackboard read/write patterns are bounded.
+# (an LLM-driven agent) is NOT allowed to grant the one remaining escalation
+# to the agents it manages — ``can_use_wallet`` requires explicit human setup
+# (spending money) — and blackboard read/write patterns are bounded.
+# ``can_spawn`` is a normal default-on capability now (ephemeral fleet-spawn,
+# bounded one level deep — spawned agents can't re-spawn), so the operator may
+# manage it like ``can_use_browser``.
 #
 # This is the SINGLE SOURCE OF TRUTH. It is enforced in two places:
 #   1. Client-side in the operator tool (`operator_tools._validate_edit`)
 #      for a fast, descriptive error to the operator LLM.
 #   2. Server-side on the mesh ``/edit-soft`` endpoint, so a fooled or
 #      injected operator LLM cannot route a raw permissions edit around
-#      its own client-side guard (finding H1, May 2026 remediation).
+#      its own client-side guard (finding H1, May 2026 remediation — now
+#      narrowed to the wallet, the only remaining operator-ungrantable flag).
 #
 # DELIBERATELY NOT enforced on the dashboard ``PUT /api/agents/{id}/
 # permissions`` endpoint — that is the human operator's "advanced
@@ -27,9 +31,9 @@ from __future__ import annotations
 # overridable there.
 _OPERATOR_PERMISSION_CEILING = {
     "can_use_browser": True,
-    "can_spawn": False,       # Created agents can't spawn others
+    "can_spawn": True,        # Ephemeral fleet-spawn is a default capability
     "can_manage_cron": True,
-    "can_use_wallet": False,  # Requires explicit user setup
+    "can_use_wallet": False,  # Requires explicit user setup (spends money)
     "blackboard_read": ["*"],
     "blackboard_write": ["tasks/*", "context/*", "status/*", "output/*", "artifacts/*"],
 }

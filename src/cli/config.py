@@ -25,11 +25,13 @@ from src.shared.utils import truncate
 logger = logging.getLogger("cli")
 
 # L4: irreversible-grant ceiling for fleet templates. Booleans here can never
-# be set true from a template's ``permissions`` dict — they are operator/user-
-# only grants (spawning agents, spending the wallet) that must not be mintable
-# by template application. Mirrors ``_OPERATOR_PERMISSION_CEILING`` in
-# ``src/agent/builtins/operator_tools.py`` (the False entries there).
-_TEMPLATE_PERMISSION_CEILING = frozenset({"can_spawn", "can_use_wallet"})
+# be set true from a template's ``permissions`` dict — the wallet is an
+# operator/user-only grant (spending money) that must not be mintable by
+# template application. ``can_spawn`` is intentionally NOT here: ephemeral
+# fleet-spawn is now a default-on capability for new agents (see
+# ``_add_agent_permissions`` base), so templates may set it freely. Mirrors
+# ``_OPERATOR_PERMISSION_CEILING`` in ``src/shared/operator_ceiling.py``.
+_TEMPLATE_PERMISSION_CEILING = frozenset({"can_use_wallet"})
 
 # ── Path constants ──────────────────────────────────────────
 
@@ -588,15 +590,18 @@ def _add_agent_permissions(
         "allowed_apis": ["llm", "image_gen"],
         "allowed_credentials": ["*"],
         # Default capability set for every new agent: browser + internet +
-        # schedules (cron) ON; wallet + ephemeral-spawn OFF (privileged —
-        # granted only explicitly, e.g. the operator passes can_spawn=True and
-        # the boolean-merge below honors it; fleet templates are clamped by
-        # _TEMPLATE_PERMISSION_CEILING). A template may still flip browser /
-        # internet / cron off via the merge.
+        # schedules (cron) + ephemeral fleet-spawn ON; wallet OFF (the sole
+        # privileged grant — spending money requires explicit user setup).
+        # NOTE: ``can_spawn=True`` applies to NAMED agents created here. The
+        # ephemeral ``spawn-*`` agents they create resolve permissions via
+        # ``PermissionMatrix.get_permissions`` ("default" record / bare
+        # fallback → field default False), so a spawned agent CANNOT itself
+        # spawn — the recursion wall is bounded at one level. A template may
+        # flip any of these off via the merge below.
         "can_use_browser": True,
         "can_use_internet": True,
         "can_manage_cron": True,
-        "can_spawn": False,
+        "can_spawn": True,
         "can_use_wallet": False,
     }
 

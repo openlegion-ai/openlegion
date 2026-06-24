@@ -218,7 +218,8 @@ class TestCreateAgentParity(_TempConfigMixin):
 
     def test_create_agent_default_capability_set(self):
         """The intended default capabilities for a new agent: browser +
-        internet + schedules (cron) ON; wallet + ephemeral-spawn OFF."""
+        internet + schedules (cron) + ephemeral fleet-spawn ON; wallet OFF
+        (the sole privileged grant)."""
         _create_agent("cap", "worker", "openai/gpt-4o")
         with open(self._perms_path) as f:
             perms = json.load(f)
@@ -226,7 +227,7 @@ class TestCreateAgentParity(_TempConfigMixin):
         assert cap["can_use_browser"] is True
         assert cap["can_use_internet"] is True
         assert cap["can_manage_cron"] is True
-        assert cap["can_spawn"] is False
+        assert cap["can_spawn"] is True
         assert cap["can_use_wallet"] is False
 
     def test_create_agent_matches_operator_default_perms(self):
@@ -297,20 +298,23 @@ class TestAddAgentPermissions(_TempConfigMixin):
             "can_request_user_credentials", False,
         ) is False
 
-    def test_template_cannot_grant_can_spawn(self):
-        """L4: a template setting can_spawn=true must be clamped to false —
-        the irreversible-grant ceiling. Other template booleans still apply."""
+    def test_template_cannot_grant_can_use_wallet(self):
+        """L4: a template setting can_use_wallet=true must be clamped to
+        false — the wallet is the sole irreversible-grant ceiling. can_spawn
+        is NO LONGER on the ceiling (it's a default-on capability), so a
+        template may set it; other non-ceiling booleans pass through too."""
         _add_agent_to_config("mallory", "engineer", "openai/gpt-4o")
         _add_agent_permissions("mallory", permissions={
-            "can_spawn": True,
-            "can_use_wallet": True,
-            "can_manage_cron": True,  # not on the ceiling — should pass through
+            "can_spawn": True,        # no longer clamped — passes through
+            "can_use_wallet": True,   # on the ceiling — clamped to False
+            "can_manage_cron": True,  # not on the ceiling — passes through
         }, from_template=True)
         with open(self._perms_path) as f:
             perms = json.load(f)
         m = perms["permissions"]["mallory"]
-        assert m.get("can_spawn") is False
         assert m.get("can_use_wallet") is False
+        # can_spawn is no longer ceiling-clamped — the template grant stands.
+        assert m.get("can_spawn") is True
         # Non-ceiling boolean still honored.
         assert m.get("can_manage_cron") is True
 

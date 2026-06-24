@@ -396,13 +396,20 @@ class AgentPermissions(BaseModel):
     # agent-side tool filter + the dashboard badge. The Operator Settings UI
     # surfaces a toggle that flips this field.
     can_use_internet: bool = False
-    # ``can_spawn`` (Task 3 narrowed semantics): gates EPHEMERAL spawning
-    # only — subagents, cron-triggered spawns, and template applies that
-    # produce short-lived workers. Durable fleet operations (creating
-    # named agents, managing projects, editing config, viewing fleet
-    # metrics, routing tasks, requesting user credentials) now live on
-    # the dedicated control-plane permissions below. Workers default to
-    # ``can_spawn=False``; the operator gets it via _ensure_operator_agent.
+    # ``can_spawn`` (Task 3 narrowed semantics): gates EPHEMERAL fleet-spawn
+    # only — the ``POST /mesh/spawn`` / ``spawn_fleet_agent`` capability that
+    # creates short-lived TTL-bounded peer agents. Durable fleet operations
+    # (creating named agents, managing projects, editing config, viewing fleet
+    # metrics, routing tasks, requesting user credentials) live on the
+    # dedicated control-plane permissions below; the in-container
+    # ``spawn_subagent`` helper is ungated and separate.
+    # The FIELD default is ``False`` — this is the RECURSION WALL: an ephemeral
+    # ``spawn-*`` agent is never written to permissions.json, so it resolves
+    # via ``PermissionMatrix.get_permissions`` ("default" record / bare
+    # fallback → this default), keeping it spawn-incapable so spawn trees stay
+    # bounded at one level. New NAMED agents nonetheless get ``can_spawn=True``
+    # via the create-path base in ``cli/config._add_agent_permissions`` (same
+    # pattern as ``can_use_browser`` / ``can_use_internet``).
     can_spawn: bool = False
     can_manage_cron: bool = False
     # Control-plane permissions split from ``can_spawn`` (Task 3).
