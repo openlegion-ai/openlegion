@@ -1174,6 +1174,78 @@ class TestPruneToFit:
         assert len(aggressive) <= len(lenient)
         assert cm.estimate_request_tokens(aggressive) <= cm.max_tokens * 0.50
 
+    def test_target_tokens_overrides_frac_ceiling(self):
+        # An absolute target forces pruning below it even though the default
+        # frac-ceiling would no-op. This is the forced-progress lever the
+        # self-heal uses when the estimate (uncalibrated) thinks we fit.
+        cm = ContextManager(max_tokens=1_000_000, model="anthropic/claude")
+        msgs = _tool_group_messages(8, chars_each=4000)
+        # Well under 0.90 * 1M, so the default ceiling is a no-op...
+        assert cm.prune_to_fit(msgs) is msgs
+        before = cm.estimate_request_tokens(msgs)
+        # ...but an absolute target below `before` must shed real content.
+        pruned = cm.prune_to_fit(msgs, target_tokens=int(before * 0.5))
+        assert len(pruned) < len(msgs)
+        assert cm.estimate_request_tokens(pruned) <= before * 0.5
+
+
+class TestEstimateCalibration:
+    """Regression for the map-agent wedge (2026-06-24): the chars/token estimate
+    read ~2x under the real tokenizer on dense CSV/JSON content (504,884 est vs
+    1,001,150 actual), so the 0.75 emergency ceiling on a 1M window saw 504K,
+    pruned NOTHING, and every retry 400'd identically. Calibrating from the
+    provider-reported count fixes both the no-op prune and future turns."""
+
+    def test_correction_defaults_to_identity(self):
+        cm = ContextManager(max_tokens=1_000_000, model="anthropic/claude")
+        assert cm._estimate_correction == 1.0
+        msgs = _make_messages(4, chars_each=400)
+        assert cm.estimate_request_tokens(msgs) == cm._raw_request_tokens(msgs)
+
+    def test_calibrate_ratchets_correction_and_scales_estimate(self):
+        cm = ContextManager(max_tokens=1_000_000, model="anthropic/claude")
+        msgs = _make_messages(6, chars_each=4000)
+        raw = cm._raw_request_tokens(msgs)
+        # Provider says the request was actually ~2x our raw estimate.
+        cm.calibrate_from_overflow(actual_tokens=raw * 2, messages=msgs)
+        assert cm._estimate_correction == pytest.approx(2.0, abs=0.05)
+        assert cm.estimate_request_tokens(msgs) == pytest.approx(raw * 2, rel=0.05)
+
+    def test_correction_only_ratchets_up(self):
+        cm = ContextManager(max_tokens=1_000_000, model="anthropic/claude")
+        msgs = _make_messages(6, chars_each=4000)
+        raw = cm._raw_request_tokens(msgs)
+        cm.calibrate_from_overflow(actual_tokens=raw * 2, messages=msgs)
+        # A later, smaller ratio must NOT lower the learned correction.
+        cm.calibrate_from_overflow(actual_tokens=int(raw * 1.2), messages=msgs)
+        assert cm._estimate_correction == pytest.approx(2.0, abs=0.05)
+
+    def test_correction_is_clamped(self):
+        from src.agent.context import _MAX_ESTIMATE_CORRECTION
+        cm = ContextManager(max_tokens=1_000_000, model="anthropic/claude")
+        msgs = _make_messages(6, chars_each=4000)
+        raw = cm._raw_request_tokens(msgs)
+        cm.calibrate_from_overflow(actual_tokens=raw * 100, messages=msgs)
+        assert cm._estimate_correction == _MAX_ESTIMATE_CORRECTION
+
+    def test_calibration_turns_a_noop_prune_into_a_real_one(self):
+        # The exact cake shape: raw estimate sits UNDER the 0.75 ceiling so the
+        # emergency prune would no-op — until calibration scales it over.
+        cm = ContextManager(max_tokens=100_000, model="anthropic/claude")
+        # ~50K raw est: comfortably under the 0.75 ceiling (so the default prune
+        # no-ops) yet over 0.375*max, so doubling it via calibration clears the
+        # ceiling and forces a real prune.
+        msgs = _tool_group_messages(14, chars_each=4000)
+        raw = cm._raw_request_tokens(msgs)
+        assert raw <= cm.max_tokens * 0.75, "precondition: default prune would no-op"
+        assert cm.prune_to_fit(msgs, ceiling_frac=0.75) is msgs
+        # API reports the request was actually ~2x — calibrate, then re-prune.
+        cm.calibrate_from_overflow(actual_tokens=raw * 2, messages=msgs)
+        assert cm.estimate_request_tokens(msgs) > cm.max_tokens * 0.75
+        pruned = cm.prune_to_fit(msgs, ceiling_frac=0.75)
+        assert len(pruned) < len(msgs), "after calibration the prune must drop groups"
+        assert cm.estimate_request_tokens(pruned) <= cm.max_tokens * 0.75
+
 
 class TestSummarizeTailCap:
     @pytest.mark.asyncio

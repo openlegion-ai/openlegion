@@ -39,6 +39,13 @@ _TOOL_RESULT_SUMMARY_CHARS = 2_000   # per tool-result slice fed to the compacti
 
 _CONSOLIDATION_MIN_INTERVAL_S = 6 * 3600   # at most every 6 hours
 _CONSOLIDATION_MIN_LOG_CHARS = 1_500       # skip if little new material accrued
+
+# Upper bound on the learned estimate-correction multiplier (see
+# ContextManager.calibrate_from_overflow). The chars/token heuristic can
+# undershoot dense content (CSV/JSON/code ~1.75 chars/tok vs the assumed 3.5),
+# but a runaway ratio from a degenerate estimate must not prune the context to
+# nothing — 6x covers the worst realistic case (single-char-token data).
+_MAX_ESTIMATE_CORRECTION = 6.0
 _CONSOLIDATION_FAIL_BACKOFF_S = 30 * 60    # after a failed run, wait before retrying
 _DECAY_MIN_INTERVAL_S = 6 * 3600           # salience-decay cadence for the maintenance pass
 
@@ -210,6 +217,12 @@ class ContextManager:
         # Backoff clock for the maintenance pass: set to a future time after a
         # failed consolidation so a frequent tick doesn't hammer the LLM.
         self._consolidation_retry_after = 0.0
+        # Learned multiplier that corrects estimate_request_tokens toward the
+        # provider's real tokenizer. Starts at 1.0 (no change) and only ratchets
+        # UP when an actual overflow tells us the true count
+        # (calibrate_from_overflow). Healthy agents that never 400 keep 1.0, so
+        # this is a no-op for them.
+        self._estimate_correction = 1.0
 
     def reset(self) -> None:
         """Reset per-session state for a new conversation."""
@@ -261,6 +274,28 @@ class ContextManager:
         (``len(json.dumps(tools)) // 3``, a tighter divisor than the 4-chars/tok
         message default) — overshooting the budget is safe; undershooting
         re-wedges.
+
+        The chars/token heuristic is still content-dependent (dense CSV/JSON/
+        code tokenizes ~2x denser than the assumed 3.5 chars/tok), so the raw
+        base is scaled by ``self._estimate_correction`` — a multiplier learned
+        from real overflow counts (:meth:`calibrate_from_overflow`). It is 1.0
+        until an actual 400 proves the estimate low, so this is a no-op for
+        agents that never overflow.
+        """
+        raw = self._raw_request_tokens(messages, system_prompt, tools)
+        return int(raw * self._estimate_correction)
+
+    def _raw_request_tokens(
+        self,
+        messages: list[dict],
+        system_prompt: str = "",
+        tools: list[dict] | None = None,
+    ) -> int:
+        """Uncorrected full-request estimate (messages + system + tools).
+
+        Kept separate from :meth:`estimate_request_tokens` so calibration can
+        compare the provider's real count against the RAW heuristic, rather than
+        against an already-corrected number (which would make the ratio drift).
         """
         total = estimate_tokens(messages, self.model)
         if system_prompt:
@@ -278,6 +313,36 @@ class ContextManager:
                 total += len(str(tools)) // 4
         return total
 
+    def calibrate_from_overflow(
+        self,
+        actual_tokens: int,
+        messages: list[dict],
+        system_prompt: str = "",
+        tools: list[dict] | None = None,
+    ) -> float:
+        """Teach the estimator the real chars/token density from an overflow.
+
+        ``actual_tokens`` is the provider-reported size of the request we just
+        sent (parsed from "… 1000961 tokens > 1000000 maximum"). Comparing it to
+        our RAW estimate of the same request yields the correction ratio. We
+        ratchet ``self._estimate_correction`` UP only (a single observation can
+        be noisy; the worst case is what re-wedges us) and clamp it so a
+        degenerate estimate can't prune the context to nothing. Returns the new
+        multiplier.
+        """
+        raw = self._raw_request_tokens(messages, system_prompt, tools)
+        if raw <= 0 or actual_tokens <= 0:
+            return self._estimate_correction
+        ratio = actual_tokens / raw
+        if ratio > self._estimate_correction:
+            self._estimate_correction = min(ratio, _MAX_ESTIMATE_CORRECTION)
+            logger.warning(
+                "estimate calibrated from overflow: actual=%s raw_est=%s "
+                "correction=%.2f",
+                f"{actual_tokens:,}", f"{raw:,}", self._estimate_correction,
+            )
+        return self._estimate_correction
+
     def prune_to_fit(
         self,
         messages: list[dict],
@@ -285,10 +350,18 @@ class ContextManager:
         tools: list[dict] | None = None,
         *,
         ceiling_frac: float = 0.90,
+        target_tokens: int | None = None,
     ) -> list[dict]:
         """Emergency hard safety net: drop oldest tool-call groups until the
         FULL request (messages + system + tools) fits under a fraction of the
         model window.
+
+        ``target_tokens`` overrides the ``ceiling_frac * max_tokens`` ceiling
+        with an absolute target. The self-heal uses it to FORCE real reduction
+        when the API has told us we overflowed but our estimate (possibly
+        uncalibrated, e.g. on the masked proxy path) still thinks the context
+        fits — without it the prune would no-op and the retry would 400
+        identically.
 
         This is NOT a threshold change — the 0.60/0.70/0.80 compaction
         thresholds are untouched. This is a separate last-resort guard for the
@@ -308,7 +381,10 @@ class ContextManager:
         if not messages:
             return messages
 
-        ceiling = int(self.max_tokens * ceiling_frac)
+        ceiling = (
+            target_tokens if target_tokens is not None
+            else int(self.max_tokens * ceiling_frac)
+        )
         before = self.estimate_request_tokens(messages, system_prompt, tools)
         if before <= ceiling:
             return messages

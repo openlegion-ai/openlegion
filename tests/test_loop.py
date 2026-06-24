@@ -5428,3 +5428,55 @@ class TestSystemNoteTranscriptRole:
         out = AgentLoop._steer_interjection([("a", True), ("b", False)])
         assert "[System]: a" in out
         assert "[User interjection]: b" in out
+
+
+class TestEmergencyPruneCalibration:
+    """The map-agent wedge (2026-06-24): the local estimate read ~2x under the
+    real tokenizer, so _emergency_prune's 0.75 ceiling saw a sub-ceiling number
+    and dropped NOTHING, and the self-heal re-raised. Both the calibrated path
+    (provider gave counts) and the masked path (no counts) must now make real
+    downward progress."""
+
+    @staticmethod
+    def _wedged_loop(max_tokens: int = 100_000):
+        from src.agent.context import ContextManager
+        loop = _make_loop()
+        loop.context_manager = ContextManager(max_tokens=max_tokens, model="anthropic/claude")
+        # Tool-call groups dense enough that the RAW estimate sits UNDER the
+        # 0.75 emergency ceiling (so the old prune no-ops), but the real request
+        # is ~2x larger.
+        msgs = [{"role": "user", "content": "INITIAL " + "i" * 4000}]
+        for g in range(12):
+            msgs.append({
+                "role": "assistant", "content": "",
+                "tool_calls": [{"id": f"c{g}", "function": {"name": "do", "arguments": "{}"}}],
+            })
+            msgs.append({"role": "tool", "tool_call_id": f"c{g}", "content": "R" + "r" * 4000})
+            msgs.append({"role": "assistant", "content": "A" + "a" * 4000})
+            msgs.append({"role": "user", "content": "U" + "u" * 4000})
+        loop._chat_messages = msgs
+        return loop
+
+    def test_calibrates_and_prunes_when_provider_reports_counts(self):
+        loop = self._wedged_loop()
+        cm = loop.context_manager
+        tools = None
+        raw = cm._raw_request_tokens(loop._chat_messages)
+        assert raw <= cm.max_tokens * 0.75, "precondition: old prune would no-op"
+        before_n = len(loop._chat_messages)
+        # Streaming-style message carrying the real (≈2x) token count.
+        msg = f"LLM stream error: prompt is too long: {raw * 2} tokens > {cm.max_tokens} maximum"
+        progressed = loop._emergency_prune("system", tools, overflow_message=msg)
+        assert cm._estimate_correction > 1.5, "should have calibrated from the count"
+        assert progressed is True
+        assert len(loop._chat_messages) < before_n, "must drop real content"
+
+    def test_forces_progress_when_message_is_masked(self):
+        # Masked proxy path: no parseable counts, estimate still thinks we fit.
+        loop = self._wedged_loop()
+        before_n = len(loop._chat_messages)
+        progressed = loop._emergency_prune(
+            "system", None, overflow_message="Upstream service call failed (HTTP 400).",
+        )
+        assert progressed is True, "forced-progress backstop must shed content"
+        assert len(loop._chat_messages) < before_n
