@@ -227,6 +227,13 @@ class ContextManager:
     def reset(self) -> None:
         """Reset per-session state for a new conversation."""
         self._flush_triggered = False
+        # NOTE: ``_estimate_correction`` is deliberately NOT reset. It reflects
+        # the model+content tokenization density, which is stable for an agent
+        # and survives a conversation reset. Clearing it would force the next
+        # conversation to RE-overflow once before re-learning — reintroducing
+        # the wedge this calibration prevents. Over-pruning a lower-density
+        # conversation that follows is the safe direction (the module's rule:
+        # overshooting the budget is safe; undershooting re-wedges).
 
     def usage(self, messages: list[dict]) -> float:
         """Return context usage as a fraction (0.0 to 1.0)."""

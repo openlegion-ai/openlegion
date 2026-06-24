@@ -27,7 +27,7 @@ from src.agent.tool_groups import (
 )
 from src.agent.workspace import INTROSPECT_PERM_KEYS
 from src.shared import limits
-from src.shared.errors import LLMAuthError, LLMConfigError
+from src.shared.errors import LLMAuthError, LLMConfigError, parse_overflow_tokens
 from src.shared.types import SILENT_REPLY_TOKEN, AgentStatus, LLMResponse, TaskAssignment, TaskResult
 from src.shared.utils import dumps_safe, format_dict, generate_id, sanitize_for_prompt, setup_logging, truncate
 
@@ -3820,11 +3820,10 @@ class AgentLoop:
            trusting the estimate over the 400 is the bug we're fixing.
         """
         cm = self.context_manager
-        sent = self._messages_with_volatile(self._chat_messages)
         if overflow_message:
-            from src.shared.errors import parse_overflow_tokens
             counts = parse_overflow_tokens(overflow_message)
             if counts:
+                sent = self._messages_with_volatile(self._chat_messages)
                 cm.calibrate_from_overflow(counts[0], sent, system, tools)
 
         before_msgs = len(self._chat_messages)
