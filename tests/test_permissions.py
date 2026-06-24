@@ -771,6 +771,16 @@ class TestSpawnRecursionWall:
         from src.shared.types import AgentPermissions
         assert AgentPermissions(agent_id="spawn-xyz").can_spawn is False
 
+    def test_cannot_create_agent_named_default(self):
+        # "default" is the get_permissions FALLBACK record for unregistered
+        # (incl. ephemeral spawn-*) agents. If the create path could write a
+        # "default" record, the new can_spawn=True base would leak into that
+        # fallback → every ephemeral agent inherits spawn → recursion wall
+        # broken. So the create path must reject the name outright.
+        from src.cli.config import _validate_agent_name
+        with pytest.raises(ValueError, match="reserved"):
+            _validate_agent_name("default")
+
 
 # ── Task 3: can_spawn split ────────────────────────────────────────────
 #

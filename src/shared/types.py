@@ -31,13 +31,22 @@ def _generate_id(prefix: str, length: int = 12) -> str:
 SILENT_REPLY_TOKEN = "__SILENT__"
 """Sentinel returned by agents to suppress empty responses."""
 
-RESERVED_AGENT_IDS = frozenset({"mesh", "operator", "canary-probe"})
+RESERVED_AGENT_IDS = frozenset({"mesh", "operator", "canary-probe", "default"})
 """Internal component names that must not be used as agent IDs.
 
 ``canary-probe`` is the stable agent-id used by the stealth canary
 (§5.4) for its dedicated profile. Reserving it prevents a user from
 creating a real agent with the same id — which would otherwise have
 its profile silently stomped the next time an operator ran the canary.
+
+``default`` is reserved because ``PermissionMatrix.get_permissions`` uses a
+``permissions["default"]`` record as the FALLBACK for any unregistered agent
+(including ephemeral ``spawn-*`` agents). If the agent-create path could write
+a ``default`` record, a new agent's capability defaults (which now include
+``can_spawn=True``) would leak into that fallback and grant every ephemeral
+agent spawn — breaking the recursion wall. A deployment may still hand-author
+a ``default`` template directly in permissions.json; only the create path is
+blocked.
 """
 
 AGENT_ID_RE_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
