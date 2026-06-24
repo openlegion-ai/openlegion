@@ -397,16 +397,15 @@ class TestCreateCustomAgent:
         assert live.can_manage_cron is True
         assert live.can_use_wallet is False
 
-    def test_default_capabilities_omit_can_spawn(
+    def test_default_capabilities_include_can_spawn_but_not_wallet(
         self, mesh_app, tmp_path,
     ):
-        """Pin: a newly-created agent does NOT inherit ``can_spawn`` —
-        only the operator (the one calling create) is allowed to create
-        agents. Without this, every operator-created agent could turn
-        around and create more agents itself, defeating the operator
-        gate. ``_add_agent_permissions`` writes ``can_spawn: False``
-        explicitly in its base defaults (the create path passes only the
-        coordination ACLs), so the agent has no spawn ability.
+        """Pin: a newly-created agent gets ``can_spawn=True`` by default
+        (ephemeral fleet-spawn is a baseline capability now) but NOT
+        ``can_use_wallet`` (spending money requires explicit human setup).
+        The recursion wall is preserved elsewhere: an ephemeral ``spawn-*``
+        agent is never written to permissions.json, so it resolves to the
+        field default (False) and cannot itself re-spawn.
         """
         import json as _json
 
@@ -423,17 +422,13 @@ class TestCreateCustomAgent:
         perms_path = tmp_path / "config" / "permissions.json"
         on_disk = _json.loads(perms_path.read_text())
         agent_perms = on_disk["permissions"]["noprivs"]
-        # Field is omitted from the on-disk record (defaults to False at
-        # ``AgentPermissions`` construction time) — the agent has no
-        # spawn ability. We accept either: (a) key absent, or (b) key
-        # present but explicitly False.
-        assert agent_perms.get("can_spawn", False) is False
-        # Wallet is the other privileged-off default.
+        # Spawn ON by default; wallet OFF (the sole privileged-off default).
+        assert agent_perms.get("can_spawn") is True
         assert agent_perms.get("can_use_wallet", False) is False
 
         # And the live matrix agrees.
         mesh_app["perms"].reload()
-        assert mesh_app["perms"].can_spawn("noprivs") is False
+        assert mesh_app["perms"].can_spawn("noprivs") is True
 
 
 class TestCreateCustomAgentMeshClient:

@@ -554,11 +554,14 @@ async def test_edit_agent_invalid_reason():
 
 @pytest.mark.asyncio
 async def test_edit_agent_permission_ceiling_still_enforced():
-    """Hard-field permission ceiling still blocks even via edit_agent."""
+    """Hard-field permission ceiling still blocks even via edit_agent.
+
+    can_use_wallet is the sole remaining operator-ungrantable flag (can_spawn
+    is now a default-on capability the operator may manage)."""
     from src.agent.builtins.operator_tools import edit_agent
 
     result = await edit_agent(
-        "writer", "permissions", {"can_spawn": True},
+        "writer", "permissions", {"can_use_wallet": True},
         mesh_client=MagicMock(),
     )
     assert "error" in result
@@ -788,16 +791,18 @@ def test_clamp_to_operator_ceiling_single_source_of_truth():
     edits. This pins the single source of truth behavior."""
     from src.host.permissions import clamp_to_operator_ceiling
 
-    # Escalations rejected.
-    assert clamp_to_operator_ceiling("permissions", {"can_spawn": True}) is not None
+    # Escalations rejected. can_use_wallet is the sole operator-ungrantable
+    # flag; an out-of-bounds blackboard pattern is still rejected.
     assert clamp_to_operator_ceiling("permissions", {"can_use_wallet": True}) is not None
     assert (
         clamp_to_operator_ceiling("permissions", {"blackboard_write": ["secrets/*"]})
         is not None
     )
 
-    # Within-ceiling edits pass.
+    # Within-ceiling edits pass. can_spawn is now a default-on capability the
+    # operator may grant (no longer an escalation).
     assert clamp_to_operator_ceiling("permissions", {"can_use_browser": True}) is None
+    assert clamp_to_operator_ceiling("permissions", {"can_spawn": True}) is None
     assert (
         clamp_to_operator_ceiling("permissions", {"blackboard_write": ["artifacts/*"]})
         is None
@@ -809,7 +814,7 @@ def test_clamp_to_operator_ceiling_single_source_of_truth():
 
 @pytest.mark.asyncio
 async def test_edit_agent_permission_ceiling_can_use_wallet():
-    """can_use_wallet=True hits the same ceiling as can_spawn=True."""
+    """can_use_wallet=True is the sole grant blocked by the operator ceiling."""
     from src.agent.builtins.operator_tools import edit_agent
 
     result = await edit_agent(

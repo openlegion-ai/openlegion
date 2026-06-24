@@ -745,6 +745,43 @@ class TestSelfInboxCarveOut:
         ) is False
 
 
+class TestSpawnRecursionWall:
+    """can_spawn is ON by default for new NAMED agents, but an ephemeral
+    ``spawn-*`` agent is never written to permissions.json — so it resolves
+    via get_permissions ("default" record / bare fallback → field default
+    False) and CANNOT itself re-spawn. This pins that recursion wall: spawn
+    trees stay bounded one level deep."""
+
+    def _matrix(self, tmp_path, perms: dict):
+        cfg = {"permissions": perms}
+        path = tmp_path / "permissions.json"
+        path.write_text(json.dumps(cfg))
+        return PermissionMatrix(config_path=str(path))
+
+    def test_unregistered_ephemeral_agent_cannot_spawn(self, tmp_path):
+        # A named worker is spawn-capable (the new default)...
+        m = self._matrix(tmp_path, {"worker": {"can_spawn": True}})
+        assert m.can_spawn("worker") is True
+        # ...but an ephemeral spawn-* id it creates has no record → False.
+        assert m.can_spawn("spawn-abc123") is False
+
+    def test_field_default_is_false(self):
+        # The model field default IS the wall — keep it False even though the
+        # create-path base grants True to named agents.
+        from src.shared.types import AgentPermissions
+        assert AgentPermissions(agent_id="spawn-xyz").can_spawn is False
+
+    def test_cannot_create_agent_named_default(self):
+        # "default" is the get_permissions FALLBACK record for unregistered
+        # (incl. ephemeral spawn-*) agents. If the create path could write a
+        # "default" record, the new can_spawn=True base would leak into that
+        # fallback → every ephemeral agent inherits spawn → recursion wall
+        # broken. So the create path must reject the name outright.
+        from src.cli.config import _validate_agent_name
+        with pytest.raises(ValueError, match="reserved"):
+            _validate_agent_name("default")
+
+
 # ── Task 3: can_spawn split ────────────────────────────────────────────
 #
 # Task 3 narrowed ``can_spawn`` to ephemeral spawning only (``/mesh/spawn``)

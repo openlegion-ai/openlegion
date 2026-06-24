@@ -124,7 +124,7 @@ An OS-level device profile is selected by `BROWSER_DEVICE_PROFILE` (`desktop-win
 |------|-----------|-------------|
 | `create_tool` | `name`, `code` | Write a new Python tool at runtime. Source is AST-validated before being written — see "AST validation" below. `_MAX_TOOL_SIZE=10_000` bytes. Tools land in `/data/custom_tools`. Call `reload_tools` to activate. |
 | `reload_tools` | -- | Hot-reload all tools from disk |
-| `spawn_fleet_agent` | `role`, `system_prompt` (default ""), `ttl` (default 3600s) | Spawn a new agent in its own isolated container with independent tools, memory, and environment. The agent joins the fleet as a peer. Permission gate: `permissions.can_spawn` (operator cannot grant this). |
+| `spawn_fleet_agent` | `role`, `system_prompt` (default ""), `ttl` (default 3600s) | Spawn a new agent in its own isolated container with independent tools, memory, and environment. The agent joins the fleet as a peer. Permission gate: `permissions.can_spawn` (on by default for new agents; spawned ephemeral agents can't themselves re-spawn). |
 
 **AST validation for `create_tool`.** The submitted source is parsed and rejected if it touches any of:
 - `_FORBIDDEN_IMPORTS` (23 modules): `os`, `subprocess`, `shutil`, `ctypes`, `importlib`, `socket`, `sys`, `signal`, `multiprocessing`, `threading`, `pathlib`, `io`, `tempfile`, `pty`, `code`, `gc`, `inspect`, `pickle`, `shelve`, `http`, `asyncio`, `resource`, `builtins`.
@@ -249,7 +249,7 @@ stale LLM prompt fails fast and retries on the canonical name.
 | `cancel_pending_action` | `nonce` | Cancel a pending action by nonce so it can no longer be confirmed. Use to clean up stale or incorrect proposals. Pair with `list_pending` to find the nonce. |
 | `archive_audit_before` | `before_date` (ISO 8601 date or timestamp) | Archive operator audit entries older than the given date. Rows are removed from the active audit-log view but preserved in the archived store (recoverable via `include_archived=true`). Returns the count of rows archived. |
 
-**Permission ceiling.** The operator cannot grant `can_spawn=true` or `can_use_wallet=true` to agents. The full ceiling: `can_use_browser=True`, `can_spawn=False`, `can_manage_cron=True`, `can_use_wallet=False`, `blackboard_read=["*"]`, `blackboard_write=["tasks/*","context/*","status/*","output/*","artifacts/*"]`. Budget limits: daily $0.01–$1000, monthly $0.10–$30000.
+**Permission ceiling.** The operator cannot grant `can_use_wallet=true` to agents (spending money requires explicit human setup). The full ceiling: `can_use_browser=True`, `can_spawn=True`, `can_manage_cron=True`, `can_use_wallet=False`, `blackboard_read=["*"]`, `blackboard_write=["tasks/*","context/*","status/*","output/*","artifacts/*"]`. Budget limits: daily $0.01–$1000, monthly $0.10–$30000.
 
 **Soft / hard edit fields.** The split is defined once in `src/shared/types.py` (`HARD_EDIT_FIELDS = {"model","permissions","budget","thinking"}`, `SOFT_EDIT_FIELDS = {"instructions","soul","heartbeat","heartbeat_schedule","interface","role"}`) and pending-action TTL is field-aware: 5 minutes for soft edits, 30 minutes for hard edits.
 
