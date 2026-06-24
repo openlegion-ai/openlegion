@@ -24,6 +24,8 @@ handlers keep working without modification.
 """
 from __future__ import annotations
 
+import re
+
 
 class LLMAuthError(RuntimeError):
     """Raised when LLM credentials are broken (401/403) — actionable by rotating creds."""
@@ -128,3 +130,34 @@ def is_context_overflow(text: str) -> bool:
     # `max_tokens` exceed context limit...", which would defeat the marker.
     t = (text or "").lower().replace("`", "")
     return any(marker in t for marker in CONTEXT_OVERFLOW_MARKERS)
+
+
+# Anthropic phrases the overflow as "prompt is too long: 1000961 tokens >
+# 1000000 maximum". When that detail survives to the agent (the streaming SSE
+# path forwards it un-masked), the actual token count is ground truth we can
+# use to CALIBRATE our local estimate — which is content-dependent and can
+# undershoot the real tokenizer by ~2x on dense CSV/JSON/code, leaving the
+# emergency prune a no-op. See ContextManager.calibrate_from_overflow.
+_OVERFLOW_COUNT_RE = re.compile(r"(\d[\d,]*)\s*tokens?\s*>\s*(\d[\d,]*)")
+
+
+def parse_overflow_tokens(text: str) -> tuple[int, int] | None:
+    """Parse ``(actual_tokens, limit_tokens)`` from a context-overflow message.
+
+    Returns ``None`` when the message carries no counts (e.g. the non-streaming
+    proxy path masks the detail to "Upstream service call failed."). Callers
+    must handle ``None`` by forcing progress some other way.
+    """
+    if not text:
+        return None
+    m = _OVERFLOW_COUNT_RE.search(text)
+    if not m:
+        return None
+    try:
+        actual = int(m.group(1).replace(",", ""))
+        limit = int(m.group(2).replace(",", ""))
+    except (ValueError, AttributeError):
+        return None
+    if actual <= 0 or limit <= 0:
+        return None
+    return actual, limit

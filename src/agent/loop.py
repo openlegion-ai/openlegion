@@ -27,7 +27,7 @@ from src.agent.tool_groups import (
 )
 from src.agent.workspace import INTROSPECT_PERM_KEYS
 from src.shared import limits
-from src.shared.errors import LLMAuthError, LLMConfigError
+from src.shared.errors import LLMAuthError, LLMConfigError, parse_overflow_tokens
 from src.shared.types import SILENT_REPLY_TOKEN, AgentStatus, LLMResponse, TaskAssignment, TaskResult
 from src.shared.utils import dumps_safe, format_dict, generate_id, sanitize_for_prompt, setup_logging, truncate
 
@@ -3792,7 +3792,9 @@ class AgentLoop:
                 "output": result,
             })
 
-    def _emergency_prune(self, system: str, tools) -> bool:
+    def _emergency_prune(
+        self, system: str, tools, *, overflow_message: str | None = None,
+    ) -> bool:
         """Emergency-prune ``self._chat_messages`` to ~0.75 of the window after
         a context-overflow 400, and report whether it made progress.
 
@@ -3803,17 +3805,49 @@ class AgentLoop:
         while the role-alternation bridge inserts 1 leaves the count unchanged
         though tokens fell, so a count check would bail prematurely on
         text-heavy (no-tool) operator chats. Callers guard ``context_manager``.
+
+        Two reinforcing mechanisms keep this from no-op'ing when the local
+        estimate is low (dense CSV/JSON/code can read ~2x under the real
+        tokenizer, so the 0.75 ceiling on a 1M window saw 504K and dropped
+        nothing while the real request was 1.0M+):
+
+        1. ``overflow_message`` — when the API reported real counts (the
+           streaming path forwards them un-masked), calibrate the estimator so
+           every subsequent estimate, here and on later turns, reflects reality.
+        2. Forced progress — if the (possibly still-uncalibrated, e.g. masked
+           proxy path) estimate claims we already fit, shed a fixed fraction of
+           the CURRENT size anyway. The API already told us we overflowed, so
+           trusting the estimate over the 400 is the bug we're fixing.
         """
         cm = self.context_manager
+        if overflow_message:
+            counts = parse_overflow_tokens(overflow_message)
+            if counts:
+                sent = self._messages_with_volatile(self._chat_messages)
+                cm.calibrate_from_overflow(counts[0], sent, system, tools)
+
         before_msgs = len(self._chat_messages)
         before_tokens = cm.estimate_request_tokens(self._chat_messages, system, tools)
         self._chat_messages = cm.prune_to_fit(
             self._chat_messages, system_prompt=system, tools=tools, ceiling_frac=0.75,
         )
         after_tokens = cm.estimate_request_tokens(self._chat_messages, system, tools)
+
+        # Forced progress: the API said we overflowed, so a no-op prune means
+        # the estimate is lying — drop ~30% of the current size outright. Guard
+        # on >1 message so prune_to_fit always retains the first+last group.
+        if after_tokens >= before_tokens and before_msgs > 1:
+            self._chat_messages = cm.prune_to_fit(
+                self._chat_messages, system_prompt=system, tools=tools,
+                target_tokens=int(after_tokens * 0.7),
+            )
+            after_tokens = cm.estimate_request_tokens(self._chat_messages, system, tools)
+
         logger.warning(
-            "context overflow: emergency-pruned %d->%d messages (%d->%d est tokens)",
+            "context overflow: emergency-pruned %d->%d messages (%d->%d est tokens, "
+            "correction=%.2f)",
             before_msgs, len(self._chat_messages), before_tokens, after_tokens,
+            cm._estimate_correction,
         )
         return after_tokens < before_tokens
 
@@ -3844,15 +3878,17 @@ class AgentLoop:
                     tools=tools,
                     **kwargs,
                 )
-            except LLMContextOverflowError:
+            except LLMContextOverflowError as e:
                 # Last attempt, no context manager, or the prune can't shrink it
                 # any further → surface the failure instead of looping on the
                 # same 400. (``or`` short-circuits, so we don't prune on the
-                # final attempt.)
+                # final attempt.) ``str(e)`` carries the real token counts when
+                # the provider detail survived (streaming path) so the prune can
+                # calibrate; harmless when it's the masked text.
                 if (
                     attempt >= 2
                     or not self.context_manager
-                    or not self._emergency_prune(system, tools)
+                    or not self._emergency_prune(system, tools, overflow_message=str(e))
                 ):
                     raise
 
@@ -5114,6 +5150,7 @@ class AgentLoop:
                 tools = self.tools.get_tool_definitions(**self._tool_filter_kw) or None
                 _msgs = self._messages_with_volatile(self._chat_messages)
                 _overflowed = False
+                _overflow_msg: str | None = None
                 try:
                     async for event in self.llm.chat_stream(
                         system=system, messages=_msgs, tools=tools,
@@ -5126,11 +5163,14 @@ class AgentLoop:
                         elif etype == "done":
                             llm_response = event["response"]
                     used_streaming = True
-                except LLMContextOverflowError:
+                except LLMContextOverflowError as _overflow_exc:
                     # Context-overflow self-heal: emergency-prune and retry
                     # rather than re-wedge. Only meaningful when nothing was
-                    # streamed yet (overflow 400s before the first token).
+                    # streamed yet (overflow 400s before the first token). The
+                    # streaming SSE path forwards the raw provider detail, so
+                    # this message carries the real token counts for calibration.
                     _overflowed = True
+                    _overflow_msg = str(_overflow_exc)
                     logger.warning(
                         "LLM stream overflowed context window; emergency-pruning",
                     )
@@ -5143,7 +5183,9 @@ class AgentLoop:
                         # First prune before falling back to non-streaming; the
                         # fallback loop below self-heals further if it overflows
                         # again. (Progress bool ignored — this is the 1st pass.)
-                        self._emergency_prune(system, tools)
+                        # Pass the streamed overflow detail so the estimator
+                        # calibrates from the real token count.
+                        self._emergency_prune(system, tools, overflow_message=_overflow_msg)
                         _msgs = self._messages_with_volatile(self._chat_messages)
                     elif used_streaming:
                         logger.warning("LLM stream ended without done event, falling back")
@@ -5157,11 +5199,13 @@ class AgentLoop:
                                 messages=_msgs, tools=tools,
                             )
                             break
-                        except LLMContextOverflowError:
+                        except LLMContextOverflowError as e:
                             if (
                                 _heal_attempt >= 2
                                 or not self.context_manager
-                                or not self._emergency_prune(system, tools)
+                                or not self._emergency_prune(
+                                    system, tools, overflow_message=str(e),
+                                )
                             ):
                                 raise
                             _msgs = self._messages_with_volatile(self._chat_messages)

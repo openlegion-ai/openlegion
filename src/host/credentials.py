@@ -3963,6 +3963,12 @@ class CredentialVault:
                     error_data: dict = {'error': str(e)}
                     if getattr(e, 'status_code', 0) == 402:
                         error_data['credit_exhausted'] = True
+                    # Tag context-overflow so the agent self-heals on the TYPE,
+                    # not the raw text. The streaming frame forwards the detail
+                    # un-masked today (the agent's substring backstop fires), but
+                    # the tag is the durable signal if that text ever changes.
+                    if is_context_overflow(str(e)):
+                        error_data['error_type'] = 'context_overflow'
                     yield f"data: {json.dumps(error_data)}\n\n"
                     return
                 last_error = e
@@ -4030,6 +4036,8 @@ class CredentialVault:
                             error_data = {'error': str(e)}
                             if getattr(e, 'status_code', 0) == 402:
                                 error_data['credit_exhausted'] = True
+                            if is_context_overflow(str(e)):
+                                error_data['error_type'] = 'context_overflow'
                             yield f"data: {json.dumps(error_data)}\n\n"
                             return
                         last_error = e
