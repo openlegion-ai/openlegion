@@ -390,8 +390,12 @@ class TestCreateCustomAgent:
         live = perms.get_permissions("freshie")
         assert "*" in live.blackboard_read
         assert "tasks/*" in live.blackboard_write
+        # Full default capability set: browser + internet + schedules ON,
+        # wallet OFF (parity with the human `_create_agent` path).
         assert live.can_use_browser is True
+        assert live.can_use_internet is True
         assert live.can_manage_cron is True
+        assert live.can_use_wallet is False
 
     def test_default_capabilities_omit_can_spawn(
         self, mesh_app, tmp_path,
@@ -400,9 +404,9 @@ class TestCreateCustomAgent:
         only the operator (the one calling create) is allowed to create
         agents. Without this, every operator-created agent could turn
         around and create more agents itself, defeating the operator
-        gate. The current implementation writes the defaults dict via
-        ``_add_agent_permissions`` and that dict deliberately excludes
-        ``can_spawn`` so the field defaults to False on read.
+        gate. ``_add_agent_permissions`` writes ``can_spawn: False``
+        explicitly in its base defaults (the create path passes only the
+        coordination ACLs), so the agent has no spawn ability.
         """
         import json as _json
 
@@ -424,6 +428,8 @@ class TestCreateCustomAgent:
         # spawn ability. We accept either: (a) key absent, or (b) key
         # present but explicitly False.
         assert agent_perms.get("can_spawn", False) is False
+        # Wallet is the other privileged-off default.
+        assert agent_perms.get("can_use_wallet", False) is False
 
         # And the live matrix agrees.
         mesh_app["perms"].reload()
