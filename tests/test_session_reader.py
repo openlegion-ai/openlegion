@@ -18,7 +18,7 @@ import tempfile
 from click.testing import CliRunner
 
 from src.cli import cli
-from src.cli.session_reader import assemble_session, parse_since
+from src.cli.session_reader import _fmt_ts, _terminal_task, assemble_session, parse_since, render_session
 from src.host.costs import CostTracker
 from src.host.intent import IntentStore
 from src.host.orchestration import Tasks
@@ -117,6 +117,76 @@ class TestParseSince:
         # UTC 'Z' suffix also parses (folded to +00:00).
         z = "2026-01-02T03:04:05Z"
         assert parse_since(z) == _dt.fromisoformat("2026-01-02T03:04:05+00:00").timestamp()
+
+
+class TestTerminalTaskSelection:
+    """The one-line ``sessions`` outcome must reflect how the session ENDED,
+    not the newest-created task. ``_fetch_tasks`` orders by created_at, so a
+    naive ``tasks[-1]`` picks a still-pending child over a completed root."""
+
+    def test_empty(self):
+        assert _terminal_task([]) is None
+
+    def test_prefers_completed_over_newer_pending(self):
+        tasks = [
+            {"id": "root", "status": "done", "outcome": "approved",
+             "completed_at": 100.0, "created_at": 10.0, "updated_at": 100.0},
+            {"id": "child", "status": "pending",
+             "completed_at": None, "created_at": 20.0, "updated_at": 20.0},
+        ]
+        # tasks[-1] is the pending child; terminal must be the completed root.
+        assert _terminal_task(tasks)["id"] == "root"
+
+    def test_falls_back_to_latest_updated_when_none_completed(self):
+        tasks = [
+            {"id": "a", "status": "working",
+             "completed_at": None, "created_at": 10.0, "updated_at": 50.0},
+            {"id": "b", "status": "pending",
+             "completed_at": None, "created_at": 20.0, "updated_at": 20.0},
+        ]
+        assert _terminal_task(tasks)["id"] == "a"
+
+    def test_picks_most_recently_completed(self):
+        tasks = [
+            {"id": "first", "status": "failed",
+             "completed_at": 100.0, "created_at": 10.0, "updated_at": 100.0},
+            {"id": "second", "status": "done",
+             "completed_at": 200.0, "created_at": 20.0, "updated_at": 200.0},
+        ]
+        assert _terminal_task(tasks)["id"] == "second"
+
+
+class TestTimelineTimestamp:
+    """A task's ``→ status`` line must be timestamped at the transition that
+    produced that status (completion), not at creation — otherwise a task
+    created at 10:00 and completed at 10:30 renders ``→ done`` at 10:00 and
+    scrambles the merged chronological timeline."""
+
+    def _session(self, task):
+        return {
+            "trace_id": "tr_timeline", "found": True,
+            "intent": [], "actions": [], "tasks": [task],
+            "cost": {"total_tokens": 0, "total_cost_usd": 0.0, "by_model": []},
+        }
+
+    def test_terminal_status_uses_completed_at_not_created_at(self):
+        task = {
+            "id": "t1", "status": "done", "assignee": "alpha",
+            "created_at": 1000.0, "updated_at": 5000.0, "completed_at": 5000.0,
+        }
+        out = render_session(self._session(task))
+        task_line = next(ln for ln in out.splitlines() if "task t1 → done" in ln)
+        assert _fmt_ts(5000.0) in task_line
+        assert _fmt_ts(1000.0) not in task_line
+
+    def test_pending_task_falls_back_to_created_at(self):
+        task = {
+            "id": "t2", "status": "pending", "assignee": "beta",
+            "created_at": 2000.0, "updated_at": None, "completed_at": None,
+        }
+        out = render_session(self._session(task))
+        task_line = next(ln for ln in out.splitlines() if "task t2 → pending" in ln)
+        assert _fmt_ts(2000.0) in task_line
 
 
 class TestAssemble:

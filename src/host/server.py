@@ -5769,6 +5769,11 @@ def create_mesh_app(
             _try_wake_agent(
                 "operator", wake_msg, wake_origin,
                 auto_notify=False,
+                # Continue the failed task's session so the operator's
+                # recovery work joins the same trace (this path runs from
+                # update_task_status, which does not seed the contextvar, so
+                # pass the task's stored trace explicitly — like retry does).
+                trace_id=task_record.get("trace_id"),
                 on_fail=lambda e: logger.warning(
                     "Operator wake for task %s failed: %s", task_id, e,
                 ),
@@ -5919,6 +5924,11 @@ def create_mesh_app(
                 _try_wake_agent(
                     origin_user, wake_msg, wake_origin,
                     task_id=task_id, auto_notify=False,
+                    # Continue the originating task's session: this back-edge
+                    # fires from update_task_status (no seeded contextvar), so
+                    # pass the task's stored trace so the notified originator's
+                    # follow-up work stays on the same trace instead of forking.
+                    trace_id=task_record.get("trace_id"),
                     on_fail=lambda e: logger.warning(
                         "Back-edge wake for %s on task %s failed: %s",
                         origin_user, task_id, e,
@@ -6641,6 +6651,9 @@ def create_mesh_app(
             f"Operator rerouted task to you: {title!r}{reason_suffix}. "
             "Call check_inbox() to pick it up.",
             origin,
+            # Continue the rerouted task's session (consistent with retry);
+            # this endpoint doesn't seed the contextvar.
+            trace_id=updated.get("trace_id"),
         )
         return updated
 
@@ -7674,6 +7687,9 @@ def create_mesh_app(
                 f"{reason_suffix}. Stop work on it and call check_inbox() "
                 "for next steps.",
                 origin,
+                # Continue the cancelled task's session so the stop-work wake
+                # joins the same trace (consistent with retry/reroute).
+                trace_id=updated.get("trace_id"),
             )
         return updated
 
