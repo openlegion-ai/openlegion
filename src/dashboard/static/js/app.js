@@ -406,6 +406,15 @@ function dashboard() {
     agentFilePreview: null,   // { path, content, mime_type, encoding, size }
     agentFilePreviewLoading: false,
 
+    // Chat deliverables — an agent's workspace/artifacts/ surfaced as
+    // one-click downloads right where the user is reading (keyed by agent id,
+    // 'operator' for the operator chat). Ground-truth backed: lists the real
+    // files on disk, so a download card can never point at a file that isn't
+    // there. See docs/plans/2026-06-24-chat-deliverable-files.md.
+    chatDeliverables: {},        // { agentId: [{ path, name, size }] }
+    chatDeliverablesOpen: {},    // { agentId: bool } — panel expanded
+    chatDeliverablesLoading: {}, // { agentId: bool }
+
     // Uploads panel (System tab)
     uploadsList: [],
     uploadsLoading: false,
@@ -4637,6 +4646,11 @@ function dashboard() {
             this._workplaceTasksDebounce = setTimeout(() => this.loadWorkplaceTasks(), 250);
           }
         }
+        // Keep the in-chat deliverables list fresh for whichever agent just
+        // produced an artifact, so the Files count updates without a manual
+        // refresh. Best-effort.
+        const actor = evt.data?.actor || evt.agent;
+        if (actor) this.loadChatDeliverables(actor);
       }
 
       // PR 1 — operator_action_receipt: append a receipt card to the
@@ -5979,6 +5993,43 @@ function dashboard() {
       document.body.appendChild(a);
       a.click();
       a.remove();
+    },
+
+    // ── Chat deliverables ─────────────────────────────────────────
+    // The agent's workspace/artifacts/ folder is the designed deliverable
+    // channel; surface it as download cards inside the chat so the user
+    // never has to hunt the buried Files sub-tab. Best-effort + silent: a
+    // chat with no artifacts simply shows nothing.
+    async loadChatDeliverables(agentId) {
+      if (!agentId) return;
+      this.chatDeliverablesLoading[agentId] = true;
+      try {
+        const resp = await fetch(
+          `${window.__config.apiBase}/agents/${agentId}/files?path=${encodeURIComponent('workspace/artifacts')}`
+        );
+        if (resp.ok) {
+          const data = await resp.json();
+          this.chatDeliverables[agentId] = (data.entries || [])
+            .filter((e) => e.type === 'file')
+            .map((e) => ({ path: e.path, name: e.path.split('/').pop(), size: e.size }));
+        } else {
+          // 400/404 = no artifacts dir yet; treat as empty, not an error.
+          this.chatDeliverables[agentId] = [];
+        }
+      } catch (e) {
+        console.warn('loadChatDeliverables failed:', e);
+      }
+      this.chatDeliverablesLoading[agentId] = false;
+    },
+
+    chatDeliverableCount(agentId) {
+      return (this.chatDeliverables[agentId] || []).length;
+    },
+
+    toggleChatDeliverables(agentId) {
+      const open = !this.chatDeliverablesOpen[agentId];
+      this.chatDeliverablesOpen[agentId] = open;
+      if (open) this.loadChatDeliverables(agentId); // always refresh on expand
     },
 
     agentFilesParentPath(path) {

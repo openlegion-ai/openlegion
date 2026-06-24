@@ -1461,6 +1461,30 @@
                   <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
                 </button>
               </div>
+              <!-- Deliverables: the operator's workspace/artifacts/ surfaced
+                   as one-click downloads, inline in chat. Loads on mount;
+                   hidden until there's at least one file to deliver. -->
+              <div class="chat-deliverables" x-init="loadChatDeliverables('operator')"
+                x-show="chatDeliverableCount('operator') > 0" x-cloak>
+                <button type="button" class="chat-deliverables-toggle"
+                  @click="toggleChatDeliverables('operator')"
+                  :aria-expanded="chatDeliverablesOpen['operator'] ? 'true' : 'false'">
+                  <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+                  <span x-text="chatDeliverableCount('operator') + (chatDeliverableCount('operator') === 1 ? ' file from this agent' : ' files from this agent')"></span>
+                  <svg class="chat-deliverables-caret" :class="chatDeliverablesOpen['operator'] ? 'rotate-90' : ''" width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+                </button>
+                <div x-show="chatDeliverablesOpen['operator']" class="chat-deliverables-list">
+                  <template x-for="f in (chatDeliverables['operator'] || [])" :key="f.path">
+                    <div class="chat-deliverable-row">
+                      <span class="chat-deliverable-name" x-text="f.name" :title="f.name"></span>
+                      <span class="chat-deliverable-size" x-text="formatFileSize(f.size)"></span>
+                      <button type="button" class="chat-deliverable-dl" @click="downloadAgentFile('operator', f.path)" :title="'Download ' + f.name" aria-label="Download">
+                        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                      </button>
+                    </div>
+                  </template>
+                </div>
+              </div>
               <!-- Input row -->
               <div class="chat-input-wrap">
                 <!-- Attach file button -->
@@ -9152,6 +9176,30 @@
               Steering
             </span>
             <span class="text-[11px] text-gray-500">Agent is working &mdash; your message will redirect it</span>
+          </div>
+          <!-- Deliverables for the active side-chat agent. x-effect reloads
+               whenever activeChatId changes (the panel stays in the DOM and
+               just re-keys), mirroring the operator-chat affordance above. -->
+          <div class="chat-deliverables" x-effect="activeChatId && loadChatDeliverables(activeChatId)"
+            x-show="chatDeliverableCount(activeChatId) > 0" x-cloak>
+            <button type="button" class="chat-deliverables-toggle"
+              @click="toggleChatDeliverables(activeChatId)"
+              :aria-expanded="chatDeliverablesOpen[activeChatId] ? 'true' : 'false'">
+              <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
+              <span x-text="chatDeliverableCount(activeChatId) + (chatDeliverableCount(activeChatId) === 1 ? ' file from this agent' : ' files from this agent')"></span>
+              <svg class="chat-deliverables-caret" :class="chatDeliverablesOpen[activeChatId] ? 'rotate-90' : ''" width="12" height="12" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg>
+            </button>
+            <div x-show="chatDeliverablesOpen[activeChatId]" class="chat-deliverables-list">
+              <template x-for="f in (chatDeliverables[activeChatId] || [])" :key="f.path">
+                <div class="chat-deliverable-row">
+                  <span class="chat-deliverable-name" x-text="f.name" :title="f.name"></span>
+                  <span class="chat-deliverable-size" x-text="formatFileSize(f.size)"></span>
+                  <button type="button" class="chat-deliverable-dl" @click="downloadAgentFile(activeChatId, f.path)" :title="'Download ' + f.name" aria-label="Download">
+                    <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                  </button>
+                </div>
+              </template>
+            </div>
           </div>
           <!-- Input row -->
           <div class="chat-input-wrap">
