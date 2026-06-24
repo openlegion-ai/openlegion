@@ -2594,3 +2594,52 @@ class TestChatWatchChips:
     def test_pipelines_seeded_on_mount_and_chat_entry(self):
         js = _read(_APP_JS)
         assert js.count("this.loadWorkplacePipelines()") >= 3  # mount + chat entry + WS debounce
+
+
+class TestChatDeliverables:
+    """Chat-native deliverable files: an agent's workspace/artifacts/ surfaced
+    as one-click downloads inside both chat surfaces.
+    docs/plans/2026-06-24-chat-deliverable-files.md."""
+
+    def test_deliverables_state_declared(self):
+        for marker in (
+            "chatDeliverables:", "chatDeliverablesOpen:", "chatDeliverablesLoading:",
+        ):
+            assert marker in _APP_JS_TEXT, marker
+
+    def test_deliverables_methods_present(self):
+        for marker in (
+            "loadChatDeliverables(agentId)",
+            "chatDeliverableCount(agentId)",
+            "toggleChatDeliverables(agentId)",
+        ):
+            assert marker in _APP_JS_TEXT, marker
+
+    def test_deliverables_lists_artifacts_dir_ground_truth(self):
+        """Must read the agent's real workspace/artifacts/ listing — the
+        ground-truth backing that keeps a download card from ever pointing
+        at a file that isn't there."""
+        idx = _APP_JS_TEXT.index("async loadChatDeliverables(")
+        block = _APP_JS_TEXT[idx:idx + 900]
+        assert "workspace/artifacts" in block
+        assert "/files?path=" in block
+
+    def test_deliverables_refresh_on_artifact_event(self):
+        """task_artifact_added keeps the in-chat list live without a manual
+        refresh."""
+        idx = _APP_JS_TEXT.index("task_artifact_added'")
+        block = _APP_JS_TEXT[idx:idx + 1200]
+        assert "loadChatDeliverables(" in block
+
+    def test_deliverables_markup_in_both_chat_surfaces(self):
+        # Operator chat keys on the literal 'operator'; the side-chat keys on
+        # the reactive activeChatId. Both must render the affordance.
+        assert "toggleChatDeliverables('operator')" in _INDEX_HTML
+        assert "toggleChatDeliverables(activeChatId)" in _INDEX_HTML
+        assert _INDEX_HTML.count('class="chat-deliverables"') == 2
+
+    def test_deliverables_download_wired_to_existing_endpoint(self):
+        # The chip reuses the shipped downloadAgentFile() egress path
+        # (PR #1037) rather than inventing a new download route.
+        assert "downloadAgentFile('operator', f.path)" in _INDEX_HTML
+        assert "downloadAgentFile(activeChatId, f.path)" in _INDEX_HTML

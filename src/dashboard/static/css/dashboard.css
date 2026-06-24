@@ -1627,6 +1627,108 @@ body {
 
 /* ── Chat input composite (textarea + send button) ── */
 
+/* ── Chat deliverables (an agent's artifacts as inline downloads) ── */
+
+.chat-deliverables {
+  width: 100%;
+  margin-bottom: 6px;
+}
+
+.chat-deliverables-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid rgba(42, 42, 58, 0.8);
+  border-radius: 0.625rem;
+  background: rgba(17, 17, 24, 0.6);
+  color: #9ca3af;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+  transition: color 0.15s, border-color 0.15s, background-color 0.15s;
+}
+
+.chat-deliverables-toggle:hover {
+  color: #e5e7eb;
+  border-color: rgba(99, 102, 241, 0.4);
+  background: rgba(99, 102, 241, 0.08);
+}
+
+.chat-deliverables-toggle span {
+  flex: 1;
+}
+
+.chat-deliverables-caret {
+  flex-shrink: 0;
+  transition: transform 0.15s;
+}
+
+.chat-deliverables-caret.rotate-90 {
+  transform: rotate(90deg);
+}
+
+.chat-deliverables-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.chat-deliverable-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 10px;
+  border-radius: 0.5rem;
+  background: rgba(17, 17, 24, 0.5);
+}
+
+.chat-deliverable-row:hover {
+  background: rgba(99, 102, 241, 0.08);
+}
+
+.chat-deliverable-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: #e5e7eb;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-deliverable-size {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: #6b7280;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-deliverable-dl {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 0.45rem;
+  background: transparent;
+  color: #818cf8;
+  cursor: pointer;
+  transition: color 0.15s, background-color 0.15s;
+}
+
+.chat-deliverable-dl:hover {
+  color: #fff;
+  background: rgba(99, 102, 241, 0.85);
+}
+
 .chat-input-wrap {
   display: flex;
   align-items: flex-end;  /* keep send/attach pinned to the last line as the textarea grows */

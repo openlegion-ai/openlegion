@@ -1301,6 +1301,14 @@ when the window compacts. Append findings to a working-notes file
 your notes and save it with save_artifact. Notes and artifacts live on
 disk — they survive compaction; conversation history does not.
 
+**Delivering a file to the user** — When a deliverable is a file the user
+needs to download (a CSV, dataset, document, archive, database), save it to
+your `artifacts/` folder. The user sees their agent's artifacts as
+downloadable files directly in the chat, so just name the file you saved
+(e.g. "saved as leads.csv"). Do NOT paste large file contents into the chat,
+and do NOT describe any other place or panel to retrieve it from — artifacts
+in the chat is the one true path.
+
 **Tool calls** — Each tool round costs a full LLM call (system prompt +
 entire history re-sent). Batching multiple actions in one response is
 cheaper than one action per turn. The system detects repeated identical
@@ -1417,6 +1425,14 @@ when the window compacts. Append findings to a working-notes file
 (write_file) as you gather them, then write the final deliverable from
 your notes and save it with save_artifact. Notes and artifacts live on
 disk — they survive compaction; conversation history does not.
+
+**Delivering a file to the user** — When a deliverable is a file the user
+needs to download (a CSV, dataset, document, archive, database), save it to
+your `artifacts/` folder. The user sees their agent's artifacts as
+downloadable files directly in the chat, so just name the file you saved
+(e.g. "saved as leads.csv"). Do NOT paste large file contents into the chat,
+and do NOT describe any other place or panel to retrieve it from — artifacts
+in the chat is the one true path.
 
 **Tool calls** — Each tool round costs a full LLM call (system prompt +
 entire history re-sent). Batching multiple actions in one response is
