@@ -653,6 +653,12 @@ def create_dashboard_router(
     # Optional so existing dashboard tests that don't construct one keep
     # working; the endpoints return ``{enabled: False}`` when absent.
     summaries_store: Any = None,
+    # Session observability (Phase 2) — verbatim-intent store. The dashboard
+    # chat endpoints call the agent DIRECTLY (not via the lane's
+    # ``_direct_dispatch``, the only other capture point), so this is the sole
+    # intent-capture surface for the primary human UI. Optional so existing
+    # tests keep working; capture is skipped when absent.
+    intent_store: Any = None,
     # Phase -1 onboarding wizard — tracks first-visit activation. Optional
     # so existing tests that don't pass it keep working; we lazy-init a
     # default :class:`DashboardTelemetry` against ``data/telemetry.db``
@@ -3622,14 +3628,33 @@ def create_dashboard_router(
         # from an unrelated chat. The finally runs after transport.request,
         # so the outbound trace_headers() still carries X-Trace-Id.
         _trace_tok = current_trace_id.set(new_trace_id())
-        origin = MessageOrigin(
-            kind="human",
-            channel="dashboard",
-            user=_operator_session_id(request),
-        )
-        hdrs = trace_headers()
-        hdrs.update(origin_header(origin))
         try:
+            origin = MessageOrigin(
+                kind="human",
+                channel="dashboard",
+                user=_operator_session_id(request),
+            )
+            hdrs = trace_headers()
+            hdrs.update(origin_header(origin))
+            # Session observability (Phase 2): capture the verbatim dashboard
+            # turn. This path calls the agent directly (not via
+            # ``_direct_dispatch``), so it is the ONLY intent-capture point for
+            # the primary human surface — without it ``sessions``/``session``
+            # never see dashboard turns. Best-effort: a store failure must
+            # never break chat. Redaction happens at storage (H16).
+            if intent_store is not None:
+                try:
+                    intent_store.record(
+                        trace_id=current_trace_id.get(),
+                        origin_kind="human",
+                        origin_channel="dashboard",
+                        origin_user=origin.user,
+                        agent=agent_id,
+                        message=message,
+                        meta={"surface": "dashboard"},
+                    )
+                except Exception as _intent_err:
+                    logger.debug("dashboard intent capture failed: %s", _intent_err)
             result = await transport.request(
                 agent_id, "POST", "/chat", json={"message": message}, timeout=120,
                 headers=hdrs,
@@ -3686,6 +3711,22 @@ def create_dashboard_router(
             )
             _hdrs = trace_headers()
             _hdrs.update(origin_header(_origin))
+            # Session observability (Phase 2): capture the verbatim dashboard
+            # turn here (the streaming path also bypasses ``_direct_dispatch``).
+            # Best-effort; redaction at storage (H16). See api_chat above.
+            if intent_store is not None:
+                try:
+                    intent_store.record(
+                        trace_id=current_trace_id.get(),
+                        origin_kind="human",
+                        origin_channel="dashboard",
+                        origin_user=_origin.user,
+                        agent=agent_id,
+                        message=message,
+                        meta={"surface": "dashboard"},
+                    )
+                except Exception as _intent_err:
+                    logger.debug("dashboard intent capture failed: %s", _intent_err)
         finally:
             current_trace_id.reset(_trace_tok)
 

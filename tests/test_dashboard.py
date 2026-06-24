@@ -6101,3 +6101,68 @@ class TestDashboardChatMintsTraceId:
                     or self._captured["headers"].get("x-trace-id"))
         assert bc_trace != chat_trace
         assert not bc_trace, f"broadcast leaked a stale trace_id: {bc_trace!r}"
+
+
+class TestDashboardIntentCapture:
+    """Session observability (Phase 2): the dashboard chat endpoints call the
+    agent directly (not via the lane's ``_direct_dispatch``), so they are the
+    ONLY intent-capture point for the primary human surface. Without capture
+    here, ``openlegion sessions``/``session`` never see dashboard turns — the
+    feature's headline use case. These pin that wiring end-to-end."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        from src.host.intent import IntentStore
+
+        self.intent_store = IntentStore(db_path=os.path.join(self._tmpdir, "intent.db"))
+        self.components["intent_store"] = self.intent_store
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        self.intent_store.close()
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_dashboard_chat_captures_intent(self):
+        self.components["transport"].request = AsyncMock(return_value={"response": "ok"})
+        resp = self.client.post(
+            "/dashboard/api/agents/alpha/chat",
+            json={"message": "pull last week signups"},
+        )
+        assert resp.status_code == 200, resp.text
+        rows = self.intent_store.list_recent(since=0)
+        assert len(rows) == 1, rows
+        row = rows[0]
+        assert row["origin_kind"] == "human"
+        assert row["origin_channel"] == "dashboard"
+        assert row["agent"] == "alpha"
+        assert "signups" in row["message"]
+        assert (row["trace_id"] or "").startswith("tr_")
+
+    def test_dashboard_chat_stream_captures_intent(self):
+        async def _mock_stream(agent_id, method, path, **kwargs):
+            yield {"type": "done", "response": "done"}
+
+        self.components["transport"].stream_request = _mock_stream
+        resp = self.client.post(
+            "/dashboard/api/agents/alpha/chat/stream",
+            json={"message": "stream intent here"},
+        )
+        assert resp.status_code == 200, resp.text
+        rows = self.intent_store.list_recent(since=0)
+        assert len(rows) == 1, rows
+        assert rows[0]["origin_channel"] == "dashboard"
+        assert "stream intent" in rows[0]["message"]
+
+    def test_dashboard_chat_capture_failure_never_breaks_chat(self):
+        """Intent capture is best-effort — a store failure must not 5xx the
+        chat response."""
+        self.components["transport"].request = AsyncMock(return_value={"response": "ok"})
+        self.intent_store.record = MagicMock(side_effect=RuntimeError("boom"))
+        resp = self.client.post(
+            "/dashboard/api/agents/alpha/chat",
+            json={"message": "still works"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["response"] == "ok"

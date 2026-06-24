@@ -1697,6 +1697,10 @@ def create_mesh_app(
             ok, err = _try_wake_agent(
                 target, wake_msg, origin,
                 task_id=task_id, auto_notify=had_origin,
+                # Propagate the handoff's originating trace so the recipient's
+                # work joins the same session (keystone for multi-agent chain
+                # reconstruction).
+                trace_id=request.headers.get("x-trace-id"),
                 on_fail=lambda e: logger.warning(
                     "Wake enqueue for %s failed: %s", target, e,
                 ),
@@ -2767,15 +2771,28 @@ def create_mesh_app(
             duration_ms = 0
         try:
             meta = data.get("meta")
+            # Bound the meta payload: a runaway/compromised agent could otherwise
+            # inflate a single row up to the 8 MiB body cap. Drop an oversized
+            # meta to a marker rather than persist it (the row itself still
+            # records, so the timeline isn't lost).
+            if isinstance(meta, dict):
+                try:
+                    if len(dumps_safe(meta)) > 8192:
+                        meta = {"_truncated": True}
+                except Exception:
+                    meta = {"_truncated": True}
             trace_store.record(
                 trace_id=req_trace_id,
                 source="agent",
                 agent=agent_id,
                 event_type=str(data.get("event_type", ""))[:64],
-                detail=str(data.get("detail", "")),
+                # Cap free-text fields server-side so a misbehaving agent can't
+                # store oversized rows — symmetric with the event_type cap and
+                # independent of the agent's own client-side truncation.
+                detail=str(data.get("detail", ""))[:2000],
                 duration_ms=duration_ms,
-                status=str(data.get("status", "ok")),
-                error=str(data.get("error", "")),
+                status=str(data.get("status", "ok"))[:32],
+                error=str(data.get("error", ""))[:2000],
                 meta=meta if isinstance(meta, dict) else None,
             )
         except Exception:
@@ -5752,6 +5769,11 @@ def create_mesh_app(
             _try_wake_agent(
                 "operator", wake_msg, wake_origin,
                 auto_notify=False,
+                # Continue the failed task's session so the operator's
+                # recovery work joins the same trace (this path runs from
+                # update_task_status, which does not seed the contextvar, so
+                # pass the task's stored trace explicitly — like retry does).
+                trace_id=task_record.get("trace_id"),
                 on_fail=lambda e: logger.warning(
                     "Operator wake for task %s failed: %s", task_id, e,
                 ),
@@ -5902,6 +5924,11 @@ def create_mesh_app(
                 _try_wake_agent(
                     origin_user, wake_msg, wake_origin,
                     task_id=task_id, auto_notify=False,
+                    # Continue the originating task's session: this back-edge
+                    # fires from update_task_status (no seeded contextvar), so
+                    # pass the task's stored trace so the notified originator's
+                    # follow-up work stays on the same trace instead of forking.
+                    trace_id=task_record.get("trace_id"),
                     on_fail=lambda e: logger.warning(
                         "Back-edge wake for %s on task %s failed: %s",
                         origin_user, task_id, e,
@@ -6502,6 +6529,7 @@ def create_mesh_app(
         target: str, message: str, origin: "MessageOrigin | None",
         *,
         task_id: str | None = None,
+        trace_id: str | None = None,
         auto_notify: bool | None = None,
         on_fail=None,
     ) -> tuple[bool, str | None]:
@@ -6536,11 +6564,23 @@ def create_mesh_app(
         eff_origin = origin if origin is not None else MessageOrigin(
             kind="agent", channel="", user="",
         )
+        # Session observability: propagate the originating turn's trace_id into
+        # the lane so the woken agent's work (LLM calls, tool_call/handoff
+        # traces) records under the SAME trace as the human turn that triggered
+        # it — otherwise every handoff starts a fresh, disconnected trace and a
+        # multi-agent chain cannot be reconstructed. Read the active contextvar
+        # here in the request thread (the enqueue coroutine runs on a different
+        # loop, so the contextvar must be captured at bind time). Callers that
+        # already know the trace (e.g. retry of a stored task) pass it
+        # explicitly; ``None`` downstream falls back to a fresh id.
+        from src.shared.trace import current_trace_id
+        eff_trace_id = trace_id if trace_id is not None else current_trace_id.get()
         # Build the coroutine first so we can close it explicitly if the
         # dispatch loop is unhealthy — otherwise an orphaned coroutine
         # would emit a "coroutine was never awaited" warning.
         coro = lane_manager.enqueue(
             target, sanitize_for_prompt(message), mode="followup",
+            trace_id=eff_trace_id,
             origin=eff_origin,
             auto_notify=had_origin if auto_notify is None else auto_notify,
             task_id=task_id, system_note=True,
@@ -6611,6 +6651,9 @@ def create_mesh_app(
             f"Operator rerouted task to you: {title!r}{reason_suffix}. "
             "Call check_inbox() to pick it up.",
             origin,
+            # Continue the rerouted task's session (consistent with retry);
+            # this endpoint doesn't seed the contextvar.
+            trace_id=updated.get("trace_id"),
         )
         return updated
 
@@ -6722,6 +6765,9 @@ def create_mesh_app(
             f"Operator retried failed task as {clone['id']!r}: {title!r}. "
             "Call check_inbox() to pick it up.",
             origin,
+            # Continue the original task's session on the retry clone (the
+            # contextvar was already reset above, so pass it explicitly).
+            trace_id=_retry_trace_id,
         )
         return {"clone": clone, "original_id": original["id"]}
 
@@ -7073,17 +7119,20 @@ def create_mesh_app(
         import time as _time
         if not since:
             return _time.time() - (7 * 24 * 60 * 60)
-        s = since.strip().lower()
+        raw = since.strip()
+        low = raw.lower()
         # Duration form: ``Nh`` / ``Nd`` / ``Nm``
-        if s and s[-1] in {"s", "m", "h", "d"} and s[:-1].isdigit():
-            n = int(s[:-1])
-            unit = s[-1]
+        if low and low[-1] in {"s", "m", "h", "d"} and low[:-1].isdigit():
+            n = int(low[:-1])
+            unit = low[-1]
             mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[unit]
             return _time.time() - (n * mult)
-        # ISO timestamp
+        # ISO timestamp. Parse the ORIGINAL-case string — Python 3.10's
+        # ``fromisoformat`` rejects a lowercase ``t`` separator, so lowercasing
+        # first made a full ``...T...`` timestamp silently fall back to 7d.
         try:
             from datetime import datetime as _dt
-            dt = _dt.fromisoformat(s.replace("z", "+00:00"))
+            dt = _dt.fromisoformat(raw.replace("Z", "+00:00").replace("z", "+00:00"))
             return dt.timestamp()
         except (ValueError, TypeError):
             return _time.time() - (7 * 24 * 60 * 60)
@@ -7638,6 +7687,9 @@ def create_mesh_app(
                 f"{reason_suffix}. Stop work on it and call check_inbox() "
                 "for next steps.",
                 origin,
+                # Continue the cancelled task's session so the stop-work wake
+                # joins the same trace (consistent with retry/reroute).
+                trace_id=updated.get("trace_id"),
             )
         return updated
 

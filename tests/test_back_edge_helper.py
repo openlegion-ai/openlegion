@@ -356,6 +356,56 @@ class TestBackEdgeHelperEligibility:
         assert len(lane.calls) == 1
 
 
+class TestBackEdgeTracePropagation:
+    """Session observability: a back-edge / operator-recovery wake must
+    continue the failed task's trace so ``openlegion session <trace>`` shows
+    the recovery branch. ``update_task_status`` does not seed the trace
+    contextvar, so the helper must pass the task's stored ``trace_id``
+    explicitly — otherwise ``_direct_dispatch`` mints a fresh, disconnected
+    trace and the recovery work falls out of the session."""
+
+    def test_agent_origin_back_edge_wake_carries_task_trace(
+        self, mesh_app_with_back_edge,
+    ):
+        app, _blackboard, lane, _loop = mesh_app_with_back_edge
+        rec = _record(
+            "task_trace_1",
+            creator="scout",
+            origin={"kind": "agent", "channel": "", "user": "scout"},
+            trace_id="tr_aaaaaaaaaaaa",
+        )
+
+        app._write_task_event_back_edge(
+            rec, event_kind="task_failed",
+            payload_extras={"error": "boom"},
+        )
+        _settle()
+
+        assert len(lane.calls) == 1
+        assert lane.calls[0]["args"][0] == "scout"
+        assert lane.calls[0]["kwargs"].get("trace_id") == "tr_aaaaaaaaaaaa"
+
+    def test_human_origin_recovery_wake_carries_task_trace(
+        self, mesh_app_with_back_edge,
+    ):
+        app, _blackboard, lane, _loop = mesh_app_with_back_edge
+        rec = _record(
+            "task_trace_2",
+            origin={"kind": "human", "channel": "telegram", "user": "9999"},
+            trace_id="tr_bbbbbbbbbbbb",
+        )
+
+        app._write_task_event_back_edge(
+            rec, event_kind="task_failed",
+            payload_extras={"error": "boom"},
+        )
+        _settle()
+
+        op_wakes = [c for c in lane.calls if c["args"][0] == "operator"]
+        assert len(op_wakes) == 1
+        assert op_wakes[0]["kwargs"].get("trace_id") == "tr_bbbbbbbbbbbb"
+
+
 class TestBackEdgeTTLSplit:
     """Actionable events keep the 7-day TTL; informational events get a
     much shorter 24h TTL so they don't pile up for a week and flood the

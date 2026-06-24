@@ -65,21 +65,26 @@ def parse_since(since: str | None) -> float:
     default = time.time() - (7 * 24 * 60 * 60)
     if not since:
         return default
-    s = since.strip().lower()
-    if not s:
+    raw = since.strip()
+    low = raw.lower()
+    if not low:
         return default
-    if s == "today":
+    if low == "today":
         now = datetime.now()
         midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
         return midnight.timestamp()
     # Duration form: Ns / Nm / Nh / Nd
-    if s[-1] in {"s", "m", "h", "d"} and s[:-1].isdigit():
-        n = int(s[:-1])
-        mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[s[-1]]
+    if low[-1] in {"s", "m", "h", "d"} and low[:-1].isdigit():
+        n = int(low[:-1])
+        mult = {"s": 1, "m": 60, "h": 3600, "d": 86400}[low[-1]]
         return time.time() - (n * mult)
-    # ISO date / timestamp
+    # ISO date / timestamp. Parse the ORIGINAL-case string: on Python 3.10
+    # (a supported interpreter) ``datetime.fromisoformat`` rejects a lowercase
+    # ``t`` separator, so lowercasing first made a full ``2026-06-18T12:00:00``
+    # silently fall back to the 7-day default. Only the ``Z``/``z`` UTC suffix
+    # is normalized (3.10 doesn't accept it either).
     try:
-        dt = datetime.fromisoformat(s.replace("z", "+00:00"))
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00").replace("z", "+00:00"))
         return dt.timestamp()
     except (ValueError, TypeError):
         return default
@@ -264,6 +269,23 @@ def assemble_session(data_dir: str | Path, trace_id: str) -> dict:
     }
 
 
+def _terminal_task(tasks: list[dict]) -> dict | None:
+    """Pick the task that best represents how a session ended.
+
+    ``_fetch_tasks`` orders by ``created_at``, so ``tasks[-1]`` is the newest
+    *created* task — which is wrong for the one-line outcome: a session whose
+    root task is ``done`` but which spawned a still-``pending`` child would
+    summarize as ``pending``. Prefer the most recently completed task; if none
+    has completed, fall back to the most recently updated/created one.
+    """
+    if not tasks:
+        return None
+    completed = [t for t in tasks if t.get("completed_at")]
+    if completed:
+        return max(completed, key=lambda t: t.get("completed_at") or 0)
+    return max(tasks, key=lambda t: t.get("updated_at") or t.get("created_at") or 0)
+
+
 def list_sessions(
     data_dir: str | Path,
     *,
@@ -315,8 +337,8 @@ def list_sessions(
         cost = _fetch_cost(data_dir, trace_id)
         # The terminal task's status/outcome is the most useful one-line signal.
         outcome = ""
-        if tasks:
-            last = tasks[-1]
+        last = _terminal_task(tasks)
+        if last:
             outcome = last.get("status") or ""
             if last.get("outcome"):
                 outcome = f"{outcome}/{last['outcome']}"
@@ -388,7 +410,11 @@ def render_session(session: dict) -> str:
         suffix = f" ({', '.join(tail)})" if tail else ""
         events.append((ts, f"  [{_fmt_ts(ts)}] {' '.join(bits)}{suffix}"))
     for t in session["tasks"]:
-        ts = t.get("created_at") or 0
+        # The line renders the task's CURRENT status, so timestamp it at the
+        # transition that produced that status — completed_at for a terminal
+        # task, else the last update, else creation. Using created_at would
+        # pin a "→ done" 30 minutes early and scramble the merged timeline.
+        ts = t.get("completed_at") or t.get("updated_at") or t.get("created_at") or 0
         line = (
             f"  [{_fmt_ts(ts)}] task {t.get('id') or '?'} → {t.get('status') or '?'} "
             f"(assignee={t.get('assignee') or '?'})"

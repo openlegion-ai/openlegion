@@ -1527,6 +1527,7 @@ class RuntimeContext:
             summaries_store=getattr(app, "summaries_store", None),
             connector_store=self.connector_store,
             mcp_gateway=self.mcp_gateway,
+            intent_store=self.intent_store,
         )
         app.include_router(dashboard_router)
         app.include_router(create_spa_catchall_router())  # Must be last — SPA deep linking
