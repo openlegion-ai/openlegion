@@ -286,11 +286,13 @@ class PermissionMatrix:
         """Check if agent has external-internet access (HTTPS / web search).
 
         Returns True for trusted mesh-internal callers. Otherwise reads
-        ``AgentPermissions.can_use_internet``. The operator gets True by
-        default via ``_ensure_operator_agent``; worker agents default to
-        False — their http_request / web_search tools are historically
-        ungated, so this only affects agents whose runtime explicitly
-        consults the flag (today: operator's ``_allowed_tools`` filter).
+        ``AgentPermissions.can_use_internet``. New agents get True via the
+        create-path defaults (``cli/config._add_agent_permissions``) and the
+        operator via ``_ensure_operator_agent``; the field default is False so
+        the deny-all fallback for an unknown agent stays restrictive. Worker
+        http_request / web_search tools are historically ungated, so this only
+        affects agents whose runtime explicitly consults the flag (today: the
+        operator's ``_allowed_tools`` filter).
         """
         if self._is_trusted(agent_id):
             return True

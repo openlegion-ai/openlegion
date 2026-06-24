@@ -386,12 +386,15 @@ class AgentPermissions(BaseModel):
                                                # [] = no actions (equivalent
                                                # to can_use_browser=False).
     # ``can_use_internet`` gates external HTTPS / web-search tool calls
-    # (``http_request``, ``web_search``). Workers default to ``False``
-    # but their tools are also default-ungated historically, so the
-    # field has no effect for them unless the agent-side filter explicitly
-    # consults it. The operator gets ``True`` via
-    # ``_ensure_operator_agent`` so it can reach the internet by default;
-    # the Operator Settings UI surfaces a toggle that flips this field.
+    # (``http_request``, ``web_search``). Field default is ``False`` so the
+    # deny-all fallback for an unknown agent stays restrictive — exactly like
+    # ``can_use_browser`` above. New agents nonetheless get internet ON: every
+    # create path persists ``can_use_internet: True`` via the base defaults in
+    # ``cli/config._add_agent_permissions`` (mirroring how that base flips
+    # ``can_use_browser`` to True). Worker internet tools are also
+    # default-ungated historically, so this field mainly drives the operator's
+    # agent-side tool filter + the dashboard badge. The Operator Settings UI
+    # surfaces a toggle that flips this field.
     can_use_internet: bool = False
     # ``can_spawn`` (Task 3 narrowed semantics): gates EPHEMERAL spawning
     # only — subagents, cron-triggered spawns, and template applies that

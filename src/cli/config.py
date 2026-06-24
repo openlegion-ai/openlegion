@@ -538,6 +538,25 @@ def _add_agent_to_config(
         yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
 
 
+# Coordination grants layered on top of the base defaults for a fully-fledged
+# created agent. Applied by EVERY human create path (`_create_agent`: setup
+# wizard, REPL, dashboard no-template) AND the operator/mesh create endpoint,
+# so a manually-created agent is no more limited than an operator- or
+# template-created one. The base defaults leave `blackboard_read`/`_write`
+# empty (so templates can scope them); without these grants an agent is locked
+# out of the coordination protocol entirely (and skips the auto-watch setup at
+# /mesh/register, gated on blackboard_read being truthy). Capability toggles
+# (browser/internet/cron/spawn/wallet) live in the base dict, not here. The
+# mesh `create_custom_agent` endpoint imports this same constant rather than
+# duplicating it.
+_DEFAULT_AGENT_COORDINATION_PERMS: dict = {
+    "blackboard_read":  ["*"],
+    "blackboard_write": ["tasks/*", "context/*", "status/*", "output/*", "artifacts/*"],
+    "can_publish":      ["*"],
+    "can_subscribe":    ["*"],
+}
+
+
 def _add_agent_permissions(
     name: str, permissions: dict | None = None, *, from_template: bool = False
 ) -> None:
@@ -568,8 +587,17 @@ def _add_agent_permissions(
         "blackboard_write": [],
         "allowed_apis": ["llm", "image_gen"],
         "allowed_credentials": ["*"],
+        # Default capability set for every new agent: browser + internet +
+        # schedules (cron) ON; wallet + ephemeral-spawn OFF (privileged —
+        # granted only explicitly, e.g. the operator passes can_spawn=True and
+        # the boolean-merge below honors it; fleet templates are clamped by
+        # _TEMPLATE_PERMISSION_CEILING). A template may still flip browser /
+        # internet / cron off via the merge.
         "can_use_browser": True,
+        "can_use_internet": True,
         "can_manage_cron": True,
+        "can_spawn": False,
+        "can_use_wallet": False,
     }
 
     # Merge template permissions into defaults
@@ -679,7 +707,10 @@ def _create_agent(
     """Create an agent: config, permissions, tools directory."""
     name = _validate_agent_name(name)
     _add_agent_to_config(name, description, model)
-    _add_agent_permissions(name)
+    # Apply the same coordination defaults the operator/mesh create path uses
+    # so a human-created (no-template) agent isn't second-class — empty
+    # blackboard ACLs would lock it out of the coordination protocol.
+    _add_agent_permissions(name, permissions=_DEFAULT_AGENT_COORDINATION_PERMS)
     tools_dir = PROJECT_ROOT / "agent_tools" / name
     tools_dir.mkdir(parents=True, exist_ok=True)
 

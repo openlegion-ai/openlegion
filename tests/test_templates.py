@@ -12,12 +12,14 @@ import pytest
 import yaml
 
 from src.cli.config import (
+    _DEFAULT_AGENT_COORDINATION_PERMS,
     AGENTS_FILE,
     PERMISSIONS_FILE,
     PROJECT_ROOT,
     _add_agent_permissions,
     _add_agent_to_config,
     _apply_template,
+    _create_agent,
     _create_agent_from_template,
     _load_tool_templates,
     _validate_agent_name,
@@ -196,9 +198,54 @@ class TestAddAgentToConfig(_TempConfigMixin):
             assert key not in agent, f"unexpected empty key {key!r} in agents.yaml"
 
 
+class TestCreateAgentParity(_TempConfigMixin):
+    """A human-created (no-template) agent must get the SAME coordination
+    defaults as an operator/mesh-created one — empty blackboard ACLs would
+    otherwise lock it out of the coordination protocol. Both paths funnel
+    through ``_add_agent_permissions`` with ``_DEFAULT_AGENT_COORDINATION_PERMS``."""
+
+    def test_create_agent_gets_coordination_defaults(self):
+        _create_agent("dana", "researcher", "openai/gpt-4o")
+        with open(self._perms_path) as f:
+            perms = json.load(f)
+        dana = perms["permissions"]["dana"]
+        # Coordination: full blackboard read + the standard write prefixes.
+        assert dana["blackboard_read"] == ["*"]
+        for prefix in ("tasks/*", "context/*", "status/*", "output/*", "artifacts/*"):
+            assert prefix in dana["blackboard_write"]
+        assert dana["can_publish"] == ["*"]
+        assert dana["can_subscribe"] == ["*"]
+
+    def test_create_agent_default_capability_set(self):
+        """The intended default capabilities for a new agent: browser +
+        internet + schedules (cron) ON; wallet + ephemeral-spawn OFF."""
+        _create_agent("cap", "worker", "openai/gpt-4o")
+        with open(self._perms_path) as f:
+            perms = json.load(f)
+        cap = perms["permissions"]["cap"]
+        assert cap["can_use_browser"] is True
+        assert cap["can_use_internet"] is True
+        assert cap["can_manage_cron"] is True
+        assert cap["can_spawn"] is False
+        assert cap["can_use_wallet"] is False
+
+    def test_create_agent_matches_operator_default_perms(self):
+        """The blackboard/pubsub coordination grants a human-created agent
+        receives are exactly the operator/mesh create defaults (same source
+        constant) — no path is more limited than the other."""
+        _create_agent("erin", "analyst", "openai/gpt-4o")
+        with open(self._perms_path) as f:
+            perms = json.load(f)
+        erin = perms["permissions"]["erin"]
+        assert set(erin["blackboard_read"]) == set(_DEFAULT_AGENT_COORDINATION_PERMS["blackboard_read"])
+        assert set(erin["blackboard_write"]) == set(_DEFAULT_AGENT_COORDINATION_PERMS["blackboard_write"])
+
+
 class TestAddAgentPermissions(_TempConfigMixin):
     def test_default_permissions(self):
-        """Without template permissions, defaults are used."""
+        """``_add_agent_permissions`` with NO perms keeps the restrictive base
+        (empty blackboard) — only the create paths layer coordination defaults
+        on top. This pins the base so templates can still scope blackboard."""
         _add_agent_to_config("alice", "researcher", "openai/gpt-4o")
         _add_agent_permissions("alice")
         with open(self._perms_path) as f:
@@ -207,6 +254,8 @@ class TestAddAgentPermissions(_TempConfigMixin):
         assert alice["allowed_apis"] == ["llm", "image_gen"]
         assert alice["blackboard_read"] == []
         assert alice["blackboard_write"] == []
+        # Internet is on by default even on the bare base.
+        assert alice["can_use_internet"] is True
 
     def test_template_permissions_merged(self):
         """Template permissions are merged into defaults."""

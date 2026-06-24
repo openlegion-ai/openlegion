@@ -4264,6 +4264,7 @@ def create_mesh_app(
         import random
 
         from src.cli.config import (
+            _DEFAULT_AGENT_COORDINATION_PERMS,
             PROJECT_ROOT,
             _add_agent_permissions,
             _add_agent_to_config,
@@ -4301,21 +4302,13 @@ def create_mesh_app(
                 initial_instructions=instructions, initial_soul=soul,
             )
         _update_agent_field(name, "avatar", random.randint(1, 50))
-        # Operator-created agents need the same coordination defaults as
-        # template-created agents — empty blackboard_read/write would lock
-        # them out of the coordination protocol entirely (and skip the
-        # auto-watch setup at /mesh/register, which is gated on
-        # blackboard_read being truthy). Mirrors the operator-permission
-        # ceiling in operator_tools.py and the starter.yaml template.
-        default_perms = {
-            "blackboard_read":  ["*"],
-            "blackboard_write": ["tasks/*", "context/*", "status/*", "output/*", "artifacts/*"],
-            "can_publish":      ["*"],
-            "can_subscribe":    ["*"],
-            "can_use_browser":  True,
-            "can_manage_cron":  True,
-        }
-        _add_agent_permissions(name, permissions=default_perms)
+        # Operator-created agents need the same coordination defaults as the
+        # human create path (`_create_agent`) and template-created agents —
+        # empty blackboard_read/write would lock them out of the coordination
+        # protocol entirely (and skip the auto-watch setup at /mesh/register,
+        # which is gated on blackboard_read being truthy). Single source of
+        # truth lives in cli.config so both create paths stay in lockstep.
+        _add_agent_permissions(name, permissions=_DEFAULT_AGENT_COORDINATION_PERMS)
         # _add_agent_permissions writes to config/permissions.json on disk;
         # the live PermissionMatrix has to reload or the agent's imminent
         # /mesh/register call will fall through to default/deny-all (cf. PR
