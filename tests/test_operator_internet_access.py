@@ -2,7 +2,8 @@
 
 Surface under test:
 
-* ``AgentPermissions.can_use_internet`` (new field, default False).
+* ``AgentPermissions.can_use_internet`` (field default False for the
+  deny-all fallback; create paths grant True so new agents get internet on).
 * ``PermissionMatrix.can_use_internet(agent_id)`` (mirrors the field;
   trusted-internal callers always pass).
 * ``_OPERATOR_ALLOWED_TOOLS`` includes ``http_request`` and
@@ -92,12 +93,17 @@ def mesh_app(tmp_path, monkeypatch):
 # ── Permission model + matrix ─────────────────────────────────────────
 
 
-def test_agent_permissions_default_can_use_internet_is_false():
-    """Workers default to ``False`` — their http/web_search tools are
-    historically ungated, so the field is opt-in. Only the operator is
-    flipped True by ``_ensure_operator_agent``."""
+def test_agent_permissions_field_default_can_use_internet_is_false():
+    """The MODEL field default stays ``False`` so the deny-all fallback for an
+    unknown agent (PermissionMatrix.get_permissions) is restrictive — same
+    convention as ``can_use_browser``. New agents get internet ON via the
+    create-path base defaults (see test_templates.TestCreateAgentParity), not
+    via the bare field default."""
     perms = AgentPermissions(agent_id="worker")
     assert perms.can_use_internet is False
+    # Mirrors the established can_use_browser convention (field default False,
+    # create-path default True).
+    assert perms.can_use_browser is False
 
 
 def test_agent_permissions_can_use_internet_round_trip():
