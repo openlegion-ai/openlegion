@@ -211,6 +211,38 @@ def _fetch_tasks(data_dir: Path, trace_id: str) -> list[dict]:
         conn.close()
 
 
+def _fetch_lifecycle(data_dir: Path, start: float, end: float) -> list[dict]:
+    """Return external infra-event markers overlapping ``[start, end]``.
+
+    Lifecycle markers (host restart / deploy / OOM) are NOT trace-keyed — a host
+    restart hits every in-flight trace at once — so they're correlated to a
+    session by wall-clock overlap, not by a ``trace_id`` join. The window is
+    padded slightly on both ends so a restart that lands just outside the first/
+    last recorded event (the gap it likely *caused*) still surfaces.
+    """
+    conn = _connect_ro(data_dir / "lifecycle.db")
+    if conn is None:
+        return []
+    try:
+        cols = _columns(conn, "lifecycle_events")
+        if not cols:
+            return []
+        pad = 60.0  # seconds of slack on each edge
+        rows = conn.execute(
+            "SELECT timestamp, kind, detail FROM lifecycle_events "
+            "WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp",
+            (start - pad, end + pad),
+        ).fetchall()
+        return [
+            {"timestamp": r["timestamp"], "kind": r["kind"], "detail": r["detail"]}
+            for r in rows
+        ]
+    except sqlite3.OperationalError:
+        return []
+    finally:
+        conn.close()
+
+
 def _fetch_cost(data_dir: Path, trace_id: str) -> dict:
     """Return a cost rollup for a trace_id: totals + per-model breakdown."""
     empty = {"total_tokens": 0, "total_cost_usd": 0.0, "by_model": []}
@@ -258,6 +290,25 @@ def assemble_session(data_dir: str | Path, trace_id: str) -> dict:
     actions = _fetch_actions(data_dir, trace_id)
     tasks = _fetch_tasks(data_dir, trace_id)
     cost = _fetch_cost(data_dir, trace_id)
+
+    # Lifecycle markers are correlated by wall-clock, so derive the session's
+    # time window from every timestamped row we found and pull markers that
+    # overlap it. Only query when the window is non-empty (a found session).
+    timestamps: list[float] = []
+    for it in intent:
+        if it.get("timestamp"):
+            timestamps.append(float(it["timestamp"]))
+    for a in actions:
+        if a.get("timestamp"):
+            timestamps.append(float(a["timestamp"]))
+    for t in tasks:
+        for key in ("created_at", "updated_at", "completed_at"):
+            if t.get(key):
+                timestamps.append(float(t[key]))
+    lifecycle: list[dict] = []
+    if timestamps:
+        lifecycle = _fetch_lifecycle(data_dir, min(timestamps), max(timestamps))
+
     found = bool(intent or actions or tasks or cost["by_model"])
     return {
         "trace_id": trace_id,
@@ -266,6 +317,7 @@ def assemble_session(data_dir: str | Path, trace_id: str) -> dict:
         "actions": actions,
         "tasks": tasks,
         "cost": cost,
+        "lifecycle": lifecycle,
     }
 
 
@@ -420,6 +472,14 @@ def render_session(session: dict) -> str:
             f"(assignee={t.get('assignee') or '?'})"
         )
         events.append((ts, line))
+    # External infra-event markers (host restart / deploy / OOM), interleaved by
+    # wall-clock. Flagged with ``**`` so a restart that explains a timeline gap
+    # jumps out of the normal action stream.
+    for ev in session.get("lifecycle", []):
+        ts = ev.get("timestamp") or 0
+        detail = ev.get("detail") or ""
+        suffix = f" — {detail[:120]}" if detail else ""
+        events.append((ts, f"  [{_fmt_ts(ts)}] ** infra:{ev.get('kind') or 'event'}{suffix}"))
     if events:
         for _ts, line in sorted(events, key=lambda e: e[0]):
             lines.append(line)

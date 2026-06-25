@@ -765,24 +765,63 @@ def tasks_cmd(agent, team, status, port, as_json):
 
 
 @cli.command("session")
-@click.argument("trace_id")
+@click.argument("trace_id", required=False, default=None)
+@click.option(
+    "--recent", "recent", is_flag=True, default=False,
+    help="List recent sessions instead of one trace (optionally pass a count, default 20)",
+)
 @click.option(
     "--data-dir", "data_dir", default=None,
     help="Path to the on-box data dir holding the SQLite stores (default: ./data)",
 )
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-def session_cmd(trace_id: str, data_dir: str | None, as_json: bool):
+def session_cmd(trace_id: str | None, recent: bool, data_dir: str | None, as_json: bool):
     """Reconstruct one session's full timeline by trace_id (read-only).
 
     Assembles intent + actions + task transitions + cost from the host SQLite
-    stores. Works even when the mesh is down. NOTE: per-turn chat transcript
-    text is container-local, so this host-side timeline does not include the
-    full conversation — only intent, traces, tasks, and costs.
-    """
-    from src.cli.session_reader import assemble_session, render_session
+    stores — and interleaves external infra-event markers (host restart /
+    deploy) by wall-clock so an unexplained gap gets attributed to its cause.
+    Works even when the mesh is down. NOTE: per-turn chat transcript text is
+    container-local, so this host-side timeline does not include the full
+    conversation — only intent, traces, tasks, and costs.
 
+    Usage:
+
+    \b
+      openlegion session <trace_id>     reconstruct one session's timeline
+      openlegion session --recent [N]   list the N most recent sessions (default 20)
+
+    See also the ``sessions`` command for richer filters (``--since`` /
+    ``--user`` / ``--agent``).
+    """
     as_json = as_json or _json_mode
     base = Path(data_dir) if data_dir else cli_config.DATA_DIR
+
+    # --recent: list recent sessions instead of reconstructing one trace. The
+    # optional ``[N]`` rides in on the positional ``trace_id`` slot (so the
+    # documented ``session --recent 50`` syntax works); default 20.
+    if recent:
+        from src.cli.session_reader import list_sessions, render_sessions
+
+        limit = 20
+        if trace_id:
+            try:
+                limit = max(1, int(trace_id))
+            except ValueError:
+                _fail(f"--recent expects a count, got {trace_id!r}")
+        # Unbounded window — "recent" is a count, not a time floor.
+        summaries = list_sessions(base, since=0.0, limit=limit)
+        if as_json:
+            click.echo(dumps_safe({"sessions": summaries}))
+        else:
+            click.echo(render_sessions(summaries))
+        return
+
+    if not trace_id:
+        _fail("Provide a trace_id, or use --recent [N] to list recent sessions.")
+
+    from src.cli.session_reader import assemble_session, render_session
+
     session = assemble_session(base, trace_id)
     if as_json:
         click.echo(dumps_safe(session))

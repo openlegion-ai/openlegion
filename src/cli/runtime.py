@@ -163,6 +163,7 @@ class RuntimeContext:
         self.event_bus = None
         self.trace_store = None
         self.intent_store = None
+        self.lifecycle_store = None
         self.agent_urls: dict[str, str] = {}
         self._dispatch_loop = None
         # Post-completion verification wakes (success path) — sliding
@@ -216,6 +217,8 @@ class RuntimeContext:
             self.trace_store.close()
         if self.intent_store:
             self.intent_store.close()
+        if self.lifecycle_store:
+            self.lifecycle_store.close()
         if self.pubsub:
             self.pubsub.close()
         if self.blackboard:
@@ -404,6 +407,15 @@ class RuntimeContext:
         from src.host.intent import IntentStore
         self.intent_store = IntentStore(
             db_path=os.environ.get("OPENLEGION_INTENT_DB", "data/intent.db")
+        )
+        # External infra-event markers (host restart / deploy / OOM). Emitted
+        # out-of-band by the provisioner or an operator runbook via the
+        # internal-only POST /mesh/system/lifecycle_event endpoint and
+        # interleaved by wall-clock into the session-reader timeline. Append-
+        # only with a 90-day time-based GC (mirrors the intent store).
+        from src.host.lifecycle import LifecycleStore
+        self.lifecycle_store = LifecycleStore(
+            db_path=os.environ.get("OPENLEGION_LIFECYCLE_DB", "data/lifecycle.db")
         )
         self.blackboard = Blackboard(event_bus=self.event_bus)
         self.pubsub = PubSub(db_path="pubsub.db")
@@ -1429,6 +1441,7 @@ class RuntimeContext:
             auth_tokens=self.runtime.auth_tokens,
             trace_store=self.trace_store,
             intent_store=self.intent_store,
+            lifecycle_store=self.lifecycle_store,
             event_bus=self.event_bus,
             health_monitor=self.health_monitor,
             cost_tracker=self.cost_tracker,
@@ -1528,6 +1541,7 @@ class RuntimeContext:
             connector_store=self.connector_store,
             mcp_gateway=self.mcp_gateway,
             intent_store=self.intent_store,
+            lifecycle_store=self.lifecycle_store,
         )
         app.include_router(dashboard_router)
         app.include_router(create_spa_catchall_router())  # Must be last — SPA deep linking
