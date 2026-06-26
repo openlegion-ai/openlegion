@@ -119,6 +119,7 @@ class TestDockerBackendLifecycle:
         backend.agents = {}
         backend._port_lock = __import__("threading").Lock()
         backend._next_port = 8400
+        backend._reserved_ports = {8420}
         backend.use_host_network = True
         backend.mesh_host_port = 8420
         backend.extra_env = {}
@@ -138,6 +139,63 @@ class TestDockerBackendLifecycle:
         # Token must have been popped on the failure path.
         assert "gamma" not in backend.auth_tokens
         assert "gamma" not in backend.agents
+
+
+# ── Host-port allocator: must never collide with the mesh host port ──
+#
+# Production outage: the loopback allocator (8401+) incremented blindly and
+# eventually handed an agent container 127.0.0.1:8420 — the exact port the
+# mesh host process must bind. The mesh then failed with
+# [Errno 98] address already in use, never bound, and the whole instance
+# served 404s, self-perpetuating on every restart.
+
+class TestDockerBackendPortAllocator:
+    def _make_backend(self, *, next_port: int = 8401, mesh_host_port: int = 8420) -> DockerBackend:
+        backend = DockerBackend.__new__(DockerBackend)
+        backend._port_lock = __import__("threading").Lock()
+        backend._next_port = next_port
+        backend.mesh_host_port = mesh_host_port
+        backend._reserved_ports = {mesh_host_port}
+        return backend
+
+    def test_skips_mesh_host_port(self):
+        """8419 → 8421: the mesh host port is jumped over, never returned."""
+        backend = self._make_backend(next_port=8419)
+        assert backend._allocate_port() == 8419
+        # 8420 (the mesh port) must be skipped entirely.
+        assert backend._allocate_port() == 8421
+        assert backend._allocate_port() == 8422
+
+    def test_mesh_port_never_assigned_across_full_range(self):
+        """Allocate well past the mesh port; it must appear in no assignment."""
+        backend = self._make_backend(next_port=8401)
+        assigned = [backend._allocate_port() for _ in range(30)]
+        assert backend.mesh_host_port not in assigned
+        # No duplicates and still monotonic.
+        assert assigned == sorted(assigned)
+        assert len(set(assigned)) == len(assigned)
+
+    def test_allocator_skips_mesh_port_when_next_lands_on_it(self):
+        """When _next_port lands exactly on the reserved mesh port, the next
+        allocation jumps over it rather than returning it."""
+        backend = self._make_backend(next_port=8420)
+        assert backend._allocate_port() == 8421
+
+    def test_multiple_reserved_ports_all_skipped(self):
+        """The reserved set is extensible — every member is jumped over."""
+        backend = self._make_backend(next_port=8419)
+        backend._reserved_ports = {8420, 8421}
+        assert backend._allocate_port() == 8419
+        assert backend._allocate_port() == 8422
+
+    def test_raises_on_port_exhaustion(self):
+        """At the top of the 16-bit range, the last valid port is handed out,
+        then the allocator raises rather than returning an invalid (>65535)
+        port and deferring the failure to Docker."""
+        backend = self._make_backend(next_port=65535)
+        assert backend._allocate_port() == 65535
+        with pytest.raises(RuntimeError, match="host port range exhausted"):
+            backend._allocate_port()
 
 
 # ── SandboxBackend ────────────────────────────────────────────
@@ -549,6 +607,7 @@ def _make_docker_backend(**overrides):
     backend.mesh_host_port = 8420
     backend.use_host_network = False
     backend._next_port = 8401
+    backend._reserved_ports = {backend.mesh_host_port}
     backend._port_lock = threading.Lock()
     backend.project_root = __import__("pathlib").Path("/tmp")
     backend.browser_service_url = None
@@ -2905,3 +2964,80 @@ class TestSystemSignalReroute:
             stub, "x", attempts=3, backoff_s=0,
         )
         assert stub.transport.calls == 3
+
+
+# ── Mesh primary-port bind: fail fast (prod outage regression) ────
+
+
+class TestMeshBindFailFast:
+    """A mesh that cannot bind its primary port MUST crash the process.
+
+    Regression for the 70-min silent outage: a restart raced the old mesh's
+    teardown, uvicorn swallowed the bind OSError in its daemon thread, and the
+    process kept "running" bound to nothing while the health check hit the
+    stale listener.
+    """
+
+    def test_bind_helper_raises_when_port_in_use(self):
+        import socket as _socket
+
+        from src.cli.runtime import _bind_mesh_socket
+
+        # Occupy a port with a throwaway listener.
+        occupied = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        occupied.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen(1)
+        port = occupied.getsockname()[1]
+        try:
+            with pytest.raises(OSError):
+                _bind_mesh_socket("127.0.0.1", port)
+        finally:
+            occupied.close()
+
+    def test_bind_helper_succeeds_on_free_port_and_listens(self):
+        import socket as _socket
+
+        from src.cli.runtime import _bind_mesh_socket
+
+        sock = _bind_mesh_socket("127.0.0.1", 0)
+        try:
+            assert sock.fileno() != -1
+            # A bound + listening socket answers connect attempts.
+            port = sock.getsockname()[1]
+            client = _socket.create_connection(("127.0.0.1", port), timeout=2)
+            client.close()
+        finally:
+            sock.close()
+
+    def test_start_mesh_server_fatal_when_bind_fails(self):
+        """The fatal path: bind fails → stop_all() + SystemExit(1), and uvicorn
+        is NEVER constructed (the app is never built / banner never reached).
+
+        The bind is the FIRST thing _start_mesh_server does, so patching the
+        helper to raise OSError is sufficient to exercise the whole escalation
+        without standing up the real app graph.
+        """
+        from src.cli.runtime import RuntimeContext
+
+        ctx = RuntimeContext.__new__(RuntimeContext)
+        ctx.cfg = {"mesh": {"port": 8420}}
+        ctx.runtime = MagicMock()
+        # A sentinel that would be reached only if the function continued past
+        # the bind — it must not, so async_dispatch (used to build the
+        # WebhookManager right after the bind) is never touched.
+        ctx.async_dispatch = MagicMock(side_effect=AssertionError("reached app build"))
+
+        with patch(
+            "src.cli.runtime._bind_mesh_socket",
+            side_effect=OSError("[Errno 98] address already in use"),
+        ):
+            with pytest.raises(SystemExit) as excinfo:
+                ctx._start_mesh_server()
+
+        assert excinfo.value.code == 1
+        # Orphan cleanup ran so systemd doesn't restart over a leaked container.
+        ctx.runtime.stop_all.assert_called_once()
+        # We bailed before any app construction — so the "Started" banner can
+        # never be printed on a failed bind.
+        ctx.async_dispatch.assert_not_called()

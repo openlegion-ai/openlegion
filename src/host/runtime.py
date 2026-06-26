@@ -308,6 +308,15 @@ class DockerBackend(RuntimeBackend):
         self.use_host_network = use_host_network
         self._next_port = 8401
         self._port_lock = threading.Lock()
+        # Host ports the loopback allocator must never hand out to a
+        # container. The mesh host (a non-container host process) binds
+        # ``mesh_host_port``; if a published agent/browser port collided with
+        # it, the mesh would fail to bind ([Errno 98] address already in use),
+        # never come up, and the whole instance would 404 — self-perpetuating
+        # on every restart. The allocator range (8401+) reaches 8420 once
+        # enough agents exist, so the mesh port MUST be excluded. A set so
+        # other host-published ports can be reserved later.
+        self._reserved_ports: set[int] = {self.mesh_host_port}
         self.browser_service_url: str | None = None
         self.browser_auth_token: str = ""
         self._browser_container = None
@@ -371,6 +380,23 @@ class DockerBackend(RuntimeBackend):
             options={"com.docker.network.bridge.enable_icc": "false"},
         )
 
+    def _allocate_port(self) -> int:
+        """Return the next unreserved loopback host port, skipping any reserved
+        port (at minimum the mesh host port). ``_next_port`` stays monotonic;
+        we just jump over reserved ports so a published agent/browser port can
+        never collide with the mesh host process. (Skips reserved ports; it
+        does not OS-probe for a free one.) Caller must hold
+        ``self._port_lock``."""
+        while self._next_port in self._reserved_ports:
+            self._next_port += 1
+        if self._next_port > 65535:
+            raise RuntimeError(
+                f"host port range exhausted (next={self._next_port}); too many containers"
+            )
+        port = self._next_port
+        self._next_port += 1
+        return port
+
     @staticmethod
     def backend_name() -> str:
         return "docker"
@@ -397,8 +423,7 @@ class DockerBackend(RuntimeBackend):
         env_overrides: dict[str, str] | None = None,
     ) -> str:
         with self._port_lock:
-            port = self._next_port
-            self._next_port += 1
+            port = self._allocate_port()
 
         # Generate per-agent auth token for mesh request verification.
         # Task 4 invariant: every agent (including the operator) gets a
@@ -767,8 +792,7 @@ class DockerBackend(RuntimeBackend):
                 environment[var] = env_val
 
         with self._port_lock:
-            api_port = self._next_port
-            self._next_port += 1
+            api_port = self._allocate_port()
 
         uploads_path = str(self.uploads_dir.as_posix() if platform.system() == "Windows" else self.uploads_dir)
         run_kwargs: dict[str, Any] = {

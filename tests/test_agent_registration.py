@@ -351,6 +351,7 @@ def test_docker_backend_operator_gets_distinct_token(tmp_path, monkeypatch):
     backend = DockerBackend.__new__(DockerBackend)
     backend.auth_tokens = {}
     backend._next_port = 9000
+    backend._reserved_ports = {8420}
     import threading
     backend._port_lock = threading.Lock()
     backend.use_host_network = False
