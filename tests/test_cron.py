@@ -794,6 +794,39 @@ class TestHeartbeatDispatchFn:
         assert result is None
 
     @pytest.mark.asyncio
+    async def test_heartbeat_prompt_uses_silent_ok_rule(self):
+        """Heartbeat prompt should not force user notifications for routine OK states."""
+        dispatch = AsyncMock(return_value="should not be called")
+        hb_dispatch = AsyncMock(return_value={
+            "response": "HEARTBEAT_OK",
+            "summary": "Nothing to do",
+            "tools_used": [],
+            "duration_ms": 100,
+            "tokens_used": 10,
+            "outcome": "ok",
+            "skipped": False,
+        })
+        context_fn = AsyncMock(return_value={
+            "heartbeat_rules": "# Rules\nStay quiet on no-op heartbeats",
+            "is_default_heartbeat": False,
+            "has_recent_activity": True,
+        })
+        sched = CronScheduler(
+            config_path=self.config_path,
+            dispatch_fn=dispatch,
+            heartbeat_dispatch_fn=hb_dispatch,
+            context_fn=context_fn,
+        )
+        job = sched.add_job(
+            agent="test", schedule="every 15m", message="heartbeat", heartbeat=True,
+        )
+        await sched._execute_job(job)
+
+        msg = hb_dispatch.call_args.args[1]
+        assert "stay silent and return HEARTBEAT_OK" in msg
+        assert "Report what you worked on to the USER via notify_user" not in msg
+
+    @pytest.mark.asyncio
     async def test_heartbeat_emits_event(self):
         """heartbeat_complete event is emitted with structured data."""
         hb_dispatch = AsyncMock(return_value={
