@@ -285,6 +285,7 @@ if TYPE_CHECKING:
     from src.host.health import HealthMonitor
     from src.host.intent import IntentStore
     from src.host.lanes import LaneManager
+    from src.host.lifecycle import LifecycleStore
     from src.host.mcp_gateway import MCPGateway
     from src.host.mesh import Blackboard, MessageRouter, PubSub
     from src.host.permissions import PermissionMatrix
@@ -766,6 +767,7 @@ def create_mesh_app(
     auth_tokens: dict[str, str] | None = None,
     trace_store: TraceStore | None = None,
     intent_store: "IntentStore | None" = None,
+    lifecycle_store: "LifecycleStore | None" = None,
     event_bus: EventBus | None = None,
     health_monitor: HealthMonitor | None = None,
     cost_tracker: CostTracker | None = None,
@@ -899,6 +901,13 @@ def create_mesh_app(
     # Instantiated in cli/runtime and passed in; attached here so the
     # Phase 3 read endpoints / reader can reach it off the app.
     app.intent_store = intent_store  # exposed for tests/Phase 3 reader
+
+    # External infra-event markers (host restart / deploy / OOM). Populated
+    # out-of-band by the provisioner or an operator runbook via the
+    # internal-only ``POST /mesh/system/lifecycle_event`` endpoint; the
+    # session reader interleaves them by wall-clock so an unexplained
+    # workflow gap can be attributed to its external cause.
+    app.lifecycle_store = lifecycle_store  # exposed for tests/Phase 3 reader
 
     # Observation log of agent→user notifications. NOT a message channel:
     # agents call ``notify_user`` (intent: tell the human) and the mesh
@@ -5108,6 +5117,54 @@ def create_mesh_app(
             # means no LLM keys at all (deployment broken).
             "available_providers": available_providers,
         }
+
+    @app.post("/mesh/system/lifecycle_event")
+    async def record_lifecycle_event(body: dict, request: Request) -> dict:
+        """Record an EXTERNAL infra-event marker (host restart / deploy / OOM).
+
+        Internal-only (loopback + ``x-mesh-internal``): the emitter is the
+        provisioner over SSH or an operator runbook — never an agent. These
+        markers describe events the engine itself cannot observe but which
+        explain otherwise-unexplained gaps in a session timeline (the real
+        incident: the provisioner restarted the host mid-workflow). The
+        ``openlegion session`` reader interleaves them by wall-clock.
+
+        Body: ``{kind: str (required), detail?: str, timestamp?: float,
+        meta?: dict}``. ``kind`` and ``detail`` are length-capped and
+        redacted at storage (matches the intent/trace H16 posture).
+        """
+        if not _is_internal_caller(request):
+            _record_denial(
+                "role", caller="?", target="lifecycle_event",
+                gate="lifecycle_event:internal_only",
+            )
+            raise HTTPException(403, "lifecycle_event is internal-only")
+        if lifecycle_store is None:
+            return {"recorded": False, "reason": "no lifecycle_store"}
+        if not isinstance(body, dict):
+            raise HTTPException(400, "body must be a JSON object")
+        kind = str(body.get("kind", "")).strip()
+        if not kind:
+            raise HTTPException(400, "kind is required")
+        ts_raw = body.get("timestamp")
+        timestamp: float | None
+        if ts_raw is None:
+            timestamp = None
+        else:
+            try:
+                timestamp = float(ts_raw)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "timestamp must be a number (epoch seconds)")
+        meta = body.get("meta")
+        if meta is not None and not isinstance(meta, dict):
+            raise HTTPException(400, "meta must be a JSON object")
+        row = lifecycle_store.record(
+            kind=kind,
+            detail=str(body.get("detail", "")),
+            timestamp=timestamp,
+            meta=meta,
+        )
+        return {"recorded": True, "event": row}
 
     @app.get("/mesh/agents/{agent_id}/metrics")
     async def agent_metrics(agent_id: str, request: Request) -> dict:
