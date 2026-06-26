@@ -119,6 +119,7 @@ class TestDockerBackendLifecycle:
         backend.agents = {}
         backend._port_lock = __import__("threading").Lock()
         backend._next_port = 8400
+        backend._reserved_ports = {8420}
         backend.use_host_network = True
         backend.mesh_host_port = 8420
         backend.extra_env = {}
@@ -138,6 +139,63 @@ class TestDockerBackendLifecycle:
         # Token must have been popped on the failure path.
         assert "gamma" not in backend.auth_tokens
         assert "gamma" not in backend.agents
+
+
+# ── Host-port allocator: must never collide with the mesh host port ──
+#
+# Production outage: the loopback allocator (8401+) incremented blindly and
+# eventually handed an agent container 127.0.0.1:8420 — the exact port the
+# mesh host process must bind. The mesh then failed with
+# [Errno 98] address already in use, never bound, and the whole instance
+# served 404s, self-perpetuating on every restart.
+
+class TestDockerBackendPortAllocator:
+    def _make_backend(self, *, next_port: int = 8401, mesh_host_port: int = 8420) -> DockerBackend:
+        backend = DockerBackend.__new__(DockerBackend)
+        backend._port_lock = __import__("threading").Lock()
+        backend._next_port = next_port
+        backend.mesh_host_port = mesh_host_port
+        backend._reserved_ports = {mesh_host_port}
+        return backend
+
+    def test_skips_mesh_host_port(self):
+        """8419 → 8421: the mesh host port is jumped over, never returned."""
+        backend = self._make_backend(next_port=8419)
+        assert backend._allocate_port() == 8419
+        # 8420 (the mesh port) must be skipped entirely.
+        assert backend._allocate_port() == 8421
+        assert backend._allocate_port() == 8422
+
+    def test_mesh_port_never_assigned_across_full_range(self):
+        """Allocate well past the mesh port; it must appear in no assignment."""
+        backend = self._make_backend(next_port=8401)
+        assigned = [backend._allocate_port() for _ in range(30)]
+        assert backend.mesh_host_port not in assigned
+        # No duplicates and still monotonic.
+        assert assigned == sorted(assigned)
+        assert len(set(assigned)) == len(assigned)
+
+    def test_allocator_skips_mesh_port_when_next_lands_on_it(self):
+        """When _next_port lands exactly on the reserved mesh port, the next
+        allocation jumps over it rather than returning it."""
+        backend = self._make_backend(next_port=8420)
+        assert backend._allocate_port() == 8421
+
+    def test_multiple_reserved_ports_all_skipped(self):
+        """The reserved set is extensible — every member is jumped over."""
+        backend = self._make_backend(next_port=8419)
+        backend._reserved_ports = {8420, 8421}
+        assert backend._allocate_port() == 8419
+        assert backend._allocate_port() == 8422
+
+    def test_raises_on_port_exhaustion(self):
+        """At the top of the 16-bit range, the last valid port is handed out,
+        then the allocator raises rather than returning an invalid (>65535)
+        port and deferring the failure to Docker."""
+        backend = self._make_backend(next_port=65535)
+        assert backend._allocate_port() == 65535
+        with pytest.raises(RuntimeError, match="host port range exhausted"):
+            backend._allocate_port()
 
 
 # ── SandboxBackend ────────────────────────────────────────────
@@ -549,6 +607,7 @@ def _make_docker_backend(**overrides):
     backend.mesh_host_port = 8420
     backend.use_host_network = False
     backend._next_port = 8401
+    backend._reserved_ports = {backend.mesh_host_port}
     backend._port_lock = threading.Lock()
     backend.project_root = __import__("pathlib").Path("/tmp")
     backend.browser_service_url = None
