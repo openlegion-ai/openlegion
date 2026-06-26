@@ -281,6 +281,15 @@ class Channel(abc.ABC):
         "/addkey", "/steer", "/broadcast", "/reset", "/debug",
     })
 
+    #: Deterministic command → agent routing. When a command matches a key
+    #: in this map, it is dispatched directly to the target agent without
+    #: consuming an LLM round-trip. Value is ``(target_agent, task_template)``
+    #: where ``task_template`` may contain ``{args}`` for the command tail.
+    #:
+    #: Empty by default — deployments populate it with their own routes.
+    #: Routes are skipped silently if the target agent is not running.
+    _BOT_COMMAND_ROUTES: dict[str, tuple[str, str]] = {}
+
     async def _handle_command(
         self, user_id: str, message: str, current: str, agents: list[str],
         is_owner: bool = False,
@@ -294,6 +303,26 @@ class Channel(abc.ABC):
         # state, or expose traces — restrict them to the owner.
         if cmd in self._OWNER_ONLY_COMMANDS and not is_owner:
             return f"'{cmd}' is owner only."
+
+        # Deterministic bot-command routing — bypasses LLM for reliability.
+        if cmd in self._BOT_COMMAND_ROUTES:
+            target_agent, task_tmpl = self._BOT_COMMAND_ROUTES[cmd]
+            if target_agent in agents:
+                args = parts[1].strip() if len(parts) > 1 else ""
+                task = task_tmpl.format(args=args) if "{args}" in task_tmpl else task_tmpl
+                from src.shared.types import MessageOrigin
+
+                origin: MessageOrigin | None = None
+                if self.CHANNEL_TYPE and user_id:
+                    origin = MessageOrigin(
+                        kind="human",
+                        channel=self.CHANNEL_TYPE,
+                        user=str(user_id),
+                    )
+                response = await self.dispatch(target_agent, task, origin=origin)
+                if not response or not response.strip():
+                    return ""
+                return f"[{target_agent}] {response}"
 
         if cmd == "/use":
             if len(parts) < 2:
