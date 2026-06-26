@@ -2283,6 +2283,8 @@ class TestInfraInterruptRecoverable:
         dispatch_fn, ctx, transport = _capture_dispatch_fn(
             monkeypatch, app=_app_with_tasks(store),
         )
+        # The drop is only recoverable BECAUSE the mesh is shutting down.
+        ctx._shutting_down = True
         transport.request.side_effect = httpx.RemoteProtocolError(
             "Server disconnected without sending a response."
         )
@@ -2308,11 +2310,42 @@ class TestInfraInterruptRecoverable:
         dispatch_fn, ctx, transport = _capture_dispatch_fn(
             monkeypatch, app=_app_with_tasks(store),
         )
+        ctx._shutting_down = True
         transport.request.side_effect = httpx.ConnectError("Connection refused")
 
         await dispatch_fn("worker", "go", task_id=task_id)
 
         assert store.get(task_id)["status"] == "blocked"
+
+    @pytest.mark.asyncio
+    async def test_disconnect_while_not_shutting_down_lands_failed(
+        self, monkeypatch, tmp_path,
+    ):
+        """The SAME transport-drop signature, but the mesh is NOT shutting
+        down (e.g. the agent container genuinely crashed), must close the task
+        to terminal ``failed`` with a ``dispatch_error:`` note — never silently
+        relabel a real failure as recoverable."""
+        import httpx
+
+        store = _tasks_store(tmp_path)
+        rec = store.create(creator="op", assignee="worker", title="do thing")
+        task_id = rec["id"]
+        store.update_status(task_id, "working", actor="worker")
+
+        dispatch_fn, ctx, transport = _capture_dispatch_fn(
+            monkeypatch, app=_app_with_tasks(store),
+        )
+        # Mesh is NOT shutting down (default from __new__-bypass; assert it).
+        assert getattr(ctx, "_shutting_down", False) is False
+        transport.request.side_effect = httpx.RemoteProtocolError(
+            "Server disconnected without sending a response."
+        )
+
+        await dispatch_fn("worker", "go", task_id=task_id)
+
+        fetched = store.get(task_id)
+        assert fetched["status"] == "failed"
+        assert fetched["blocker_note"].startswith("dispatch_error: ")
 
     @pytest.mark.asyncio
     async def test_genuine_error_still_lands_failed(
@@ -2359,6 +2392,7 @@ class TestInfraInterruptRecoverable:
         dispatch_fn, ctx, transport = _capture_dispatch_fn(
             monkeypatch, app=_app_with_tasks(store),
         )
+        ctx._shutting_down = True
         transport.request.side_effect = httpx.RemoteProtocolError(
             "Server disconnected without sending a response."
         )

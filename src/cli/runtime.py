@@ -244,6 +244,12 @@ class RuntimeContext:
         self._start_time: float | None = None
         self._agent_results: list = []
         self._cron_job_count: int = 0
+        # Set True as the FIRST act of shutdown() so an in-flight dispatch that
+        # drops *because we are tearing down* is attributable. A connection-drop
+        # is reclassified to recoverable ``blocked`` ONLY while this is True
+        # (see _close_task_on_dispatch_error); a drop while still running stays
+        # terminal ``failed`` — a genuine agent-container crash must not hide.
+        self._shutting_down = False
 
     def start(self) -> None:
         """Initialize and start all components. Called once."""
@@ -266,6 +272,10 @@ class RuntimeContext:
 
     def shutdown(self) -> None:
         """Tear down all components in reverse order."""
+        # FIRST, before any teardown: mark the mesh as shutting down so any
+        # in-flight dispatch that drops during teardown is attributable to the
+        # restart (and thus reclassified to recoverable ``blocked``).
+        self._shutting_down = True
         click.echo("  Stopping OpenLegion...", nl=False)
         if self.chain_watcher:
             self.chain_watcher.stop()
@@ -809,16 +819,25 @@ class RuntimeContext:
         (host restart tearing down an in-flight ``/chat``) is NOT a real task
         error — its work is recoverable. Those land as ``blocked`` (recoverable)
         with an honest ``interrupted by host restart`` note, NOT terminal
-        ``failed``, so the task is not silently lost. Only the connection-drop
-        class is reclassified (see :func:`_is_infra_disconnect`); a genuine task
-        error still becomes terminal ``failed``.
+        ``failed``, so the task is not silently lost. A connection-drop signature
+        is **necessary but NOT sufficient** for that reclassification: the exact
+        same transport errors also fire when an agent container genuinely
+        CRASHES with no host restart. So we additionally gate on the mesh
+        actually shutting down (``self._shutting_down``) — only a dispatch that
+        drops *because we are restarting* becomes ``blocked``; a drop while NOT
+        shutting down stays terminal ``failed`` (see :func:`_is_infra_disconnect`).
         """
         from src.host.orchestration import InvalidStatusTransition
 
         tasks_store = getattr(getattr(self, "_app", None), "tasks_store", None)
         if tasks_store is None:
             return
-        if _is_infra_disconnect(exc):
+        # Reclassify to recoverable ``blocked`` ONLY when BOTH the error is a
+        # transport-drop signature AND the mesh is shutting down. A drop while
+        # still running is a real failure (e.g. agent container crash) and must
+        # stay terminal ``failed`` so operators see it. ``getattr`` is defensive
+        # in case a construction path bypasses ``__init__``.
+        if _is_infra_disconnect(exc) and getattr(self, "_shutting_down", False):
             target_status = "blocked"
             note = _INFRA_INTERRUPT_NOTE
         else:
