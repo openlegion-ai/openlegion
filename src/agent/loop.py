@@ -5176,6 +5176,13 @@ class AgentLoop:
                     )
                 except Exception as e:
                     logger.warning(f"LLM streaming failed ({e}), falling back to non-streaming")
+                    if any_text_streamed:
+                        # Mid-stream failure: notify the user so partial output is
+                        # clearly separated from the fallback response.
+                        yield {
+                            "type": "text_delta",
+                            "content": "\n\n*(Stream interrupted — retrying…)*\n\n",
+                        }
 
                 streamed = llm_response is not None
                 if llm_response is None:

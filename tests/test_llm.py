@@ -481,3 +481,91 @@ def test_thinking_override_on_openai_reasoning_models():
     )
     llm.thinking_override = "high"
     assert llm._get_thinking_params() == {"reasoning_effort": "high"}
+
+
+# ── chat_stream transport error classification ────────────────
+
+
+def _make_streaming_mock(lines: list[str] | None = None, exc: Exception | None = None):
+    """Build a mock that mimics client.stream() for chat_stream tests."""
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+
+    async def _aiter_lines():
+        if lines:
+            for line in lines:
+                yield line
+        if exc:
+            raise exc
+
+    mock_response.aiter_lines = _aiter_lines
+
+    mock_cm = AsyncMock()
+    mock_cm.__aenter__ = AsyncMock(return_value=mock_response)
+    mock_cm.__aexit__ = AsyncMock(return_value=False)
+
+    mock_http = AsyncMock()
+    mock_http.stream = MagicMock(return_value=mock_cm)
+    return mock_http
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_transport_error_classified_retryable():
+    """httpx RemoteProtocolError during streaming should raise LLMRetryableError."""
+    import httpx
+
+    llm = _make_llm_client()
+    mock_http = _make_streaming_mock(exc=httpx.RemoteProtocolError("peer closed"))
+    llm._get_client = AsyncMock(return_value=mock_http)
+
+    with pytest.raises(LLMRetryableError):
+        async for _ in llm.chat_stream("system", [{"role": "user", "content": "hi"}]):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_readtimeout_classified_retryable():
+    """httpx ReadTimeout during streaming should raise LLMRetryableError."""
+    import httpx
+
+    llm = _make_llm_client()
+    mock_http = _make_streaming_mock(exc=httpx.ReadTimeout("read timed out"))
+    llm._get_client = AsyncMock(return_value=mock_http)
+
+    with pytest.raises(LLMRetryableError):
+        async for _ in llm.chat_stream("system", [{"role": "user", "content": "hi"}]):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_connecterror_classified_retryable():
+    """httpx ConnectError during streaming should raise LLMRetryableError."""
+    import httpx
+
+    llm = _make_llm_client()
+    mock_http = _make_streaming_mock(exc=httpx.ConnectError("connection refused"))
+    llm._get_client = AsyncMock(return_value=mock_http)
+
+    with pytest.raises(LLMRetryableError):
+        async for _ in llm.chat_stream("system", [{"role": "user", "content": "hi"}]):
+            pass
+
+
+@pytest.mark.asyncio
+async def test_chat_stream_normal_completion_unaffected():
+    """Normal SSE stream should still yield text_delta + done without transport wrapping."""
+    llm = _make_llm_client()
+    lines = [
+        'data: {"type":"text_delta","content":"hello"}',
+        'data: {"type":"done","content":"hello","tokens_used":5,"model":"test"}',
+    ]
+    mock_http = _make_streaming_mock(lines=lines)
+    llm._get_client = AsyncMock(return_value=mock_http)
+
+    chunks = []
+    async for chunk in llm.chat_stream("system", [{"role": "user", "content": "hi"}]):
+        chunks.append(chunk)
+
+    assert chunks[0]["type"] == "text_delta"
+    assert chunks[0]["content"] == "hello"
+    assert chunks[1]["type"] == "done"

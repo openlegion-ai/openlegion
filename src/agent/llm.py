@@ -378,42 +378,51 @@ class LLMClient:
             timeout=self.timeout_seconds,
         ) as response:
             response.raise_for_status()
-            async for line in response.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                payload = line[6:]
-                try:
-                    data = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
+            _TRANSPORT_ERRORS = (
+                httpx.RemoteProtocolError,
+                httpx.ReadTimeout,
+                httpx.ConnectError,
+                httpx.ReadError,
+            )
+            try:
+                async for line in response.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    payload = line[6:]
+                    try:
+                        data = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
 
-                if "error" in data:
-                    # Distinguished error types ride the SSE payload so the
-                    # agent loop can route to the auth-failure / config-error
-                    # branches. Shared helper also adds the ``transient`` +
-                    # substring-backstop retry handling that ``chat`` has —
-                    # closing the streaming-path asymmetry (a mid-stream
-                    # transient is now retried rather than raised as a bare
-                    # RuntimeError).
-                    self._raise_classified_error(
-                        data["error"],
-                        data.get("error_type"),
-                        data.get("error_meta") or {},
-                        prefix="LLM stream error",
-                    )
+                    if "error" in data:
+                        # Distinguished error types ride the SSE payload so the
+                        # agent loop can route to the auth-failure / config-error
+                        # branches. Shared helper also adds the ``transient`` +
+                        # substring-backstop retry handling that ``chat`` has —
+                        # closing the streaming-path asymmetry (a mid-stream
+                        # transient is now retried rather than raised as a bare
+                        # RuntimeError).
+                        self._raise_classified_error(
+                            data["error"],
+                            data.get("error_type"),
+                            data.get("error_meta") or {},
+                            prefix="LLM stream error",
+                        )
 
-                if data.get("type") == "text_delta":
-                    yield {"type": "text_delta", "content": data.get("content", "")}
+                    if data.get("type") == "text_delta":
+                        yield {"type": "text_delta", "content": data.get("content", "")}
 
-                elif data.get("type") == "done":
-                    llm_resp = LLMResponse(
-                        content=data.get("content", ""),
-                        thinking_content=data.get("thinking_content"),
-                        tool_calls=self._parse_tool_calls(data.get("tool_calls", [])),
-                        tokens_used=data.get("tokens_used", 0),
-                        model=data.get("model", ""),
-                    )
-                    yield {"type": "done", "response": llm_resp}
+                    elif data.get("type") == "done":
+                        llm_resp = LLMResponse(
+                            content=data.get("content", ""),
+                            thinking_content=data.get("thinking_content"),
+                            tool_calls=self._parse_tool_calls(data.get("tool_calls", [])),
+                            tokens_used=data.get("tokens_used", 0),
+                            model=data.get("model", ""),
+                        )
+                        yield {"type": "done", "response": llm_resp}
+            except _TRANSPORT_ERRORS as transport_exc:
+                raise LLMRetryableError(str(transport_exc)) from transport_exc
 
     async def chat_collect(
         self,
