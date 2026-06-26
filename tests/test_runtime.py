@@ -2206,6 +2206,170 @@ class TestDispatchErrorSurfacing:
         assert fetched["status"] == "working"
 
 
+# ── Infra shutdown / connection-drop ⇒ recoverable (blocked) ──────────────
+#
+# Prod incident: the host was restarted under running tasks. The in-flight
+# mesh→agent ``/chat`` dispatches died with
+# ``Server disconnected without sending a response`` and the durable tasks
+# were closed as terminal ``failed`` — work lost, no auto-resume, three
+# subtasks manually re-dispatched. An infra tear-down is RECOVERABLE: such
+# tasks must land as ``blocked`` (NOT ``failed``) with an honest note. A
+# genuine task error must still be terminal ``failed``.
+
+
+class TestInfraDisconnectClassifier:
+    """Unit tests for the pure connection-drop classifier."""
+
+    def test_httpx_remote_protocol_error_is_infra(self):
+        import httpx
+
+        from src.cli.runtime import _is_infra_disconnect
+
+        assert _is_infra_disconnect(
+            httpx.RemoteProtocolError(
+                "Server disconnected without sending a response."
+            )
+        ) is True
+
+    def test_httpx_connect_and_read_errors_are_infra(self):
+        import httpx
+
+        from src.cli.runtime import _is_infra_disconnect
+
+        assert _is_infra_disconnect(httpx.ConnectError("refused")) is True
+        assert _is_infra_disconnect(httpx.ReadError("reset")) is True
+        assert _is_infra_disconnect(httpx.WriteError("broken pipe")) is True
+        assert _is_infra_disconnect(httpx.ConnectTimeout("slow")) is True
+
+    def test_string_signature_without_httpx_type_is_infra(self):
+        from src.cli.runtime import _is_infra_disconnect
+
+        # A non-httpx wrapper carrying the same connection-drop signature.
+        assert _is_infra_disconnect(
+            RuntimeError("Server disconnected without sending a response")
+        ) is True
+
+    def test_genuine_task_error_is_not_infra(self):
+        import httpx
+
+        from src.cli.runtime import _is_infra_disconnect
+
+        # A real application error (e.g. agent returned 500 with a body) is
+        # NOT a connection drop — must stay terminal ``failed``.
+        assert _is_infra_disconnect(
+            RuntimeError("502 from https://api.example.com/run")
+        ) is False
+        assert _is_infra_disconnect(RuntimeError("tool execution failed")) is False
+        # A read TIMEOUT while the connection stays up is the agent being slow
+        # (lane-watchdog territory), not an infra tear-down.
+        assert _is_infra_disconnect(httpx.ReadTimeout("slow")) is False
+
+
+class TestInfraInterruptRecoverable:
+    @pytest.mark.asyncio
+    async def test_server_disconnected_lands_blocked_not_failed(
+        self, monkeypatch, tmp_path,
+    ):
+        """A dispatch killed by a host-restart connection drop closes the
+        durable task to ``blocked`` (recoverable) with an honest note —
+        NOT terminal ``failed`` (the prod incident)."""
+        import httpx
+
+        store = _tasks_store(tmp_path)
+        rec = store.create(creator="op", assignee="worker", title="do thing")
+        task_id = rec["id"]
+        store.update_status(task_id, "working", actor="worker")
+
+        dispatch_fn, ctx, transport = _capture_dispatch_fn(
+            monkeypatch, app=_app_with_tasks(store),
+        )
+        transport.request.side_effect = httpx.RemoteProtocolError(
+            "Server disconnected without sending a response."
+        )
+
+        await dispatch_fn("worker", "go", task_id=task_id)
+
+        fetched = store.get(task_id)
+        assert fetched["status"] == "blocked"
+        assert fetched["blocker_note"] == "interrupted by host restart — recoverable"
+
+    @pytest.mark.asyncio
+    async def test_connect_error_lands_blocked(
+        self, monkeypatch, tmp_path,
+    ):
+        """A bare connection-refused (host/agent gone) is also recoverable."""
+        import httpx
+
+        store = _tasks_store(tmp_path)
+        rec = store.create(creator="op", assignee="worker", title="do thing")
+        task_id = rec["id"]
+        store.update_status(task_id, "working", actor="worker")
+
+        dispatch_fn, ctx, transport = _capture_dispatch_fn(
+            monkeypatch, app=_app_with_tasks(store),
+        )
+        transport.request.side_effect = httpx.ConnectError("Connection refused")
+
+        await dispatch_fn("worker", "go", task_id=task_id)
+
+        assert store.get(task_id)["status"] == "blocked"
+
+    @pytest.mark.asyncio
+    async def test_genuine_error_still_lands_failed(
+        self, monkeypatch, tmp_path,
+    ):
+        """A genuine (non-connection-drop) dispatch error must still close the
+        task to terminal ``failed`` — the recoverable carve-out is narrow."""
+        store = _tasks_store(tmp_path)
+        rec = store.create(creator="op", assignee="worker", title="do thing")
+        task_id = rec["id"]
+        store.update_status(task_id, "working", actor="worker")
+
+        dispatch_fn, ctx, transport = _capture_dispatch_fn(
+            monkeypatch, app=_app_with_tasks(store),
+        )
+        transport.request.side_effect = RuntimeError(
+            "502 from https://api.example.com/run"
+        )
+
+        await dispatch_fn("worker", "go", task_id=task_id)
+
+        fetched = store.get(task_id)
+        assert fetched["status"] == "failed"
+        assert fetched["blocker_note"].startswith("dispatch_error: ")
+
+    @pytest.mark.asyncio
+    async def test_infra_interrupt_does_not_clobber_assignee_blocked(
+        self, monkeypatch, tmp_path,
+    ):
+        """An assignee-authored ``blocked`` (with its own note) is preserved
+        even on an infra interrupt — the already-terminal/blocked pre-check
+        still guards it."""
+        import httpx
+
+        store = _tasks_store(tmp_path)
+        rec = store.create(creator="op", assignee="worker", title="do thing")
+        task_id = rec["id"]
+        store.update_status(task_id, "working", actor="worker")
+        store.update_status(
+            task_id, "blocked", actor="worker",
+            blocker_note="waiting on credential CRED_FOO",
+        )
+
+        dispatch_fn, ctx, transport = _capture_dispatch_fn(
+            monkeypatch, app=_app_with_tasks(store),
+        )
+        transport.request.side_effect = httpx.RemoteProtocolError(
+            "Server disconnected without sending a response."
+        )
+
+        await dispatch_fn("worker", "go", task_id=task_id)
+
+        fetched = store.get(task_id)
+        assert fetched["status"] == "blocked"
+        assert fetched["blocker_note"] == "waiting on credential CRED_FOO"
+
+
 # ── Chain-outcome bell kinds ──────────────────────────────────
 
 
