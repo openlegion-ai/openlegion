@@ -1541,7 +1541,6 @@ class RuntimeContext:
             connector_store=self.connector_store,
             mcp_gateway=self.mcp_gateway,
             intent_store=self.intent_store,
-            lifecycle_store=self.lifecycle_store,
         )
         app.include_router(dashboard_router)
         app.include_router(create_spa_catchall_router())  # Must be last — SPA deep linking

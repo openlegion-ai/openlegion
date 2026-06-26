@@ -345,3 +345,74 @@ async def test_lifecycle_endpoint_requires_kind(tmp_path):
     finally:
         app.state._test_bb.close()
         app.state._test_lifecycle.close()
+
+
+# ── App-construction smoke: lifecycle_store wiring ───────────────
+#
+# Regression for the ship-blocker where ``_start_mesh_server`` passed
+# ``lifecycle_store=`` to BOTH ``create_mesh_app`` (which accepts it) and
+# ``create_dashboard_router`` (which does NOT) → ``TypeError`` at mesh
+# startup. The dashboard never consumes lifecycle markers — the
+# ``openlegion session`` reader reads ``lifecycle.db`` directly — so the
+# kwarg belongs to the mesh factory only. These two asserts pin that
+# split so the spurious kwarg can't be reintroduced.
+
+
+def test_create_mesh_app_accepts_lifecycle_store(tmp_path):
+    import src.host.server as server_module
+    from src.host.mesh import Blackboard, MessageRouter, PubSub
+    from src.host.permissions import PermissionMatrix
+
+    perms = PermissionMatrix()
+    router = MessageRouter(perms, {})
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    lifecycle = LifecycleStore(db_path=str(tmp_path / "lifecycle.db"))
+    try:
+        # Must construct without TypeError.
+        app = server_module.create_mesh_app(
+            blackboard=bb,
+            pubsub=pubsub,
+            router=router,
+            permissions=perms,
+            lifecycle_store=lifecycle,
+        )
+        assert app is not None
+    finally:
+        bb.close()
+        lifecycle.close()
+
+
+def test_create_dashboard_router_does_not_accept_lifecycle_store(tmp_path):
+    """The dashboard factory must NOT take ``lifecycle_store``.
+
+    The runtime wires it only into ``create_mesh_app``; passing it to the
+    dashboard router was the original ``TypeError`` ship-blocker. This
+    asserts the signature stays free of it so the bug can't regress.
+    """
+    from unittest.mock import MagicMock
+
+    from src.dashboard.server import create_dashboard_router
+
+    registry: dict[str, str] = {}
+    common = dict(
+        blackboard=MagicMock(),
+        health_monitor=None,
+        cost_tracker=MagicMock(),
+        trace_store=None,
+        event_bus=None,
+        agent_registry=registry,
+        mesh_port=8420,
+    )
+
+    # The legitimate call (no lifecycle_store) constructs fine.
+    router = create_dashboard_router(**common)
+    assert router is not None
+
+    # Passing lifecycle_store would raise the original TypeError.
+    lifecycle = LifecycleStore(db_path=str(tmp_path / "lifecycle.db"))
+    try:
+        with pytest.raises(TypeError):
+            create_dashboard_router(**common, lifecycle_store=lifecycle)
+    finally:
+        lifecycle.close()
