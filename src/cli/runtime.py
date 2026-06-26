@@ -141,6 +141,75 @@ def _build_dispatch_error_note(exc: BaseException) -> str:
     return note[:_DISPATCH_ERROR_NOTE_MAX]
 
 
+# Honest, operator-visible ``blocker_note`` written when a dispatch is killed
+# by an INFRA shutdown / connection-drop rather than a real task error. The
+# task is left ``blocked`` (recoverable) — NOT terminal ``failed`` — so its
+# work is not silently lost. (Prod incident: a host restart under running
+# tasks killed three in-flight subtasks as terminal ``failed`` with
+# ``dispatch_error: Server disconnected without sending a response``; they had
+# to be manually re-dispatched.)
+_INFRA_INTERRUPT_NOTE = "interrupted by host restart — recoverable"
+
+# Substrings (lower-cased) that mark a transport/connection-drop signature —
+# i.e. the host (or the agent container) went away mid-request, the hallmark
+# of a graceful-shutdown / restart tear-down rather than a genuine task error.
+# Conservative on purpose: only the connection-drop class is reclassified to
+# the recoverable ``blocked`` state; everything else stays terminal ``failed``.
+_INFRA_DISCONNECT_MARKERS: tuple[str, ...] = (
+    "server disconnected",
+    "disconnected without sending",
+    "connection reset",
+    "connection refused",
+    "connection aborted",
+    "remote protocol error",
+    "peer closed connection",
+    "incomplete chunked read",
+    "all connection attempts failed",
+)
+
+
+def _is_infra_disconnect(exc: BaseException) -> bool:
+    """True when ``exc`` is a transport-level connection drop — the signature
+    of a host/agent shutdown or restart tearing down an in-flight ``/chat``
+    dispatch, as opposed to a genuine task error.
+
+    Detection is conservative and twofold:
+
+    1. **Type-based** — httpx transport-error subclasses that only arise when
+       the connection itself fails (``ConnectError``, ``ReadError``,
+       ``WriteError``, ``RemoteProtocolError``, ``ConnectTimeout``,
+       ``PoolTimeout``). httpx is an optional-at-import dependency here, so the
+       check degrades gracefully if it can't be imported.
+    2. **String-based** — a fallback that matches the connection-drop markers
+       in the (already untrusted, but here only substring-tested) message, so
+       a non-httpx wrapper carrying the same signature still classifies right.
+
+    A ``read`` *timeout while the connection stays up* is deliberately NOT
+    matched — that is the agent being slow, governed by the lane watchdog, not
+    an infra tear-down.
+    """
+    try:
+        import httpx
+
+        if isinstance(
+            exc,
+            (
+                httpx.ConnectError,
+                httpx.ReadError,
+                httpx.WriteError,
+                httpx.RemoteProtocolError,
+                httpx.ConnectTimeout,
+                httpx.PoolTimeout,
+            ),
+        ):
+            return True
+    except Exception:  # pragma: no cover - httpx import shouldn't fail
+        pass
+
+    text = str(exc).lower()
+    return any(marker in text for marker in _INFRA_DISCONNECT_MARKERS)
+
+
 def _bind_mesh_socket(host: str, port: int) -> socket.socket:
     """Bind and return the mesh's primary listening socket — FATAL on failure.
 
@@ -213,6 +282,12 @@ class RuntimeContext:
         self._start_time: float | None = None
         self._agent_results: list = []
         self._cron_job_count: int = 0
+        # Set True as the FIRST act of shutdown() so an in-flight dispatch that
+        # drops *because we are tearing down* is attributable. A connection-drop
+        # is reclassified to recoverable ``blocked`` ONLY while this is True
+        # (see _close_task_on_dispatch_error); a drop while still running stays
+        # terminal ``failed`` — a genuine agent-container crash must not hide.
+        self._shutting_down = False
 
     def start(self) -> None:
         """Initialize and start all components. Called once."""
@@ -235,6 +310,10 @@ class RuntimeContext:
 
     def shutdown(self) -> None:
         """Tear down all components in reverse order."""
+        # FIRST, before any teardown: mark the mesh as shutting down so any
+        # in-flight dispatch that drops during teardown is attributable to the
+        # restart (and thus reclassified to recoverable ``blocked``).
+        self._shutting_down = True
         click.echo("  Stopping OpenLegion...", nl=False)
         if self.chain_watcher:
             self.chain_watcher.stop()
@@ -773,7 +852,7 @@ class RuntimeContext:
     async def _close_task_on_dispatch_error(
         self, task_id: str, exc: BaseException,
     ) -> None:
-        """Mark a durable task ``failed`` after its mesh→agent dispatch raised.
+        """Close a durable task after its mesh→agent dispatch raised.
 
         Without this, ``_direct_dispatch`` used to return ``f"Error: {e}"`` —
         an opaque string the lane recorded as a *successful* turn, so the
@@ -784,13 +863,35 @@ class RuntimeContext:
         during a race isn't clobbered), then write a REDACTED + truncated
         ``blocker_note``. Best-effort: a failure to close must never mask the
         original error from the lane.
+
+        **Classification (prod incident):** an INFRA shutdown / connection-drop
+        (host restart tearing down an in-flight ``/chat``) is NOT a real task
+        error — its work is recoverable. Those land as ``blocked`` (recoverable)
+        with an honest ``interrupted by host restart`` note, NOT terminal
+        ``failed``, so the task is not silently lost. A connection-drop signature
+        is **necessary but NOT sufficient** for that reclassification: the exact
+        same transport errors also fire when an agent container genuinely
+        CRASHES with no host restart. So we additionally gate on the mesh
+        actually shutting down (``self._shutting_down``) — only a dispatch that
+        drops *because we are restarting* becomes ``blocked``; a drop while NOT
+        shutting down stays terminal ``failed`` (see :func:`_is_infra_disconnect`).
         """
         from src.host.orchestration import InvalidStatusTransition
 
         tasks_store = getattr(getattr(self, "_app", None), "tasks_store", None)
         if tasks_store is None:
             return
-        note = _build_dispatch_error_note(exc)
+        # Reclassify to recoverable ``blocked`` ONLY when BOTH the error is a
+        # transport-drop signature AND the mesh is shutting down. A drop while
+        # still running is a real failure (e.g. agent container crash) and must
+        # stay terminal ``failed`` so operators see it. ``getattr`` is defensive
+        # in case a construction path bypasses ``__init__``.
+        if _is_infra_disconnect(exc) and getattr(self, "_shutting_down", False):
+            target_status = "blocked"
+            note = _INFRA_INTERRUPT_NOTE
+        else:
+            target_status = "failed"
+            note = _build_dispatch_error_note(exc)
         loop = asyncio.get_running_loop()
         try:
             pre = await loop.run_in_executor(
@@ -813,18 +914,22 @@ class RuntimeContext:
             # generic dispatch note.
             logger.info(
                 "Dispatch error: task %s already terminal (status=%s) — "
-                "skipping failed-close", task_id, pre.get("status"),
+                "skipping close", task_id, pre.get("status"),
             )
             return
+        # Infra interrupts ride the recoverable error code so the dashboard /
+        # observers can distinguish "host restart, will recover" from a real
+        # dispatch failure.
+        error_code = "infra_interrupt" if target_status == "blocked" else "dispatch_error"
         try:
             await loop.run_in_executor(
                 None,
                 lambda: tasks_store.update_status(
                     task_id,
-                    "failed",
+                    target_status,
                     actor="dispatch",
                     blocker_note=note,
-                    extra_payload={"error": "dispatch_error"},
+                    extra_payload={"error": error_code},
                 ),
             )
         except InvalidStatusTransition as race_err:
