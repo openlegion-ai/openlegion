@@ -381,13 +381,18 @@ class DockerBackend(RuntimeBackend):
         )
 
     def _allocate_port(self) -> int:
-        """Return the next free loopback host port, skipping any reserved
+        """Return the next unreserved loopback host port, skipping any reserved
         port (at minimum the mesh host port). ``_next_port`` stays monotonic;
         we just jump over reserved ports so a published agent/browser port can
-        never collide with the mesh host process. Caller must hold
+        never collide with the mesh host process. (Skips reserved ports; it
+        does not OS-probe for a free one.) Caller must hold
         ``self._port_lock``."""
         while self._next_port in self._reserved_ports:
             self._next_port += 1
+        if self._next_port > 65535:
+            raise RuntimeError(
+                f"host port range exhausted (next={self._next_port}); too many containers"
+            )
         port = self._next_port
         self._next_port += 1
         return port

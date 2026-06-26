@@ -188,6 +188,15 @@ class TestDockerBackendPortAllocator:
         assert backend._allocate_port() == 8419
         assert backend._allocate_port() == 8422
 
+    def test_raises_on_port_exhaustion(self):
+        """At the top of the 16-bit range, the last valid port is handed out,
+        then the allocator raises rather than returning an invalid (>65535)
+        port and deferring the failure to Docker."""
+        backend = self._make_backend(next_port=65535)
+        assert backend._allocate_port() == 65535
+        with pytest.raises(RuntimeError, match="host port range exhausted"):
+            backend._allocate_port()
+
 
 # ── SandboxBackend ────────────────────────────────────────────
 
