@@ -29,7 +29,11 @@ _BILLING_CODES = {402}
 _RATE_LIMIT_CODES = {429}
 _AUTH_CODES = {401, 403}
 _TRANSIENT_CODES = {408, 500, 502, 503, 504, 529}
-_TRANSIENT_KEYWORDS = {"connection", "timeout", "connecterror", "readtimeout"}
+_TRANSIENT_KEYWORDS = {
+    "connection", "timeout", "connecterror", "readtimeout",
+    "incomplete", "peer closed", "remoteerror", "chunked",
+    "eof", "brokenresource", "broken pipe", "brokenpipe",
+}
 
 
 @dataclass
