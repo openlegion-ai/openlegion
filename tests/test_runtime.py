@@ -2707,3 +2707,80 @@ class TestSystemSignalReroute:
             stub, "x", attempts=3, backoff_s=0,
         )
         assert stub.transport.calls == 3
+
+
+# ── Mesh primary-port bind: fail fast (prod outage regression) ────
+
+
+class TestMeshBindFailFast:
+    """A mesh that cannot bind its primary port MUST crash the process.
+
+    Regression for the 70-min silent outage: a restart raced the old mesh's
+    teardown, uvicorn swallowed the bind OSError in its daemon thread, and the
+    process kept "running" bound to nothing while the health check hit the
+    stale listener.
+    """
+
+    def test_bind_helper_raises_when_port_in_use(self):
+        import socket as _socket
+
+        from src.cli.runtime import _bind_mesh_socket
+
+        # Occupy a port with a throwaway listener.
+        occupied = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        occupied.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen(1)
+        port = occupied.getsockname()[1]
+        try:
+            with pytest.raises(OSError):
+                _bind_mesh_socket("127.0.0.1", port)
+        finally:
+            occupied.close()
+
+    def test_bind_helper_succeeds_on_free_port_and_listens(self):
+        import socket as _socket
+
+        from src.cli.runtime import _bind_mesh_socket
+
+        sock = _bind_mesh_socket("127.0.0.1", 0)
+        try:
+            assert sock.fileno() != -1
+            # A bound + listening socket answers connect attempts.
+            port = sock.getsockname()[1]
+            client = _socket.create_connection(("127.0.0.1", port), timeout=2)
+            client.close()
+        finally:
+            sock.close()
+
+    def test_start_mesh_server_fatal_when_bind_fails(self):
+        """The fatal path: bind fails → stop_all() + SystemExit(1), and uvicorn
+        is NEVER constructed (the app is never built / banner never reached).
+
+        The bind is the FIRST thing _start_mesh_server does, so patching the
+        helper to raise OSError is sufficient to exercise the whole escalation
+        without standing up the real app graph.
+        """
+        from src.cli.runtime import RuntimeContext
+
+        ctx = RuntimeContext.__new__(RuntimeContext)
+        ctx.cfg = {"mesh": {"port": 8420}}
+        ctx.runtime = MagicMock()
+        # A sentinel that would be reached only if the function continued past
+        # the bind — it must not, so async_dispatch (used to build the
+        # WebhookManager right after the bind) is never touched.
+        ctx.async_dispatch = MagicMock(side_effect=AssertionError("reached app build"))
+
+        with patch(
+            "src.cli.runtime._bind_mesh_socket",
+            side_effect=OSError("[Errno 98] address already in use"),
+        ):
+            with pytest.raises(SystemExit) as excinfo:
+                ctx._start_mesh_server()
+
+        assert excinfo.value.code == 1
+        # Orphan cleanup ran so systemd doesn't restart over a leaked container.
+        ctx.runtime.stop_all.assert_called_once()
+        # We bailed before any app construction — so the "Started" banner can
+        # never be printed on a failed bind.
+        ctx.async_dispatch.assert_not_called()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -138,6 +139,42 @@ def _build_dispatch_error_note(exc: BaseException) -> str:
     safe = redact_text_with_urls(raw)
     note = f"dispatch_error: {safe}"
     return note[:_DISPATCH_ERROR_NOTE_MAX]
+
+
+def _bind_mesh_socket(host: str, port: int) -> socket.socket:
+    """Bind and return the mesh's primary listening socket — FATAL on failure.
+
+    Production incident (70-min silent outage): a ``systemctl restart`` raced
+    the old mesh's teardown, so the new process found port 8420 still held.
+    uvicorn's own ``startup()`` catches the bind ``OSError``, logs the
+    ``[Errno 98] address already in use`` line, and calls ``sys.exit(1)`` — but
+    it runs the server in a daemon thread, so that ``SystemExit`` only kills the
+    *thread*. The main process kept running bound to NO port while systemd
+    reported ``active (running)`` and the provisioner health check (which hit
+    the *stale* listener still answering on 8420) believed the mesh was up. The
+    mesh served 404s for ~70 minutes.
+
+    We bind the socket ourselves on the MAIN thread *before* launching uvicorn
+    and hand it the open socket. A bind failure now raises here, on the caller's
+    thread, where it tears the whole process down (caller exits non-zero) — so
+    systemd restarts it and the health check sees the truth. The success banner
+    is never printed when the bind fails.
+
+    ``SO_REUSEADDR`` matches uvicorn's default and lets a genuinely-released
+    port be re-bound through TIME_WAIT; it does NOT mask a live listener
+    (a second ``bind()`` to an actively-LISTENing socket still raises
+    ``EADDRINUSE``), which is exactly the failure we must surface.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((host, port))
+        sock.listen(2048)
+        sock.set_inheritable(True)
+    except OSError:
+        sock.close()
+        raise
+    return sock
 
 
 class RuntimeContext:
@@ -1394,6 +1431,29 @@ class RuntimeContext:
 
         mesh_port = self.cfg["mesh"]["port"]
 
+        # Bind the primary port on THIS (main) thread BEFORE building the app
+        # or launching uvicorn. A bind failure must be fatal to the whole
+        # process — see _bind_mesh_socket for the outage this prevents. uvicorn
+        # would otherwise swallow the OSError inside its daemon thread, leaving
+        # the process "running" but bound to nothing while the health check
+        # answered off a stale listener. Binding first also avoids wiring the
+        # whole app only to throw it away.
+        try:
+            mesh_socket = _bind_mesh_socket("0.0.0.0", mesh_port)
+        except OSError as exc:
+            echo_fail(
+                f"Mesh server could not bind port {mesh_port}: {exc}. "
+                f"Another process may already own it. Try: openlegion stop"
+            )
+            logger.error("FATAL: mesh failed to bind port %d: %s", mesh_port, exc)
+            # Tear down any agent containers we started so a failed-to-bind
+            # boot doesn't leave orphans behind for systemd to restart over.
+            try:
+                self.runtime.stop_all()
+            except Exception as cleanup_err:
+                logger.debug("Cleanup after bind failure errored: %s", cleanup_err)
+            sys.exit(1)
+
         webhook_manager = WebhookManager(dispatch_fn=self.async_dispatch)
 
         # Wallet signing service (only if master seed is configured).
@@ -1535,7 +1595,13 @@ class RuntimeContext:
 
         server_config = uvicorn.Config(app, host="0.0.0.0", port=mesh_port, log_level="warning")
         self._server = uvicorn.Server(server_config)
-        mesh_thread = threading.Thread(target=self._server.run, daemon=True)
+        # Hand uvicorn the already-bound socket so it never re-binds (and so
+        # the bind result was already asserted, fatally, above).
+        mesh_thread = threading.Thread(
+            target=self._server.run,
+            kwargs={"sockets": [mesh_socket]},
+            daemon=True,
+        )
         mesh_thread.start()
 
     def _wait_for_readiness(self) -> None:
