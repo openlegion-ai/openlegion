@@ -7473,18 +7473,24 @@ class TestBrowserSettingsEndpoint:
         assert get_speed() == 4.0
 
     def test_get_settings_includes_delay(self):
-        """GET /browser/settings should include delay."""
+        """GET /browser/settings should reflect the runtime delay."""
         from src.browser.server import create_browser_app
         from src.browser.service import BrowserManager
+        from src.browser.timing import set_delay
         mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         app = create_browser_app(mgr)
 
+        # Self-contained: set a known, non-default delay and assert the
+        # endpoint echoes it. Don't rely on the module-global default (now
+        # 0.3) or on state left behind by an earlier test in this file —
+        # teardown_method resets the delay to 0.0.
+        set_delay(0.7)
         from starlette.testclient import TestClient
         client = TestClient(app)
         resp = client.get("/browser/settings")
         assert resp.status_code == 200
         assert "delay" in resp.json()
-        assert resp.json()["delay"] == 0.0
+        assert resp.json()["delay"] == 0.7
 
     def test_set_delay(self):
         """POST /browser/settings should update the delay."""

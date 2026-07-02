@@ -4325,11 +4325,15 @@ class TestDashboardBrowserSettings:
         assert saved["browser_speed"] == 1.5
 
     def test_get_returns_delay(self):
-        """GET should include delay field."""
+        """GET should include delay field, defaulting to the runtime 0.3."""
+        # Remove any stale settings file so we exercise the default path.
+        settings_path = Path("config/settings.json")
+        if settings_path.exists():
+            settings_path.unlink()
         resp = self.client.get("/dashboard/api/browser-settings")
         assert resp.status_code == 200
         assert "delay" in resp.json()
-        assert resp.json()["delay"] == 0.0
+        assert resp.json()["delay"] == 0.3
 
     def test_post_delay_persists(self):
         """POST with delay should persist it."""
