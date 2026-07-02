@@ -110,6 +110,37 @@ class BrowserPoolExhausted(RuntimeError):
         )
 
 
+class ProxyRequiredError(RuntimeError):
+    """Raised when ``BROWSER_REQUIRE_PROXY`` is on but no proxy resolved.
+
+    Fail-closed egress control. Without a proxy the container egresses
+    from the datacenter IP — a strong bot-cluster signal AND a
+    deanonymization risk (the real host IP leaks to every site the agent
+    visits). When the operator sets ``BROWSER_REQUIRE_PROXY=true`` and the
+    effective proxy config for an agent is ``None``, ``_start_browser``
+    refuses to launch and raises this instead of silently leaking.
+
+    Recoverable by design: the mesh pushes the per-agent proxy config
+    shortly after boot (which triggers a reset), so a later
+    ``get_or_start`` finds a proxy and launches normally. The browser
+    service FastAPI app maps this to HTTP 503 with ``Retry-After`` and a
+    structured ``error="proxy_required"`` envelope — the agent's model
+    sees a recoverable failure and can retry rather than an opaque 500.
+
+    The default is ``false`` (historical fail-open behavior); this only
+    fires when an operator opts in.
+    """
+
+    def __init__(self, *, agent_id: str, retry_after_s: int = 30):
+        self.agent_id = agent_id
+        self.retry_after_s = retry_after_s
+        super().__init__(
+            f"Browser start refused for '{agent_id}': BROWSER_REQUIRE_PROXY "
+            f"is on but no proxy is configured yet. The mesh should push a "
+            f"proxy + reset shortly; retry in ~{retry_after_s}s.",
+        )
+
+
 # ── §11.13 structured CAPTCHA detection envelope ──────────────────────────
 # Both helpers below produce literal-string enums (see plan §11.13). We do
 # NOT use Python ``enum.Enum``: the wire format is JSON strings, and a real
@@ -3129,6 +3160,14 @@ class BrowserManager:
         self._playwright = None
         self.redactor = CredentialRedactor()
         self._proxy_configs: dict[str, dict | None] = {}
+        # Per-agent probed egress IP (BROWSER_PROXY_EGRESS_IP_CHECK). Cached
+        # for the browser instance's lifetime so we probe once at launch,
+        # never per navigation. Cleared on proxy re-push and on stop so the
+        # next launch re-probes against the (possibly rotated) egress.
+        self._egress_ips: dict[str, str] = {}
+        # Agents already warned about a no-proxy locale/TZ mismatch, so the
+        # coarse coherence warning fires at most once per agent.
+        self._tz_mismatch_warned: set[str] = set()
         self.boot_id: str = str(uuid.uuid4())
         self._captcha_solver = get_solver()
         self._metrics_sink = metrics_sink
@@ -4141,6 +4180,27 @@ class BrowserManager:
         else:
             logger.info("Starting Camoufox for '%s' (profile=%s, no proxy)", agent_id, profile_dir)
 
+        # Fail-closed egress control. When the operator has opted into
+        # BROWSER_REQUIRE_PROXY, refuse to launch without a proxy rather
+        # than egressing from the datacenter IP. Raises BEFORE allocating a
+        # display slot / spawning the X stack so nothing leaks on refusal.
+        # Recoverable: the mesh pushes the proxy + resets, and the next
+        # get_or_start finds a proxy and launches normally.
+        self._enforce_require_proxy(agent_id, _proxy_opt)
+
+        if _proxy_opt is None:
+            # Fail-open (default): launching without a proxy means GeoIP is
+            # off and the timezone falls back to the container TZ. Warn once
+            # per agent on a coarse locale/TZ mismatch (no behavior change).
+            self._warn_locale_tz_mismatch(agent_id)
+        else:
+            # Best-effort real-egress-IP probe (BROWSER_PROXY_EGRESS_IP_CHECK,
+            # default off). Only meaningful when a proxy IS set; folds the
+            # returned IP into the binding signature so a rotated residential
+            # egress invalidates bound anti-bot cookies. Never raises — a
+            # probe failure falls back to the UA+URL-only signature.
+            await self._probe_egress_ip(agent_id, _proxy_opt)
+
         # ── Per-agent X stack ─────────────────────────────────────────────
         # Allocate a (display, port) slot and bring up Xvnc + Openbox +
         # unclutter sized to the picked window resolution.  Camoufox is
@@ -4973,6 +5033,9 @@ class BrowserManager:
                 agent_id, e,
             )
         self._session_snapshot_elapsed_s.pop(agent_id, None)
+        # Drop the probed egress IP — its lifetime is one browser instance.
+        # The next launch re-probes (proxy may have rotated meanwhile).
+        self._egress_ips.pop(agent_id, None)
         # ``context.close()`` can wedge indefinitely when the underlying
         # Camoufox child has hung (X11 stuck, deadlocked on its own
         # mutex, or refusing SIGTERM). A 10s ceiling lets one bad
@@ -5084,15 +5147,159 @@ class BrowserManager:
             self._proxy_configs.pop(agent_id, None)
         else:
             self._proxy_configs[agent_id] = config
+        # A new (or cleared) proxy means the previously-probed egress IP
+        # is stale. Drop it so the next launch re-probes against the new
+        # egress — this is the automatic-recovery path after a rotation
+        # or a proxy re-push.
+        self._egress_ips.pop(agent_id, None)
 
     def get_proxy_config(self, agent_id: str) -> dict | None:
         """Get stored proxy config for an agent, or None."""
         return self._proxy_configs.get(agent_id)
 
+    def _enforce_require_proxy(self, agent_id: str, proxy_opt: dict | None) -> None:
+        """Refuse to launch without a proxy when ``BROWSER_REQUIRE_PROXY`` is on.
+
+        Fail-closed egress control. ``proxy_opt`` is the resolved
+        Playwright-style proxy dict (``None`` when no proxy will be used).
+        When it is ``None`` AND the operator opted into
+        ``BROWSER_REQUIRE_PROXY`` (default off), raise
+        :class:`ProxyRequiredError` so the browser never egresses from the
+        datacenter IP. Otherwise return quietly — a configured proxy or the
+        default fail-open posture both proceed to launch.
+
+        Split out from ``_start_browser`` so the gate is unit-testable
+        without driving a full (camoufox-dependent) launch.
+        """
+        if proxy_opt is not None:
+            return
+        from src.browser.flags import get_bool
+        if not get_bool("BROWSER_REQUIRE_PROXY", False, agent_id=agent_id):
+            return
+        logger.error(
+            "Refusing to start browser for '%s': BROWSER_REQUIRE_PROXY is on "
+            "but no proxy is configured — would egress from the datacenter "
+            "IP. Waiting for the mesh to push a proxy.",
+            agent_id,
+        )
+        raise ProxyRequiredError(agent_id=agent_id)
+
+    async def _probe_egress_ip(self, agent_id: str, proxy_arg: dict) -> None:
+        """Best-effort probe of the real egress IP through ``proxy_arg``.
+
+        Gated on ``BROWSER_PROXY_EGRESS_IP_CHECK`` (default off). When on
+        AND a proxy is set, fetch the echo URL
+        (``BROWSER_PROXY_EGRESS_IP_ECHO_URL``, default
+        ``https://api.ipify.org``) THROUGH the proxy with a 5s timeout and
+        cache the returned IP in ``self._egress_ips[agent_id]``. The cached
+        IP is folded into :meth:`_build_session_binding_signature`, so a
+        rotating residential pool (one proxy URL, changing egress IP) now
+        invalidates bound anti-bot cookies instead of replaying them under
+        a new IP for a guaranteed 403 + trust hit.
+
+        NEVER raises: any failure / timeout / flag-off leaves the cache
+        untouched, and the signature transparently falls back to UA+URL
+        only. Probes once per instance lifetime — a cached entry short-
+        circuits, so this is never per-navigation. Proxy credentials are
+        redacted from every log via :func:`redact_url`.
+        """
+        from src.browser.flags import get_bool, get_str
+        if not get_bool("BROWSER_PROXY_EGRESS_IP_CHECK", False, agent_id=agent_id):
+            return
+        if agent_id in self._egress_ips:
+            return  # already probed for this instance lifetime
+        server = (proxy_arg or {}).get("server")
+        if not server:
+            return
+        # Build an httpx proxy URL, re-injecting credentials from the
+        # playwright-style proxy dict (they live in separate keys there).
+        import ipaddress  # noqa: PLC0415 — local import keeps startup cheap
+        from urllib.parse import quote, urlsplit, urlunsplit
+        try:
+            parsed = urlsplit(server)
+        except ValueError:
+            return
+        scheme = (parsed.scheme or "").lower()
+        # Only HTTP(S) proxies are probeable here. SOCKS was removed
+        # deliberately (unreliable through the browser service); a SOCKS
+        # URL would also need httpx's socks extra. Skip → UA+URL fallback.
+        if scheme not in ("http", "https"):
+            return
+        netloc = parsed.netloc
+        if "@" in netloc:
+            netloc = netloc.rsplit("@", 1)[-1]  # drop any embedded userinfo
+        username = proxy_arg.get("username")
+        password = proxy_arg.get("password")
+        if username:
+            userinfo = quote(str(username), safe="")
+            if password:
+                userinfo += ":" + quote(str(password), safe="")
+            netloc = f"{userinfo}@{netloc}"
+        proxy_url = urlunsplit((parsed.scheme, netloc, parsed.path or "", "", ""))
+        echo_url = get_str(
+            "BROWSER_PROXY_EGRESS_IP_ECHO_URL",
+            "https://api.ipify.org",
+            agent_id=agent_id,
+        )
+        import httpx  # noqa: PLC0415 — local import (see _is_httpx_timeout)
+        try:
+            async with httpx.AsyncClient(proxy=proxy_url, timeout=5.0) as client:
+                resp = await client.get(echo_url)
+                resp.raise_for_status()
+                text = (resp.text or "").strip()
+            ip = ipaddress.ip_address(text)  # validates shape; raises on junk
+        except Exception as e:
+            logger.debug(
+                "egress-ip probe for '%s' via %s failed: %s",
+                agent_id, redact_url(proxy_url), e,
+            )
+            return
+        self._egress_ips[agent_id] = str(ip)
+        logger.info(
+            "egress-ip probe for '%s' succeeded via %s; folded into "
+            "binding signature", agent_id, redact_url(proxy_url),
+        )
+        logger.debug("egress-ip for '%s': %s", agent_id, str(ip))
+
+    def _warn_locale_tz_mismatch(self, agent_id: str) -> None:
+        """Warn once per agent on a coarse no-proxy locale/TZ mismatch.
+
+        With no proxy configured, GeoIP is off (Camoufox only enables it
+        when a proxy is set), so ``Intl`` timezone falls back to the
+        container ``TZ`` (default ``America/New_York``). If the agent
+        advertises a non-US ``BROWSER_LOCALE`` (e.g. ``en-GB``) while the
+        container TZ is ``America/*``, anti-bot vendors see a locale/
+        timezone mismatch — a real coherence signal.
+
+        Coarse heuristic only (no exhaustive locale→TZ table): a non-US
+        BCP-47 region subtag paired with an ``America/*`` TZ. No behavior
+        change — this is a diagnostic WARNING recommending a per-agent
+        proxy (for GeoIP TZ coherence) or a matching container TZ.
+        """
+        if agent_id in self._tz_mismatch_warned:
+            return
+        locale = os.environ.get("BROWSER_LOCALE", "en-US")
+        tz = os.environ.get("TZ", "America/New_York")
+        # BCP-47 region subtag = the token after the first '-' (upper-cased).
+        region = ""
+        if "-" in locale:
+            region = locale.split("-", 1)[1].split("-", 1)[0].upper()
+        if region and region != "US" and tz.startswith("America/"):
+            self._tz_mismatch_warned.add(agent_id)
+            logger.warning(
+                "Agent '%s': no proxy set, so GeoIP is off and the browser "
+                "timezone falls back to the container TZ (%s), which does "
+                "not match BROWSER_LOCALE (%s, region=%s). Anti-bot vendors "
+                "flag a locale/timezone mismatch. Recommend a per-agent "
+                "proxy (for GeoIP timezone coherence) or a container TZ "
+                "matching the locale region.",
+                agent_id, tz, locale, region,
+            )
+
     def _build_session_binding_signature(
         self, agent_id: str,
     ) -> dict[str, str | None]:
-        """Build a (UA, proxy) signature for cookie-binding invalidation.
+        """Build a (UA, proxy[, egress-IP]) signature for cookie-binding invalidation.
 
         Cloudflare / DataDome / PerimeterX bind tokens like ``cf_clearance``
         to the original (UA, IP) tuple. Replaying them under a rotated
@@ -5101,13 +5308,17 @@ class BrowserManager:
         detect the change and drop bound cookies before seeding the
         context.
 
-        We hash UA + proxy server URL (not the egress IP itself, which is
-        often unknown to us). For most operators a proxy URL change is a
-        proxy provider change, which usually means a different egress IP
-        — close enough to gate cookie reuse on.
+        We always hash UA + proxy server URL. When
+        ``BROWSER_PROXY_EGRESS_IP_CHECK`` is enabled and a launch-time
+        probe resolved the real egress IP (cached in ``self._egress_ips``),
+        we ALSO include it under ``egress_ip`` — this is what makes a
+        rotating residential pool (one URL, changing egress IP) invalidate
+        bound cookies. When the probe is off or failed, the key is omitted
+        and the hash is identical to the historical UA+URL signature.
 
-        Returns ``{"ua": ..., "proxy": ...}`` with ``None`` for fields we
-        don't know. ``None`` keys are dropped before hashing so an
+        Returns ``{"ua": ..., "proxy": ...}`` (plus ``egress_ip`` when
+        known) with ``None`` for fields we don't know. Falsy / ``None``
+        keys are dropped before hashing (see ``_hash_signature``) so an
         operator who never configures a proxy gets stable hashes across
         snapshots.
         """
@@ -5120,7 +5331,11 @@ class BrowserManager:
                 or proxy_cfg.get("url")
                 or None
             )
-        return {"ua": ua, "proxy": proxy_url}
+        sig: dict[str, str | None] = {"ua": ua, "proxy": proxy_url}
+        egress_ip = self._egress_ips.get(agent_id)
+        if egress_ip:
+            sig["egress_ip"] = egress_ip
+        return sig
 
     async def get_status(self, agent_id: str) -> dict:
         """Get status for a specific agent's browser.

@@ -89,6 +89,31 @@ KNOWN_FLAGS: dict[str, str] = {
         "arrivals as bot signal. Operators who run high-volume tests "
         "against these platforms (or have measured no benefit) can "
         "disable globally or per-agent.",
+    # ── Proxy hardening ───────────────────────────────────────────────────
+    "BROWSER_REQUIRE_PROXY":
+        "true | false (DEFAULT FALSE) — fail closed when no proxy is "
+        "resolved for an agent. When true and the effective proxy config "
+        "is None, the browser REFUSES to launch for that agent rather "
+        "than egressing from the datacenter IP (a strong bot signal + a "
+        "deanonymization risk). Recoverable: the mesh re-pushes the proxy "
+        "config + resets, and the next launch succeeds. When false "
+        "(default) the historical fail-open behavior is preserved — launch "
+        "without a proxy and log a warning.",
+    "BROWSER_PROXY_EGRESS_IP_CHECK":
+        "true | false (DEFAULT FALSE) — when a proxy IS set, best-effort "
+        "probe the real egress IP through the proxy at launch and fold it "
+        "into the per-agent binding signature. Rotating residential pools "
+        "share ONE proxy URL across a changing egress IP, so a URL-only "
+        "signature never invalidates anti-bot bound cookies "
+        "(cf_clearance / datadome / _abck …) when the IP rotates — they "
+        "get replayed under a new IP for a guaranteed 403 + trust hit. "
+        "Probe failure / timeout falls back to the UA+URL signature "
+        "(never raises). Probed once per browser instance lifetime.",
+    "BROWSER_PROXY_EGRESS_IP_ECHO_URL":
+        "URL of an echo endpoint returning the caller's public IP as "
+        "plain text (default https://api.ipify.org). Fetched THROUGH the "
+        "agent's proxy with a 5s timeout when "
+        "BROWSER_PROXY_EGRESS_IP_CHECK is enabled.",
     # ── CAPTCHA solver (§11) ──────────────────────────────────────────────
     "CAPTCHA_SOLVER_PROVIDER": "2captcha | capsolver | unset",
     "CAPTCHA_SOLVER_KEY": "API key for the primary provider",

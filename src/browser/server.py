@@ -19,7 +19,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from src.browser.service import BrowserManager, BrowserPoolExhausted
+from src.browser.service import BrowserManager, BrowserPoolExhausted, ProxyRequiredError
 from src.shared.paths import resolve_under_root
 from src.shared.trace import TRACE_HEADER, current_trace_id
 from src.shared.types import AGENT_ID_RE_PATTERN
@@ -156,6 +156,27 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
                 "error": "browser_pool_full",
                 "message": str(exc),
                 "cap": exc.cap,
+                "retry_after_s": exc.retry_after_s,
+            },
+        )
+
+    # Fail-closed proxy handler — converts the typed exception raised by
+    # ``_start_browser`` when ``BROWSER_REQUIRE_PROXY`` is on and no proxy
+    # resolved into a structured, RECOVERABLE 503. The agent's model sees
+    # ``error="proxy_required"`` + a retry hint (the mesh pushes a proxy +
+    # resets shortly) instead of egressing from the datacenter IP or
+    # getting an opaque 500.
+    @app.exception_handler(ProxyRequiredError)
+    async def _proxy_required_handler(
+        request: Request, exc: ProxyRequiredError,
+    ):
+        return JSONResponse(
+            status_code=503,
+            headers={"Retry-After": str(exc.retry_after_s)},
+            content={
+                "error": "proxy_required",
+                "message": str(exc),
+                "agent_id": exc.agent_id,
                 "retry_after_s": exc.retry_after_s,
             },
         )
