@@ -2063,6 +2063,10 @@ _VERB_FOR_TOOL_FALLBACK_OK = frozenset({
     "browser_drag",
     "browser_grant_permissions",
     "browser_set_geolocation",
+    "browser_right_click",
+    "browser_read_clipboard",
+    "browser_write_clipboard",
+    "browser_wait_for_network_idle",
     "request_captcha_help",
     "request_browser_login",
     # Watch / pub-sub.
