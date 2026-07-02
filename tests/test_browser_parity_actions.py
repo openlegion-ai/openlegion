@@ -387,6 +387,31 @@ class TestDragDispatch:
         assert result["success"] is False
         assert result["error"]["code"] == "invalid_input"
 
+    @pytest.mark.asyncio
+    async def test_ref_stale_returns_ref_stale_envelope(self):
+        """A RefStale raised while resolving source/target refs must surface
+        the ``ref_stale`` recovery path (re-snapshot), not a misleading
+        ``service_unavailable`` from the outer handler."""
+        from src.browser.ref_handle import RefStale
+
+        mgr = _make_manager()
+        inst = _FakeInstance(x11_wid=None)
+        _patch_get_or_start(mgr, inst)
+        mgr._locator_from_ref = AsyncMock(  # type: ignore[assignment]
+            side_effect=RefStale("shadow host missing", ref="e1"),
+        )
+
+        result = await mgr.drag(
+            "agent-parity",
+            source_ref="e1",
+            target_ref="e2",
+        )
+
+        assert result["success"] is False
+        assert result["error"]["code"] == "ref_stale"
+        # A drag that never resolved must not have touched the mouse.
+        inst.page.mouse.down.assert_not_called()
+
 
 class TestX11Drag:
     @pytest.mark.asyncio
@@ -423,6 +448,59 @@ class TestX11Drag:
         verbs = [c[1] for c in calls]
         assert verbs == ["mousedown", "mouseup"]
         assert calls[0][-1] == "1" and calls[1][-1] == "1"
+
+
+# ── Dialog listener attachment (restored-page coverage) ───────────────────
+
+
+class TestDialogListenerAttach:
+    def test_attaches_handler_to_every_restored_page(self):
+        """A persistent Camoufox profile can RESTORE multiple pages at launch.
+        Playwright has no context-level ``dialog`` event, so every existing
+        page — not just ``inst.page`` — needs its own page-level handler; else
+        a ``switch_tab`` to a restored tab silently auto-dismisses dialogs."""
+        mgr = _make_manager()
+        inst = _FakeInstance()
+
+        # Simulate a restored profile: three pages already open, the first of
+        # which is inst.page (so it must NOT be double-wired).
+        page_a = inst.page
+        page_a.on = MagicMock()
+        page_b = MagicMock()
+        page_c = MagicMock()
+        inst.context.pages = [page_a, page_b, page_c]
+        inst.context.on = MagicMock()
+        inst._dialog_attached = False
+
+        mgr._attach_dialog_listeners(inst)
+
+        # Every existing page wired for "dialog" exactly once.
+        for p in (page_a, page_b, page_c):
+            dialog_calls = [
+                c for c in p.on.call_args_list
+                if c.args and c.args[0] == "dialog"
+            ]
+            assert len(dialog_calls) == 1, f"page wired {len(dialog_calls)}x"
+        # Future pages covered via a single context-level "page" listener.
+        page_calls = [
+            c for c in inst.context.on.call_args_list
+            if c.args and c.args[0] == "page"
+        ]
+        assert len(page_calls) == 1
+        assert inst._dialog_attached is True
+
+    def test_idempotent_when_already_attached(self):
+        mgr = _make_manager()
+        inst = _FakeInstance()
+        inst.context.pages = [inst.page]
+        inst.page.on = MagicMock()
+        inst.context.on = MagicMock()
+        inst._dialog_attached = True  # already wired
+
+        mgr._attach_dialog_listeners(inst)
+
+        inst.page.on.assert_not_called()
+        inst.context.on.assert_not_called()
 
 
 # ── Agent-side @tool forwarding ────────────────────────────────────────────

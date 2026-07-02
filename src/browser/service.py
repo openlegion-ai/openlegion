@@ -8380,8 +8380,15 @@ class BrowserManager:
                     )
                 # Resolve source + target to (x, y) viewport points.
                 if source_ref and target_ref:
-                    src_loc = await self._locator_from_ref(inst, source_ref)
-                    tgt_loc = await self._locator_from_ref(inst, target_ref)
+                    # ``_locator_from_ref`` raises RefStale when the DOM has
+                    # shifted since snapshot; surface the ref_stale recovery
+                    # path (re-snapshot) rather than a misleading
+                    # ``service_unavailable`` from the outer handler.
+                    try:
+                        src_loc = await self._locator_from_ref(inst, source_ref)
+                        tgt_loc = await self._locator_from_ref(inst, target_ref)
+                    except RefStale as rs:
+                        return _err("ref_stale", str(rs))
                     if not src_loc:
                         return _err("ref_stale", f"Ref '{source_ref}' not found")
                     if not tgt_loc:
@@ -11788,13 +11795,19 @@ class BrowserManager:
                 await dialog.dismiss()
 
     def _attach_dialog_listeners(self, inst: CamoufoxInstance) -> None:
-        """Wire a native-dialog handler on the initial page + every new page.
+        """Wire a native-dialog handler on EVERY existing page + every new page.
 
         Playwright Python event callbacks are SYNC, but ``dialog.accept()`` /
         ``dialog.dismiss()`` are coroutines — so schedule ``_on_dialog`` via
-        ``asyncio.create_task``. The context-level ``page`` event covers
-        popups / ``window.open()`` / OAuth windows (mirrors
-        ``_attach_network_listeners``'s context-level wiring). Idempotent
+        ``asyncio.create_task``. Unlike ``request`` / ``response``, Playwright
+        has NO context-level ``dialog`` event, so the handler must be attached
+        per page. A persistent Camoufox profile can RESTORE multiple pages at
+        launch; wiring only ``inst.page`` (as this did before) left every other
+        restored tab with no handler, so a ``switch_tab`` to one of them meant
+        confirm/prompt dialogs were silently auto-dismissed. We therefore wire
+        the handler on all pages currently in ``inst.context.pages`` plus the
+        initial ``inst.page``, then use the context-level ``page`` event for
+        FUTURE pages (popups / ``window.open()`` / OAuth windows). Idempotent
         via ``_dialog_attached``; re-runs after RESET (fresh instance).
 
         Best-effort: a Camoufox build that doesn't surface the events must
@@ -11804,10 +11817,17 @@ class BrowserManager:
         if getattr(inst, "_dialog_attached", False):
             return
         try:
-            inst.page.on(
-                "dialog",
-                lambda d: asyncio.create_task(self._on_dialog(inst, d)),
-            )
+            # De-dupe by object identity so a page reached via both
+            # ``context.pages`` and ``inst.page`` is not wired twice (which
+            # would fire ``_on_dialog`` twice for one dialog).
+            existing = list(inst.context.pages)
+            if inst.page is not None and inst.page not in existing:
+                existing.append(inst.page)
+            for page in existing:
+                page.on(
+                    "dialog",
+                    lambda d: asyncio.create_task(self._on_dialog(inst, d)),
+                )
             inst.context.on(
                 "page",
                 lambda p: p.on(
