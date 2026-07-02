@@ -132,9 +132,26 @@ RUN mkdir -p /opt/openlegion/extensions \
 # also used by ``vnc_ws`` to connect upstream to the per-agent
 # KasmVNC.
 COPY pyproject.toml .
+# ``camoufox`` is version-pinned on purpose. Camoufox itself pins
+# ``playwright="*"``, so an unpinned rebuild can silently drift onto a
+# Playwright release that breaks the Camoufox<->Firefox Juggler bridge
+# (camoufox#617), and it also drags in a different fingerprint DB. CI's
+# ``build-and-smoke`` job (.github/workflows/browser-image.yml) builds
+# this exact image whenever Dockerfile.browser/pyproject.toml change, so
+# it WILL catch an un-installable or absent pin — it already caught an
+# earlier bad pin (a non-existent version). What CI does NOT do is run
+# the browser canary (``src/browser/canary.py``) or any live
+# Camoufox-launch / Juggler-bridge / fingerprint check, so the *runtime*
+# behavior of a future version BUMP still surfaces only as a live
+# antibot/session regression. 0.4.11 is the current latest release,
+# i.e. exactly what an unpinned build resolves to today — pinning it locks
+# in current, known-good behavior with zero drift. Refresh this pin
+# DELIBERATELY and re-run the browser canary at staging after any bump.
+# The ``python -m camoufox fetch`` below resolves the matching Firefox
+# build from whatever version is pinned here.
 RUN pip install --no-cache-dir --root-user-action=ignore --upgrade pip \
     && pip install --no-cache-dir --root-user-action=ignore \
-    "camoufox[geoip]" fastapi "uvicorn[standard]" pydantic httpx \
+    "camoufox[geoip]==0.4.11" fastapi "uvicorn[standard]" pydantic httpx \
     "Pillow>=10.0"
 
 # Application code
