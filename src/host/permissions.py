@@ -79,6 +79,11 @@ KNOWN_BROWSER_ACTIONS: frozenset[str] = frozenset({
     # trusted-X11 drag-and-drop. Default-allow like every other known
     # action; operators narrow via ``AgentPermissions.browser_actions``.
     "set_dialog_policy", "grant_permissions", "set_geolocation", "drag",
+    # P2 human-parity actions: trusted right-click / native context menu,
+    # secure-context clipboard read + write, and an explicit network-idle
+    # wait. Default-allow like every other known action; operators narrow
+    # via ``AgentPermissions.browser_actions``.
+    "right_click", "read_clipboard", "write_clipboard", "wait_for_network_idle",
 })
 
 

@@ -923,6 +923,52 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         await _apply_delay()
         return result
 
+    @app.post("/browser/{agent_id}/right_click")
+    async def right_click(agent_id: str, request: Request):
+        """Right-click (secondary button) at a ref or viewport coords."""
+        _verify_auth(request)
+        body = await request.json()
+        result = await manager.right_click(
+            agent_id,
+            ref=body.get("ref"),
+            x=body.get("x"),
+            y=body.get("y"),
+        )
+        await _apply_delay()
+        return result
+
+    @app.post("/browser/{agent_id}/read_clipboard")
+    async def read_clipboard(agent_id: str, request: Request):
+        """Read the system clipboard (async Clipboard API, secure-context)."""
+        _verify_auth(request)
+        result = await manager.read_clipboard(agent_id)
+        await _apply_delay()
+        return result
+
+    @app.post("/browser/{agent_id}/write_clipboard")
+    async def write_clipboard(agent_id: str, request: Request):
+        """Write text to the system clipboard (async Clipboard API)."""
+        _verify_auth(request)
+        body = await request.json()
+        result = await manager.write_clipboard(
+            agent_id,
+            text=body.get("text", "") or "",
+        )
+        await _apply_delay()
+        return result
+
+    @app.post("/browser/{agent_id}/wait_for_network_idle")
+    async def wait_for_network_idle(agent_id: str, request: Request):
+        """Wait for no in-flight network requests (non-fatal on timeout)."""
+        _verify_auth(request)
+        body = await request.json()
+        result = await manager.wait_for_network_idle(
+            agent_id,
+            timeout=body.get("timeout", 10000),
+        )
+        await _apply_delay()
+        return result
+
     # ── Session persistence (Phase 10 §20) ────────────────────────────────
     #
     # Read-only summary + operator clear endpoint. Mounted on the browser

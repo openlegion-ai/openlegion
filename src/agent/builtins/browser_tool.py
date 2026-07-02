@@ -1485,6 +1485,124 @@ async def browser_set_geolocation(
 
 
 @tool(
+    name="browser_right_click",
+    description=(
+        "Right-click (secondary / context-menu button) at an element ref or "
+        "at viewport coordinates — something a human can do but a normal click "
+        "cannot. Provide EITHER a 'ref' from browser_get_elements OR an (x, y) "
+        "viewport coordinate pair (CSS pixels); a ref wins when both are given. "
+        "IMPORTANT: a right-click usually opens the browser's NATIVE context "
+        "menu, which is NOT part of the page DOM — browser_get_elements will "
+        "NOT see its items. After right-clicking, drive the menu with "
+        "browser_press_key: ArrowDown/ArrowUp to move, Enter to activate, "
+        "Escape to dismiss. Many web apps also render their OWN in-page menu on "
+        "right-click; that one IS in the DOM and you can snapshot + click it."
+    ),
+    parameters={
+        "ref": {
+            "type": "string",
+            "description": "Ref of the element to right-click (e.g. 'e7').",
+            "default": "",
+        },
+        "x": {
+            "type": "number",
+            "description": "Viewport x (CSS px). Use with y when not using a ref.",
+        },
+        "y": {
+            "type": "number",
+            "description": "Viewport y (CSS px).",
+        },
+    },
+    parallel_safe=False,
+)
+async def browser_right_click(
+    ref: str = "", x: float | None = None, y: float | None = None,
+    *, mesh_client=None,
+) -> dict:
+    """Right-click at a ref or at (x, y) viewport coordinates."""
+    params: dict = {}
+    if ref:
+        params["ref"] = ref
+    else:
+        params["x"] = x
+        params["y"] = y
+    return await _browser_command(mesh_client, "right_click", params)
+
+
+@tool(
+    name="browser_write_clipboard",
+    description=(
+        "Write text to the browser's clipboard (the same clipboard a human "
+        "Ctrl+C / Ctrl+V uses), so you can then paste it into a field with "
+        "browser_press_key. Writes the browser's X clipboard directly, so it "
+        "works on any page (no HTTPS requirement); returns an error rather "
+        "than hanging if the clipboard is unavailable."
+    ),
+    parameters={
+        "text": {
+            "type": "string",
+            "description": "The text to place on the clipboard.",
+        },
+    },
+    parallel_safe=False,
+)
+async def browser_write_clipboard(text: str = "", *, mesh_client=None) -> dict:
+    """Write text to the system clipboard."""
+    return await _browser_command(mesh_client, "write_clipboard", {"text": text})
+
+
+@tool(
+    name="browser_read_clipboard",
+    description=(
+        "Read the current text contents of the browser's clipboard — useful "
+        "to capture what a page copied when you clicked a 'Copy' button (share "
+        "links, API keys, coupon codes) that never appears in the DOM. Reads "
+        "the browser's X clipboard directly, so it works on any page (no HTTPS "
+        "requirement); returns an error rather than hanging if the clipboard "
+        "is empty or unavailable. Returns data.text."
+    ),
+    parameters={},
+    parallel_safe=False,
+)
+async def browser_read_clipboard(*, mesh_client=None) -> dict:
+    """Read the system clipboard contents."""
+    return await _browser_command(mesh_client, "read_clipboard")
+
+
+@tool(
+    name="browser_wait_for_network_idle",
+    description=(
+        "Wait until the page has no in-flight network requests (Playwright's "
+        "'networkidle'). Call this AFTER an action that fires background XHR / "
+        "fetch — search-as-you-type, infinite scroll, a form submit, adding to "
+        "a cart — to let the results settle before you snapshot with "
+        "browser_get_elements. 'timeout' is milliseconds (default 10000, capped "
+        "at 30000). Reaching the timeout is NOT an error: it returns "
+        "data.idle=False (some pages have persistent long-poll / websocket "
+        "traffic that never goes idle), so you can safely proceed."
+    ),
+    parameters={
+        "timeout": {
+            "type": "number",
+            "description": (
+                "Max time to wait in milliseconds (default 10000, capped at "
+                "30000)."
+            ),
+            "default": 10000,
+        },
+    },
+    parallel_safe=False,
+)
+async def browser_wait_for_network_idle(
+    timeout: float = 10000, *, mesh_client=None,
+) -> dict:
+    """Wait for the page's network to go idle (non-fatal on timeout)."""
+    return await _browser_command(
+        mesh_client, "wait_for_network_idle", {"timeout": timeout},
+    )
+
+
+@tool(
     name="browser_detect_captcha",
     description=(
         "Detect CAPTCHAs (reCAPTCHA, hCaptcha, Cloudflare Turnstile, etc.) "

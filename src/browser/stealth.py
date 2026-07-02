@@ -1109,6 +1109,16 @@ def _stealth_prefs(locale: str = "en-US") -> dict:
         # Blocking them causes silent auth failures.
         "dom.disable_open_during_load": False,
 
+        # NOTE: the async Clipboard API is deliberately NOT enabled here.
+        # Prefs like ``dom.events.testing.asyncClipboard`` /
+        # ``dom.events.asyncClipboard.readText`` would let ANY HTTPS page an
+        # agent visits silently read and write the OS clipboard — a data
+        # exfiltration channel AND a fleet-wide fingerprint tell (Firefox does
+        # not expose these to normal web content). The ``read_clipboard`` /
+        # ``write_clipboard`` browser actions instead drive the X11 clipboard
+        # directly via ``xclip`` in ``service.py``, scoped to the agent's own
+        # display — no page-reachable Clipboard API required.
+
         # ── Telemetry and update checks ───────────────────────────────────────
         # These fire background XHR/DNS requests that look like bot traffic
         # patterns (non-page-triggered network activity).

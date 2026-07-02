@@ -7590,6 +7590,47 @@ class BrowserManager:
             ),
         )
 
+    async def _x11_right_click_xy(
+        self, inst: CamoufoxInstance, x: float, y: float,
+    ) -> None:
+        """Right-click at viewport coords (x, y) via xdotool button 3.
+
+        Same trusted-event rationale + Bezier/settle/dwell shape as
+        ``_x11_click_xy``, but presses the SECONDARY button (``3``) so the
+        browser fires a real ``contextmenu`` with ``isTrusted=true``. A
+        right-click typically opens a NATIVE context menu that is not part
+        of the DOM (so ``get_elements`` won't see it) — the agent normally
+        follows up with ``press_key`` (arrows / Enter) to drive it.
+        """
+        wid = inst.x11_wid
+        if not wid:
+            raise RuntimeError("No X11 window ID — cannot use xdotool right-click")
+        await self._x11_move_to(inst, int(x), int(y))
+        wid_s = str(wid)
+        loop = asyncio.get_running_loop()
+        await asyncio.sleep(pre_click_settle())
+        await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ["xdotool", "mousedown", "--clearmodifiers", "--window", wid_s, "3"],
+                capture_output=True, timeout=3, env=inst.subprocess_env(),
+            ),
+        )
+        # Once button 3 is physically DOWN the release MUST always fire. An
+        # ``asyncio.CancelledError`` during the dwell (or any raise) would
+        # otherwise leave the secondary button held for the rest of the
+        # session — the same class of bug as the drag held-button leak.
+        try:
+            await asyncio.sleep(click_dwell())
+        finally:
+            await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    ["xdotool", "mouseup", "--clearmodifiers", "--window", wid_s, "3"],
+                    capture_output=True, timeout=3, env=inst.subprocess_env(),
+                ),
+            )
+
     async def _x11_hover(self, inst: CamoufoxInstance, locator) -> None:
         """Move mouse to element via xdotool for isTrusted=true mousemove events."""
         await self._x11_ensure_in_viewport(inst, locator)
@@ -8576,6 +8617,267 @@ class BrowserManager:
                     },
                 }
             except Exception as e:
+                return _err("service_unavailable", str(e))
+
+    async def right_click(
+        self, agent_id: str, ref: str | None = None,
+        x: float | None = None, y: float | None = None,
+    ) -> dict:
+        """Right-click (secondary button) at a ref or viewport coords.
+
+        Accepts EITHER a ``ref`` from ``get_elements`` (resolved to a
+        Fitts'-Law-sampled point inside its bbox) OR an ``(x, y)`` viewport
+        coordinate pair. A ref takes precedence when both are supplied.
+
+        Uses the trusted X11 path (``_x11_right_click_xy``, xdotool button
+        3) when the agent has an X11 window on an X11 site; falls back to
+        CDP ``page.mouse.click(x, y, button="right")``.
+
+        A right-click usually opens the browser's NATIVE context menu, which
+        is NOT part of the page DOM — ``get_elements`` will not see it. Drive
+        the menu with ``press_key`` (Down/Up arrows then Enter, or Escape to
+        dismiss).
+        """
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        async with inst.lock:
+            try:
+                if inst._user_control:
+                    return _err(
+                        "conflict",
+                        "User has browser control — action paused until "
+                        "control is released.",
+                    )
+                # Resolve the target point from ref or coords.
+                if ref:
+                    # ``_locator_from_ref`` raises RefStale when the DOM has
+                    # shifted since snapshot; surface the ref_stale recovery
+                    # path (re-snapshot) rather than a misleading
+                    # ``service_unavailable`` from the outer handler.
+                    try:
+                        loc = await self._locator_from_ref(inst, ref)
+                    except RefStale as rs:
+                        return _err("ref_stale", str(rs))
+                    if not loc:
+                        return _err("ref_stale", f"Ref '{ref}' not found")
+                    box = await loc.bounding_box()
+                    if not box:
+                        return _err(
+                            "invalid_input",
+                            "element has no bounding box (not visible)",
+                        )
+                    px, py = self._pick_click_target(box)
+                elif x is not None and y is not None:
+                    for v in (x, y):
+                        if isinstance(v, bool) or not isinstance(v, (int, float)):
+                            return _err(
+                                "invalid_input",
+                                "right_click coordinates must be numbers",
+                            )
+                    px, py = int(x), int(y)
+                else:
+                    return _err(
+                        "invalid_input",
+                        "provide either a ref or (x, y) coordinates",
+                    )
+
+                _use_x11 = bool(inst.x11_wid) and self._is_x11_site(inst)
+                # Track the path actually taken: an X11 right-click that raises
+                # falls back to CDP, so ``_use_x11`` alone would mislabel a
+                # CDP-injected right-click as "x11".
+                method = "x11" if _use_x11 else "cdp"
+                if _use_x11:
+                    try:
+                        await self._x11_right_click_xy(inst, px, py)
+                    except Exception as e:
+                        logger.warning(
+                            "X11 right-click failed for '%s', falling back "
+                            "to CDP: %s", agent_id, e,
+                        )
+                        method = "cdp"
+                        await inst.page.mouse.click(px, py, button="right")
+                else:
+                    await inst.page.mouse.click(px, py, button="right")
+                await asyncio.sleep(action_delay())
+                return {
+                    "success": True,
+                    "data": {
+                        "at": [px, py],
+                        "method": method,
+                        # Truth-in-advertising: the resulting menu is native,
+                        # not DOM — the agent must drive it with press_key.
+                        "note": (
+                            "a native context menu (if any) is not in the DOM; "
+                            "use press_key (arrows / Enter / Escape) to drive it"
+                        ),
+                    },
+                }
+            except Exception as e:
+                return _err("service_unavailable", str(e))
+
+    async def write_clipboard(self, agent_id: str, text: str = "") -> dict:
+        """Write ``text`` to the browser's X11 clipboard via ``xclip``.
+
+        Scoped to THIS agent's X display (``inst.subprocess_env()`` pins
+        ``DISPLAY``, exactly like the xdotool input path) so one agent's
+        clipboard never bleeds into another's. Deliberately NOT backed by the
+        page's ``navigator.clipboard`` API: exposing that to web content would
+        let any visited HTTPS page read/write the clipboard silently (a data
+        exfiltration channel + a fleet-wide fingerprint tell). Fails safe — a
+        missing / failed ``xclip`` returns a structured error, never hangs.
+        """
+        if not isinstance(text, str):
+            return _err("invalid_input", "text must be a string")
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        async with inst.lock:
+            if inst._user_control:
+                return _err(
+                    "conflict",
+                    "User has browser control — action paused until "
+                    "control is released.",
+                )
+            loop = asyncio.get_running_loop()
+
+            def _run_xclip():
+                # ``xclip -i`` reads stdin into the CLIPBOARD selection, then
+                # forks to keep serving it. DEVNULL its stdout/stderr so
+                # subprocess.run does not block waiting for EOF on inherited
+                # pipe fds (the classic xclip daemonize hang); the timeout is
+                # the last-ditch guard against a wedged X server.
+                return subprocess.run(
+                    ["xclip", "-selection", "clipboard", "-i"],
+                    input=text.encode("utf-8"),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=3,
+                    env=inst.subprocess_env(),
+                )
+
+            try:
+                result = await loop.run_in_executor(None, _run_xclip)
+            except FileNotFoundError:
+                return _err(
+                    "service_unavailable",
+                    "xclip is not available in the browser container",
+                )
+            except subprocess.TimeoutExpired:
+                return _err("service_unavailable", "xclip write timed out")
+            except Exception as e:
+                return _err("service_unavailable", str(e))
+            if result.returncode != 0:
+                return _err(
+                    "service_unavailable",
+                    f"xclip write failed (rc={result.returncode})",
+                )
+            return {"success": True, "data": {"written": len(text)}}
+
+    async def read_clipboard(self, agent_id: str) -> dict:
+        """Read the browser's X11 clipboard via ``xclip``.
+
+        Scoped to THIS agent's X display. NOT backed by the page's
+        ``navigator.clipboard`` API (that would expose clipboard reads to any
+        visited page — see ``write_clipboard`` and ``stealth.py``). The
+        returned text is redacted through the per-agent redactor like other
+        page text. Fails safe — a missing / failed / empty clipboard returns
+        a structured error rather than hanging.
+        """
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        async with inst.lock:
+            if inst._user_control:
+                return _err(
+                    "conflict",
+                    "User has browser control — action paused until "
+                    "control is released.",
+                )
+            loop = asyncio.get_running_loop()
+
+            def _run_xclip():
+                # ``xclip -o`` prints the CLIPBOARD selection to stdout and
+                # exits (no daemonize on output), so capture_output is safe
+                # here; the timeout guards a wedged X server.
+                return subprocess.run(
+                    ["xclip", "-selection", "clipboard", "-o"],
+                    capture_output=True,
+                    timeout=3,
+                    env=inst.subprocess_env(),
+                )
+
+            try:
+                result = await loop.run_in_executor(None, _run_xclip)
+            except FileNotFoundError:
+                return _err(
+                    "service_unavailable",
+                    "xclip is not available in the browser container",
+                )
+            except subprocess.TimeoutExpired:
+                return _err("service_unavailable", "xclip read timed out")
+            except Exception as e:
+                return _err("service_unavailable", str(e))
+            if result.returncode != 0:
+                # xclip exits non-zero when the clipboard is empty or has no
+                # text target — surface it rather than returning a phantom
+                # empty string.
+                err = (result.stderr or b"").decode("utf-8", "replace").strip()
+                return _err(
+                    "service_unavailable",
+                    err or "clipboard is empty or unavailable",
+                )
+            text = (result.stdout or b"").decode("utf-8", "replace")
+            return {
+                "success": True,
+                "data": {"text": self.redactor.redact(agent_id, text)},
+            }
+
+    async def wait_for_network_idle(
+        self, agent_id: str, timeout: int = 10000,
+    ) -> dict:
+        """Wait until there are no in-flight network requests (networkidle).
+
+        Thin wrapper over Playwright's ``page.wait_for_load_state
+        ("networkidle")`` — useful after an action that triggers XHR / fetch
+        (search-as-you-type, infinite scroll, a form POST) to let the results
+        settle before snapshotting. ``timeout`` is milliseconds, default
+        10000, capped at 30000. Reaching the cap is NOT fatal: it returns a
+        structured ``idle=False`` result (the page may simply have long-poll /
+        websocket traffic that never goes idle) rather than raising.
+        """
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+            return _err("invalid_input", "timeout must be a number (ms)")
+        # Clamp to a sane window: at least 0, at most 30s.
+        timeout_ms = max(0, min(int(timeout), 30000))
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        async with inst.lock:
+            try:
+                await inst.page.wait_for_load_state(
+                    "networkidle", timeout=timeout_ms,
+                )
+                return {
+                    "success": True,
+                    "data": {"idle": True, "timeout_ms": timeout_ms},
+                }
+            except Exception as e:
+                # Playwright's ``TimeoutError`` does NOT subclass the builtin,
+                # so match it the way the rest of the file does — isinstance
+                # OR the "timeout" message heuristic. A timeout here is
+                # NON-FATAL: idle simply wasn't reached inside the window (the
+                # page may have persistent long-poll / websocket traffic), so
+                # return a structured idle=False rather than raising.
+                if isinstance(e, TimeoutError) or "timeout" in str(e).lower():
+                    return {
+                        "success": True,
+                        "data": {
+                            "idle": False,
+                            "timeout_ms": timeout_ms,
+                            "note": (
+                                "network did not go idle within the timeout; "
+                                "the page may have persistent (long-poll / "
+                                "websocket) traffic"
+                            ),
+                        },
+                    }
                 return _err("service_unavailable", str(e))
 
     async def type_text(self, agent_id: str, ref: str | None = None, selector: str | None = None,
