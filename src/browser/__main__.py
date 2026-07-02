@@ -250,6 +250,18 @@ def main() -> None:
             await _cost_counter.restore()
         except Exception as exc:
             logger.warning("captcha_cost_counter.restore failed: %s", exc)
+        # Durable fingerprint burn + per-agent binding-signature state.
+        # Without this restore, a fingerprint flagged "burned" reads clean
+        # after a restart while its poisoned cookies persist on disk, and
+        # the binding-coherence check has no prior signature to compare
+        # against. Non-fatal — a missing / corrupt sidecar restores empty.
+        from src.browser.service import (
+            load_fingerprint_state as _load_fp_state,
+        )
+        try:
+            await _load_fp_state()
+        except Exception as exc:
+            logger.warning("load_fingerprint_state failed: %s", exc)
         await manager.start_cleanup_loop()
         logger.info("Browser service ready (max=%d, idle_timeout=%dm)", _MAX_BROWSERS, _IDLE_TIMEOUT)
         yield
@@ -257,6 +269,13 @@ def main() -> None:
             await _cost_counter.snapshot()
         except Exception as exc:
             logger.warning("captcha_cost_counter.snapshot failed: %s", exc)
+        from src.browser.service import (
+            persist_fingerprint_state as _persist_fp_state,
+        )
+        try:
+            await _persist_fp_state()
+        except Exception as exc:
+            logger.warning("persist_fingerprint_state failed: %s", exc)
         # ``stop_all`` tears down every per-agent X stack via
         # ``_teardown_per_agent_x_stack``; no global processes to reap.
         await manager.stop_all()
