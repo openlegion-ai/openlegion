@@ -1115,6 +1115,7 @@ class TestFillFormHumanize:
         assert result["success"] is True
         loc.fill.assert_awaited_once_with("x@y.z")
         x11_click.assert_not_awaited()
+        x11_key.assert_not_awaited()  # no ctrl+a select-all on the native path
         x11_type.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1140,6 +1141,7 @@ class TestFillFormHumanize:
         assert result["success"] is True
         loc.fill.assert_awaited_once_with("x@y.z")
         x11_click.assert_not_awaited()
+        x11_key.assert_not_awaited()  # no ctrl+a select-all on the native path
         x11_type.assert_not_awaited()
 
 
