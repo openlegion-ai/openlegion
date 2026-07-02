@@ -27,8 +27,16 @@ def _make_manager() -> BrowserManager:
     return mgr
 
 
-def _make_instance(refs_dict: dict | None = None) -> MagicMock:
-    """Build a mock CamoufoxInstance with the given ref-id → ref-dict map."""
+def _make_instance(
+    refs_dict: dict | None = None, *, x11_wid: int | None = None,
+) -> MagicMock:
+    """Build a mock CamoufoxInstance with the given ref-id → ref-dict map.
+
+    ``x11_wid`` defaults to ``None`` so the humanized X11 keystroke path is
+    disabled and ``fill_form`` uses Playwright's atomic ``fill()`` — matching
+    the behavior these tests were written against. Pass a truthy window ID to
+    exercise the trusted per-key path (``_is_x11_site`` always returns True).
+    """
     inst = MagicMock()
     inst.refs = {k: _h(v) for k, v in (refs_dict or {}).items()}
     inst.page = AsyncMock()
@@ -36,11 +44,23 @@ def _make_instance(refs_dict: dict | None = None) -> MagicMock:
     inst.lock = asyncio.Lock()
     inst.touch = MagicMock()
     inst._user_control = False
+    inst.x11_wid = x11_wid
     return inst
 
 
-def _make_locator(*, raise_on_fill: Exception | None = None) -> AsyncMock:
-    """Locator stub: visible, in-viewport, fill/press succeed unless overridden."""
+def _make_locator(
+    *, raise_on_fill: Exception | None = None,
+    input_value: str | Exception | None = None,
+) -> AsyncMock:
+    """Locator stub: visible, in-viewport, fill/press succeed unless overridden.
+
+    ``input_value`` drives the X11 post-type verification in ``fill_form``:
+    the code compares ``await locator.input_value()`` against the typed value
+    and falls back to ``fill()`` on a mismatch. Pass the expected value to
+    simulate a landed keystroke chain, a *different* string to simulate a
+    silent no-op, or an ``Exception`` to simulate a non-input control that
+    can't be read back (the code then trusts the X11 path).
+    """
     loc = AsyncMock()
     loc.is_visible = AsyncMock(return_value=True)
     loc.bounding_box = AsyncMock(
@@ -52,6 +72,10 @@ def _make_locator(*, raise_on_fill: Exception | None = None) -> AsyncMock:
     else:
         loc.fill = AsyncMock(return_value=None)
     loc.press = AsyncMock(return_value=None)
+    if isinstance(input_value, BaseException):
+        loc.input_value = AsyncMock(side_effect=input_value)
+    else:
+        loc.input_value = AsyncMock(return_value=input_value)
     return loc
 
 
@@ -1016,6 +1040,291 @@ class TestFillFormValueAndLabelHandling:
         )
 
 
+class TestFillFormHumanize:
+    """humanize=True routes text fields through the trusted X11 keystroke chain.
+
+    ``_is_x11_site`` always returns True, so the X11 path turns on whenever the
+    instance has a truthy ``x11_wid`` and ``humanize`` is set (the default).
+    """
+
+    def _x11_patches(self):
+        """Patch the three X11 primitives as AsyncMocks; return the CM stack."""
+        return (
+            patch.object(BrowserManager, "_x11_click", new_callable=AsyncMock),
+            patch.object(BrowserManager, "_x11_key", new_callable=AsyncMock),
+            patch.object(BrowserManager, "_x11_type", new_callable=AsyncMock),
+        )
+
+    @pytest.mark.asyncio
+    async def test_text_field_with_x11_uses_keystroke_chain(self):
+        mgr = _make_manager()
+        refs = {"e0": {"role": "textbox", "name": "Email", "index": 0, "disabled": False}}
+        inst = _make_instance(refs, x11_wid=12345)
+        # input_value echoes the typed value → post-type verification passes,
+        # so the trusted X11 path is kept (no fill() fallback).
+        loc = _make_locator(input_value="alice@example.com")
+        p_click, p_key, p_type = self._x11_patches()
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref",
+                          new_callable=AsyncMock, return_value=loc), \
+             patch.object(BrowserManager, "_check_captcha",
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
+             patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot), \
+             p_click as x11_click, p_key as x11_key, p_type as x11_type:
+            result = await mgr.fill_form(
+                "agent1", [{"label": "Email", "value": "alice@example.com"}],
+            )
+
+        assert result["success"] is True
+        assert result["data"]["filled"][0]["status"] == "filled"
+        # Trusted focus-click → ctrl+a select-all → per-key type, no fill().
+        x11_click.assert_awaited_once_with(inst, loc)
+        x11_key.assert_awaited_once_with(inst, "ctrl+a")
+        x11_type.assert_awaited_once_with(inst, "alice@example.com", typos=True)
+        loc.fill.assert_not_awaited()
+        # Keystrokes recorded for the behavioral recorder (mirrors type_text).
+        inst.recorder.record_keystrokes.assert_called_once_with(
+            char_count=len("alice@example.com"), fast=False, method="x11",
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_text_field_with_x11_uses_native_fill(self):
+        mgr = _make_manager()
+        # combobox is NOT in _FILL_FORM_PREFERRED_ROLES → native fill().
+        refs = {"e0": {"role": "combobox", "name": "Country", "index": 0, "disabled": False}}
+        inst = _make_instance(refs, x11_wid=12345)
+        loc = _make_locator()
+        p_click, p_key, p_type = self._x11_patches()
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref",
+                          new_callable=AsyncMock, return_value=loc), \
+             patch.object(BrowserManager, "_check_captcha",
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
+             patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot), \
+             p_click as x11_click, p_key as x11_key, p_type as x11_type:
+            result = await mgr.fill_form(
+                "agent1", [{"label": "Country", "value": "US"}],
+            )
+
+        assert result["success"] is True
+        loc.fill.assert_awaited_once_with("US")
+        x11_click.assert_not_awaited()
+        x11_key.assert_not_awaited()
+        x11_type.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_text_field_without_x11_uses_native_fill(self):
+        mgr = _make_manager()
+        refs = {"e0": {"role": "textbox", "name": "Email", "index": 0, "disabled": False}}
+        inst = _make_instance(refs, x11_wid=None)  # no X11 window bound
+        loc = _make_locator()
+        p_click, p_key, p_type = self._x11_patches()
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref",
+                          new_callable=AsyncMock, return_value=loc), \
+             patch.object(BrowserManager, "_check_captcha",
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
+             patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot), \
+             p_click as x11_click, p_key as x11_key, p_type as x11_type:
+            result = await mgr.fill_form(
+                "agent1", [{"label": "Email", "value": "x@y.z"}],
+            )
+
+        assert result["success"] is True
+        loc.fill.assert_awaited_once_with("x@y.z")
+        x11_click.assert_not_awaited()
+        x11_key.assert_not_awaited()  # no ctrl+a select-all on the native path
+        x11_type.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_humanize_false_uses_native_fill_even_with_x11(self):
+        mgr = _make_manager()
+        refs = {"e0": {"role": "textbox", "name": "Email", "index": 0, "disabled": False}}
+        inst = _make_instance(refs, x11_wid=12345)
+        loc = _make_locator()
+        p_click, p_key, p_type = self._x11_patches()
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref",
+                          new_callable=AsyncMock, return_value=loc), \
+             patch.object(BrowserManager, "_check_captcha",
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
+             patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot), \
+             p_click as x11_click, p_key as x11_key, p_type as x11_type:
+            result = await mgr.fill_form(
+                "agent1", [{"label": "Email", "value": "x@y.z"}],
+                humanize=False,
+            )
+
+        assert result["success"] is True
+        loc.fill.assert_awaited_once_with("x@y.z")
+        x11_click.assert_not_awaited()
+        x11_key.assert_not_awaited()  # no ctrl+a select-all on the native path
+        x11_type.assert_not_awaited()
+
+
+class TestFillFormX11Fallback:
+    """The X11 text-entry chain must never hard-fail a field.
+
+    Regression guard for the review of the trusted-input PR: the per-field
+    X11 chain (``_x11_click`` → ``_x11_key`` → ``_x11_type``) is wrapped so a
+    raised xdotool error OR a silent no-op (xdotool returns 0 but the DOM
+    never changed) falls back to the atomic ``fill()`` — restoring
+    fill_form's historical reliability guarantee. Submit trust follows the
+    field: X11 Return after a trusted X11 field, CDP Enter after a fallback.
+    """
+
+    @pytest.mark.asyncio
+    async def test_x11_typing_raises_falls_back_to_fill(self):
+        """A raised xdotool error (bounding_box() None → RuntimeError,
+        TimeoutExpired, …) must fall back to fill(), not fail the field."""
+        mgr = _make_manager()
+        refs = {"e0": {"role": "textbox", "name": "Email", "index": 0, "disabled": False}}
+        inst = _make_instance(refs, x11_wid=12345)
+        loc = _make_locator()
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref",
+                          new_callable=AsyncMock, return_value=loc), \
+             patch.object(BrowserManager, "_check_captcha",
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
+             patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot), \
+             patch.object(BrowserManager, "_x11_click", new_callable=AsyncMock), \
+             patch.object(BrowserManager, "_x11_key", new_callable=AsyncMock), \
+             patch.object(BrowserManager, "_x11_type", new_callable=AsyncMock,
+                          side_effect=RuntimeError("bounding_box() returned None")):
+            result = await mgr.fill_form(
+                "agent1", [{"label": "Email", "value": "a@b.co"}],
+            )
+
+        # Field succeeds via the fallback rather than landing type_failed.
+        assert result["success"] is True
+        assert result["data"]["filled"][0]["status"] == "filled"
+        loc.fill.assert_awaited_once_with("a@b.co")
+        # Not a trusted keystroke run → nothing recorded as x11.
+        inst.recorder.record_keystrokes.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_x11_silent_noop_value_mismatch_falls_back_to_fill(self):
+        """xdotool returns 0 but the DOM never changed (stale WID). The
+        post-type input_value() check disagrees → fall back to fill()."""
+        mgr = _make_manager()
+        refs = {"e0": {"role": "textbox", "name": "Email", "index": 0, "disabled": False}}
+        inst = _make_instance(refs, x11_wid=12345)
+        # X11 chain "succeeds" but the field still reads empty.
+        loc = _make_locator(input_value="")
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref",
+                          new_callable=AsyncMock, return_value=loc), \
+             patch.object(BrowserManager, "_check_captcha",
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
+             patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot), \
+             patch.object(BrowserManager, "_x11_click", new_callable=AsyncMock), \
+             patch.object(BrowserManager, "_x11_key", new_callable=AsyncMock), \
+             patch.object(BrowserManager, "_x11_type", new_callable=AsyncMock):
+            result = await mgr.fill_form(
+                "agent1", [{"label": "Email", "value": "a@b.co"}],
+            )
+
+        assert result["success"] is True
+        assert result["data"]["filled"][0]["status"] == "filled"
+        loc.fill.assert_awaited_once_with("a@b.co")
+        inst.recorder.record_keystrokes.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_x11_unverifiable_input_value_trusts_x11(self):
+        """A contenteditable textbox raises on input_value(); fill() couldn't
+        verify it either, so we trust the X11 path — no fallback, recorded."""
+        mgr = _make_manager()
+        refs = {"e0": {"role": "textbox", "name": "Bio", "index": 0, "disabled": False}}
+        inst = _make_instance(refs, x11_wid=12345)
+        loc = _make_locator(
+            input_value=Exception("Node is not an <input> element"),
+        )
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref",
+                          new_callable=AsyncMock, return_value=loc), \
+             patch.object(BrowserManager, "_check_captcha",
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
+             patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot), \
+             patch.object(BrowserManager, "_x11_click", new_callable=AsyncMock), \
+             patch.object(BrowserManager, "_x11_key", new_callable=AsyncMock), \
+             patch.object(BrowserManager, "_x11_type", new_callable=AsyncMock):
+            result = await mgr.fill_form(
+                "agent1", [{"label": "Bio", "value": "hello"}],
+            )
+
+        assert result["data"]["filled"][0]["status"] == "filled"
+        loc.fill.assert_not_awaited()
+        inst.recorder.record_keystrokes.assert_called_once_with(
+            char_count=len("hello"), fast=False, method="x11",
+        )
+
+    @pytest.mark.asyncio
+    async def test_verified_x11_submit_uses_trusted_return(self):
+        """A verified X11 field submits with a trusted X11 Return, not a CDP
+        Enter — no mixed-trust signal (WORTH-FIX 3)."""
+        mgr = _make_manager()
+        refs = {"e0": {"role": "textbox", "name": "Search", "index": 0, "disabled": False}}
+        inst = _make_instance(refs, x11_wid=12345)
+        loc = _make_locator(input_value="query")
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref",
+                          new_callable=AsyncMock, return_value=loc), \
+             patch.object(BrowserManager, "_check_captcha",
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
+             patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot), \
+             patch.object(BrowserManager, "_x11_click", new_callable=AsyncMock), \
+             patch.object(BrowserManager, "_x11_key", new_callable=AsyncMock) as x11_key, \
+             patch.object(BrowserManager, "_x11_type", new_callable=AsyncMock):
+            result = await mgr.fill_form(
+                "agent1", [{"label": "Search", "value": "query"}],
+                submit_after=True,
+            )
+
+        assert result["data"]["submitted"] is True
+        x11_key.assert_any_await(inst, "Return")  # trusted submit
+        loc.press.assert_not_awaited()  # no CDP Enter
+
+    @pytest.mark.asyncio
+    async def test_fallback_field_submit_uses_cdp_enter(self):
+        """After an X11 fallback to fill(), the submit uses the CDP press —
+        there was no trusted X11 typing to match, so a trusted Return would
+        itself be the mixed-trust signal we're avoiding."""
+        mgr = _make_manager()
+        refs = {"e0": {"role": "textbox", "name": "Search", "index": 0, "disabled": False}}
+        inst = _make_instance(refs, x11_wid=12345)
+        loc = _make_locator()
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref",
+                          new_callable=AsyncMock, return_value=loc), \
+             patch.object(BrowserManager, "_check_captcha",
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
+             patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot), \
+             patch.object(BrowserManager, "_x11_click", new_callable=AsyncMock), \
+             patch.object(BrowserManager, "_x11_key", new_callable=AsyncMock) as x11_key, \
+             patch.object(BrowserManager, "_x11_type", new_callable=AsyncMock,
+                          side_effect=RuntimeError("xdotool timeout")):
+            result = await mgr.fill_form(
+                "agent1", [{"label": "Search", "value": "query"}],
+                submit_after=True,
+            )
+
+        assert result["data"]["submitted"] is True
+        loc.fill.assert_awaited_once_with("query")
+        loc.press.assert_awaited_once_with("Enter")  # CDP submit
+        # No trusted Return sent for a field that wasn't X11-typed.
+        for call in x11_key.await_args_list:
+            assert call.args[1] != "Return"
+
+
 class TestFillFormServerRoute:
     """Concern 15 — happy-path POST /browser/{agent_id}/fill_form route test."""
 
@@ -1059,4 +1368,31 @@ class TestFillFormServerRoute:
         args, kwargs = mgr.fill_form.await_args
         assert args[0] == "a1"
         assert args[1] == [{"label": "Email", "value": "a@b.co"}]
-        assert kwargs == {"submit_after": False}
+        # humanize defaults to True when the body omits it.
+        assert kwargs == {"submit_after": False, "humanize": True}
+
+    def test_route_threads_humanize_false(self, monkeypatch):
+        """humanize=false in the body reaches the manager as humanize=False."""
+        from fastapi.testclient import TestClient
+
+        from src.browser.server import create_browser_app
+
+        monkeypatch.delenv("BROWSER_AUTH_TOKEN", raising=False)
+        monkeypatch.delenv("MESH_AUTH_TOKEN", raising=False)
+
+        mgr = MagicMock()
+        mgr.fill_form = AsyncMock(return_value={"success": True, "data": {}})
+
+        app = create_browser_app(mgr)
+        with TestClient(app) as client:
+            resp = client.post(
+                "/browser/a1/fill_form",
+                json={
+                    "fields": [{"label": "Email", "value": "a@b.co"}],
+                    "humanize": False,
+                },
+            )
+
+        assert resp.status_code == 200
+        _args, kwargs = mgr.fill_form.await_args
+        assert kwargs == {"submit_after": False, "humanize": False}

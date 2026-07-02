@@ -3646,8 +3646,30 @@ class TestHumanTiming:
         assert 120 <= mean <= 160
 
     def test_default_delay(self):
-        from src.browser.timing import get_delay
-        assert get_delay() == 0.0
+        # setup_method forces _delay to 0; reload the module to observe the
+        # true module-level default — a small non-zero human pause (0.3s).
+        import importlib
+
+        from src.browser import timing
+        importlib.reload(timing)
+        try:
+            assert timing.get_delay() == 0.3
+        finally:
+            timing.set_delay(0.0)
+
+    def test_inter_action_delay_positive_by_default(self):
+        # With the non-zero default in effect (module reload bypasses the
+        # setup_method reset), inter_action_delay() should sample a positive
+        # pause rather than short-circuiting to 0.0.
+        import importlib
+
+        from src.browser import timing
+        importlib.reload(timing)
+        try:
+            samples = [timing.inter_action_delay() for _ in range(200)]
+            assert all(s > 0 for s in samples)
+        finally:
+            timing.set_delay(0.0)
 
     def test_set_delay(self):
         from src.browser.timing import get_delay, set_delay
@@ -7451,18 +7473,24 @@ class TestBrowserSettingsEndpoint:
         assert get_speed() == 4.0
 
     def test_get_settings_includes_delay(self):
-        """GET /browser/settings should include delay."""
+        """GET /browser/settings should reflect the runtime delay."""
         from src.browser.server import create_browser_app
         from src.browser.service import BrowserManager
+        from src.browser.timing import set_delay
         mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/test_profiles")
         app = create_browser_app(mgr)
 
+        # Self-contained: set a known, non-default delay and assert the
+        # endpoint echoes it. Don't rely on the module-global default (now
+        # 0.3) or on state left behind by an earlier test in this file —
+        # teardown_method resets the delay to 0.0.
+        set_delay(0.7)
         from starlette.testclient import TestClient
         client = TestClient(app)
         resp = client.get("/browser/settings")
         assert resp.status_code == 200
         assert "delay" in resp.json()
-        assert resp.json()["delay"] == 0.0
+        assert resp.json()["delay"] == 0.7
 
     def test_set_delay(self):
         """POST /browser/settings should update the delay."""
@@ -8579,6 +8607,157 @@ class TestX11Input:
         # Simulate what _start_browser does when no WID is found
         inst._jitter_task = None
         assert inst._jitter_task is None
+
+
+# -- iframe selector+frame trusted-input tests -----------------------------
+
+
+async def _passthrough_redetect(self, inst, coro):
+    """Stub _with_captcha_redetect: run the body, report no captcha."""
+    return (await coro, None)
+
+
+class TestX11IframeSelectorPath:
+    """selector + frame= (iframe) click/type route through the trusted X11
+    path when a WID is available, and fall back to CDP without one.
+
+    ``resolved_frame.locator(...).bounding_box()`` returns main-frame /
+    viewport-relative coordinates — exactly what ``_x11_click`` consumes — so
+    the trusted path needs no offset math, matching the ref= iframe path.
+    """
+
+    def _make_manager(self):
+        from src.browser.service import BrowserManager
+        return BrowserManager.__new__(BrowserManager)
+
+    def _make_inst(self, *, x11_wid):
+        inst = MagicMock()
+        inst.page = AsyncMock()
+        inst.page.url = "https://example.com/"
+        inst.x11_wid = x11_wid
+        inst.refs = {}
+        inst.lock = asyncio.Lock()
+        inst.touch = MagicMock()
+        inst._user_control = False
+        inst.dialog_active = False
+        return inst
+
+    @pytest.mark.asyncio
+    async def test_click_iframe_selector_uses_x11_when_available(self):
+        from src.browser.service import BrowserManager
+        mgr = self._make_manager()
+        inst = self._make_inst(x11_wid=12345)
+        loc = AsyncMock()
+        frame = MagicMock()
+        frame.locator.return_value.first = loc
+        mgr._resolve_frame_arg = MagicMock(return_value=frame)
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_with_captcha_redetect",
+                          new=_passthrough_redetect), \
+             patch.object(BrowserManager, "_x11_click",
+                          new_callable=AsyncMock) as x11_click, \
+             patch.object(BrowserManager, "_human_click",
+                          new_callable=AsyncMock) as human_click, \
+             patch("src.browser.service.action_delay", return_value=0.0):
+            result = await mgr.click(
+                "agent-1", selector="#in-iframe", frame="example.com/iframe",
+            )
+
+        assert result["success"]
+        x11_click.assert_awaited_once()
+        assert x11_click.await_args.args[:2] == (inst, loc)
+        human_click.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_click_iframe_selector_falls_back_without_wid(self):
+        from src.browser.service import BrowserManager
+        mgr = self._make_manager()
+        inst = self._make_inst(x11_wid=None)
+        loc = AsyncMock()
+        frame = MagicMock()
+        frame.locator.return_value.first = loc
+        mgr._resolve_frame_arg = MagicMock(return_value=frame)
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_with_captcha_redetect",
+                          new=_passthrough_redetect), \
+             patch.object(BrowserManager, "_x11_click",
+                          new_callable=AsyncMock) as x11_click, \
+             patch.object(BrowserManager, "_human_click",
+                          new_callable=AsyncMock) as human_click, \
+             patch("src.browser.service.action_delay", return_value=0.0):
+            result = await mgr.click(
+                "agent-1", selector="#in-iframe", frame="example.com/iframe",
+            )
+
+        assert result["success"]
+        human_click.assert_awaited_once()
+        assert human_click.await_args.args[:2] == (inst.page, loc)
+        x11_click.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_type_iframe_selector_focus_uses_x11_when_available(self):
+        from src.browser.service import BrowserManager
+        mgr = self._make_manager()
+        inst = self._make_inst(x11_wid=12345)
+        loc = AsyncMock()
+        frame = MagicMock()
+        frame.locator.return_value.first = loc
+        mgr._resolve_frame_arg = MagicMock(return_value=frame)
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_with_captcha_redetect",
+                          new=_passthrough_redetect), \
+             patch.object(BrowserManager, "_x11_click",
+                          new_callable=AsyncMock) as x11_click, \
+             patch.object(BrowserManager, "_x11_key", new_callable=AsyncMock), \
+             patch.object(BrowserManager, "_x11_type",
+                          new_callable=AsyncMock) as x11_type, \
+             patch.object(BrowserManager, "_human_click",
+                          new_callable=AsyncMock) as human_click, \
+             patch("src.browser.service.action_delay", return_value=0.0):
+            result = await mgr.type_text(
+                "agent-1", text="hello", selector="#in-iframe",
+                frame="example.com/iframe",
+            )
+
+        assert result["success"]
+        # Focus-click through the trusted path, then per-key type.
+        x11_click.assert_awaited_once()
+        assert x11_click.await_args.args[:2] == (inst, loc)
+        x11_type.assert_awaited_once()
+        human_click.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_type_iframe_selector_focus_falls_back_without_wid(self):
+        from src.browser.service import BrowserManager
+        mgr = self._make_manager()
+        inst = self._make_inst(x11_wid=None)
+        loc = AsyncMock()
+        frame = MagicMock()
+        frame.locator.return_value.first = loc
+        mgr._resolve_frame_arg = MagicMock(return_value=frame)
+
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_with_captcha_redetect",
+                          new=_passthrough_redetect), \
+             patch.object(BrowserManager, "_x11_click",
+                          new_callable=AsyncMock) as x11_click, \
+             patch.object(BrowserManager, "_type_with_variance",
+                          new_callable=AsyncMock), \
+             patch.object(BrowserManager, "_human_click",
+                          new_callable=AsyncMock) as human_click, \
+             patch("src.browser.service.action_delay", return_value=0.0):
+            result = await mgr.type_text(
+                "agent-1", text="hello", selector="#in-iframe",
+                frame="example.com/iframe",
+            )
+
+        assert result["success"]
+        human_click.assert_awaited_once()
+        assert human_click.await_args.args[:2] == (inst.page, loc)
+        x11_click.assert_not_awaited()
 
 
 # -- Modal retry stale handle tests ----------------------------------------

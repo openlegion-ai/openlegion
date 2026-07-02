@@ -6396,7 +6396,7 @@ def create_dashboard_router(
         settings = _load_settings()
         return {
             "speed": settings.get("browser_speed", 1.0),
-            "delay": settings.get("browser_delay", 0.0),
+            "delay": settings.get("browser_delay", 0.3),
         }
 
     @api_router.get("/api/dashboard/platform-success")
@@ -6469,7 +6469,7 @@ def create_dashboard_router(
         _emit_config_changed("browser_settings")
         return {
             "speed": settings.get("browser_speed", 1.0),
-            "delay": settings.get("browser_delay", 0.0),
+            "delay": settings.get("browser_delay", 0.3),
         }
 
     # ── CAPTCHA solver settings ───────────────────────────────

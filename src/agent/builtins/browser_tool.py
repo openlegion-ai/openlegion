@@ -1157,18 +1157,29 @@ async def browser_find_text(
             ),
             "default": False,
         },
+        "humanize": {
+            "type": "boolean",
+            "description": (
+                "Type text fields key-by-key with human-like timing "
+                "(trusted keystrokes) instead of pasting the value "
+                "atomically. Default true — better against bot detection. "
+                "Set false for the fast atomic path on simple forms."
+            ),
+            "default": True,
+        },
     },
     parallel_safe=False,
 )
 async def browser_fill_form(
-    fields: list, submit_after: bool = False, *, mesh_client=None,
+    fields: list, submit_after: bool = False, humanize: bool = True,
+    *, mesh_client=None,
 ) -> dict:
     """Fill a sequence of form fields by visible label."""
     if not isinstance(fields, list):
         return {"error": "The 'fields' parameter must be an array"}
     return await _browser_command(
         mesh_client, "fill_form",
-        {"fields": fields, "submit_after": submit_after},
+        {"fields": fields, "submit_after": submit_after, "humanize": humanize},
     )
 
 
