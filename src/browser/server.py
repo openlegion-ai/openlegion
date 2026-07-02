@@ -904,18 +904,18 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
 
     @app.post("/browser/{agent_id}/set_geolocation")
     async def set_geolocation(agent_id: str, request: Request):
-        """Override the reported geolocation for the context."""
+        """Override the reported geolocation for the context.
+
+        Manager-side validates ``latitude`` / ``longitude`` and returns a
+        §2.3 envelope on bad input rather than raising HTTP 400, matching the
+        other human-parity browser actions (drag / set_dialog_policy).
+        """
         _verify_auth(request)
         body = await request.json()
-        lat = body.get("latitude")
-        lon = body.get("longitude")
-        if not isinstance(lat, (int, float)) or isinstance(lat, bool) \
-                or not isinstance(lon, (int, float)) or isinstance(lon, bool):
-            raise HTTPException(400, "latitude and longitude are required numbers")
         result = await manager.set_geolocation(
             agent_id,
-            latitude=float(lat),
-            longitude=float(lon),
+            latitude=body.get("latitude"),
+            longitude=body.get("longitude"),
             accuracy=body.get("accuracy"),
             origin=body.get("origin"),
         )

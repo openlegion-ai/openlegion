@@ -1386,7 +1386,7 @@ async def browser_drag(
         "Grant browser permissions for the current site so a page stops "
         "prompting (or silently failing). This browser is Firefox — only these "
         "permissions can be granted: geolocation, notifications, "
-        "persistent-storage, push, screen-wake-lock. Camera and microphone are "
+        "persistent-storage, push. Camera and microphone are "
         "NOT possible on this engine (that would require a Chromium browser) — "
         "requesting them returns a clear error rather than crashing. Optionally "
         "scope the grant to a specific origin (e.g. 'https://example.com'); "
@@ -1398,7 +1398,7 @@ async def browser_drag(
             "items": {"type": "string"},
             "description": (
                 "Permission strings to grant. Valid on Firefox: geolocation, "
-                "notifications, persistent-storage, push, screen-wake-lock."
+                "notifications, persistent-storage, push."
             ),
         },
         "origin": {

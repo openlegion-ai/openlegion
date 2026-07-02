@@ -1480,15 +1480,17 @@ def _err(
 
 # Permission strings Playwright's FIREFOX engine can actually grant.
 # Chromium additionally supports camera / microphone / clipboard-read /
-# clipboard-write / etc., but Camoufox is Firefox — passing any of those
-# to ``context.grant_permissions`` raises ``Unknown permission``. We
-# allowlist to these five and reject the rest with a structured error so
+# clipboard-write / wake-lock / etc., but Camoufox is Firefox —
+# passing any of those to ``context.grant_permissions`` raises ``Unknown
+# permission``. Playwright's Firefox permission map (ffBrowser.js
+# ``webPermissionToProtocol``) covers exactly these four: geolocation,
+# notifications (→ desktop-notification), persistent-storage, and push. We
+# allowlist to those four and reject the rest with a structured error so
 # the agent gets a clear "not grantable on Firefox" message rather than a
 # raw Playwright exception. Camera / microphone are NOT possible on this
 # engine — that would require a Chromium stack (known limitation, not a bug).
 _FIREFOX_GRANTABLE_PERMISSIONS: frozenset[str] = frozenset({
-    "geolocation", "notifications", "persistent-storage",
-    "push", "screen-wake-lock",
+    "geolocation", "notifications", "persistent-storage", "push",
 })
 
 _MAX_SNAPSHOT_ELEMENTS = 200
@@ -7368,18 +7370,26 @@ class BrowserManager:
                 capture_output=True, timeout=3, env=inst.subprocess_env(),
             ),
         )
-        await asyncio.sleep(click_dwell())
-        # 3. Move to the target with the button held — this is the drag.
-        await self._x11_move_to(inst, int(bx), int(by))
-        await asyncio.sleep(pre_click_settle())
-        # 4. Release.
-        await loop.run_in_executor(
-            None,
-            lambda: subprocess.run(
-                ["xdotool", "mouseup", "--clearmodifiers", "--window", wid_s, "1"],
-                capture_output=True, timeout=3, env=inst.subprocess_env(),
-            ),
-        )
+        # Once button 1 is physically DOWN the release MUST always fire. The
+        # target move (``_x11_move_to``) genuinely raises — RuntimeError on an
+        # xdotool non-zero exit, ``subprocess.TimeoutExpired``, and
+        # ``asyncio.CancelledError`` passes through — so without a finally the
+        # button stays held for the rest of the session and the CDP fallback
+        # (a different input channel) cannot release it.
+        try:
+            await asyncio.sleep(click_dwell())
+            # 3. Move to the target with the button held — this is the drag.
+            await self._x11_move_to(inst, int(bx), int(by))
+            await asyncio.sleep(pre_click_settle())
+        finally:
+            # 4. Release.
+            await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    ["xdotool", "mouseup", "--clearmodifiers", "--window", wid_s, "1"],
+                    capture_output=True, timeout=3, env=inst.subprocess_env(),
+                ),
+            )
 
     async def _x11_ensure_in_viewport(
         self, inst: CamoufoxInstance, locator, *,
@@ -8406,6 +8416,10 @@ class BrowserManager:
                     )
 
                 _use_x11 = bool(inst.x11_wid) and self._is_x11_site(inst)
+                # Track the path actually taken: an X11 drag that raises falls
+                # back to CDP, so ``_use_x11`` alone would mislabel a
+                # CDP-injected drag as "x11".
+                method = "x11" if _use_x11 else "cdp"
                 if _use_x11:
                     try:
                         await self._x11_drag(inst, ax, ay, bx, by)
@@ -8414,22 +8428,29 @@ class BrowserManager:
                             "X11 drag failed for '%s', falling back to CDP: %s",
                             agent_id, e,
                         )
+                        method = "cdp"
                         await inst.page.mouse.move(ax, ay)
                         await inst.page.mouse.down()
-                        await inst.page.mouse.move(bx, by)
-                        await inst.page.mouse.up()
+                        # A raised move must not leave the CDP button down.
+                        try:
+                            await inst.page.mouse.move(bx, by)
+                        finally:
+                            await inst.page.mouse.up()
                 else:
                     await inst.page.mouse.move(ax, ay)
                     await inst.page.mouse.down()
-                    await inst.page.mouse.move(bx, by)
-                    await inst.page.mouse.up()
+                    # A raised move must not leave the CDP button down.
+                    try:
+                        await inst.page.mouse.move(bx, by)
+                    finally:
+                        await inst.page.mouse.up()
                 await asyncio.sleep(action_delay())
                 return {
                     "success": True,
                     "data": {
                         "from": [ax, ay],
                         "to": [bx, by],
-                        "method": "x11" if _use_x11 else "cdp",
+                        "method": method,
                     },
                 }
             except Exception as e:

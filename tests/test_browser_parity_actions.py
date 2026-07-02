@@ -236,15 +236,21 @@ class TestGrantPermissions:
         assert result["success"] is False
 
     def test_allowlist_matches_firefox_reality(self):
+        # These are the ONLY four web permissions Playwright's Firefox engine
+        # maps (ffBrowser.js ``webPermissionToProtocol``): geolocation, push,
+        # persistent-storage, and notifications (→ desktop-notification).
+        # screen-wake-lock is Chromium-only — it is NOT in the FF map and
+        # ``grant_permissions`` raises "Unknown permission" for it, so it must
+        # never be in the allowlist.
         assert _FIREFOX_GRANTABLE_PERMISSIONS == frozenset(
             {
                 "geolocation",
                 "notifications",
                 "persistent-storage",
                 "push",
-                "screen-wake-lock",
             }
         )
+        assert "screen-wake-lock" not in _FIREFOX_GRANTABLE_PERMISSIONS
         assert "camera" not in _FIREFOX_GRANTABLE_PERMISSIONS
         assert "microphone" not in _FIREFOX_GRANTABLE_PERMISSIONS
 
