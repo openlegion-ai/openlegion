@@ -2056,6 +2056,13 @@ _VERB_FOR_TOOL_FALLBACK_OK = frozenset({
     "browser_go_back",
     "browser_go_forward",
     "browser_solve_captcha",
+    # Human-parity mechanical actions — the generic "using browser_*"
+    # activity-feed verb reads fine (same treatment as the scroll/hover/
+    # press_key siblings above).
+    "browser_set_dialog_policy",
+    "browser_drag",
+    "browser_grant_permissions",
+    "browser_set_geolocation",
     "request_captcha_help",
     "request_browser_login",
     # Watch / pub-sub.

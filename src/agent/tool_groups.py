@@ -119,6 +119,8 @@ TOOL_GROUPS: tuple[ToolGroup, ...] = (
             "browser_find_text", "browser_fill_form", "browser_open_tab",
             "browser_inspect_requests", "browser_detect_captcha",
             "browser_upload_file", "browser_solve_captcha", "browser_download",
+            "browser_set_dialog_policy", "browser_drag",
+            "browser_grant_permissions", "browser_set_geolocation",
         ),
     ),
 )

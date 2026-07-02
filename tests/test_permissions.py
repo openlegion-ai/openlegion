@@ -193,6 +193,22 @@ class TestCanBrowserAction:
         for action in ("navigate", "upload_file", "brand_new_action"):
             assert browser_matrix.can_browser_action("wildcard-agent", action) is True
 
+    def test_human_parity_actions_gating(self, browser_matrix):
+        """The parity actions default-allow, honor the wildcard, and are
+        narrowable — the readonly agent (navigate/snapshot/screenshot only)
+        must NOT be granted them."""
+        for action in (
+            "set_dialog_policy", "grant_permissions",
+            "set_geolocation", "drag",
+        ):
+            # Default (None) and wildcard both allow.
+            assert browser_matrix.can_browser_action("legacy-agent", action) is True, action
+            assert browser_matrix.can_browser_action("wildcard-agent", action) is True, action
+            # A narrowed allowlist that omits them denies.
+            assert browser_matrix.can_browser_action("readonly-agent", action) is False, action
+            # can_use_browser=False overrides even a wildcard.
+            assert browser_matrix.can_browser_action("no-browser-agent", action) is False, action
+
     def test_specific_list_is_opt_out_restriction(self, browser_matrix):
         """Operators can narrow to a specific list — opt-out default-allow."""
         assert browser_matrix.can_browser_action("readonly-agent", "navigate") is True
@@ -279,6 +295,18 @@ class TestKnownBrowserActionsSet:
         from src.host.permissions import KNOWN_BROWSER_ACTIONS
         assert "solve_captcha" in KNOWN_BROWSER_ACTIONS
         assert "request_captcha_help" in KNOWN_BROWSER_ACTIONS
+
+    def test_human_parity_actions_present(self):
+        """Native dialog policy, Firefox permission grants + geolocation, and
+        drag-and-drop must be recognized by the mesh input validator so the
+        /mesh/browser/command proxy accepts them (else a clean 400 blocks
+        the whole action rather than the per-agent gate deciding)."""
+        from src.host.permissions import KNOWN_BROWSER_ACTIONS
+        for action in (
+            "set_dialog_policy", "grant_permissions",
+            "set_geolocation", "drag",
+        ):
+            assert action in KNOWN_BROWSER_ACTIONS, action
 
 
 class TestDefaultFallbackPropagatesBrowserActions:

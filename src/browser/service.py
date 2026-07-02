@@ -1478,6 +1478,21 @@ def _err(
     }
 
 
+# Permission strings Playwright's FIREFOX engine can actually grant.
+# Chromium additionally supports camera / microphone / clipboard-read /
+# clipboard-write / wake-lock / etc., but Camoufox is Firefox —
+# passing any of those to ``context.grant_permissions`` raises ``Unknown
+# permission``. Playwright's Firefox permission map (ffBrowser.js
+# ``webPermissionToProtocol``) covers exactly these four: geolocation,
+# notifications (→ desktop-notification), persistent-storage, and push. We
+# allowlist to those four and reject the rest with a structured error so
+# the agent gets a clear "not grantable on Firefox" message rather than a
+# raw Playwright exception. Camera / microphone are NOT possible on this
+# engine — that would require a Chromium stack (known limitation, not a bug).
+_FIREFOX_GRANTABLE_PERMISSIONS: frozenset[str] = frozenset({
+    "geolocation", "notifications", "persistent-storage", "push",
+})
+
 _MAX_SNAPSHOT_ELEMENTS = 200
 _MAX_WALK_DEPTH = 50
 
@@ -2956,6 +2971,23 @@ class CamoufoxInstance:
         # SDK. ``secrets.token_hex`` is stdlib, no extra dependency.
         import secrets
         self._captcha_probe_var: str = f"__telemetry_{secrets.token_hex(4)}"
+        # Native JS dialog (alert / confirm / prompt / beforeunload) policy.
+        # Playwright auto-DISMISSES any dialog when no ``page.on("dialog")``
+        # handler is registered, so dialog-gated flows (a "Save changes?"
+        # beforeunload, a JS confirm() before delete, a window.prompt()) fail
+        # silently. ``_on_dialog`` (wired in ``_start_browser`` at the page
+        # AND context level so popups/OAuth windows are covered) resolves
+        # every dialog per this policy and records the last message so the
+        # agent can read what a dialog said. Default stays dismiss to match
+        # the pre-handler behavior — an agent must opt in to accept/respond.
+        self.dialog_policy: dict = {"action": "dismiss", "text": ""}
+        # Idempotency flag for ``BrowserManager._attach_dialog_listeners``.
+        self._dialog_attached: bool = False
+        # Most-recent native dialog message + type, e.g.
+        # ``{"message": "Delete this?", "type": "confirm"}``. None until the
+        # first dialog fires. Surfaced by ``set_dialog_policy`` so the agent
+        # can read a dialog it just triggered.
+        self.last_dialog_message: dict | None = None
 
     @property
     def lock(self) -> asyncio.Lock:
@@ -4410,6 +4442,15 @@ class BrowserManager:
             # because RESET drops the whole instance and the next get_or_start
             # creates a fresh one with ``_network_attached=False``.
             self._attach_network_listeners(inst)
+
+            # Native JS dialog handling. Without a ``page.on("dialog")``
+            # handler Playwright silently auto-dismisses every alert /
+            # confirm / prompt / beforeunload — dialog-gated flows then
+            # fail with no signal. Wire at the initial page AND the context
+            # ``page`` event (mirrors ``_attach_network_listeners``) so
+            # popups / OAuth windows are covered too. Idempotent; re-runs
+            # after RESET with a fresh instance.
+            self._attach_dialog_listeners(inst)
 
             # Discover the new X11 window for targeted focus.  ``wids_before``
             # is empty by construction — the agent's display was just spawned,
@@ -7293,6 +7334,63 @@ class BrowserManager:
             )
             await asyncio.sleep(x11_step_delay())
 
+    async def _x11_drag(
+        self, inst: CamoufoxInstance,
+        ax: int, ay: int, bx: int, by: int,
+    ) -> None:
+        """Drag from (ax, ay) to (bx, by) via xdotool — trusted-event path.
+
+        Move to the source, press button 1 DOWN, move to the target with
+        the button held (the held button + ``mousemove --window`` produces
+        real ``dragover`` / pointer-move events the browser marks
+        ``isTrusted=true``), then release. Mirrors the settle / dwell +
+        subprocess-env shape of ``_x11_click``.
+
+        Known limitation (documented on the ``drag`` action / tool): a
+        pointer-driven drag does NOT populate the HTML5 ``DataTransfer``
+        object, so widgets that key off ``dragstart`` / ``dragover`` /
+        ``drop`` (many React / SortableJS lists) won't respond. Works for
+        pointer-driven sliders and reordering.
+        """
+        wid = inst.x11_wid
+        if not wid:
+            raise RuntimeError("No X11 window ID — cannot use xdotool drag")
+        wid_s = str(wid)
+        loop = asyncio.get_running_loop()
+
+        # 1. Move to the source point with the natural Bezier trajectory.
+        await self._x11_move_to(inst, int(ax), int(ay))
+        # 2. Press and hold the primary button (dwell before + after so the
+        #    grab registers, matching a human press-then-drag).
+        await asyncio.sleep(pre_click_settle())
+        await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                ["xdotool", "mousedown", "--clearmodifiers", "--window", wid_s, "1"],
+                capture_output=True, timeout=3, env=inst.subprocess_env(),
+            ),
+        )
+        # Once button 1 is physically DOWN the release MUST always fire. The
+        # target move (``_x11_move_to``) genuinely raises — RuntimeError on an
+        # xdotool non-zero exit, ``subprocess.TimeoutExpired``, and
+        # ``asyncio.CancelledError`` passes through — so without a finally the
+        # button stays held for the rest of the session and the CDP fallback
+        # (a different input channel) cannot release it.
+        try:
+            await asyncio.sleep(click_dwell())
+            # 3. Move to the target with the button held — this is the drag.
+            await self._x11_move_to(inst, int(bx), int(by))
+            await asyncio.sleep(pre_click_settle())
+        finally:
+            # 4. Release.
+            await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    ["xdotool", "mouseup", "--clearmodifiers", "--window", wid_s, "1"],
+                    capture_output=True, timeout=3, env=inst.subprocess_env(),
+                ),
+            )
+
     async def _x11_ensure_in_viewport(
         self, inst: CamoufoxInstance, locator, *,
         timeout: int = _CLICK_TIMEOUT_MS,
@@ -8263,6 +8361,222 @@ class BrowserManager:
                 return {"success": True, "data": {"hovered": ref or selector}}
             except Exception as e:
                 return {"success": False, "error": str(e)}
+
+    async def drag(
+        self, agent_id: str,
+        source_ref: str | None = None, target_ref: str | None = None,
+        source_x: float | None = None, source_y: float | None = None,
+        target_x: float | None = None, target_y: float | None = None,
+    ) -> dict:
+        """Drag from a source point to a target point.
+
+        Accepts EITHER two refs (``source_ref`` / ``target_ref``, resolved
+        to Fitts'-Law-sampled points inside each element's bbox) OR two
+        coordinate pairs (``source_x/y`` → ``target_x/y``, viewport CSS
+        pixels). Refs take precedence when both are supplied.
+
+        Uses the trusted X11 path (``_x11_drag``) when the agent has an X11
+        window; falls back to CDP ``page.mouse.move/down/move/up``.
+
+        Known limitation: a pointer-based drag does NOT populate the HTML5
+        ``DataTransfer`` object, so ``dragstart`` / ``dragover`` / ``drop``
+        widgets (many React / SortableJS lists) won't respond — a universal
+        Playwright limitation. Works for pointer-driven sliders / reordering.
+        """
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        async with inst.lock:
+            try:
+                if inst._user_control:
+                    return _err(
+                        "conflict",
+                        "User has browser control — action paused until "
+                        "control is released.",
+                    )
+                # Resolve source + target to (x, y) viewport points.
+                if source_ref and target_ref:
+                    # ``_locator_from_ref`` raises RefStale when the DOM has
+                    # shifted since snapshot; surface the ref_stale recovery
+                    # path (re-snapshot) rather than a misleading
+                    # ``service_unavailable`` from the outer handler.
+                    try:
+                        src_loc = await self._locator_from_ref(inst, source_ref)
+                        tgt_loc = await self._locator_from_ref(inst, target_ref)
+                    except RefStale as rs:
+                        return _err("ref_stale", str(rs))
+                    if not src_loc:
+                        return _err("ref_stale", f"Ref '{source_ref}' not found")
+                    if not tgt_loc:
+                        return _err("ref_stale", f"Ref '{target_ref}' not found")
+                    src_box = await src_loc.bounding_box()
+                    tgt_box = await tgt_loc.bounding_box()
+                    if not src_box or not tgt_box:
+                        return _err(
+                            "invalid_input",
+                            "source or target element has no bounding box "
+                            "(not visible)",
+                        )
+                    ax, ay = self._pick_click_target(src_box)
+                    bx, by = self._pick_click_target(tgt_box)
+                elif (
+                    source_x is not None and source_y is not None
+                    and target_x is not None and target_y is not None
+                ):
+                    for v in (source_x, source_y, target_x, target_y):
+                        if isinstance(v, bool) or not isinstance(v, (int, float)):
+                            return _err(
+                                "invalid_input",
+                                "drag coordinates must be numbers",
+                            )
+                    ax, ay = int(source_x), int(source_y)
+                    bx, by = int(target_x), int(target_y)
+                else:
+                    return _err(
+                        "invalid_input",
+                        "provide either (source_ref, target_ref) or "
+                        "(source_x, source_y, target_x, target_y)",
+                    )
+
+                _use_x11 = bool(inst.x11_wid) and self._is_x11_site(inst)
+                # Track the path actually taken: an X11 drag that raises falls
+                # back to CDP, so ``_use_x11`` alone would mislabel a
+                # CDP-injected drag as "x11".
+                method = "x11" if _use_x11 else "cdp"
+                if _use_x11:
+                    try:
+                        await self._x11_drag(inst, ax, ay, bx, by)
+                    except Exception as e:
+                        logger.warning(
+                            "X11 drag failed for '%s', falling back to CDP: %s",
+                            agent_id, e,
+                        )
+                        method = "cdp"
+                        await inst.page.mouse.move(ax, ay)
+                        await inst.page.mouse.down()
+                        # A raised move must not leave the CDP button down.
+                        try:
+                            await inst.page.mouse.move(bx, by)
+                        finally:
+                            await inst.page.mouse.up()
+                else:
+                    await inst.page.mouse.move(ax, ay)
+                    await inst.page.mouse.down()
+                    # A raised move must not leave the CDP button down.
+                    try:
+                        await inst.page.mouse.move(bx, by)
+                    finally:
+                        await inst.page.mouse.up()
+                await asyncio.sleep(action_delay())
+                return {
+                    "success": True,
+                    "data": {
+                        "from": [ax, ay],
+                        "to": [bx, by],
+                        "method": method,
+                    },
+                }
+            except Exception as e:
+                return _err("service_unavailable", str(e))
+
+    async def grant_permissions(
+        self, agent_id: str, permissions: list[str] | None = None,
+        origin: str | None = None,
+    ) -> dict:
+        """Grant browser permissions for the context (Firefox-scoped).
+
+        Only Firefox-grantable strings are accepted (see
+        :data:`_FIREFOX_GRANTABLE_PERMISSIONS`); anything else — notably
+        camera / microphone / clipboard — is rejected with a structured
+        error BEFORE Playwright can raise a raw ``Unknown permission``.
+        """
+        perms = permissions or []
+        if not isinstance(perms, list) or not perms:
+            return _err(
+                "invalid_input",
+                "permissions must be a non-empty list of strings",
+            )
+        invalid = [
+            p for p in perms
+            if not isinstance(p, str) or p not in _FIREFOX_GRANTABLE_PERMISSIONS
+        ]
+        if invalid:
+            return _err(
+                "invalid_input",
+                f"permission {invalid[0]!r} is not grantable on the Firefox "
+                f"engine (camera / microphone are not possible here); "
+                f"grantable: {sorted(_FIREFOX_GRANTABLE_PERMISSIONS)}",
+            )
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        async with inst.lock:
+            try:
+                if origin:
+                    await inst.context.grant_permissions(perms, origin=origin)
+                else:
+                    await inst.context.grant_permissions(perms)
+                return {
+                    "success": True,
+                    "data": {"granted": perms, "origin": origin},
+                }
+            except Exception as e:
+                return _err("service_unavailable", str(e))
+
+    async def set_geolocation(
+        self, agent_id: str, latitude: float, longitude: float,
+        accuracy: float | None = None, origin: str | None = None,
+    ) -> dict:
+        """Override the browser's reported geolocation.
+
+        Sets the context geolocation AND grants the ``geolocation``
+        permission (Firefox requires BOTH to deliver coords). Note: the
+        stealth profile sets ``geo.enabled=False`` (``stealth.py``), which
+        disables the Firefox geo API entirely — with that pref on, pages
+        will NOT receive these coordinates. This action still wires the
+        override (never silently no-ops); an operator who needs live geo
+        must flip ``geo.enabled`` in the stealth prefs.
+        """
+        for v in (latitude, longitude):
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                return _err(
+                    "invalid_input", "latitude and longitude must be numbers",
+                )
+        if accuracy is not None and (
+            isinstance(accuracy, bool) or not isinstance(accuracy, (int, float))
+        ):
+            return _err("invalid_input", "accuracy must be a number")
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        async with inst.lock:
+            try:
+                geo: dict = {
+                    "latitude": float(latitude),
+                    "longitude": float(longitude),
+                }
+                if accuracy is not None:
+                    geo["accuracy"] = float(accuracy)
+                await inst.context.set_geolocation(geo)
+                # Firefox only delivers coords when the origin has the
+                # geolocation permission too.
+                if origin:
+                    await inst.context.grant_permissions(
+                        ["geolocation"], origin=origin,
+                    )
+                else:
+                    await inst.context.grant_permissions(["geolocation"])
+                return {
+                    "success": True,
+                    "data": {
+                        "geolocation": geo,
+                        # Truth-in-advertising: warn the agent that the
+                        # stealth pref may swallow the override.
+                        "note": (
+                            "geo.enabled=False in the stealth profile may "
+                            "block delivery of these coordinates to pages"
+                        ),
+                    },
+                }
+            except Exception as e:
+                return _err("service_unavailable", str(e))
 
     async def type_text(self, agent_id: str, ref: str | None = None, selector: str | None = None,
                         text: str = "", clear: bool = True,
@@ -11576,6 +11890,118 @@ class BrowserManager:
                     pass
                 inst.page = previous_page
                 return _err("service_unavailable", "open_tab failed")
+
+    # ── Native JS dialog handling ───────────────────────────────
+
+    async def _on_dialog(self, inst: CamoufoxInstance, dialog) -> None:
+        """Resolve a native JS dialog per ``inst.dialog_policy``.
+
+        MUST always resolve the dialog (accept or dismiss) — a pending
+        dialog blocks the page's JS event loop indefinitely, so a handler
+        that returns without resolving hangs the tab. Records the message
+        + type first so the agent can read what the dialog said via
+        ``set_dialog_policy`` even when the policy dismisses it.
+
+        Best-effort: any exception is swallowed after a final dismiss
+        attempt so a listener error can't wedge the page.
+        """
+        try:
+            inst.last_dialog_message = {
+                "message": getattr(dialog, "message", "") or "",
+                "type": getattr(dialog, "type", "") or "",
+            }
+        except Exception:
+            inst.last_dialog_message = None
+        policy = inst.dialog_policy or {}
+        action = policy.get("action", "dismiss")
+        try:
+            if action in ("accept", "respond"):
+                # ``respond`` supplies prompt() text; accept() ignores text
+                # for alert/confirm. Empty string → None so Firefox uses the
+                # prompt's defaultValue rather than blanking it.
+                await dialog.accept(policy.get("text") or None)
+            else:
+                await dialog.dismiss()
+        except Exception as e:
+            logger.debug("dialog handler failed for '%s': %s", inst.agent_id, e)
+            # Last-ditch: never leave the dialog pending or the page hangs.
+            with contextlib.suppress(Exception):
+                await dialog.dismiss()
+
+    def _attach_dialog_listeners(self, inst: CamoufoxInstance) -> None:
+        """Wire a native-dialog handler on EVERY existing page + every new page.
+
+        Playwright Python event callbacks are SYNC, but ``dialog.accept()`` /
+        ``dialog.dismiss()`` are coroutines — so schedule ``_on_dialog`` via
+        ``asyncio.create_task``. Unlike ``request`` / ``response``, Playwright
+        has NO context-level ``dialog`` event, so the handler must be attached
+        per page. A persistent Camoufox profile can RESTORE multiple pages at
+        launch; wiring only ``inst.page`` (as this did before) left every other
+        restored tab with no handler, so a ``switch_tab`` to one of them meant
+        confirm/prompt dialogs were silently auto-dismissed. We therefore wire
+        the handler on all pages currently in ``inst.context.pages`` plus the
+        initial ``inst.page``, then use the context-level ``page`` event for
+        FUTURE pages (popups / ``window.open()`` / OAuth windows). Idempotent
+        via ``_dialog_attached``; re-runs after RESET (fresh instance).
+
+        Best-effort: a Camoufox build that doesn't surface the events must
+        not take the browser down — the default auto-dismiss behavior
+        simply persists.
+        """
+        if getattr(inst, "_dialog_attached", False):
+            return
+        try:
+            # De-dupe by object identity so a page reached via both
+            # ``context.pages`` and ``inst.page`` is not wired twice (which
+            # would fire ``_on_dialog`` twice for one dialog).
+            existing = list(inst.context.pages)
+            if inst.page is not None and inst.page not in existing:
+                existing.append(inst.page)
+            for page in existing:
+                page.on(
+                    "dialog",
+                    lambda d: asyncio.create_task(self._on_dialog(inst, d)),
+                )
+            inst.context.on(
+                "page",
+                lambda p: p.on(
+                    "dialog",
+                    lambda d: asyncio.create_task(self._on_dialog(inst, d)),
+                ),
+            )
+        except Exception as e:
+            logger.debug(
+                "Dialog listener wiring failed for '%s': %s", inst.agent_id, e,
+            )
+            return
+        inst._dialog_attached = True
+
+    async def set_dialog_policy(
+        self, agent_id: str, action: str = "dismiss", text: str = "",
+    ) -> dict:
+        """Set how native JS dialogs (alert/confirm/prompt/beforeunload) resolve.
+
+        ``action`` ∈ {accept, dismiss, respond}. ``respond`` supplies
+        ``text`` as the ``window.prompt()`` answer. Returns the last dialog
+        message observed so the agent can read what a dialog said after
+        triggering it.
+        """
+        if action not in ("accept", "dismiss", "respond"):
+            return _err(
+                "invalid_input",
+                f"action must be one of accept/dismiss/respond, got {action!r}",
+            )
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        async with inst.lock:
+            inst.dialog_policy = {"action": action, "text": text or ""}
+            return {
+                "success": True,
+                "data": {
+                    "policy": {"action": action, "text": text or ""},
+                    "last_dialog": inst.last_dialog_message,
+                },
+            }
 
     # ── §9.1 Network inspection ─────────────────────────────────
 

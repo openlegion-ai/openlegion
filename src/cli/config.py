@@ -1761,6 +1761,8 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "browser_fill_form", "browser_open_tab", "browser_inspect_requests",
     "browser_detect_captcha", "browser_upload_file", "browser_solve_captcha",
     "browser_download",
+    "browser_set_dialog_policy", "browser_drag",
+    "browser_grant_permissions", "browser_set_geolocation",
 ]
 
 # Grouped Tool Search bridge — pulls a deferred capability group's full schemas

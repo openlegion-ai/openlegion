@@ -1286,6 +1286,205 @@ async def browser_inspect_requests(
 
 
 @tool(
+    name="browser_set_dialog_policy",
+    description=(
+        "Decide in advance how native JavaScript dialogs "
+        "(alert / confirm / prompt / the 'Leave site?' beforeunload prompt) "
+        "are answered. Without this, dialogs are auto-DISMISSED, so any flow "
+        "gated on a confirm() or prompt() fails silently. Call this BEFORE the "
+        "action that triggers the dialog (e.g. a delete button that pops a "
+        "confirm). action='accept' clicks OK/Leave, action='dismiss' clicks "
+        "Cancel/Stay (default), action='respond' answers a window.prompt() with "
+        "'text' and accepts it. The policy persists until you change it. "
+        "Returns the LAST dialog message seen so you can read what a dialog said."
+    ),
+    parameters={
+        "action": {
+            "type": "string",
+            "description": (
+                "How to resolve dialogs: 'accept' (OK/confirm), 'dismiss' "
+                "(Cancel — default), or 'respond' (type 'text' into a "
+                "prompt() and accept)."
+            ),
+            "default": "dismiss",
+        },
+        "text": {
+            "type": "string",
+            "description": (
+                "Answer supplied to a window.prompt() when action='respond'. "
+                "Ignored for alert/confirm."
+            ),
+            "default": "",
+        },
+    },
+    parallel_safe=False,
+)
+async def browser_set_dialog_policy(
+    action: str = "dismiss", text: str = "", *, mesh_client=None,
+) -> dict:
+    """Set how native JS dialogs resolve for the current browser."""
+    return await _browser_command(
+        mesh_client, "set_dialog_policy",
+        {"action": action, "text": text},
+    )
+
+
+@tool(
+    name="browser_drag",
+    description=(
+        "Drag from a source to a target using a real (trusted) pointer "
+        "press-move-release. Provide EITHER two element refs from "
+        "browser_get_elements (source_ref + target_ref) OR two viewport "
+        "coordinate pairs (source_x/source_y + target_x/target_y, CSS pixels). "
+        "Refs win when both are given. Use for sliders, canvas handles, and "
+        "reordering. LIMITATION: this is a pointer drag — it does NOT populate "
+        "the HTML5 DataTransfer object, so widgets that rely on dragstart/"
+        "dragover/drop events (many React / SortableJS lists) will not respond. "
+        "This is a universal browser-automation limitation, not a bug."
+    ),
+    parameters={
+        "source_ref": {
+            "type": "string",
+            "description": "Ref of the element to drag FROM (e.g. 'e5').",
+            "default": "",
+        },
+        "target_ref": {
+            "type": "string",
+            "description": "Ref of the element to drop ONTO (e.g. 'e9').",
+            "default": "",
+        },
+        "source_x": {
+            "type": "number",
+            "description": "Start x (viewport CSS px). Use with source_y when not using refs.",
+        },
+        "source_y": {
+            "type": "number",
+            "description": "Start y (viewport CSS px).",
+        },
+        "target_x": {
+            "type": "number",
+            "description": "End x (viewport CSS px).",
+        },
+        "target_y": {
+            "type": "number",
+            "description": "End y (viewport CSS px).",
+        },
+    },
+    parallel_safe=False,
+)
+async def browser_drag(
+    source_ref: str = "", target_ref: str = "",
+    source_x: float | None = None, source_y: float | None = None,
+    target_x: float | None = None, target_y: float | None = None,
+    *, mesh_client=None,
+) -> dict:
+    """Drag from a source point to a target point."""
+    params: dict = {}
+    if source_ref and target_ref:
+        params["source_ref"] = source_ref
+        params["target_ref"] = target_ref
+    else:
+        params["source_x"] = source_x
+        params["source_y"] = source_y
+        params["target_x"] = target_x
+        params["target_y"] = target_y
+    return await _browser_command(mesh_client, "drag", params)
+
+
+@tool(
+    name="browser_grant_permissions",
+    description=(
+        "Grant browser permissions for the current site so a page stops "
+        "prompting (or silently failing). This browser is Firefox — only these "
+        "permissions can be granted: geolocation, notifications, "
+        "persistent-storage, push. Camera and microphone are "
+        "NOT possible on this engine (that would require a Chromium browser) — "
+        "requesting them returns a clear error rather than crashing. Optionally "
+        "scope the grant to a specific origin (e.g. 'https://example.com'); "
+        "omit to grant for the active page."
+    ),
+    parameters={
+        "permissions": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": (
+                "Permission strings to grant. Valid on Firefox: geolocation, "
+                "notifications, persistent-storage, push."
+            ),
+        },
+        "origin": {
+            "type": "string",
+            "description": (
+                "Optional origin to scope the grant to (e.g. "
+                "'https://example.com'). Omit for the current page."
+            ),
+            "default": "",
+        },
+    },
+    parallel_safe=False,
+)
+async def browser_grant_permissions(
+    permissions: list[str] | None = None, origin: str = "",
+    *, mesh_client=None,
+) -> dict:
+    """Grant Firefox-scoped browser permissions."""
+    params: dict = {"permissions": permissions or []}
+    if origin:
+        params["origin"] = origin
+    return await _browser_command(mesh_client, "grant_permissions", params)
+
+
+@tool(
+    name="browser_set_geolocation",
+    description=(
+        "Override the geographic coordinates the browser reports to pages "
+        "(the Geolocation API). Also auto-grants the geolocation permission. "
+        "Use for location-gated sites or to test region-specific behavior. "
+        "NOTE: this fleet's stealth profile disables the geo API "
+        "(geo.enabled=False) to avoid leaking a server's real location, so "
+        "with the default profile pages will NOT receive these coordinates — "
+        "an operator must enable geo in the stealth prefs first. The override "
+        "is still applied (never a silent no-op)."
+    ),
+    parameters={
+        "latitude": {
+            "type": "number",
+            "description": "Latitude in decimal degrees, e.g. 37.7749.",
+        },
+        "longitude": {
+            "type": "number",
+            "description": "Longitude in decimal degrees, e.g. -122.4194.",
+        },
+        "accuracy": {
+            "type": "number",
+            "description": "Optional accuracy in meters (e.g. 50).",
+        },
+        "origin": {
+            "type": "string",
+            "description": (
+                "Optional origin to scope the geolocation permission to. "
+                "Omit for the current page."
+            ),
+            "default": "",
+        },
+    },
+    parallel_safe=False,
+)
+async def browser_set_geolocation(
+    latitude: float, longitude: float,
+    accuracy: float | None = None, origin: str = "",
+    *, mesh_client=None,
+) -> dict:
+    """Override the browser's reported geolocation (Firefox geo.enabled caveat)."""
+    params: dict = {"latitude": latitude, "longitude": longitude}
+    if accuracy is not None:
+        params["accuracy"] = accuracy
+    if origin:
+        params["origin"] = origin
+    return await _browser_command(mesh_client, "set_geolocation", params)
+
+
+@tool(
     name="browser_detect_captcha",
     description=(
         "Detect CAPTCHAs (reCAPTCHA, hCaptcha, Cloudflare Turnstile, etc.) "
