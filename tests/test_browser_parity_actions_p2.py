@@ -112,6 +112,9 @@ class TestRightClick:
         # Fell back to CDP with the secondary button.
         assert result["success"] is True
         inst.page.mouse.click.assert_awaited_once_with(1, 2, button="right")
+        # The reported method must reflect the path ACTUALLY taken (cdp),
+        # not the x11 preference that raised and fell back.
+        assert result["data"]["method"] == "cdp"
 
     @pytest.mark.asyncio
     async def test_ref_resolves_bounding_box(self):

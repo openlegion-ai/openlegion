@@ -8654,6 +8654,10 @@ class BrowserManager:
                     )
 
                 _use_x11 = bool(inst.x11_wid) and self._is_x11_site(inst)
+                # Track the path actually taken: an X11 right-click that raises
+                # falls back to CDP, so ``_use_x11`` alone would mislabel a
+                # CDP-injected right-click as "x11".
+                method = "x11" if _use_x11 else "cdp"
                 if _use_x11:
                     try:
                         await self._x11_right_click_xy(inst, px, py)
@@ -8662,6 +8666,7 @@ class BrowserManager:
                             "X11 right-click failed for '%s', falling back "
                             "to CDP: %s", agent_id, e,
                         )
+                        method = "cdp"
                         await inst.page.mouse.click(px, py, button="right")
                 else:
                     await inst.page.mouse.click(px, py, button="right")
@@ -8670,7 +8675,7 @@ class BrowserManager:
                     "success": True,
                     "data": {
                         "at": [px, py],
-                        "method": "x11" if _use_x11 else "cdp",
+                        "method": method,
                         # Truth-in-advertising: the resulting menu is native,
                         # not DOM — the agent must drive it with press_key.
                         "note": (
