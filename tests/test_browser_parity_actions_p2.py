@@ -5,9 +5,10 @@ Covers the actions stacked on top of the P1 parity surface:
   * ``right_click`` — trusted X11 button-3 click when an X11 window exists
     (``_x11_right_click_xy``), CDP ``page.mouse.click(..., button="right")``
     fallback otherwise. Accepts a ref or (x, y) coords.
-  * ``read_clipboard`` / ``write_clipboard`` — the async Clipboard API driven
-    via ``page.evaluate``. A rejected evaluate (insecure context / permission)
-    must surface a structured error rather than hanging.
+  * ``read_clipboard`` / ``write_clipboard`` — the agent's X11 clipboard driven
+    via ``xclip`` (NOT the page's ``navigator.clipboard`` API, which would let
+    any visited page read/write the clipboard). A missing / failed / empty
+    ``xclip`` must surface a structured error rather than hanging.
   * ``wait_for_network_idle`` — ``page.wait_for_load_state("networkidle")``;
     a timeout returns a NON-FATAL ``idle=False`` result instead of raising.
 
@@ -153,6 +154,26 @@ class TestRightClick:
         assert result["error"]["code"] == "ref_stale"
 
     @pytest.mark.asyncio
+    async def test_ref_stale_exception_returns_ref_stale(self):
+        """A RefStale raised while resolving the ref (DOM shifted since
+        snapshot) must surface the ref_stale recovery path, not a misleading
+        service_unavailable from the outer handler."""
+        from src.browser.ref_handle import RefStale
+
+        mgr = _make_manager()
+        inst = _FakeInstance(x11_wid=None)
+        _patch_get_or_start(mgr, inst)
+        mgr._locator_from_ref = AsyncMock(  # type: ignore[assignment]
+            side_effect=RefStale("shadow host missing", ref="e3"),
+        )
+
+        result = await mgr.right_click("agent-parity", ref="e3")
+
+        assert result["success"] is False
+        assert result["error"]["code"] == "ref_stale"
+        inst.page.mouse.click.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_missing_args_rejected(self):
         mgr = _make_manager()
         inst = _FakeInstance()
@@ -199,62 +220,135 @@ class TestX11RightClickXy:
         # Both xdotool calls target button 3, not 1.
         assert calls[0][-1] == "3" and calls[1][-1] == "3"
 
+    @pytest.mark.asyncio
+    async def test_mouseup_fires_in_finally_on_cancel(self, monkeypatch):
+        """A CancelledError during the click dwell (after button 3 is DOWN)
+        must still release the button — otherwise button 3 stays physically
+        held for the rest of the session (X11 corruption), the same class of
+        bug as the drag held-button leak."""
+        import src.browser.service as svc
+
+        mgr = _make_manager()
+        inst = _FakeInstance(x11_wid=555)
+
+        async def _fake_move(_inst, x, y):
+            return None
+
+        monkeypatch.setattr(mgr, "_x11_move_to", _fake_move)
+
+        calls: list[list[str]] = []
+
+        class _FakeCompletedProc:
+            returncode = 0
+
+        def _fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            return _FakeCompletedProc()
+
+        monkeypatch.setattr(
+            "src.browser.service.subprocess",
+            types.SimpleNamespace(run=_fake_run),
+        )
+
+        # Raise CancelledError on the 2nd asyncio.sleep — the dwell between
+        # mousedown (button held) and mouseup. The 1st (pre_click_settle)
+        # sleeps normally.
+        real_sleep = asyncio.sleep
+        state = {"n": 0}
+
+        async def _sleep(*a, **k):
+            state["n"] += 1
+            if state["n"] == 2:
+                raise asyncio.CancelledError()
+            return await real_sleep(0)
+
+        monkeypatch.setattr(svc.asyncio, "sleep", _sleep)
+
+        with pytest.raises(asyncio.CancelledError):
+            await mgr._x11_right_click_xy(inst, 10, 20)
+
+        # Despite the cancel mid-dwell, mouseup 3 MUST have fired.
+        verbs = [c[1] for c in calls]
+        assert verbs == ["mousedown", "mouseup"]
+        assert calls[0][-1] == "3" and calls[1][-1] == "3"
+
 
 # ── Clipboard ──────────────────────────────────────────────────────────────
 
 
+class _FakeCompleted:
+    def __init__(self, returncode=0, stdout=b"", stderr=b""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _patch_subprocess_run(monkeypatch, calls: list, result):
+    """Patch ONLY ``subprocess.run`` on the service module (keeping DEVNULL /
+    TimeoutExpired intact). ``result`` is returned, or raised if it is an
+    exception instance."""
+
+    def _run(cmd, *args, **kwargs):
+        calls.append({"cmd": cmd, "kwargs": kwargs})
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
+    monkeypatch.setattr("src.browser.service.subprocess.run", _run)
+
+
 class TestClipboard:
     @pytest.mark.asyncio
-    async def test_write_clipboard_calls_evaluate(self):
+    async def test_write_clipboard_pipes_to_xclip(self, monkeypatch):
+        """write_clipboard must pipe the text to ``xclip -selection clipboard
+        -i`` — the X clipboard, NOT the page's navigator.clipboard API."""
         mgr = _make_manager()
         inst = _FakeInstance()
         _patch_get_or_start(mgr, inst)
+        calls: list = []
+        _patch_subprocess_run(monkeypatch, calls, _FakeCompleted(returncode=0))
 
         result = await mgr.write_clipboard("agent-parity", text="hello world")
 
         assert result["success"] is True
         assert result["data"]["written"] == len("hello world")
-        inst.page.evaluate.assert_awaited_once_with(
-            "(t) => navigator.clipboard.writeText(t)", "hello world",
-        )
+        # navigator.clipboard was NOT used.
+        inst.page.evaluate.assert_not_called()
+        assert len(calls) == 1
+        assert calls[0]["cmd"] == ["xclip", "-selection", "clipboard", "-i"]
+        assert calls[0]["kwargs"]["input"] == b"hello world"
 
     @pytest.mark.asyncio
-    async def test_read_clipboard_returns_text(self):
+    async def test_read_clipboard_reads_from_xclip(self, monkeypatch):
+        """read_clipboard must return the stdout of ``xclip -selection
+        clipboard -o``."""
         mgr = _make_manager()
         inst = _FakeInstance()
-        inst.page.evaluate = AsyncMock(return_value="copied text")
         _patch_get_or_start(mgr, inst)
+        calls: list = []
+        _patch_subprocess_run(
+            monkeypatch, calls,
+            _FakeCompleted(returncode=0, stdout=b"copied text"),
+        )
 
         result = await mgr.read_clipboard("agent-parity")
 
         assert result["success"] is True
         assert result["data"]["text"] == "copied text"
-        inst.page.evaluate.assert_awaited_once_with(
-            "() => navigator.clipboard.readText()",
-        )
+        inst.page.evaluate.assert_not_called()
+        assert calls[0]["cmd"] == ["xclip", "-selection", "clipboard", "-o"]
 
     @pytest.mark.asyncio
-    async def test_read_clipboard_none_becomes_empty(self):
+    async def test_read_clipboard_missing_xclip_is_structured_error(self, monkeypatch):
+        """A missing xclip binary must fail safe with a structured error, not
+        raise (fail-closed for the feature)."""
         mgr = _make_manager()
         inst = _FakeInstance()
-        inst.page.evaluate = AsyncMock(return_value=None)
         _patch_get_or_start(mgr, inst)
-
-        result = await mgr.read_clipboard("agent-parity")
-
-        assert result["success"] is True
-        assert result["data"]["text"] == ""
-
-    @pytest.mark.asyncio
-    async def test_read_clipboard_rejection_surfaces_error(self):
-        """An insecure-context / permission rejection must be a structured
-        error, never a hang."""
-        mgr = _make_manager()
-        inst = _FakeInstance()
-        inst.page.evaluate = AsyncMock(
-            side_effect=RuntimeError("Clipboard read blocked (insecure context)"),
+        calls: list = []
+        _patch_subprocess_run(
+            monkeypatch, calls, FileNotFoundError("xclip"),
         )
-        _patch_get_or_start(mgr, inst)
 
         result = await mgr.read_clipboard("agent-parity")
 
@@ -262,13 +356,47 @@ class TestClipboard:
         assert result["error"]["code"] == "service_unavailable"
 
     @pytest.mark.asyncio
-    async def test_write_clipboard_rejection_surfaces_error(self):
+    async def test_read_clipboard_empty_is_structured_error(self, monkeypatch):
+        """xclip exits non-zero on an empty clipboard (no STRING target) — that
+        must surface as an error, never a phantom empty string or a hang."""
         mgr = _make_manager()
         inst = _FakeInstance()
-        inst.page.evaluate = AsyncMock(
-            side_effect=RuntimeError("writeText blocked"),
-        )
         _patch_get_or_start(mgr, inst)
+        calls: list = []
+        _patch_subprocess_run(
+            monkeypatch, calls,
+            _FakeCompleted(returncode=1, stderr=b"Error: target STRING not available"),
+        )
+
+        result = await mgr.read_clipboard("agent-parity")
+
+        assert result["success"] is False
+        assert result["error"]["code"] == "service_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_write_clipboard_missing_xclip_is_structured_error(self, monkeypatch):
+        mgr = _make_manager()
+        inst = _FakeInstance()
+        _patch_get_or_start(mgr, inst)
+        calls: list = []
+        _patch_subprocess_run(
+            monkeypatch, calls, FileNotFoundError("xclip"),
+        )
+
+        result = await mgr.write_clipboard("agent-parity", text="x")
+
+        assert result["success"] is False
+        assert result["error"]["code"] == "service_unavailable"
+
+    @pytest.mark.asyncio
+    async def test_write_clipboard_nonzero_is_structured_error(self, monkeypatch):
+        mgr = _make_manager()
+        inst = _FakeInstance()
+        _patch_get_or_start(mgr, inst)
+        calls: list = []
+        _patch_subprocess_run(
+            monkeypatch, calls, _FakeCompleted(returncode=1),
+        )
 
         result = await mgr.write_clipboard("agent-parity", text="x")
 

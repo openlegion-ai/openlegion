@@ -7616,14 +7616,20 @@ class BrowserManager:
                 capture_output=True, timeout=3, env=inst.subprocess_env(),
             ),
         )
-        await asyncio.sleep(click_dwell())
-        await loop.run_in_executor(
-            None,
-            lambda: subprocess.run(
-                ["xdotool", "mouseup", "--clearmodifiers", "--window", wid_s, "3"],
-                capture_output=True, timeout=3, env=inst.subprocess_env(),
-            ),
-        )
+        # Once button 3 is physically DOWN the release MUST always fire. An
+        # ``asyncio.CancelledError`` during the dwell (or any raise) would
+        # otherwise leave the secondary button held for the rest of the
+        # session — the same class of bug as the drag held-button leak.
+        try:
+            await asyncio.sleep(click_dwell())
+        finally:
+            await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    ["xdotool", "mouseup", "--clearmodifiers", "--window", wid_s, "3"],
+                    capture_output=True, timeout=3, env=inst.subprocess_env(),
+                ),
+            )
 
     async def _x11_hover(self, inst: CamoufoxInstance, locator) -> None:
         """Move mouse to element via xdotool for isTrusted=true mousemove events."""
@@ -8629,7 +8635,14 @@ class BrowserManager:
                     )
                 # Resolve the target point from ref or coords.
                 if ref:
-                    loc = await self._locator_from_ref(inst, ref)
+                    # ``_locator_from_ref`` raises RefStale when the DOM has
+                    # shifted since snapshot; surface the ref_stale recovery
+                    # path (re-snapshot) rather than a misleading
+                    # ``service_unavailable`` from the outer handler.
+                    try:
+                        loc = await self._locator_from_ref(inst, ref)
+                    except RefStale as rs:
+                        return _err("ref_stale", str(rs))
                     if not loc:
                         return _err("ref_stale", f"Ref '{ref}' not found")
                     box = await loc.bounding_box()
@@ -8688,65 +8701,119 @@ class BrowserManager:
                 return _err("service_unavailable", str(e))
 
     async def write_clipboard(self, agent_id: str, text: str = "") -> dict:
-        """Write ``text`` to the system clipboard via the async Clipboard API.
+        """Write ``text`` to the browser's X11 clipboard via ``xclip``.
 
-        Backed by ``navigator.clipboard.writeText`` inside the page. Requires
-        a SECURE (HTTPS) context — on a plain-http page Firefox rejects the
-        call and the error is surfaced (never hangs). The stealth profile
-        enables the testing prefs that let this resolve programmatically
-        (see ``stealth.py``).
+        Scoped to THIS agent's X display (``inst.subprocess_env()`` pins
+        ``DISPLAY``, exactly like the xdotool input path) so one agent's
+        clipboard never bleeds into another's. Deliberately NOT backed by the
+        page's ``navigator.clipboard`` API: exposing that to web content would
+        let any visited HTTPS page read/write the clipboard silently (a data
+        exfiltration channel + a fleet-wide fingerprint tell). Fails safe — a
+        missing / failed ``xclip`` returns a structured error, never hangs.
         """
         if not isinstance(text, str):
             return _err("invalid_input", "text must be a string")
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
-            try:
-                if inst._user_control:
-                    return _err(
-                        "conflict",
-                        "User has browser control — action paused until "
-                        "control is released.",
-                    )
-                await inst.page.evaluate(
-                    "(t) => navigator.clipboard.writeText(t)", text,
+            if inst._user_control:
+                return _err(
+                    "conflict",
+                    "User has browser control — action paused until "
+                    "control is released.",
                 )
-                return {"success": True, "data": {"written": len(text)}}
+            loop = asyncio.get_running_loop()
+
+            def _run_xclip():
+                # ``xclip -i`` reads stdin into the CLIPBOARD selection, then
+                # forks to keep serving it. DEVNULL its stdout/stderr so
+                # subprocess.run does not block waiting for EOF on inherited
+                # pipe fds (the classic xclip daemonize hang); the timeout is
+                # the last-ditch guard against a wedged X server.
+                return subprocess.run(
+                    ["xclip", "-selection", "clipboard", "-i"],
+                    input=text.encode("utf-8"),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=3,
+                    env=inst.subprocess_env(),
+                )
+
+            try:
+                result = await loop.run_in_executor(None, _run_xclip)
+            except FileNotFoundError:
+                return _err(
+                    "service_unavailable",
+                    "xclip is not available in the browser container",
+                )
+            except subprocess.TimeoutExpired:
+                return _err("service_unavailable", "xclip write timed out")
             except Exception as e:
-                # A rejected writeText (insecure context / permission) lands
-                # here — surface it as a structured error rather than hanging.
                 return _err("service_unavailable", str(e))
+            if result.returncode != 0:
+                return _err(
+                    "service_unavailable",
+                    f"xclip write failed (rc={result.returncode})",
+                )
+            return {"success": True, "data": {"written": len(text)}}
 
     async def read_clipboard(self, agent_id: str) -> dict:
-        """Read the system clipboard via the async Clipboard API.
+        """Read the browser's X11 clipboard via ``xclip``.
 
-        Backed by ``navigator.clipboard.readText`` inside the page. Firefox
-        blocks clipboard reads for web content by default — the stealth
-        profile's testing prefs (``stealth.py``) allow it programmatically.
-        Requires a SECURE (HTTPS) context; on a plain-http page the read
-        rejects and the error is surfaced rather than hanging. The returned
-        text is redacted through the per-agent redactor like other page text.
+        Scoped to THIS agent's X display. NOT backed by the page's
+        ``navigator.clipboard`` API (that would expose clipboard reads to any
+        visited page — see ``write_clipboard`` and ``stealth.py``). The
+        returned text is redacted through the per-agent redactor like other
+        page text. Fails safe — a missing / failed / empty clipboard returns
+        a structured error rather than hanging.
         """
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
-            try:
-                if inst._user_control:
-                    return _err(
-                        "conflict",
-                        "User has browser control — action paused until "
-                        "control is released.",
-                    )
-                text = await inst.page.evaluate(
-                    "() => navigator.clipboard.readText()",
+            if inst._user_control:
+                return _err(
+                    "conflict",
+                    "User has browser control — action paused until "
+                    "control is released.",
                 )
-                text = text or ""
-                return {
-                    "success": True,
-                    "data": {"text": self.redactor.redact(agent_id, text)},
-                }
+            loop = asyncio.get_running_loop()
+
+            def _run_xclip():
+                # ``xclip -o`` prints the CLIPBOARD selection to stdout and
+                # exits (no daemonize on output), so capture_output is safe
+                # here; the timeout guards a wedged X server.
+                return subprocess.run(
+                    ["xclip", "-selection", "clipboard", "-o"],
+                    capture_output=True,
+                    timeout=3,
+                    env=inst.subprocess_env(),
+                )
+
+            try:
+                result = await loop.run_in_executor(None, _run_xclip)
+            except FileNotFoundError:
+                return _err(
+                    "service_unavailable",
+                    "xclip is not available in the browser container",
+                )
+            except subprocess.TimeoutExpired:
+                return _err("service_unavailable", "xclip read timed out")
             except Exception as e:
                 return _err("service_unavailable", str(e))
+            if result.returncode != 0:
+                # xclip exits non-zero when the clipboard is empty or has no
+                # text target — surface it rather than returning a phantom
+                # empty string.
+                err = (result.stderr or b"").decode("utf-8", "replace").strip()
+                return _err(
+                    "service_unavailable",
+                    err or "clipboard is empty or unavailable",
+                )
+            text = (result.stdout or b"").decode("utf-8", "replace")
+            return {
+                "success": True,
+                "data": {"text": self.redactor.redact(agent_id, text)},
+            }
 
     async def wait_for_network_idle(
         self, agent_id: str, timeout: int = 10000,

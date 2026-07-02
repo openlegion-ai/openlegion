@@ -1521,12 +1521,11 @@ async def browser_right_click(
 @tool(
     name="browser_write_clipboard",
     description=(
-        "Write text to the system clipboard (the same clipboard a human "
+        "Write text to the browser's clipboard (the same clipboard a human "
         "Ctrl+C / Ctrl+V uses), so you can then paste it into a field with "
-        "browser_press_key. Backed by the browser's async Clipboard API. "
-        "REQUIRES a secure (HTTPS) page — on a plain-http page the browser "
-        "rejects clipboard access and this returns an error rather than "
-        "hanging."
+        "browser_press_key. Writes the browser's X clipboard directly, so it "
+        "works on any page (no HTTPS requirement); returns an error rather "
+        "than hanging if the clipboard is unavailable."
     ),
     parameters={
         "text": {
@@ -1544,12 +1543,12 @@ async def browser_write_clipboard(text: str = "", *, mesh_client=None) -> dict:
 @tool(
     name="browser_read_clipboard",
     description=(
-        "Read the current text contents of the system clipboard — useful to "
-        "capture what a page copied when you clicked a 'Copy' button (share "
-        "links, API keys, coupon codes) that never appears in the DOM. Backed "
-        "by the browser's async Clipboard API. REQUIRES a secure (HTTPS) page; "
-        "on a plain-http page the browser blocks clipboard reads and this "
-        "returns an error rather than hanging. Returns data.text."
+        "Read the current text contents of the browser's clipboard — useful "
+        "to capture what a page copied when you clicked a 'Copy' button (share "
+        "links, API keys, coupon codes) that never appears in the DOM. Reads "
+        "the browser's X clipboard directly, so it works on any page (no HTTPS "
+        "requirement); returns an error rather than hanging if the clipboard "
+        "is empty or unavailable. Returns data.text."
     ),
     parameters={},
     parallel_safe=False,
