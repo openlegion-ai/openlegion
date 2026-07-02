@@ -68,6 +68,23 @@ os.environ["OPENLEGION_SKIP_TRUST_TIER_BOOT_GATE"] = "1"
 # e2e runs with real keys keep working.
 os.environ.setdefault("LITELLM_MODE", "PRODUCTION")
 
+# Redirect the durable fingerprint-state sidecar off the real ``data/``
+# path for the whole session. The browser service now snapshots fingerprint
+# burn + binding-signature state on every low-frequency mutation
+# (``_record_fingerprint_outcome`` / ``_force_fingerprint_burn`` /
+# ``_reset_fingerprint_window`` and the launch-time binding-coherence check),
+# so any test that drives those would otherwise write ``data/fingerprint_state.json``
+# in the repo root. A per-pid temp path keeps each xdist/shard worker isolated;
+# ``setdefault`` so a test that needs a specific path can still override.
+import tempfile as _tempfile  # noqa: E402
+
+os.environ.setdefault(
+    "FINGERPRINT_STATE_PATH",
+    os.path.join(
+        _tempfile.gettempdir(), f"ol_test_fingerprint_state_{os.getpid()}.json",
+    ),
+)
+
 # Time-returning helpers consumed by ``src.browser.service`` via
 # ``from src.browser.timing import X``. ``scroll_increment`` and
 # ``scroll_ramp`` are intentionally excluded — they return pixel counts

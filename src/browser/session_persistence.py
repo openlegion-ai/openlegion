@@ -179,6 +179,30 @@ def _hash_signature(parts: dict[str, str | None]) -> str:
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
 
 
+def cookie_binding_vendor(name: str) -> str | None:
+    """Return the vendor family if ``name`` is a binding-sensitive cookie, else ``None``.
+
+    THE single source of truth for "is this an anti-bot bound cookie" —
+    shared by the opt-in sidecar restore path
+    (:func:`_drop_binding_sensitive_cookies`) and the always-on profile
+    coherence check in ``service._enforce_binding_cookie_coherence``.
+
+    Match rule (unchanged from the original inline matcher): case-
+    insensitive; a cookie matches a prefix when its lowercased name
+    equals the prefix OR starts with it. The returned family is the
+    prefix's leading ``_``-delimited segment (or the whole prefix when
+    that segment is empty, e.g. ``_abck`` → ``_abck``) so operators see
+    "we dropped Cloudflare tokens" without leaking specific cookie names.
+    """
+    if not isinstance(name, str):
+        return None
+    lowered = name.lower()
+    for prefix in _BINDING_SENSITIVE_COOKIE_PREFIXES:
+        if lowered == prefix or lowered.startswith(prefix):
+            return prefix.split("_", 1)[0] or prefix
+    return None
+
+
 def _drop_binding_sensitive_cookies(state: dict, vendors_seen: list[str]) -> int:
     """Strip cookies whose names match the binding-sensitive prefix list.
 
@@ -195,20 +219,12 @@ def _drop_binding_sensitive_cookies(state: dict, vendors_seen: list[str]) -> int
         if not isinstance(cookie, dict):
             kept.append(cookie)
             continue
-        name = (cookie.get("name") or "").lower()
-        bound = False
-        for prefix in _BINDING_SENSITIVE_COOKIE_PREFIXES:
-            if name == prefix or name.startswith(prefix):
-                bound = True
-                # Track which vendor families we dropped (de-dupe by
-                # caller). Helps operators see "we dropped Cloudflare
-                # tokens" without leaking specific cookie names.
-                family = prefix.split("_", 1)[0] or prefix
-                if family not in vendors_seen:
-                    vendors_seen.append(family)
-                break
-        if bound:
+        family = cookie_binding_vendor(cookie.get("name") or "")
+        if family is not None:
             dropped += 1
+            # Track which vendor families we dropped (de-dupe by caller).
+            if family not in vendors_seen:
+                vendors_seen.append(family)
         else:
             kept.append(cookie)
     state["cookies"] = kept

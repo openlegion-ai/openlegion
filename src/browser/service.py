@@ -888,6 +888,15 @@ _fingerprint_hard_burned: set[str] = set()
 # {agent_id: (vendor, header_or_status)} — last hard-block reason captured
 # for operator visibility on the dashboard. Operator-only; never logged.
 _fingerprint_hard_burn_reason: dict[str, tuple[str, str]] = {}
+# {agent_id: signature} — short opaque hash of the (UA, proxy) identity the
+# agent last launched with, written by ``_enforce_binding_cookie_coherence``.
+# The always-on Camoufox persistent profile restores ALL cookies on launch,
+# so a changed identity must drop anti-bot bound cookies (cf_clearance et al.)
+# BEFORE they replay under the new fingerprint. Persisted alongside the burn
+# state so the signature survives a browser-service restart (Constraint #8:
+# a new module-level global, but lock-protected identity state consistent
+# with the surrounding fingerprint globals). Guarded by ``_fingerprint_lock``.
+_binding_signatures: dict[str, str] = {}
 
 
 def _get_fingerprint_lock() -> asyncio.Lock:
@@ -917,7 +926,11 @@ async def _record_fingerprint_outcome(
             _fingerprint_window[agent_id] = bucket
         bucket.append(bool(rejected))
         _fingerprint_last_signal[agent_id] = time.time()
-        return _is_burned_locked(bucket)
+        burned = _is_burned_locked(bucket)
+        # Persist across restarts so a poisoned window can't read clean
+        # after a browser-service bounce while its cookies survive on disk.
+        _snapshot_fingerprint_state_locked()
+        return burned
 
 
 def _is_burned_locked(bucket: deque[bool]) -> bool:
@@ -1027,6 +1040,8 @@ async def _force_fingerprint_burn(
         _fingerprint_hard_burned.add(agent_id)
         _fingerprint_hard_burn_reason[agent_id] = (vendor, reason)
         _fingerprint_last_signal[agent_id] = time.time()
+        # Persist so a vendor-confirmed hard block survives a restart.
+        _snapshot_fingerprint_state_locked()
     return not already
 
 
@@ -1100,7 +1115,61 @@ async def _reset_fingerprint_window(agent_id: str) -> bool:
         _fingerprint_last_signal.pop(agent_id, None)
         _fingerprint_hard_burned.discard(agent_id)
         _fingerprint_hard_burn_reason.pop(agent_id, None)
+        # Persist so the cleared slate survives a restart. Binding
+        # signatures are intentionally left intact — a manual reset is a
+        # burn-state concern; identity coherence is handled on next launch.
+        _snapshot_fingerprint_state_locked()
     return had_state
+
+
+def _snapshot_fingerprint_state_locked() -> bool:
+    """Durably persist the fingerprint burn + binding-signature state.
+
+    Caller MUST hold :func:`_get_fingerprint_lock`. Best-effort —
+    :func:`fingerprint_state.snapshot` logs + returns ``False`` on any I/O
+    failure and never raises, so a persistence hiccup can't break the
+    low-frequency mutation path that calls this (post-solve outcome,
+    hard-burn, operator reset, identity-signature update). Synchronous
+    file I/O under the async lock is acceptable at this call frequency
+    and mirrors the captcha-cost counter's snapshot posture.
+    """
+    from src.browser import fingerprint_state as _fp_state
+    return _fp_state.snapshot(
+        window=_fingerprint_window,
+        last_signal=_fingerprint_last_signal,
+        hard_burned=_fingerprint_hard_burned,
+        hard_burn_reason=_fingerprint_hard_burn_reason,
+        binding_signatures=_binding_signatures,
+    )
+
+
+async def persist_fingerprint_state() -> bool:
+    """Snapshot the fingerprint burn + binding-signature state (shutdown hook)."""
+    async with _get_fingerprint_lock():
+        return _snapshot_fingerprint_state_locked()
+
+
+async def load_fingerprint_state() -> None:
+    """Restore the fingerprint burn + binding-signature state (startup hook).
+
+    Non-fatal: a missing / corrupt sidecar restores empty. Repopulates
+    the in-process globals in place so existing references stay valid.
+    Without this, a fingerprint flagged "burned" would read clean after a
+    browser-service restart while its poisoned cookies persisted on disk.
+    """
+    from src.browser import fingerprint_state as _fp_state
+    loaded = _fp_state.restore(window_maxlen=_FINGERPRINT_WINDOW_SIZE)
+    async with _get_fingerprint_lock():
+        _fingerprint_window.clear()
+        _fingerprint_window.update(loaded.window)
+        _fingerprint_last_signal.clear()
+        _fingerprint_last_signal.update(loaded.last_signal)
+        _fingerprint_hard_burned.clear()
+        _fingerprint_hard_burned.update(loaded.hard_burned)
+        _fingerprint_hard_burn_reason.clear()
+        _fingerprint_hard_burn_reason.update(loaded.hard_burn_reason)
+        _binding_signatures.clear()
+        _binding_signatures.update(loaded.binding_signatures)
 
 
 # ── §22 — fingerprint audit aggregator (per-minute, no URL leak) ──────────
@@ -4262,6 +4331,17 @@ class BrowserManager:
             # through to Firefox (it owns the profile dir directly). The end
             # state is the same: cookies merged into the cookie jar; localStorage
             # seeded on each origin's first navigation via the init script.
+            #
+            # ALWAYS-ON identity coherence — runs on the persistent-profile
+            # channel regardless of BROWSER_SESSION_PERSISTENCE_ENABLED. The
+            # Camoufox profile dir restored every cookie above, including
+            # anti-bot trust tokens bound to the previous (UA, proxy). If the
+            # identity signature changed, drop those bound cookies here BEFORE
+            # any navigation so a rotated fingerprint can't replay a stale
+            # token into an instant 403 + trust-score hit. Must run before the
+            # opt-in sidecar restore so a re-added-then-invalidated ordering
+            # can't leak a bound cookie.
+            await self._enforce_binding_cookie_coherence(inst)
             await self._maybe_restore_session(inst)
 
             # §9.1 wire request listeners at the BrowserContext level so new
@@ -4333,6 +4413,135 @@ class BrowserManager:
             with contextlib.suppress(Exception):
                 await self._teardown_per_agent_x_stack(teardown_target)
             raise
+
+    async def _enforce_binding_cookie_coherence(
+        self, inst: CamoufoxInstance,
+    ) -> None:
+        """Drop anti-bot bound cookies from the profile when identity changed.
+
+        Camoufox's ``persistent_context=True`` profile dir (the always-on
+        channel) restores EVERY cookie on launch — including anti-bot trust
+        tokens (``cf_clearance``, ``datadome``, ``_abck`` …) that Cloudflare /
+        DataDome / PerimeterX bind to the original ``(UA, egress-IP)`` tuple.
+        Replaying one under a rotated UA or a different proxy is a guaranteed
+        403 AND lowers the trust score for the session lifetime. The opt-in
+        ``session_persistence`` sidecar already drops these on a signature
+        change; this mirrors that safety onto the always-on profile channel
+        so it runs regardless of ``BROWSER_SESSION_PERSISTENCE_ENABLED``.
+
+        Flow: compute the current ``(UA, proxy)`` signature; compare against
+        the per-agent signature persisted last launch. On a mismatch, drop
+        only the bound vendor cookies (never generic session cookies). Then
+        persist the current signature as the new baseline — including on the
+        first launch, when nothing is dropped. Best-effort throughout: any
+        failure is logged and the browser starts anyway.
+        """
+        from src.browser import session_persistence as _sp
+
+        agent_id = inst.agent_id
+        context = inst.context
+        try:
+            current_sig = _sp._hash_signature(
+                self._build_session_binding_signature(agent_id),
+            )
+        except Exception as e:
+            logger.debug(
+                "binding-coherence: signature build failed for '%s': %s",
+                agent_id, e,
+            )
+            return
+
+        async with _get_fingerprint_lock():
+            persisted_sig = _binding_signatures.get(agent_id)
+
+        # Only drop when we have a prior signature AND it changed. First
+        # launch (no prior signature) drops nothing but still records the
+        # baseline below.
+        if persisted_sig is not None and persisted_sig != current_sig:
+            try:
+                cookies = await context.cookies()
+            except Exception as e:
+                logger.warning(
+                    "binding-coherence: context.cookies() failed for '%s': %s",
+                    agent_id, e,
+                )
+                cookies = None
+            if cookies:
+                bound_names: list[str] = []
+                vendors: list[str] = []
+                for cookie in cookies:
+                    if not isinstance(cookie, dict):
+                        continue
+                    name = cookie.get("name")
+                    family = _sp.cookie_binding_vendor(name)
+                    if family is not None:
+                        bound_names.append(name)
+                        if family not in vendors:
+                            vendors.append(family)
+                if bound_names:
+                    dropped = await self._clear_bound_cookies(
+                        context, bound_names, cookies,
+                    )
+                    if dropped:
+                        logger.info(
+                            "binding-coherence for '%s': identity signature "
+                            "changed (persisted=%s current=%s); dropped %d "
+                            "cookie(s) bound to vendors: %s",
+                            agent_id, persisted_sig, current_sig, dropped,
+                            ",".join(vendors) or "(none)",
+                        )
+
+        # Record the current signature as the new baseline (first-run
+        # included) and durably persist it next to the burn state.
+        async with _get_fingerprint_lock():
+            _binding_signatures[agent_id] = current_sig
+            try:
+                _snapshot_fingerprint_state_locked()
+            except Exception as e:
+                logger.debug(
+                    "binding-coherence: state snapshot failed for '%s': %s",
+                    agent_id, e,
+                )
+
+    async def _clear_bound_cookies(
+        self, context, bound_names: list[str], all_cookies: list,
+    ) -> int:
+        """Delete the named cookies from ``context``; return the count removed.
+
+        Prefers Playwright's targeted ``clear_cookies(name=...)`` (>=1.43;
+        our pin is ~1.51). If that filtered form is unavailable (older
+        Playwright raising ``TypeError`` on the kwarg), falls back to
+        clearing ALL cookies then re-adding the non-bound subset — the same
+        end state (only bound cookies gone) via a coarser path.
+        """
+        bound_set = set(bound_names)
+        try:
+            for name in bound_names:
+                await context.clear_cookies(name=name)
+            return len(bound_names)
+        except TypeError:
+            # Older Playwright: no ``name`` kwarg. Fall through to the
+            # clear-all + re-add-non-bound path below.
+            pass
+        except Exception as e:
+            logger.warning(
+                "binding-coherence: targeted clear_cookies failed (%s); "
+                "falling back to clear-all + re-add", e,
+            )
+        try:
+            await context.clear_cookies()
+            keep = [
+                c for c in all_cookies
+                if isinstance(c, dict) and c.get("name") not in bound_set
+            ]
+            if keep:
+                await context.add_cookies(keep)
+            return len(bound_names)
+        except Exception as e:
+            logger.warning(
+                "binding-coherence: fallback clear/re-add failed: %s", e,
+            )
+            return 0
 
     async def _maybe_restore_session(self, inst: CamoufoxInstance) -> None:
         """§20 — restore cookies + localStorage from the per-agent sidecar.

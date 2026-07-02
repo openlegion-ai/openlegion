@@ -52,6 +52,7 @@ atexit.register(shutil.rmtree, _PROFILES_ROOT, ignore_errors=True)
 def _reset_fingerprint_state():
     """Each test starts with empty module-level fingerprint state."""
     from src.browser.service import (
+        _binding_signatures,
         _fingerprint_audit_buckets,
         _fingerprint_hard_burn_reason,
         _fingerprint_hard_burned,
@@ -63,12 +64,14 @@ def _reset_fingerprint_state():
     _fingerprint_audit_buckets.clear()
     _fingerprint_hard_burned.clear()
     _fingerprint_hard_burn_reason.clear()
+    _binding_signatures.clear()
     yield
     _fingerprint_window.clear()
     _fingerprint_last_signal.clear()
     _fingerprint_audit_buckets.clear()
     _fingerprint_hard_burned.clear()
     _fingerprint_hard_burn_reason.clear()
+    _binding_signatures.clear()
 
 
 class TestRollingWindow:
