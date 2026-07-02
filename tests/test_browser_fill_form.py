@@ -27,8 +27,16 @@ def _make_manager() -> BrowserManager:
     return mgr
 
 
-def _make_instance(refs_dict: dict | None = None) -> MagicMock:
-    """Build a mock CamoufoxInstance with the given ref-id → ref-dict map."""
+def _make_instance(
+    refs_dict: dict | None = None, *, x11_wid: int | None = None,
+) -> MagicMock:
+    """Build a mock CamoufoxInstance with the given ref-id → ref-dict map.
+
+    ``x11_wid`` defaults to ``None`` so the humanized X11 keystroke path is
+    disabled and ``fill_form`` uses Playwright's atomic ``fill()`` — matching
+    the behavior these tests were written against. Pass a truthy window ID to
+    exercise the trusted per-key path (``_is_x11_site`` always returns True).
+    """
     inst = MagicMock()
     inst.refs = {k: _h(v) for k, v in (refs_dict or {}).items()}
     inst.page = AsyncMock()
@@ -36,6 +44,7 @@ def _make_instance(refs_dict: dict | None = None) -> MagicMock:
     inst.lock = asyncio.Lock()
     inst.touch = MagicMock()
     inst._user_control = False
+    inst.x11_wid = x11_wid
     return inst
 
 
@@ -1016,6 +1025,124 @@ class TestFillFormValueAndLabelHandling:
         )
 
 
+class TestFillFormHumanize:
+    """humanize=True routes text fields through the trusted X11 keystroke chain.
+
+    ``_is_x11_site`` always returns True, so the X11 path turns on whenever the
+    instance has a truthy ``x11_wid`` and ``humanize`` is set (the default).
+    """
+
+    def _x11_patches(self):
+        """Patch the three X11 primitives as AsyncMocks; return the CM stack."""
+        return (
+            patch.object(BrowserManager, "_x11_click", new_callable=AsyncMock),
+            patch.object(BrowserManager, "_x11_key", new_callable=AsyncMock),
+            patch.object(BrowserManager, "_x11_type", new_callable=AsyncMock),
+        )
+
+    @pytest.mark.asyncio
+    async def test_text_field_with_x11_uses_keystroke_chain(self):
+        mgr = _make_manager()
+        refs = {"e0": {"role": "textbox", "name": "Email", "index": 0, "disabled": False}}
+        inst = _make_instance(refs, x11_wid=12345)
+        loc = _make_locator()
+        p_click, p_key, p_type = self._x11_patches()
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref",
+                          new_callable=AsyncMock, return_value=loc), \
+             patch.object(BrowserManager, "_check_captcha",
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
+             patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot), \
+             p_click as x11_click, p_key as x11_key, p_type as x11_type:
+            result = await mgr.fill_form(
+                "agent1", [{"label": "Email", "value": "alice@example.com"}],
+            )
+
+        assert result["success"] is True
+        assert result["data"]["filled"][0]["status"] == "filled"
+        # Trusted focus-click → ctrl+a select-all → per-key type, no fill().
+        x11_click.assert_awaited_once_with(inst, loc)
+        x11_key.assert_awaited_once_with(inst, "ctrl+a")
+        x11_type.assert_awaited_once_with(inst, "alice@example.com", typos=True)
+        loc.fill.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_text_field_with_x11_uses_native_fill(self):
+        mgr = _make_manager()
+        # combobox is NOT in _FILL_FORM_PREFERRED_ROLES → native fill().
+        refs = {"e0": {"role": "combobox", "name": "Country", "index": 0, "disabled": False}}
+        inst = _make_instance(refs, x11_wid=12345)
+        loc = _make_locator()
+        p_click, p_key, p_type = self._x11_patches()
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref",
+                          new_callable=AsyncMock, return_value=loc), \
+             patch.object(BrowserManager, "_check_captcha",
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
+             patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot), \
+             p_click as x11_click, p_key as x11_key, p_type as x11_type:
+            result = await mgr.fill_form(
+                "agent1", [{"label": "Country", "value": "US"}],
+            )
+
+        assert result["success"] is True
+        loc.fill.assert_awaited_once_with("US")
+        x11_click.assert_not_awaited()
+        x11_key.assert_not_awaited()
+        x11_type.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_text_field_without_x11_uses_native_fill(self):
+        mgr = _make_manager()
+        refs = {"e0": {"role": "textbox", "name": "Email", "index": 0, "disabled": False}}
+        inst = _make_instance(refs, x11_wid=None)  # no X11 window bound
+        loc = _make_locator()
+        p_click, p_key, p_type = self._x11_patches()
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref",
+                          new_callable=AsyncMock, return_value=loc), \
+             patch.object(BrowserManager, "_check_captcha",
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
+             patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot), \
+             p_click as x11_click, p_key as x11_key, p_type as x11_type:
+            result = await mgr.fill_form(
+                "agent1", [{"label": "Email", "value": "x@y.z"}],
+            )
+
+        assert result["success"] is True
+        loc.fill.assert_awaited_once_with("x@y.z")
+        x11_click.assert_not_awaited()
+        x11_type.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_humanize_false_uses_native_fill_even_with_x11(self):
+        mgr = _make_manager()
+        refs = {"e0": {"role": "textbox", "name": "Email", "index": 0, "disabled": False}}
+        inst = _make_instance(refs, x11_wid=12345)
+        loc = _make_locator()
+        p_click, p_key, p_type = self._x11_patches()
+        with patch.object(BrowserManager, "get_or_start", return_value=inst), \
+             patch.object(BrowserManager, "_locator_from_ref",
+                          new_callable=AsyncMock, return_value=loc), \
+             patch.object(BrowserManager, "_check_captcha",
+                          new_callable=AsyncMock,
+                          return_value={"captcha_found": False}), \
+             patch.object(BrowserManager, "_snapshot_impl", new=_fake_snapshot), \
+             p_click as x11_click, p_key as x11_key, p_type as x11_type:
+            result = await mgr.fill_form(
+                "agent1", [{"label": "Email", "value": "x@y.z"}],
+                humanize=False,
+            )
+
+        assert result["success"] is True
+        loc.fill.assert_awaited_once_with("x@y.z")
+        x11_click.assert_not_awaited()
+        x11_type.assert_not_awaited()
+
+
 class TestFillFormServerRoute:
     """Concern 15 — happy-path POST /browser/{agent_id}/fill_form route test."""
 
@@ -1059,4 +1186,31 @@ class TestFillFormServerRoute:
         args, kwargs = mgr.fill_form.await_args
         assert args[0] == "a1"
         assert args[1] == [{"label": "Email", "value": "a@b.co"}]
-        assert kwargs == {"submit_after": False}
+        # humanize defaults to True when the body omits it.
+        assert kwargs == {"submit_after": False, "humanize": True}
+
+    def test_route_threads_humanize_false(self, monkeypatch):
+        """humanize=false in the body reaches the manager as humanize=False."""
+        from fastapi.testclient import TestClient
+
+        from src.browser.server import create_browser_app
+
+        monkeypatch.delenv("BROWSER_AUTH_TOKEN", raising=False)
+        monkeypatch.delenv("MESH_AUTH_TOKEN", raising=False)
+
+        mgr = MagicMock()
+        mgr.fill_form = AsyncMock(return_value={"success": True, "data": {}})
+
+        app = create_browser_app(mgr)
+        with TestClient(app) as client:
+            resp = client.post(
+                "/browser/a1/fill_form",
+                json={
+                    "fields": [{"label": "Email", "value": "a@b.co"}],
+                    "humanize": False,
+                },
+            )
+
+        assert resp.status_code == 200
+        _args, kwargs = mgr.fill_form.await_args
+        assert kwargs == {"submit_after": False, "humanize": False}

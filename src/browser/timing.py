@@ -41,13 +41,18 @@ def set_speed(speed: float) -> None:
 
 # ── Inter-action delay ───────────────────────────────────────
 
-_delay: float = 0.0
+_delay: float = 0.3
 _DELAY_MIN: float = 0.0
 _DELAY_MAX: float = 10.0
 
 
 def get_delay() -> float:
-    """Return the current inter-action delay mean (0.0–30.0 seconds, default 0.0)."""
+    """Return the current inter-action delay mean (0.0–10.0 seconds, default 0.3).
+
+    A small non-zero default gives every stateful action a natural human
+    pause — instantaneous back-to-back actions are a behavioral signal.
+    Disable pacing entirely with ``set_delay(0)``.
+    """
     return _delay
 
 
@@ -200,10 +205,12 @@ def inter_action_delay() -> float:
     to simulate the natural human pause between actions — reading the page,
     deciding what to do next, moving eyes to the target element.
 
-    Returns 0.0 when disabled.  Otherwise samples from a Gaussian centred
-    on the configured mean with 40 % relative stddev, clamped to
-    [mean * 0.3, mean * 2.0].  This produces natural variance: most pauses
-    cluster near the mean, with occasional short bursts and long dwells.
+    Returns a small non-zero pause by default (mean 0.3s); returns 0.0 only
+    when pacing is explicitly disabled via ``set_delay(0)``.  When enabled it
+    samples from a Gaussian centred on the configured mean with 40 % relative
+    stddev, clamped to [mean * 0.3, mean * 2.0].  This produces natural
+    variance: most pauses cluster near the mean, with occasional short bursts
+    and long dwells.
 
     Not scaled by the speed setting — speed governs *intra*-action timing
     (keystroke pace, click dwell) while delay governs *inter*-action pacing.

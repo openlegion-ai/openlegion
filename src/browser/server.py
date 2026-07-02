@@ -778,8 +778,9 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         body = await request.json()
         fields = body.get("fields") or []
         submit_after = _body_bool(body, "submit_after", False)
+        humanize = _body_bool(body, "humanize", True)
         result = await manager.fill_form(
-            agent_id, fields, submit_after=submit_after,
+            agent_id, fields, submit_after=submit_after, humanize=humanize,
         )
         await _apply_delay()
         return result

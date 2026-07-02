@@ -7453,16 +7453,31 @@ class BrowserManager:
                         return {"success": False, "error": f"Ref '{ref}' not found"}
                 elif selector:
                     if resolved_frame is not None:
-                        # X11 click path requires page-level coordinates;
-                        # iframe-scoped selectors resolve through
-                        # Playwright's frame locator only. Anti-bot benefit
-                        # of the X11 path is lost for iframe clicks —
-                        # accepted tradeoff.
+                        # iframe-scoped selectors resolve through Playwright's
+                        # frame locator, but ``bounding_box()`` on that locator
+                        # returns MAIN-frame/viewport-relative coordinates —
+                        # exactly what ``_x11_click`` already consumes. So the
+                        # trusted X11 path (isTrusted=true) works for iframe
+                        # elements with no offset math, matching the ref= path.
                         loc = resolved_frame.locator(selector).first
+                        _use_x11 = bool(inst.x11_wid) and self._is_x11_site(inst)
                         try:
-                            await self._human_click(
-                                inst.page, loc, force=force, timeout=_timeout,
-                            )
+                            if _use_x11:
+                                try:
+                                    await self._x11_click(inst, loc, timeout=_timeout)
+                                except Exception as e:
+                                    logger.warning(
+                                        "X11 click failed for '%s' (iframe selector), "
+                                        "falling back to CDP: %s",
+                                        agent_id, e,
+                                    )
+                                    await self._human_click(
+                                        inst.page, loc, force=force, timeout=_timeout,
+                                    )
+                            else:
+                                await self._human_click(
+                                    inst.page, loc, force=force, timeout=_timeout,
+                                )
                         except Exception as e:
                             return {"success": False, "error": str(e)}
                     elif inst.x11_wid and self._is_x11_site(inst):
@@ -7924,14 +7939,26 @@ class BrowserManager:
                         await self._human_click(inst.page, locator)
                 elif selector:
                     if resolved_frame is not None:
-                        # X11 click path requires page-level coordinates;
-                        # iframe-scoped selectors resolve through
-                        # Playwright's frame locator only. Anti-bot benefit
-                        # of the X11 path is lost for iframe focus-clicks —
-                        # accepted tradeoff.
+                        # iframe-scoped selectors resolve through Playwright's
+                        # frame locator, but ``bounding_box()`` on that locator
+                        # returns MAIN-frame/viewport-relative coordinates —
+                        # exactly what ``_x11_click`` consumes — so the trusted
+                        # X11 focus-click (isTrusted=true) works for iframe
+                        # fields with no offset math, matching the ref= path.
                         loc = resolved_frame.locator(selector).first
                         try:
-                            await self._human_click(inst.page, loc)
+                            if _use_x11:
+                                try:
+                                    await self._x11_click(inst, loc)
+                                except Exception as e:
+                                    logger.warning(
+                                        "X11 focus click failed for '%s' (iframe "
+                                        "selector), falling back to CDP: %s",
+                                        agent_id, e,
+                                    )
+                                    await self._human_click(inst.page, loc)
+                            else:
+                                await self._human_click(inst.page, loc)
                         except Exception as e:
                             return {"success": False, "error": str(e)}
                     elif _use_x11:
@@ -10505,22 +10532,29 @@ class BrowserManager:
 
     async def fill_form(
         self, agent_id: str, fields: list[dict],
-        *, submit_after: bool = False,
+        *, submit_after: bool = False, humanize: bool = True,
     ) -> dict:
         """Sequence of find-text + fill across multiple form fields (§9.4).
 
         For each field, locates the input by visible label (reusing
         :meth:`_find_text_impl`), resolves the ref to a locator
-        (:meth:`_locator_from_ref`), and calls Playwright's ``fill``.
+        (:meth:`_locator_from_ref`), and enters the value.
 
-        We use ``fill`` rather than the per-keystroke ``type_text``
-        because (a) ``fill`` clears existing content first, making
-        idempotent retries safe (no double-prefix on resume after
-        CAPTCHA); (b) per-key humanization across many fields is
-        excessive when the agent has explicitly chosen the compound
-        path. Agents needing per-key entropy on a sensitive field
-        (rare; mostly password fields with bot detection) should fall
-        back to ``browser_type`` field-by-field.
+        By default (``humanize=True``) text fields (roles in
+        :attr:`_FILL_FORM_PREFERRED_ROLES`) are typed via the trusted X11
+        keystroke chain — focus-click, ``ctrl+a`` select-all (preserving
+        ``fill()``'s idempotent clear-first behavior), then per-key
+        ``_x11_type`` — so keystroke telemetry (isTrusted=true keydown/keyup)
+        is emitted, matching ``type_text``. This path is used only when X11
+        input is available for the site (``x11_wid`` set + ``_is_x11_site``);
+        otherwise, and for non-text controls (combobox/checkbox/select/button),
+        we fall back to Playwright's atomic ``fill``.
+
+        Pass ``humanize=False`` to force the fast atomic ``fill`` path for
+        every field (no per-key keystrokes). ``fill`` clears existing content
+        first, making idempotent retries safe (no double-prefix on resume
+        after CAPTCHA); the X11 chain's leading ``ctrl+a`` preserves that
+        clear-first semantic.
 
         On CAPTCHA detection mid-flow (after any successful fill) the
         loop stops, the remaining un-attempted fields are echoed back
@@ -10597,6 +10631,12 @@ class BrowserManager:
                         "conflict",
                         "User has browser control — action paused until control is released.",
                     )
+
+                # Trusted X11 keystroke entry is only meaningful when the
+                # instance has a bound window ID and the site is X11-enabled;
+                # otherwise we fall back to Playwright's atomic fill(). Computed
+                # once — it does not change across the field loop.
+                _use_x11 = humanize and bool(inst.x11_wid) and self._is_x11_site(inst)
 
                 filled: list[dict] = []
                 last_locator = None
@@ -10699,6 +10739,11 @@ class BrowserManager:
                         or matches[0]
                     )
                     ref = pick.get("ref")
+                    # Role of the picked control decides text (per-key X11) vs.
+                    # non-text (native fill) entry below. Same lookup shape as
+                    # ``_preferred_match`` above.
+                    picked_handle = inst.refs.get(ref)
+                    picked_role = (getattr(picked_handle, "role", "") or "").lower()
 
                     try:
                         locator = await self._locator_from_ref(inst, ref)
@@ -10720,7 +10765,21 @@ class BrowserManager:
                         continue
 
                     try:
-                        await locator.fill(value)
+                        if (
+                            _use_x11
+                            and picked_role in self._FILL_FORM_PREFERRED_ROLES
+                        ):
+                            # Trusted per-key entry for text fields: focus-click
+                            # → ctrl+a select-all (preserves fill()'s clear-first
+                            # idempotency) → per-key _x11_type. Emits
+                            # isTrusted=true keystroke telemetry that atomic
+                            # fill() never produces, matching type_text. Non-text
+                            # controls and the non-X11 path keep native fill().
+                            await self._x11_click(inst, locator)
+                            await self._x11_key(inst, "ctrl+a")
+                            await self._x11_type(inst, value, typos=True)
+                        else:
+                            await locator.fill(value)
                     except Exception as e:
                         # Element no longer attached / disabled / hidden /
                         # not-fillable (label-element returned by find_text).
