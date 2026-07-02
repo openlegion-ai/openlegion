@@ -14,7 +14,7 @@ FROM python:3.12-slim
 # fingerprint is a detectable inconsistency. Font-cache rebuild for Firefox
 # profiles is handled by src/browser/profile_schema.py migration v2.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    tini openbox wmctrl xdotool x11-xserver-utils unclutter-xfixes procps curl \
+    tini openbox wmctrl xdotool xclip x11-xserver-utils unclutter-xfixes procps curl \
     iptables gosu tzdata \
     libgtk-3-0 libatk1.0-0 libasound2 \
     libxcomposite1 libxdamage1 libxrandr2 libxkbcommon0 libgbm1 \
