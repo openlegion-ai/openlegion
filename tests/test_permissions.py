@@ -200,6 +200,9 @@ class TestCanBrowserAction:
         for action in (
             "set_dialog_policy", "grant_permissions",
             "set_geolocation", "drag",
+            # P2 parity actions.
+            "right_click", "read_clipboard",
+            "write_clipboard", "wait_for_network_idle",
         ):
             # Default (None) and wildcard both allow.
             assert browser_matrix.can_browser_action("legacy-agent", action) is True, action
@@ -305,6 +308,9 @@ class TestKnownBrowserActionsSet:
         for action in (
             "set_dialog_policy", "grant_permissions",
             "set_geolocation", "drag",
+            # P2 parity actions.
+            "right_click", "read_clipboard",
+            "write_clipboard", "wait_for_network_idle",
         ):
             assert action in KNOWN_BROWSER_ACTIONS, action
 

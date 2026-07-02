@@ -1763,6 +1763,8 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "browser_download",
     "browser_set_dialog_policy", "browser_drag",
     "browser_grant_permissions", "browser_set_geolocation",
+    "browser_right_click", "browser_read_clipboard",
+    "browser_write_clipboard", "browser_wait_for_network_idle",
 ]
 
 # Grouped Tool Search bridge — pulls a deferred capability group's full schemas

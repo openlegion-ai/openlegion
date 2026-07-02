@@ -1109,6 +1109,19 @@ def _stealth_prefs(locale: str = "en-US") -> dict:
         # Blocking them causes silent auth failures.
         "dom.disable_open_during_load": False,
 
+        # ── Clipboard read/write (async Clipboard API) ────────────────────────
+        # Firefox gates ``navigator.clipboard.readText()`` behind a user
+        # gesture and blocks it entirely for web content by default, so the
+        # ``read_clipboard`` / ``write_clipboard`` browser actions would hang
+        # or reject without these. ``grant_permissions`` cannot help here —
+        # Firefox has no grantable clipboard permission (unlike Chromium).
+        # These testing prefs let the async Clipboard API resolve
+        # programmatically. Clipboard access still requires a SECURE (HTTPS)
+        # context; on plain-http pages the call rejects and the action
+        # surfaces that error rather than hanging.
+        "dom.events.testing.asyncClipboard": True,
+        "dom.events.asyncClipboard.readText": True,
+
         # ── Telemetry and update checks ───────────────────────────────────────
         # These fire background XHR/DNS requests that look like bot traffic
         # patterns (non-page-triggered network activity).
