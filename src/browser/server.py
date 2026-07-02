@@ -852,6 +852,76 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         await _apply_delay()
         return result
 
+    # ── Human-parity actions ──────────────────────────────────────────────
+
+    @app.post("/browser/{agent_id}/set_dialog_policy")
+    async def set_dialog_policy(agent_id: str, request: Request):
+        """Set how native JS dialogs (alert/confirm/prompt) resolve.
+
+        Manager-side validates ``action`` and returns a §2.3 envelope on
+        bad input rather than raising HTTP 400, matching the other
+        default-allow browser actions.
+        """
+        _verify_auth(request)
+        body = await request.json()
+        result = await manager.set_dialog_policy(
+            agent_id,
+            action=body.get("action", "dismiss"),
+            text=body.get("text", "") or "",
+        )
+        await _apply_delay()
+        return result
+
+    @app.post("/browser/{agent_id}/drag")
+    async def drag(agent_id: str, request: Request):
+        """Drag from a source point to a target point (refs or coords)."""
+        _verify_auth(request)
+        body = await request.json()
+        result = await manager.drag(
+            agent_id,
+            source_ref=body.get("source_ref"),
+            target_ref=body.get("target_ref"),
+            source_x=body.get("source_x"),
+            source_y=body.get("source_y"),
+            target_x=body.get("target_x"),
+            target_y=body.get("target_y"),
+        )
+        await _apply_delay()
+        return result
+
+    @app.post("/browser/{agent_id}/grant_permissions")
+    async def grant_permissions(agent_id: str, request: Request):
+        """Grant Firefox-scoped browser permissions for the context."""
+        _verify_auth(request)
+        body = await request.json()
+        result = await manager.grant_permissions(
+            agent_id,
+            permissions=body.get("permissions") or [],
+            origin=body.get("origin"),
+        )
+        await _apply_delay()
+        return result
+
+    @app.post("/browser/{agent_id}/set_geolocation")
+    async def set_geolocation(agent_id: str, request: Request):
+        """Override the reported geolocation for the context."""
+        _verify_auth(request)
+        body = await request.json()
+        lat = body.get("latitude")
+        lon = body.get("longitude")
+        if not isinstance(lat, (int, float)) or isinstance(lat, bool) \
+                or not isinstance(lon, (int, float)) or isinstance(lon, bool):
+            raise HTTPException(400, "latitude and longitude are required numbers")
+        result = await manager.set_geolocation(
+            agent_id,
+            latitude=float(lat),
+            longitude=float(lon),
+            accuracy=body.get("accuracy"),
+            origin=body.get("origin"),
+        )
+        await _apply_delay()
+        return result
+
     # ── Session persistence (Phase 10 §20) ────────────────────────────────
     #
     # Read-only summary + operator clear endpoint. Mounted on the browser

@@ -74,6 +74,11 @@ KNOWN_BROWSER_ACTIONS: frozenset[str] = frozenset({
     # exclude the handoff would still see the second-call-to-dedicated-
     # endpoint succeed, defeating permission narrowing.
     "request_browser_login",
+    # Human-parity actions: native JS dialog policy (alert/confirm/prompt/
+    # beforeunload), Firefox-scoped permission grants + geolocation, and
+    # trusted-X11 drag-and-drop. Default-allow like every other known
+    # action; operators narrow via ``AgentPermissions.browser_actions``.
+    "set_dialog_policy", "grant_permissions", "set_geolocation", "drag",
 })
 
 
