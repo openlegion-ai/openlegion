@@ -570,6 +570,64 @@ are the "don't break things that matter" gates — several change how a phase mu
   in Appendix A.3 #2; restated here as the regression it prevents.)
 
 ### B-pre — Pre-existing issues found while auditing (NOT caused by the plan, worth fixing)
+_(unchanged list below)_
+
+---
+
+## Appendix C — Dead-code avoidance: replace-pairs & keep/kill decisions
+
+The destructive-cleanup mandate (delete, don't deprecate) is only *achieved* if every "replace X
+with Y" finishes by deleting X. A phased rollout is where cruft hides — old and new coexist during a
+phase, and if the phase ends without the removal, the old path lingers as redundant legacy. **Each
+item below is a removal that must complete inside its phase; treat "old side still present" as an
+unfinished phase, not a follow-up.**
+
+### C.1 Replace-pairs — the OLD side MUST be deleted when the NEW lands
+| Old (delete) | New (replaces it) | Phase | Cruft risk if not deleted |
+|---|---|---|---|
+| `_load_projects()` YAML glob (`cli/config.py:777`) + `_*_project` helpers | Team store (real entity/id) | 1 | Two team "stores"; glob left as a fallback |
+| Blackboard `output/*` + `artifacts/*` payload writers in `hand_off` (`coordination_tool.py:305`) | Team Drive artifact store | 2 | Handoff data written to two places |
+| `inbox/{agent}/task_event/` back-edge feed + `check_inbox` blackboard read (`coordination_tool.py:553`) | Team Threads event feed | 2 | **Decide C.3-a first.** Two event feeds if threads only *adds* |
+| `MessageRouter.message_log` in-memory `deque` (`mesh.py:759`) | Durable Threads store | 2 | Dead deque shadowing the real store |
+| Heartbeat suppression path (`force_llm`/`is_default` skip, `cron.py:543-554`) + `execute_heartbeat` special-casing | Single agenda loop | 3 | **Two heartbeat code paths** if agenda is added alongside |
+| `pending_actions` delete-confirm store (`pending_actions.py`, `server.py:7509/7573`) | Action-tier policy engine | 5 | Two approval systems |
+| Per-agent `goals/{agent_id}` blackboard key | Team-first goals surface (if unified) | 1/3 | **Decide C.3-b.** Two goal mechanisms |
+| Single-lane-only `LaneManager` keying (`lanes.py:127-132`) | Priority steer lane (NOT parallel — see B1) | 3 | If a 2nd parallel worker is added *and* steer stays, two injection paths |
+
+### C.2 Rename-completions — the term must die everywhere, atomically (per B5)
+`project` → `team` across `mesh_client._scope_key`, permission ACL patterns, `_agent_projects`,
+`target_kind`, `orchestration._team_col`, `tasks.project_id` dict-key + all SPA readers, config dir +
+`project.md` scaffold. **Leaving any `projects/` prefix or `project_id` alias "for safety" is exactly
+the legacy cruft to avoid** — there are no external consumers, so there is no safety to preserve.
+Exception that must NOT be renamed: the frozen tab IDs `chat/fleet/workplace/system` (B5).
+
+### C.3 Explicit keep/kill decisions (ambiguity itself breeds cruft)
+Each must be decided *before* its phase, or the codebase ends with a "maybe-used" path:
+- **(a) Threads vs the inbox event feed** — does Team Threads *replace* `inbox/{agent}/task_event/`,
+  or coexist? Recommend **replace** (one event surface). If replace, delete the blackboard back-edge
+  path and repoint `check_inbox`.
+- **(b) Goals home** — team-first goals field vs per-agent `goals/{agent_id}` blackboard key.
+  Recommend **one canonical store** (team entity owns goals; per-agent goals become a field on the
+  agent record), delete the blackboard key path.
+- **(c) `change_history` undo receipts vs the action-tier engine** — undo (revert an applied change)
+  and approval (gate before applying) are genuinely different; recommend **keep both but under one
+  policy surface** so they don't look like two competing gate systems. Document the distinction.
+- **(d) `subagent_tool.py` (in-process ephemeral subagents)** — distinct purpose from hiring a
+  teammate (bounded fan-out within one task, isolated memory). Recommend **keep**, but state the
+  boundary explicitly in docs so it isn't mistaken for redundant-with-teams cruft.
+- **(e) `SandboxBackend`** — it has **no shared-volume analog**, so it can't run Team Drive/Scratch
+  (B-pre #6). Decide: **invest** in a microVM sync layer, or **delete the backend** and commit to
+  Docker. Do not leave it half-supporting the flagship feature — that is the definition of divergent
+  legacy code.
+
+### C.4 Net result if C.1–C.3 are honored
+After the plan, the codebase has **one** team store, **one** coordination event surface, **one**
+heartbeat/agenda loop, **one** approval surface, **one** goals home, **one** namespace (`team`), and
+**zero** migration/shim/lazy-migration code. If any phase ships without completing its C.1 deletion
+or C.3 decision, that is the cruft — so the phase-exit checklist is: *"what old path did this replace,
+and is it gone?"*
+
+### B-pre list (referenced above)
 1. **Archive path health-monitor leak** — `archive_agent_endpoint` never `unregister`s from the
    health monitor (`server.py:7387-7428` vs delete `:7680`), so archived agents are candidates for
    the ~90s auto-restart. Latent today; blocks hibernation until fixed.
