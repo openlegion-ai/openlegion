@@ -648,7 +648,6 @@ def _run_teams_list(port: int, as_json: bool) -> None:
     data = _mesh_get(port, "/dashboard/api/workplace/teams")
     teams = data.get("teams", []) if isinstance(data, dict) else []
     if as_json:
-        # Emit both keys for back-compat with downstream JSON consumers.
         click.echo(dumps_safe({"teams": teams}))
         return
     if not teams:

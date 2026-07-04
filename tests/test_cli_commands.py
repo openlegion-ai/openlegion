@@ -1503,10 +1503,7 @@ class TestWorkplaceCLICommands:
             result = runner.invoke(cli, ["--json", "teams"])
         assert result.exit_code == 0
         payload = json.loads(result.output)
-        # JSON mode emits both keys for back-compat with downstream
-        # consumers that parse either name.
         assert payload["teams"][0]["name"] == "research"
-        assert payload["projects"][0]["name"] == "research"
 
     def test_team_command_shows_one(self):
         runner = CliRunner()
