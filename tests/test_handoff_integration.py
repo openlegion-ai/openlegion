@@ -60,14 +60,14 @@ async def test_hand_off_creates_task_visible_to_recipient_inbox(monkeypatch):
 
     # Roster — bob has to exist for hand_off's pre-flight validation.
     mc.list_agents = AsyncMock(return_value={
-        "scout": {"role": "scout", "project": "default"},
-        "bob": {"role": "analyst", "project": "default"},
+        "scout": {"role": "scout", "team": "default"},
+        "bob": {"role": "analyst", "team": "default"},
     })
 
     # ``create_task`` proxies into ``store.create``. ``hand_off`` invokes
     # this with kw-args matching the MeshClient.create_task signature.
     async def fake_create_task(*, assignee, title, description=None,
-                               project=None, parent_task_id=None,
+                               team_id=None, parent_task_id=None,
                                priority=0, dependencies=None,
                                artifact_refs=None, origin=None,
                                thinking=None):
@@ -76,7 +76,7 @@ async def test_hand_off_creates_task_visible_to_recipient_inbox(monkeypatch):
             assignee=assignee,
             title=title,
             description=description,
-            project_id=project,
+            team_id=team_id,
             parent_task_id=parent_task_id,
             priority=priority,
             dependencies=dependencies,
@@ -139,7 +139,7 @@ def asgi_mesh(tmp_path, monkeypatch):
         "created_at": "2026-05-21T00:00:00+00:00",
     }))
     monkeypatch.setenv(
-        "OPENLEGION_CONFIG_PROJECTS_DIR", str(tmp_path / "projects"),
+        "OPENLEGION_CONFIG_TEAMS_DIR", str(tmp_path / "projects"),
     )
     blackboard = Blackboard(str(tmp_path / "bb.db"))
     pubsub = PubSub()

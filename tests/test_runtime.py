@@ -1440,13 +1440,13 @@ class TestEnvOverrides:
             agent_id="test-agent",
             role="test",
             tools_dir="",
-            env_overrides={"INITIAL_INSTRUCTIONS": "Be helpful.", "PROJECT_NAME": "myproj"},
+            env_overrides={"INITIAL_INSTRUCTIONS": "Be helpful.", "TEAM_NAME": "myproj"},
         )
 
         run_call = mock_client.containers.run.call_args
         env = run_call.kwargs.get("environment", {})
         assert env["INITIAL_INSTRUCTIONS"] == "Be helpful."
-        assert env["PROJECT_NAME"] == "myproj"
+        assert env["TEAM_NAME"] == "myproj"
         assert env["EMBEDDING_MODEL"] == "text-embedding-3-small"
 
     def test_docker_env_overrides_do_not_mutate_extra_env(self):
@@ -1514,17 +1514,17 @@ class TestEnvOverrides:
             tools_dir="",
             system_prompt="",
             model="openai/gpt-4o-mini",
-            env_overrides={"INITIAL_INSTRUCTIONS": "Override instruction", "PROJECT_NAME": "proj1"},
+            env_overrides={"INITIAL_INSTRUCTIONS": "Override instruction", "TEAM_NAME": "proj1"},
         )
 
         env_content = (ws / ".agent.env").read_text()
         assert "INITIAL_INSTRUCTIONS=Override instruction" in env_content
-        assert "PROJECT_NAME=proj1" in env_content
+        assert "TEAM_NAME=proj1" in env_content
         assert "EMBEDDING_MODEL=text-embedding-3-small" in env_content
 
         # extra_env must be unchanged
         assert "INITIAL_INSTRUCTIONS" not in backend.extra_env
-        assert "PROJECT_NAME" not in backend.extra_env
+        assert "TEAM_NAME" not in backend.extra_env
 
     def test_sandbox_env_overrides_do_not_mutate_extra_env(self, tmp_path):
         """Passing env_overrides to _prepare_workspace must not modify extra_env."""

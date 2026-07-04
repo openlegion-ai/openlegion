@@ -83,7 +83,7 @@ def brief_app(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "OPENLEGION_ORCHESTRATION_TASKS_DB", str(tmp_path / "tasks.db"),
     )
-    # Point PROJECTS_DIR at tmp by patching the config module attribute.
+    # Point TEAMS_DIR at tmp by patching the config module attribute.
     import src.cli.config as config_module
     import src.host.server as server_module
     importlib.reload(server_module)
@@ -98,7 +98,7 @@ def brief_app(tmp_path, monkeypatch):
     (research / "project.md").write_text(
         "# research\n\nShared context.\n\n## Workflow\n\nscout -> analyst\n",
     )
-    monkeypatch.setattr(config_module, "PROJECTS_DIR", projects_dir)
+    monkeypatch.setattr(config_module, "TEAMS_DIR", projects_dir)
 
     blackboard = Blackboard(str(tmp_path / "bb.db"))
     permissions = PermissionMatrix()
@@ -238,7 +238,7 @@ async def test_team_summary_hours_param_adds_outcomes_window(brief_app):
     store = app.tasks_store
     rec = store.create(
         creator="operator", assignee="scout", title="t1",
-        project_id="research",
+        team_id="research",
     )
     store.update_status(rec["id"], "working", actor="scout")
     store.update_status(rec["id"], "done", actor="scout")

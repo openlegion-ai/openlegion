@@ -78,7 +78,7 @@ class _REPLCompleter:
                 subs = ["list", "del", "pause", "resume", "run"]
                 return [s + " " for s in subs if s.startswith(text)]
 
-        if line.startswith("/project "):
+        if line.startswith("/team "):
             parts = line.split()
             if len(parts) <= 2:
                 subs = ["list", "use", "info"]
@@ -136,8 +136,8 @@ class REPLSession:
             ("/remove [name]",    "Remove an agent"),
             ("/restart [name]",   "Restart an agent container"),
         ]),
-        ("Projects", [
-            ("/project [list|use|info]",       "Manage project context"),
+        ("Teams", [
+            ("/team [list|use|info]",          "Manage team context"),
         ]),
         ("System", [
             ("/blackboard [list|get|set|del]", "View/edit blackboard entries"),
@@ -157,7 +157,7 @@ class REPLSession:
     def __init__(self, ctx: RuntimeContext):
         self.ctx = ctx
         self.current = list(ctx.agents.keys())[0] if ctx.agents else None
-        self._active_project: str | None = None
+        self._active_team: str | None = None
         self._commands = {
             "/quit":       (self._cmd_quit,       "Exit and stop runtime"),
             "/exit":       (self._cmd_quit,       "Exit and stop runtime"),
@@ -183,7 +183,7 @@ class REPLSession:
             "/reset":      (self._cmd_reset,      "Clear conversation history"),
             "/history":    (self._cmd_history,    "Show recent messages"),
             "/logs":       (self._cmd_logs,       "Show recent runtime logs"),
-            "/project":    (self._cmd_project,    "Manage project context"),
+            "/team":       (self._cmd_team,       "Manage team context"),
             "/help":       (self._cmd_help,       "Show this help"),
         }
 
@@ -312,10 +312,10 @@ class REPLSession:
                         self.current = next(iter(self.ctx.agents))
                         click.echo(f"Now chatting with '{self.current}'.")
                     if self.current:
-                        prompt_prefix = f"[{self._active_project}] " if self._active_project else ""
+                        prompt_prefix = f"[{self._active_team}] " if self._active_team else ""
                         prompt_str = prompt_prefix + user_prompt(self.current)
                     else:
-                        prompt_prefix = f"[{self._active_project}] " if self._active_project else ""
+                        prompt_prefix = f"[{self._active_team}] " if self._active_team else ""
                         prompt_str = prompt_prefix + "openlegion> "
 
                     if pt_session is not None:
@@ -496,25 +496,25 @@ class REPLSession:
                 self.ctx.event_bus.emit("agent_state", agent=new_name,
                     data={"state": "added", "ready": False})
 
-    def _cmd_project(self, arg: str) -> None:
-        from src.cli.config import _load_projects
+    def _cmd_team(self, arg: str) -> None:
+        from src.cli.config import _load_teams
 
         parts = arg.strip().split(None, 1)
         sub = parts[0] if parts else "list"
         rest = parts[1].strip() if len(parts) > 1 else ""
 
         if sub in ("list", "ls", ""):
-            projects = _load_projects()
+            teams = _load_teams()
             all_agents = set(self.ctx.agents.keys())
-            assigned = {m for pdata in projects.values() for m in pdata.get("members", [])} & all_agents
+            assigned = {m for pdata in teams.values() for m in pdata.get("members", [])} & all_agents
 
-            if not projects:
-                click.echo("  No projects configured. Create one from the dashboard or ask the operator agent.")
+            if not teams:
+                click.echo("  No teams configured. Create one from the dashboard or ask the operator agent.")
                 return
 
-            for pname, pdata in sorted(projects.items()):
+            for pname, pdata in sorted(teams.items()):
                 members = [m for m in pdata.get("members", []) if m in all_agents]
-                active = " (active)" if pname == self._active_project else ""
+                active = " (active)" if pname == self._active_team else ""
                 click.echo(f"\n  [{pname}]{active}")
                 click.echo(f"    {pdata.get('description', '')}")
                 if members:
@@ -529,27 +529,27 @@ class REPLSession:
 
         elif sub == "use":
             if not rest or rest.lower() == "none":
-                self._active_project = None
-                click.echo("Project context cleared (global view).")
+                self._active_team = None
+                click.echo("Team context cleared (global view).")
                 return
-            projects = _load_projects()
-            if rest not in projects:
-                click.echo(f"Unknown project: '{rest}'. Available: {', '.join(projects)}")
+            teams = _load_teams()
+            if rest not in teams:
+                click.echo(f"Unknown team: '{rest}'. Available: {', '.join(teams)}")
                 return
-            self._active_project = rest
-            click.echo(f"Project context set to '{rest}'.")
+            self._active_team = rest
+            click.echo(f"Team context set to '{rest}'.")
 
         elif sub == "info":
-            name = rest or self._active_project
+            name = rest or self._active_team
             if not name:
-                click.echo("Usage: /project info <name>")
+                click.echo("Usage: /team info <name>")
                 return
-            projects = _load_projects()
-            if name not in projects:
-                click.echo(f"Project '{name}' not found.")
+            teams = _load_teams()
+            if name not in teams:
+                click.echo(f"Team '{name}' not found.")
                 return
-            pdata = projects[name]
-            click.echo(f"\n  Project: {name}")
+            pdata = teams[name]
+            click.echo(f"\n  Team: {name}")
             click.echo(f"  Description: {pdata.get('description', '(none)')}")
             click.echo(f"  Created: {pdata.get('created_at', '?')}")
             click.echo(f"  Members: {', '.join(pdata.get('members', [])) or '(none)'}")
@@ -557,7 +557,7 @@ class REPLSession:
             click.echo()
 
         else:
-            click.echo("Usage: /project [list|use <name>|use none|info [name]]")
+            click.echo("Usage: /team [list|use <name>|use none|info [name]]")
 
     def _cmd_status(self, arg: str) -> None:
         if not self.ctx.agents:
@@ -565,13 +565,13 @@ class REPLSession:
             return
         agents_cfg = self.ctx.cfg.get("agents", {})
         default_model = self.ctx.cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
-        agent_projects = self.ctx.cfg.get("_agent_projects", {})
+        agent_teams = self.ctx.cfg.get("_agent_teams", {})
 
         for name in self.ctx.agents:
             agent_cfg = agents_cfg.get(name, {})
             model = agent_cfg.get("model", default_model)
-            project = agent_projects.get(name, "")
-            proj_label = f"  [{project}]" if project else ""
+            team = agent_teams.get(name, "")
+            proj_label = f"  [{team}]" if team else ""
             try:
                 data = self.ctx.transport.request_sync(name, "GET", "/status", timeout=3)
                 state = data.get("state", "unknown")
@@ -600,15 +600,15 @@ class REPLSession:
             return
 
         # Determine target agents
-        if self._active_project and not broadcast_all:
-            from src.cli.config import _load_projects
-            projects = _load_projects()
-            project_members = set(projects.get(self._active_project, {}).get("members", []))
-            targets = [a for a in self.ctx.agents if a in project_members]
+        if self._active_team and not broadcast_all:
+            from src.cli.config import _load_teams
+            teams = _load_teams()
+            team_members = set(teams.get(self._active_team, {}).get("members", []))
+            targets = [a for a in self.ctx.agents if a in team_members]
             if not targets:
-                click.echo(f"No agents in project '{self._active_project}'. Use --all to broadcast to everyone.")
+                click.echo(f"No agents in team '{self._active_team}'. Use --all to broadcast to everyone.")
                 return
-            scope = f"project '{self._active_project}'"
+            scope = f"team '{self._active_team}'"
         else:
             targets = list(self.ctx.agents.keys())
             scope = "all"
@@ -842,17 +842,17 @@ class REPLSession:
             rest = arg.strip()
             sub = "list"
 
-        def _project_key(key: str) -> str:
-            """Prefix key with project namespace when active."""
-            if self._active_project and not key.startswith("projects/"):
-                return f"projects/{self._active_project}/{key}"
+        def _team_key(key: str) -> str:
+            """Prefix key with team namespace when active."""
+            if self._active_team and not key.startswith("teams/"):
+                return f"teams/{self._active_team}/{key}"
             return key
 
         if sub in ("list", "ls"):
             bypass_all = rest == "--all" or rest.startswith("--all ")
             if bypass_all:
                 rest = rest[5:].strip()
-            prefix = rest if bypass_all else _project_key(rest)
+            prefix = rest if bypass_all else _team_key(rest)
             entries = self.ctx.blackboard.list_by_prefix(prefix)
             if not entries:
                 click.echo("  No entries" + (f" matching '{prefix}'" if prefix else "") + ".")
@@ -868,7 +868,7 @@ class REPLSession:
             if not rest:
                 click.echo("Usage: /blackboard get <key>")
                 return
-            key = _project_key(rest)
+            key = _team_key(rest)
             entry = self.ctx.blackboard.read(key)
             if not entry:
                 click.echo(f"  Key not found: {key}")
@@ -890,7 +890,7 @@ class REPLSession:
                 click.echo("Usage: /blackboard set <key> <json>")
                 return
             key, val_str = key_and_val
-            key = _project_key(key)
+            key = _team_key(key)
             try:
                 value = json.loads(val_str)
             except json.JSONDecodeError:
@@ -904,7 +904,7 @@ class REPLSession:
             if not rest:
                 click.echo("Usage: /blackboard del <key>")
                 return
-            key = _project_key(rest)
+            key = _team_key(rest)
             if not click.confirm(f"Delete blackboard entry '{key}'?"):
                 return
             try:
@@ -1512,7 +1512,7 @@ class REPLSession:
             except Exception as e:
                 click.echo(f"  Warning: connector cleanup failed: {e}")
 
-        # Remove from config, permissions, and any project membership
+        # Remove from config, permissions, and any team membership
         from src.cli.config import _remove_agent
 
         _remove_agent(name)

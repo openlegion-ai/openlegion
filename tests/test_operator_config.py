@@ -442,7 +442,7 @@ class TestOperatorConstants:
         # Dropped dead-weight + replaced tools must be gone.
         for tool in (
             "update_status",
-            "list_projects", "get_project", "list_project_status",
+            "list_projects", "get_project", "list_team_status",
             "list_agents", "get_agent_profile", "read_agent_history",
             "archive_project", "delete_project",
             "archive_agent", "delete_agent",

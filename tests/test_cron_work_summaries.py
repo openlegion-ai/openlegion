@@ -140,7 +140,7 @@ def test_reconcile_creates_one_job_per_active_team(tmp_path, monkeypatch):
     _seed_team(projects_dir, "beta")
     _seed_team(projects_dir, "archived-team", status="archived")
     import src.cli.config as _cli_config
-    monkeypatch.setattr(_cli_config, "PROJECTS_DIR", projects_dir)
+    monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
     monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
 
     # Drive the reconcile through a minimal RuntimeContext stand-in
@@ -169,7 +169,7 @@ def test_reconcile_honors_per_team_schedule_override(tmp_path, monkeypatch):
     projects_dir.mkdir(parents=True)
     _seed_team(projects_dir, "weekly-team", schedule="0 9 * * 1")  # Mondays
     import src.cli.config as _cli_config
-    monkeypatch.setattr(_cli_config, "PROJECTS_DIR", projects_dir)
+    monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
     monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
 
     from src.host.cron import CronScheduler
@@ -190,7 +190,7 @@ def test_reconcile_prunes_summary_jobs_for_deleted_teams(tmp_path, monkeypatch):
     projects_dir.mkdir(parents=True)
     _seed_team(projects_dir, "alpha")
     import src.cli.config as _cli_config
-    monkeypatch.setattr(_cli_config, "PROJECTS_DIR", projects_dir)
+    monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
     monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
 
     from src.host.cron import CronScheduler
@@ -221,7 +221,7 @@ def test_reconcile_prunes_summary_jobs_for_archived_teams(tmp_path, monkeypatch)
     _seed_team(projects_dir, "alpha")
     _seed_team(projects_dir, "old-team", status="archived")
     import src.cli.config as _cli_config
-    monkeypatch.setattr(_cli_config, "PROJECTS_DIR", projects_dir)
+    monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
     monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
 
     from src.host.cron import CronScheduler
@@ -253,7 +253,7 @@ def test_reconcile_reschedules_drift_to_new_cadence(tmp_path, monkeypatch):
     projects_dir.mkdir(parents=True)
     _seed_team(projects_dir, "alpha", schedule="0 9 * * *")
     import src.cli.config as _cli_config
-    monkeypatch.setattr(_cli_config, "PROJECTS_DIR", projects_dir)
+    monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
     monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
 
     from src.host.cron import CronScheduler
@@ -287,7 +287,7 @@ def test_reconcile_logs_warning_on_invalid_schedule_metadata(
     projects_dir.mkdir(parents=True)
     _seed_team(projects_dir, "alpha", schedule="0 9 * * *")
     import src.cli.config as _cli_config
-    monkeypatch.setattr(_cli_config, "PROJECTS_DIR", projects_dir)
+    monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
     monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
 
     from src.host.cron import CronScheduler
@@ -317,7 +317,7 @@ def test_reconcile_leaves_non_summary_tool_jobs_alone(tmp_path, monkeypatch):
     projects_dir.mkdir(parents=True)
     _seed_team(projects_dir, "alpha")
     import src.cli.config as _cli_config
-    monkeypatch.setattr(_cli_config, "PROJECTS_DIR", projects_dir)
+    monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
     monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
 
     from src.host.cron import CronScheduler

@@ -50,7 +50,7 @@ agents:
       company websites, and job boards. Output goes to the blackboard for the
       formatter to export.
 
-      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
+      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the team.
 
       ## Input format
       You receive companies to enrich as:
@@ -218,7 +218,7 @@ agents:
       You read enriched lead data from the blackboard and produce CRM-ready
       export files as artifacts.
 
-      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
+      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the team.
 
       ## Trigger
       You activate when:

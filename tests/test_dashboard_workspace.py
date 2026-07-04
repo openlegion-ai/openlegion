@@ -438,7 +438,7 @@ class TestProjectProxy:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
         ) as client:
-            with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            with patch("src.cli.config.TEAMS_DIR", projects_dir):
                 resp = await client.get("/dashboard/api/team", params={"team": "testproj"})
             assert resp.status_code == 200
             data = resp.json()
@@ -456,7 +456,7 @@ class TestProjectProxy:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
         ) as client:
-            with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            with patch("src.cli.config.TEAMS_DIR", projects_dir):
                 resp = await client.get("/dashboard/api/team", params={"team": "testproj"})
             assert resp.status_code == 200
             data = resp.json()
@@ -503,7 +503,7 @@ class TestProjectProxy:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
         ) as client:
-            with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            with patch("src.cli.config.TEAMS_DIR", projects_dir):
                 resp = await client.put(
                     "/dashboard/api/team",
                     params={"team": "testproj"},
@@ -553,7 +553,7 @@ class TestProjectProxy:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
         ) as client:
-            with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            with patch("src.cli.config.TEAMS_DIR", projects_dir):
                 resp = await client.put(
                     "/dashboard/api/team",
                     params={"team": "testproj"},

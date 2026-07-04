@@ -551,7 +551,6 @@ if _TEAM_SCOPE_MODE not in {"warn", "enforce"}:
     )
     _TEAM_SCOPE_MODE = "enforce"
 # Internal alias — kept for the existing scope-gate call sites below.
-_PROJECT_SCOPE_MODE = _TEAM_SCOPE_MODE
 
 
 # Counter surfaced on ``/mesh/system/metrics`` as ``scope_warn_total``.
@@ -570,9 +569,8 @@ def _record_scope_warn() -> None:
 # Counter for cross-team blackboard access (read or write where the
 # caller's team differs from the existing key's writer-team). Pure
 # observability for Phase 3 enforcement design — NOT a denial. Surfaced on
-# ``/mesh/system/metrics`` as BOTH ``blackboard_cross_team_total`` and
-# the legacy ``blackboard_cross_project_total`` (same value, kept through
-# PR 3 for back-compat). Counter is process-lifetime (resets on restart),
+# ``/mesh/system/metrics`` as ``blackboard_cross_team_total``.
+# Counter is process-lifetime (resets on restart),
 # naming follows ``scope_warn_total`` rather than the ``_24h`` mental
 # model — restarts are roughly daily-ish in practice and a true 24h
 # window would need a separate ledger.
@@ -586,53 +584,32 @@ def _record_blackboard_xteam(kind: str) -> None:
     _blackboard_xteam_count[kind] += 1
 
 
-# Maps the legacy ``project_*`` lifecycle event names (callers still
-# pass these for code-reuse during the rename) to the canonical
-# ``team_*`` event names that actually fire on the bus. PR 3 stopped
-# dual-emitting under the legacy names — subscribers must listen on
-# ``team_*``. The five legacy literals stay in ``DashboardEvent.type``
-# for type-safety of any historical-record code that parses them.
-_PROJECT_TO_TEAM_EVENT = {
-    "project_created": "team_created",
-    "project_updated": "team_updated",
-    "project_deleted": "team_deleted",
-    "project_archived": "team_archived",
-    "project_unarchived": "team_unarchived",
-}
-
-
 def _emit_team_event(
     event_bus,
-    legacy_event: str,
+    event: str,
     *,
     agent: str,
     name: str,
     extra: dict | None = None,
     logger=logger,
 ) -> None:
-    """Emit a team lifecycle event on the bus under the canonical name.
+    """Emit a team lifecycle event (``team_*``) on the bus.
 
-    ``legacy_event`` accepts the pre-rename ``project_*`` name purely
-    for caller convenience — the actual emit happens under the
-    ``team_*`` equivalent looked up via ``_PROJECT_TO_TEAM_EVENT``.
-    Payload always contains ``project_id`` / ``team_id`` / ``name`` so
-    listeners reading either key keep working. ``extra`` is merged on
-    top so callers can pass description / members / etc.
+    Payload always contains ``team_id`` / ``name``; ``extra`` is merged
+    on top so callers can pass description / members / etc.
     """
     if event_bus is None:
         return
     payload: dict = {
-        "project_id": name,
         "team_id": name,
         "name": name,
     }
     if extra:
         payload.update(extra)
-    team_event = _PROJECT_TO_TEAM_EVENT.get(legacy_event, legacy_event)
     try:
-        event_bus.emit(team_event, agent=agent, data=payload)
+        event_bus.emit(event, agent=agent, data=payload)
     except Exception as e:  # pragma: no cover - defensive
-        logger.debug("%s emit failed: %s", team_event, e)
+        logger.debug("%s emit failed: %s", event, e)
 
 
 # Per-category denial counter surfaced on ``/mesh/system/metrics`` as
@@ -643,7 +620,7 @@ def _emit_team_event(
 # fired today". Categories are FROZEN (lower-cardinality, operator-readable):
 #
 #   * ``auth``       — missing/invalid bearer token
-#   * ``scope``      — caller out of project / fleet-roster scope
+#   * ``scope``      — caller out of team / fleet-roster scope
 #   * ``role``       — operator-only or operator-or-internal denied to a worker
 #   * ``permission`` — ``permissions.can_*()`` returned False
 #   * ``rate``       — rate limiter rejected
@@ -700,12 +677,12 @@ def _record_denial(
     )
 
 
-def _caller_projects(agent_id: str) -> set[str]:
-    """Return the project memberships visible to ``agent_id``.
+def _caller_teams(agent_id: str) -> set[str]:
+    """Return the team memberships visible to ``agent_id``.
 
-    Workers see only projects whose ``metadata.yaml`` lists them as
+    Workers see only teams whose ``metadata.yaml`` lists them as
     members. The operator and trusted internal callers (``mesh``) are
-    fleet-global by design — they get a sentinel meaning "all projects",
+    fleet-global by design — they get a sentinel meaning "all teams",
     represented here as an empty set with the caller_is_global flag the
     caller computes separately. Use the helper purely as a lookup of
     *worker* memberships and branch on operator/internal in the caller.
@@ -714,33 +691,33 @@ def _caller_projects(agent_id: str) -> set[str]:
         # Operator and the mesh-internal pseudo-id are global; the caller
         # branches on those identities directly. Returning an empty set
         # here forces callers to think about the global path and not
-        # silently include "every project" in a worker-style filter.
+        # silently include "every team" in a worker-style filter.
         return set()
-    from src.cli.config import _load_projects
+    from src.cli.config import _load_teams
 
-    projects = _load_projects()
+    teams_cfg = _load_teams()
     return {
         name
-        for name, meta in projects.items()
+        for name, meta in teams_cfg.items()
         if agent_id in meta.get("members", [])
     }
 
 
-def _is_blackboard_cross_project(
+def _is_blackboard_cross_team(
     caller: str, writer: str | None
 ) -> bool:
-    """Return True when caller and writer are workers in disjoint project sets.
+    """Return True when caller and writer are workers in disjoint team sets.
 
     Best-effort detection used purely for telemetry — never gates access.
     Returns False (so the counter is NOT incremented) when:
 
     - ``writer`` is missing (e.g. unknown / deleted agent or no prior entry)
     - either party is operator / ``mesh`` (fleet-global by design)
-    - caller and writer share at least one project membership
+    - caller and writer share at least one team membership
     - either party has an empty membership set (standalone agent — not
-      meaningfully "cross-project" without two project anchors)
+      meaningfully "cross-team" without two team anchors)
 
-    The intent is to count the case where two distinct *project-bound*
+    The intent is to count the case where two distinct *team-bound*
     workers touch the same key, since that is what Phase 3 enforcement
     will gate.
     """
@@ -748,8 +725,8 @@ def _is_blackboard_cross_project(
         return False
     if caller in {"operator", "mesh"} or writer in {"operator", "mesh"}:
         return False
-    caller_set = _caller_projects(caller)
-    writer_set = _caller_projects(writer)
+    caller_set = _caller_teams(caller)
+    writer_set = _caller_teams(writer)
     if not caller_set or not writer_set:
         return False
     return caller_set.isdisjoint(writer_set)
@@ -772,7 +749,7 @@ def create_mesh_app(
     health_monitor: HealthMonitor | None = None,
     cost_tracker: CostTracker | None = None,
     notify_fn: Callable[[str, str], Coroutine] | None = None,
-    agent_projects: dict[str, str] | None = None,
+    agent_teams: dict[str, str] | None = None,
     lane_manager: LaneManager | None = None,
     dispatch_loop: asyncio.AbstractEventLoop | None = None,
     wallet_service_ref: list | None = None,
@@ -834,20 +811,6 @@ def create_mesh_app(
     app.change_history = change_history
     if event_bus is not None:
         change_history.set_event_bus(event_bus)
-
-    # PR 2 — project → team rename. Idempotent on-startup migrator
-    # renames ``config/projects/`` → ``config/teams/`` and copies
-    # PROJECT.md → TEAM.md in each agent workspace. The DB column
-    # rename is gated behind ``OPENLEGION_TEAM_MIGRATION_RENAME_DB=1``
-    # (off by default this PR — see :mod:`src.host.team_migration` for
-    # rationale). Failures log and continue — back-compat aliases keep
-    # the previous-version data path working. Operators can disable the
-    # whole migrator with ``OPENLEGION_DISABLE_TEAM_MIGRATION=1``.
-    try:
-        from src.host.team_migration import migrate_project_to_team
-        migrate_project_to_team()
-    except Exception as e:
-        logger.error("team_migration failed at startup: %s — continuing", e, exc_info=True)
 
     # L10: register the loaded system-tier credential names with the
     # permission matrix so ``can_access_credential`` denies agent access to
@@ -943,36 +906,8 @@ def create_mesh_app(
         """Register an open help request and return its request_id."""
         return help_requests_store.record(kind, agent_id, payload)
 
-    # Idempotent legacy-data migration. Existing fleets that had
-    # blackboard-stored tasks before the v2 rollout (PR #835) get them
-    # imported into the durable store on first restart. Subsequent
-    # restarts find nothing to migrate and the helper is a no-op.
-    # Migration failures are logged loudly but never crash startup —
-    # legacy keys stay in place and ops can re-run the helper manually.
-    from src.host.orchestration_migration import migrate_blackboard_to_tasks
-    try:
-        _migration_result = migrate_blackboard_to_tasks(blackboard, tasks_store)
-        _migrated = int(_migration_result.get("migrated", 0) or 0)
-        _skipped = int(_migration_result.get("skipped", 0) or 0)
-        _deleted = int(_migration_result.get("deleted", 0) or 0)
-        _errors = _migration_result.get("errors", []) or []
-        _error_count = len(_errors) if isinstance(_errors, list) else int(_errors)
-        if _migrated > 0 or _deleted > 0:
-            logger.info(
-                "orchestration migration: migrated=%d skipped=%d deleted=%d errors=%d",
-                _migrated, _skipped, _deleted, _error_count,
-            )
-        else:
-            logger.debug("orchestration migration: no legacy tasks found")
-    except Exception as e:
-        logger.error(
-            "orchestration migration failed at startup: %s — legacy tasks preserved",
-            e,
-            exc_info=True,
-        )
-
     _auth_tokens = auth_tokens if auth_tokens is not None else {}
-    _agent_projects = agent_projects if agent_projects is not None else {}
+    _agent_teams = agent_teams if agent_teams is not None else {}
 
     # Fail-closed startup gate for the operator trust tier.
     #
@@ -1757,10 +1692,10 @@ def create_mesh_app(
         entry = blackboard.read(key)
         if not entry:
             raise HTTPException(404, f"Key not found: {key}")
-        # Phase 3 Slice 1 telemetry: count cross-project reads. Skip
+        # Phase 3 Slice 1 telemetry: count cross-team reads. Skip
         # internal/operator callers (fleet-global by design). No
         # enforcement — pure observability informing the design doc.
-        if not _is_internal_caller(request) and _is_blackboard_cross_project(
+        if not _is_internal_caller(request) and _is_blackboard_cross_team(
             agent_id, entry.written_by
         ):
             _record_blackboard_xteam("read")
@@ -1788,12 +1723,12 @@ def create_mesh_app(
                     gate="blackboard.write:can_write_blackboard",
                 )
                 raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
-        # Phase 3 Slice 1 telemetry: count cross-project writes against an
-        # EXISTING entry (new keys are by definition not cross-project).
+        # Phase 3 Slice 1 telemetry: count cross-team writes against an
+        # EXISTING entry (new keys are by definition not cross-team).
         # Skip internal/operator callers (fleet-global by design).
         if not _is_internal_caller(request):
             existing = blackboard.read(key)
-            if existing is not None and _is_blackboard_cross_project(
+            if existing is not None and _is_blackboard_cross_team(
                 agent_id, existing.written_by
             ):
                 _record_blackboard_xteam("write")
@@ -1826,15 +1761,15 @@ def create_mesh_app(
                     gate="blackboard.delete:can_write_blackboard",
                 )
                 raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
-        # Protect history namespace (including project-scoped keys)
-        bare = key.split("/", 2)[2] if key.startswith("projects/") and key.count("/") >= 2 else key
+        # Protect history namespace (including team-scoped keys)
+        bare = key.split("/", 2)[2] if key.startswith("teams/") and key.count("/") >= 2 else key
         if bare.startswith("history/"):
             raise HTTPException(400, "Cannot delete from history namespace")
-        # Phase 3 Slice 1 telemetry: count cross-project deletes (a delete
+        # Phase 3 Slice 1 telemetry: count cross-team deletes (a delete
         # is a write that mutates the key). Skip internal/operator callers.
         if not _is_internal_caller(request):
             existing = blackboard.read(key)
-            if existing is not None and _is_blackboard_cross_project(
+            if existing is not None and _is_blackboard_cross_team(
                 agent_id, existing.written_by
             ):
                 _record_blackboard_xteam("write")
@@ -1885,11 +1820,11 @@ def create_mesh_app(
                     gate="blackboard.claim:can_write_blackboard",
                 )
                 raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
-        # Phase 3 Slice 1 telemetry: count cross-project CAS writes against
+        # Phase 3 Slice 1 telemetry: count cross-team CAS writes against
         # an EXISTING entry. Skip internal/operator callers.
         if not _is_internal_caller(request):
             existing = blackboard.read(key)
-            if existing is not None and _is_blackboard_cross_project(
+            if existing is not None and _is_blackboard_cross_team(
                 agent_id, existing.written_by
             ):
                 _record_blackboard_xteam("write")
@@ -1924,19 +1859,19 @@ def create_mesh_app(
         event.source = _resolve_agent_id(event.source, request)
         await _check_rate_limit("publish", event.source)
 
-        # Enforce project isolation: topic must match the publisher's project prefix
-        source_project = _agent_projects.get(event.source)
-        if source_project:
-            expected_prefix = f"projects/{source_project}/"
+        # Enforce team isolation: topic must match the publisher's team prefix
+        source_team = _agent_teams.get(event.source)
+        if source_team:
+            expected_prefix = f"teams/{source_team}/"
             if not event.topic.startswith(expected_prefix):
                 _record_denial(
                     "scope", caller=event.source, target=event.topic,
-                    gate="publish:project_prefix",
-                    extra={"caller_project": source_project},
+                    gate="publish:team_prefix",
+                    extra={"caller_team": source_team},
                 )
                 raise HTTPException(
                     403,
-                    f"Agent {event.source} (project={source_project}) cannot publish to topic '{event.topic}'"
+                    f"Agent {event.source} (team={source_team}) cannot publish to topic '{event.topic}'"
                 )
 
         if not _caller_is_operator(event.source, request):
@@ -1979,19 +1914,19 @@ def create_mesh_app(
         """Subscribe an agent to an event topic."""
         agent_id = _resolve_agent_id(agent_id, request)
 
-        # Enforce project isolation: topic must match the subscriber's project prefix
-        sub_project = _agent_projects.get(agent_id)
-        if sub_project:
-            expected_prefix = f"projects/{sub_project}/"
+        # Enforce team isolation: topic must match the subscriber's team prefix
+        sub_team = _agent_teams.get(agent_id)
+        if sub_team:
+            expected_prefix = f"teams/{sub_team}/"
             if not topic.startswith(expected_prefix):
                 _record_denial(
                     "scope", caller=agent_id, target=topic,
-                    gate="subscribe:project_prefix",
-                    extra={"caller_project": sub_project},
+                    gate="subscribe:team_prefix",
+                    extra={"caller_team": sub_team},
                 )
                 raise HTTPException(
                     403,
-                    f"Agent {agent_id} (project={sub_project}) cannot subscribe to topic '{topic}'"
+                    f"Agent {agent_id} (team={sub_team}) cannot subscribe to topic '{topic}'"
                 )
 
         if not _caller_is_operator(agent_id, request):
@@ -2696,16 +2631,16 @@ def create_mesh_app(
 
         router.register_agent(agent_id, url, capabilities)
         agent_perms = permissions.get_permissions(agent_id)
-        reg_project = _agent_projects.get(agent_id)
+        reg_team = _agent_teams.get(agent_id)
         for topic in agent_perms.can_subscribe:
-            scoped = f"projects/{reg_project}/{topic}" if reg_project else topic
+            scoped = f"teams/{reg_team}/{topic}" if reg_team else topic
             pubsub.subscribe(scoped, agent_id)
         # Auto-watch task inbox (coordination protocol).
         # Only for agents with blackboard access (skip standalone agents).
         if agent_perms.blackboard_read:
             inbox_pattern = (
-                f"projects/{reg_project}/tasks/{agent_id}/*"
-                if reg_project
+                f"teams/{reg_team}/tasks/{agent_id}/*"
+                if reg_team
                 else f"tasks/{agent_id}/*"
             )
             blackboard.add_watch(agent_id, inbox_pattern)
@@ -3212,18 +3147,18 @@ def create_mesh_app(
         return {"help_requests": items}
 
     @app.get("/mesh/agents")
-    async def list_agents(request: Request, project: str = "", agent_id: str = "") -> dict:
-        """List registered agents, optionally scoped by project or agent_id.
+    async def list_agents(request: Request, team: str = "", agent_id: str = "") -> dict:
+        """List registered agents, optionally scoped by team or agent_id.
 
-        - project set: return only that project's members
+        - team set: return only that team's members
         - agent_id set (standalone): return only that agent
         - neither (dashboard/internal): return all (under enforce mode,
-          worker callers see only their own projects + operator)
+          worker callers see only their own teams + operator)
 
         Task 5 layered a per-caller filter on the unscoped path. Today's
         legacy behavior is "every authenticated agent sees the full
         fleet" — under ``OPENLEGION_TEAM_SCOPE_MODE=enforce`` (the
-        default) workers see only members of their own projects (plus
+        default) workers see only members of their own teams (plus
         the always-global operator). Under ``warn`` the response shape
         stays legacy and a structured ``scope-warn`` log line is
         emitted so operators can soak before flipping.
@@ -3276,31 +3211,31 @@ def create_mesh_app(
             entry["expected_outputs"] = list(acfg.get("expected_outputs") or [])
             entry["escalation_to"] = acfg.get("escalation_to")
             entry["forbidden"] = list(acfg.get("forbidden") or [])
-            proj = _agent_projects.get(aid)
-            if proj:
-                entry["project"] = proj
+            team_of = _agent_teams.get(aid)
+            if team_of:
+                entry["team"] = team_of
             if aid == "operator":
                 entry["scope"] = "global"
             return entry
 
-        if project:
-            from src.cli.config import _load_projects
-            projects = _load_projects()
-            pdata = projects.get(project)
+        if team:
+            from src.cli.config import _load_teams
+            teams_cfg = _load_teams()
+            pdata = teams_cfg.get(team)
             if pdata is None:
-                logger.warning("list_agents: unknown project %r", project)
+                logger.warning("list_agents: unknown team %r", team)
                 return {}
             members = set(pdata.get("members", []))
 
-            # Task 5: only members of the requested project (or global
+            # Task 5: only members of the requested team (or global
             # callers) may scope by it. Under warn mode, log but allow;
             # under enforce, return empty.
             if not caller_is_global and caller not in members:
                 _record_scope_warn()
                 logger.warning(
-                    "scope-warn: caller=%s requested /mesh/agents?project=%s "
+                    "scope-warn: caller=%s requested /mesh/agents?team=%s "
                     "but is not a member; mode=%s",
-                    caller, project, _TEAM_SCOPE_MODE,
+                    caller, team, _TEAM_SCOPE_MODE,
                 )
                 if _TEAM_SCOPE_MODE == "enforce":
                     return {}
@@ -3310,8 +3245,8 @@ def create_mesh_app(
                 for aid, url in router.agent_registry.items()
                 if aid in members
             }
-            # Operator is fleet-global by design: project agents must be able to
-            # discover and hand off back to it regardless of project membership.
+            # Operator is fleet-global by design: team agents must be able to
+            # discover and hand off back to it regardless of team membership.
             op_url = router.agent_registry.get("operator")
             if op_url is not None and "operator" not in result:
                 result["operator"] = _agent_entry("operator", op_url)
@@ -3322,7 +3257,7 @@ def create_mesh_app(
                 return {agent_id: _agent_entry(agent_id, url)}
             return {}
 
-        # Unscoped path: full fleet for global callers; per-caller-project
+        # Unscoped path: full fleet for global callers; per-caller-team
         # filter for workers (warn-logged, enforce-applied).
         full_fleet = {
             aid: _agent_entry(aid, url)
@@ -3331,17 +3266,17 @@ def create_mesh_app(
         if caller_is_global:
             return full_fleet
 
-        own_projects = _caller_projects(caller)
-        # Visible set: members of any project the caller belongs to,
+        own_teams = _caller_teams(caller)
+        # Visible set: members of any team the caller belongs to,
         # plus the always-global operator, plus the caller itself
         # (a worker should always see its own entry — including
-        # standalone agents who belong to no project).
+        # standalone agents who belong to no team).
         visible_members: set[str] = {caller}
-        if own_projects:
-            from src.cli.config import _load_projects
-            projects = _load_projects()
-            for pname in own_projects:
-                visible_members.update(projects.get(pname, {}).get("members", []))
+        if own_teams:
+            from src.cli.config import _load_teams
+            teams_cfg = _load_teams()
+            for pname in own_teams:
+                visible_members.update(teams_cfg.get(pname, {}).get("members", []))
         if "operator" in router.agent_registry:
             visible_members.add("operator")
 
@@ -3355,7 +3290,7 @@ def create_mesh_app(
         if len(filtered) < len(full_fleet):
             _record_scope_warn()
             logger.warning(
-                "scope-warn: caller=%s requested /mesh/agents (no project filter); "
+                "scope-warn: caller=%s requested /mesh/agents (no team filter); "
                 "would return %d under enforce, returning %d under %s",
                 caller, len(filtered), len(full_fleet), _TEAM_SCOPE_MODE,
             )
@@ -3389,15 +3324,15 @@ def create_mesh_app(
 
         if section in ("budget", "all") and cost_tracker:
             result["budget"] = cost_tracker.check_budget(agent_id)
-            # Include project budget if agent belongs to a project
-            agent_proj = _agent_projects.get(agent_id)
+            # Include team budget if the agent belongs to a team
+            agent_proj = _agent_teams.get(agent_id)
             if agent_proj:
-                project_spend = cost_tracker.get_team_spend(agent_proj, "today")
-                if "error" not in project_spend:
-                    result["project_budget"] = project_spend
+                team_spend_row = cost_tracker.get_team_spend(agent_proj, "today")
+                if "error" not in team_spend_row:
+                    result["team_budget"] = team_spend_row
 
         if section in ("fleet", "all"):
-            # Scope fleet list by project: project agents see only peers,
+            # Scope fleet list by team: team agents see only peers,
             # standalone agents see only themselves.
             # Exception: operator sees all agents (it manages the entire fleet).
 
@@ -3431,19 +3366,19 @@ def create_mesh_app(
                     _fleet_entry(aid) for aid in router.agent_registry
                 ]
             else:
-                from src.cli.config import _load_projects
-                _projects = _load_projects()
-                _agent_project_members: set[str] | None = None
-                for _pdata in _projects.values():
+                from src.cli.config import _load_teams
+                _teams_cfg = _load_teams()
+                _agent_team_members: set[str] | None = None
+                for _pdata in _teams_cfg.values():
                     if agent_id in _pdata.get("members", []):
-                        _agent_project_members = set(_pdata["members"])
+                        _agent_team_members = set(_pdata["members"])
                         break
 
-                if _agent_project_members is not None:
+                if _agent_team_members is not None:
                     result["fleet"] = [
                         _fleet_entry(aid)
                         for aid in router.agent_registry
-                        if aid in _agent_project_members
+                        if aid in _agent_team_members
                     ]
                 else:
                     result["fleet"] = [_fleet_entry(agent_id)]
@@ -3460,8 +3395,8 @@ def create_mesh_app(
                 (s for s in statuses if s["agent"] == agent_id), None
             )
 
-        if section in ("project", "all"):
-            result["project"] = _agent_projects.get(agent_id)
+        if section in ("team", "all"):
+            result["team"] = _agent_teams.get(agent_id)
 
         if section in ("llm", "all"):
             # BYOK visibility: surface the set of providers that actually
@@ -4515,23 +4450,23 @@ def create_mesh_app(
                     heartbeat_schedule = job.schedule
                     break
 
-        # Subscriptions (strip project prefix for readability)
+        # Subscriptions (strip team prefix for readability)
         raw_subs = pubsub.get_agent_subscriptions(agent_id) if pubsub else []
-        project = _agent_projects.get(agent_id)
-        prefix = f"projects/{project}/" if project else ""
+        team_of = _agent_teams.get(agent_id)
+        prefix = f"teams/{team_of}/" if team_of else ""
         subscriptions = [
             t[len(prefix):] if prefix and t.startswith(prefix) else t
             for t in raw_subs
         ]
 
-        # Watches (strip project prefix)
+        # Watches (strip team prefix)
         raw_watches = blackboard.get_agent_watches(agent_id)
         watches = [
             w[len(prefix):] if prefix and w.startswith(prefix) else w
             for w in raw_watches
         ]
 
-        # Recent blackboard writes (strip project prefix, keys only)
+        # Recent blackboard writes (strip team prefix, keys only)
         raw_writes = blackboard.recent_keys_by_agent(agent_id)
         recent_writes = [
             k[len(prefix):] if prefix and k.startswith(prefix) else k
@@ -5020,8 +4955,8 @@ def create_mesh_app(
         max_teams = int(os.environ.get("OPENLEGION_MAX_TEAMS", "0"))
 
         # Count actual teams
-        from src.cli.config import _load_projects
-        current_teams = len(_load_projects())
+        from src.cli.config import _load_teams
+        current_teams = len(_load_teams())
 
         # -- BYOK visibility (Bug 5) --
         # Operators (and the operator agent's heartbeat playbook) need
@@ -5077,35 +5012,25 @@ def create_mesh_app(
             "plan_limits": {
                 "max_agents": max_agents,
                 "current_agents": total,
-                # BOTH ``max_teams`` and the legacy ``max_projects`` keys
-                # are emitted with the same value for back-compat through
-                # PR 3. Same for ``current_teams`` / ``current_projects``.
                 "max_teams": max_teams,
                 "current_teams": current_teams,
-                "max_projects": max_teams,
-                "current_projects": current_teams,
             },
             # Task 5: count of warn-mode "would have denied" hits since
             # process start. Operators watch this number drop toward
             # zero before flipping ``OPENLEGION_TEAM_SCOPE_MODE`` to
             # ``enforce``. The flag itself is reported alongside so the
-            # operator dashboard can render the right state. BOTH keys
-            # emitted for back-compat.
+            # operator dashboard can render the right state.
             "scope_warn_total": _scope_warn_count,
             "team_scope_mode": _TEAM_SCOPE_MODE,
-            "project_scope_mode": _TEAM_SCOPE_MODE,
             # Phase 3 Slice 1 (PR-O'.1) telemetry: process-lifetime count
             # of cross-team blackboard accesses (caller's team set is
             # disjoint from the existing entry's writer-team set). Pure
             # observability — informs the design doc for PR-O'.2; NO
             # enforcement effect today. Counts kinds separately so the
             # design can branch on read vs write volume. BOTH the new
-            # ``blackboard_cross_team_total`` and the legacy
-            # ``blackboard_cross_project_total`` keys carry the same
-            # counter (kept through PR 3).
+            # ``blackboard_cross_team_total`` counter carries both kinds.
             "blackboard_cross_team_total": dict(_blackboard_xteam_count),
-            "blackboard_cross_project_total": dict(_blackboard_xteam_count),
-            # PR-K' minimal denial observability. 24h window, auto-reset
+                        # PR-K' minimal denial observability. 24h window, auto-reset
             # at the day boundary. Operator-readable categories:
             # ``auth`` / ``scope`` / ``role`` / ``permission`` / ``rate``.
             # Categories that have not fired today are absent from the
@@ -5266,8 +5191,7 @@ def create_mesh_app(
     # === Mesh Team Proxy Endpoints ===
     # These proxy the dashboard's /api/teams/* endpoints through the
     # mesh so operator agents can manage teams using their mesh auth
-    # token. The pre-rename ``/mesh/projects/*`` aliases were removed
-    # in PR 3 of the project→team rename — see CLAUDE.md Review State.
+    # token.
 
     @app.get("/mesh/teams")
     async def mesh_list_teams(request: Request, include_archived: bool = False) -> dict:
@@ -5282,10 +5206,10 @@ def create_mesh_app(
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can manage teams")
-        from src.cli.config import _load_projects
-        projects = _load_projects()
+        from src.cli.config import _load_teams
+        teams_cfg = _load_teams()
         result = []
-        for pname, pdata in sorted(projects.items(), key=lambda x: x[1].get("created_at") or ""):
+        for pname, pdata in sorted(teams_cfg.items(), key=lambda x: x[1].get("created_at") or ""):
             status = pdata.get("status", "active") or "active"
             if not include_archived and status == "archived":
                 continue
@@ -5307,7 +5231,7 @@ def create_mesh_app(
             raise HTTPException(403, "Only the operator can manage teams")
         import os as _os
 
-        from src.cli.config import _create_project, _load_config, _load_projects
+        from src.cli.config import _create_team, _load_config, _load_teams
 
         # Plan-limit cap read here; the "teams disabled" (==0) gate fires
         # immediately, but the count-vs-cap check is ENFORCED inside the
@@ -5341,7 +5265,7 @@ def create_mesh_app(
         # overshoot ``OPENLEGION_MAX_TEAMS``.
         async with _creation_lock:
             if _max_teams is not None and _max_teams > 0:
-                current_count = len(_load_projects())
+                current_count = len(_load_teams())
                 if current_count >= _max_teams:
                     raise HTTPException(
                         403,
@@ -5349,7 +5273,7 @@ def create_mesh_app(
                         "Upgrade your plan for more teams.",
                     )
             try:
-                _create_project(name, description=description, members=members)
+                _create_team(name, description=description, members=members)
             except ValueError as e:
                 raise HTTPException(400, str(e))
         # Real-time cron lifecycle: schedule the daily work-summary
@@ -5358,14 +5282,14 @@ def create_mesh_app(
         # Best-effort — a missing cron_scheduler or a failure here
         # mustn't fail the team-create response.
         #
-        # Reads the persisted metadata back (``_create_project`` wrote
+        # Reads the persisted metadata back (``_create_team`` wrote
         # the file with default ``settings={}``; the read is for
         # forward-compatibility with a future create endpoint that
         # accepts initial settings, and to keep behavior consistent
         # with the unarchive path which also reads metadata).
         if cron_scheduler is not None:
             try:
-                persisted = _load_projects().get(name) or {}
+                persisted = _load_teams().get(name) or {}
                 _custom_schedule = (
                     (persisted.get("settings") or {}).get("summary_schedule")
                 )
@@ -5378,10 +5302,10 @@ def create_mesh_app(
                     "ensure_summary_job on team create %s failed: %s", name, e,
                 )
         _emit_team_event(
-            event_bus, "project_created", agent="operator", name=name,
+            event_bus, "team_created", agent="operator", name=name,
             extra={"description": description, "members": list(members)},
         )
-        return {"created": True, "name": name, "team_name": name, "team_id": name, "project_id": name}
+        return {"created": True, "name": name, "team_name": name, "team_id": name}
 
     @app.post("/mesh/teams/{team_name}/members")
     async def mesh_add_team_member(team_name: str, request: Request) -> dict:
@@ -5389,18 +5313,18 @@ def create_mesh_app(
         _require_any_auth(request)
         if _resolve_agent_id("", request) != "operator":
             raise HTTPException(403, "Only the operator can manage teams")
-        from src.cli.config import _add_agent_to_project
+        from src.cli.config import _add_agent_to_team
         body = await request.json()
         agent = body.get("agent", "").strip()
         if not agent:
             raise HTTPException(400, "agent is required")
         try:
-            _add_agent_to_project(team_name, agent)
+            _add_agent_to_team(team_name, agent)
         except ValueError as e:
             raise HTTPException(400, str(e))
-        # Update in-memory project mapping so scoping takes effect immediately
-        _agent_projects[agent] = team_name
-        return {"added": True, "project": team_name, "team_name": team_name, "agent": agent}
+        # Update the in-memory team mapping so scoping takes effect immediately
+        _agent_teams[agent] = team_name
+        return {"added": True, "team_id": team_name, "team_name": team_name, "agent": agent}
 
     @app.delete("/mesh/teams/{team_name}/members/{agent}")
     async def mesh_remove_team_member(team_name: str, agent: str, request: Request) -> dict:
@@ -5408,13 +5332,13 @@ def create_mesh_app(
         _require_any_auth(request)
         if _resolve_agent_id("", request) != "operator":
             raise HTTPException(403, "Only the operator can manage teams")
-        from src.cli.config import _remove_agent_from_project
+        from src.cli.config import _remove_agent_from_team
         try:
-            _remove_agent_from_project(team_name, agent)
+            _remove_agent_from_team(team_name, agent)
         except ValueError as e:
             raise HTTPException(400, str(e))
-        _agent_projects.pop(agent, None)
-        return {"removed": True, "project": team_name, "team_name": team_name, "agent": agent}
+        _agent_teams.pop(agent, None)
+        return {"removed": True, "team_id": team_name, "team_name": team_name, "agent": agent}
 
     @app.delete("/mesh/teams/{team_name}")
     async def mesh_delete_team(team_name: str, request: Request) -> dict:
@@ -5422,9 +5346,9 @@ def create_mesh_app(
         _require_any_auth(request)
         if _resolve_agent_id("", request) != "operator":
             raise HTTPException(403, "Only the operator can manage teams")
-        from src.cli.config import _delete_project
+        from src.cli.config import _delete_team
         try:
-            _delete_project(team_name)
+            _delete_team(team_name)
         except ValueError as e:
             raise HTTPException(404, str(e))
         # Real-time cron lifecycle: drop the daily work-summary cron
@@ -5443,10 +5367,10 @@ def create_mesh_app(
                     "remove summary cron on mesh team-delete %s failed: %s",
                     team_name, e,
                 )
-        _emit_team_event(event_bus, "project_deleted", agent="operator", name=team_name)
+        _emit_team_event(event_bus, "team_deleted", agent="operator", name=team_name)
         return {
             "deleted": True, "name": team_name,
-            "team_name": team_name, "team_id": team_name, "project_id": team_name,
+            "team_name": team_name, "team_id": team_name,
         }
 
     async def _push_team_md(team_name: str, content: str) -> dict[str, bool]:
@@ -5464,9 +5388,9 @@ def create_mesh_app(
         results: dict[str, bool] = {}
         if transport is None:
             return results
-        from src.cli.config import _load_projects
+        from src.cli.config import _load_teams
         members = set(
-            (_load_projects().get(team_name) or {}).get("members", []),
+            (_load_teams().get(team_name) or {}).get("members", []),
         )
         targets = [a for a in router.agent_registry.keys() if a in members]
         if not targets:
@@ -5501,7 +5425,7 @@ def create_mesh_app(
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can manage teams")
-        from src.cli.config import PROJECTS_DIR, _load_projects
+        from src.cli.config import TEAMS_DIR, _load_teams
         body = await request.json()
         section = str(body.get("section", "")).strip()
         content = sanitize_for_prompt(str(body.get("content", ""))).strip()
@@ -5518,18 +5442,18 @@ def create_mesh_app(
                 "content exceeds 2000 chars — TEAM.md is in every "
                 "member's prompt; keep sections tight",
             )
-        if team_name not in _load_projects():
+        if team_name not in _load_teams():
             raise HTTPException(404, f"Team '{team_name}' not found")
-        project_md = PROJECTS_DIR / team_name / "project.md"
+        team_md_path = TEAMS_DIR / team_name / "team.md"
         existing = (
-            project_md.read_text(errors="replace")
-            if project_md.exists() else f"# {team_name}\n"
+            team_md_path.read_text(errors="replace")
+            if team_md_path.exists() else f"# {team_name}\n"
         )
         updated = replace_markdown_section(existing, section, content)
-        project_md.write_text(updated)
+        team_md_path.write_text(updated)
         pushed = await _push_team_md(team_name, updated)
         _emit_team_event(
-            event_bus, "project_updated", agent="operator", name=team_name,
+            event_bus, "team_updated", agent="operator", name=team_name,
             extra={"field": "brief", "section": section},
         )
         return {
@@ -5548,17 +5472,17 @@ def create_mesh_app(
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can manage teams")
-        from src.cli.config import PROJECTS_DIR, _load_projects
+        from src.cli.config import TEAMS_DIR, _load_teams
         body = await request.json()
         context = sanitize_for_prompt(body.get("context", "")).strip()
 
-        projects = _load_projects()
-        if team_name not in projects:
+        teams_cfg = _load_teams()
+        if team_name not in teams_cfg:
             raise HTTPException(404, f"Team '{team_name}' not found")
 
         # Update metadata.yaml description in place (never delete the team)
         import yaml
-        meta_file = PROJECTS_DIR / team_name / "metadata.yaml"
+        meta_file = TEAMS_DIR / team_name / "metadata.yaml"
         if meta_file.exists():
             with open(meta_file) as f:
                 meta = yaml.safe_load(f) or {}
@@ -5566,10 +5490,10 @@ def create_mesh_app(
             with open(meta_file, "w") as f:
                 yaml.dump(meta, f, default_flow_style=False, sort_keys=False)
 
-        # Update project.md in place
-        project_md = PROJECTS_DIR / team_name / "project.md"
+        # Update team.md in place
+        team_md_path = TEAMS_DIR / team_name / "team.md"
         new_content = f"# {team_name}\n\n{context}\n"
-        project_md.write_text(new_content)
+        team_md_path.write_text(new_content)
         # P2 gap fix: this writer previously never pushed to running
         # members (only the dashboard's PUT /api/team did), so an
         # operator-tool context update was invisible to agents until
@@ -5577,13 +5501,13 @@ def create_mesh_app(
         pushed = await _push_team_md(team_name, new_content)
 
         _emit_team_event(
-            event_bus, "project_updated", agent="operator", name=team_name,
+            event_bus, "team_updated", agent="operator", name=team_name,
             extra={"field": "context"},
         )
 
         return {
-            "updated": True, "project": team_name, "team": team_name,
-            "team_name": team_name, "team_id": team_name, "project_id": team_name,
+            "updated": True, "team": team_name,
+            "team_name": team_name, "team_id": team_name,
             "pushed": pushed,
         }
 
@@ -5599,7 +5523,7 @@ def create_mesh_app(
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can manage teams")
-        from src.cli.config import PROJECTS_DIR, _load_projects
+        from src.cli.config import TEAMS_DIR, _load_teams
 
         body = await request.json()
         north_star_raw = body.get("north_star")
@@ -5642,12 +5566,12 @@ def create_mesh_app(
                 cleaned.append(sc)
             success_criteria = cleaned or None
 
-        projects = _load_projects()
-        if team_name not in projects:
+        teams_cfg = _load_teams()
+        if team_name not in teams_cfg:
             raise HTTPException(404, f"Team '{team_name}' not found")
 
         import yaml
-        meta_file = PROJECTS_DIR / team_name / "metadata.yaml"
+        meta_file = TEAMS_DIR / team_name / "metadata.yaml"
         if not meta_file.exists():
             raise HTTPException(404, f"Team '{team_name}' has no metadata file")
         with open(meta_file) as f:
@@ -5658,16 +5582,14 @@ def create_mesh_app(
             yaml.dump(meta, f, default_flow_style=False, sort_keys=False)
 
         _emit_team_event(
-            event_bus, "project_updated", agent="operator", name=team_name,
+            event_bus, "team_updated", agent="operator", name=team_name,
             extra={"field": "goal"},
         )
 
         return {
             "success": True,
-            "project_name": team_name,
             "team_name": team_name,
             "team_id": team_name,
-            "project_id": team_name,
             "north_star": north_star,
             "success_criteria": success_criteria,
         }
@@ -5683,11 +5605,11 @@ def create_mesh_app(
         except Exception as e:
             logger.debug("orchestration reap failed: %s", e)
 
-    def _is_project_member(agent_id: str, project_id: str) -> bool:
+    def _is_team_member(agent_id: str, team_id: str) -> bool:
         """Membership check for read scoping. Operator + mesh are global."""
         if agent_id in {"operator", "mesh"}:
             return True
-        return project_id in _caller_projects(agent_id)
+        return team_id in _caller_teams(agent_id)
 
     # ── Back-edge events ─────────────────────────────────────────
     #
@@ -6006,7 +5928,7 @@ def create_mesh_app(
 
         Caller must be authorised to message the assignee
         (``can_message(caller, assignee)``); operator and mesh-internal
-        bypass. Body: ``{assignee, title, description?, project?,
+        bypass. Body: ``{assignee, title, description?, team_id?,
         parent_task_id?, priority?, dependencies?}``. Origin is sourced
         from the validated ``X-Origin`` header. The legacy
         ``can_route_tasks`` toggle was retired — task creation is
@@ -6052,7 +5974,7 @@ def create_mesh_app(
             )
         title = sanitize_for_prompt(body.get("title", "")).strip()
         description = sanitize_for_prompt(body.get("description") or "")
-        project_id = body.get("project") or body.get("project_id") or None
+        team_id = body.get("team_id") or None
         parent_task_id = body.get("parent_task_id") or None
         priority = int(body.get("priority", 0) or 0)
         dependencies = body.get("dependencies") or None
@@ -6084,23 +6006,23 @@ def create_mesh_app(
                     f"Agent {caller} cannot create task for {assignee!r} "
                     "(can_message not granted)",
                 )
-        # Cross-project scope: callers can only create tasks in projects
+        # Cross-team scope: callers can only create tasks in teams
         # they belong to (operators / mesh are global). Standalone is
-        # permitted (project_id=None).
-        if project_id and not _is_project_member(caller, project_id):
+        # permitted (team_id=None).
+        if team_id and not _is_team_member(caller, team_id):
             raise HTTPException(
                 403,
-                f"Caller {caller} is not a member of project {project_id!r}",
+                f"Caller {caller} is not a member of team {team_id!r}",
             )
-        # Body trace — assignee/project/parent already validated above.
+        # Body trace — assignee/team/parent already validated above.
         # Round-4 forensic visibility: pairs with the entry log at the
         # top so a missing log line here points to validation refusal
         # while a present log here proves the request reached the
         # store.create call site.
         logger.info(
-            "/mesh/tasks POST body caller=%s assignee=%s project_id=%s "
+            "/mesh/tasks POST body caller=%s assignee=%s team_id=%s "
             "parent_task_id=%s title=%r",
-            caller, assignee, project_id, parent_task_id,
+            caller, assignee, team_id, parent_task_id,
             (title or "")[:80],
         )
 
@@ -6124,7 +6046,7 @@ def create_mesh_app(
                 assignee=assignee,
                 title=title,
                 description=description or None,
-                project_id=project_id,
+                team_id=team_id,
                 parent_task_id=parent_task_id,
                 priority=priority,
                 dependencies=dependencies if isinstance(dependencies, list) else None,
@@ -6182,10 +6104,10 @@ def create_mesh_app(
                 f"creator: stored={record.get('creator')!r} "
                 f"requested={caller!r}"
             )
-        if record.get("project_id") != project_id:
+        if record.get("team_id") != team_id:
             mismatches.append(
-                f"project_id: stored={record.get('project_id')!r} "
-                f"requested={project_id!r}"
+                f"team_id: stored={record.get('team_id')!r} "
+                f"requested={team_id!r}"
             )
         if record.get("parent_task_id") != parent_task_id:
             mismatches.append(
@@ -6238,13 +6160,13 @@ def create_mesh_app(
         """
         store = tasks_store
         caller = _extract_verified_agent_id(request)
-        if not _is_project_member(caller, team_id):
+        if not _is_team_member(caller, team_id):
             raise HTTPException(
                 403,
                 f"Caller {caller} is not a member of team {team_id!r}",
             )
         _reap_tasks_opportunistically()
-        rows = store.list_project(team_id)
+        rows = store.list_team(team_id)
         return {"tasks": rows, "count": len(rows)}
 
     @app.get("/mesh/tasks/workflow/{root_task_id}")
@@ -6414,7 +6336,7 @@ def create_mesh_app(
     async def get_task(task_id: str, request: Request) -> dict:
         """Read a task by id.
 
-        Visible to creator, assignee, project members, operator, and
+        Visible to creator, assignee, team members, operator, and
         internal callers. L16: unauthorized callers receive the SAME 404
         as a non-existent task so the endpoint can't be used as an
         existence oracle (404-not-found vs 403-exists-but-denied).
@@ -6426,7 +6348,7 @@ def create_mesh_app(
             caller in (record["creator"], record["assignee"])
             or _caller_is_operator(caller, request)
             or _is_internal_caller(request)
-            or (record["project_id"] and _is_project_member(caller, record["project_id"]))
+            or (record["team_id"] and _is_team_member(caller, record["team_id"]))
         ):
             return record
         # Uniform 404 for both not-found and not-authorized (no oracle).
@@ -6446,7 +6368,7 @@ def create_mesh_app(
             caller in (record["creator"], record["assignee"])
             or _caller_is_operator(caller, request)
             or _is_internal_caller(request)
-            or (record["project_id"] and _is_project_member(caller, record["project_id"]))
+            or (record["team_id"] and _is_team_member(caller, record["team_id"]))
         ):
             # Uniform 404 for both not-found and not-authorized (no oracle).
             raise HTTPException(404, f"Task '{task_id}' not found")
@@ -6795,7 +6717,7 @@ def create_mesh_app(
                 assignee=new_assignee,
                 title=title,
                 description=description,
-                project_id=original.get("project_id"),
+                team_id=original.get("team_id"),
                 parent_task_id=original["id"],
                 priority=original.get("priority", 0) or 0,
                 origin=origin_dict,
@@ -6833,7 +6755,7 @@ def create_mesh_app(
     #
     # Visibility: operator + loopback-internal see all summaries.
     # Workers see only summaries for teams they belong to (mirrors
-    # ``_is_project_member`` semantics). Solo summaries are scoped to
+    # ``_is_team_member`` semantics). Solo summaries are scoped to
     # the agent id — only the agent itself + operator can read.
     #
     # Permission: create + rating are operator-or-internal. Read is
@@ -6845,7 +6767,7 @@ def create_mesh_app(
         if row["scope_kind"] == "solo":
             return caller == row["scope_id"]
         if row["scope_kind"] == "team":
-            return _is_project_member(caller, row["scope_id"])
+            return _is_team_member(caller, row["scope_id"])
         return False
 
     @app.post("/mesh/work-summaries")
@@ -6995,9 +6917,9 @@ def create_mesh_app(
     # === Operator product surface (Task 7) — read tools ===
     #
     # Read endpoints surfaced as operator tools. They aggregate over
-    # the tasks store + project metadata and respect the same scoping
+    # the tasks store + team metadata and respect the same scoping
     # rules as the task-store endpoints (operator + internal can see all,
-    # other callers can see only their own projects).
+    # other callers can see only their own teams).
 
     def _summarize_tasks(rows: list[dict]) -> dict:
         """Reduce a list of task rows to status counts + recent slices.
@@ -7047,23 +6969,23 @@ def create_mesh_app(
         """Per-team status counts + recent blockers/completions.
 
         Caller must be a team member (or operator/internal). Returns
-        the same structure as ``_summarize_tasks`` plus a ``project``
+        the same structure as ``_summarize_tasks`` plus a ``team``
         / ``team`` field carrying name and archive status.
         """
         store = tasks_store
         caller = _extract_verified_agent_id(request)
-        if not _is_project_member(caller, team_id):
+        if not _is_team_member(caller, team_id):
             raise HTTPException(
                 403,
                 f"Caller {caller} is not a member of team {team_id!r}",
             )
-        from src.cli.config import _load_projects
-        projects = _load_projects()
-        if team_id not in projects:
+        from src.cli.config import _load_teams
+        teams_cfg = _load_teams()
+        if team_id not in teams_cfg:
             raise HTTPException(404, f"Team '{team_id}' not found")
-        meta = projects[team_id]
+        meta = teams_cfg[team_id]
         _reap_tasks_opportunistically()
-        rows = store.list_project(team_id)
+        rows = store.list_team(team_id)
         result = _summarize_tasks(rows)
         meta_block = {
             "name": team_id,
@@ -7071,7 +6993,7 @@ def create_mesh_app(
             "members": meta.get("members", []),
             "description": meta.get("description", ""),
         }
-        result["project"] = meta_block
+        result["team"] = meta_block
         result["team"] = meta_block
         return result
 
@@ -7086,19 +7008,19 @@ def create_mesh_app(
         """
         store = tasks_store
         caller = _extract_verified_agent_id(request)
-        from src.cli.config import _load_projects
-        projects = _load_projects()
+        from src.cli.config import _load_teams
+        teams_cfg = _load_teams()
         visible: list[str]
         if _caller_is_operator(caller, request) or _is_internal_caller(request):
-            visible = list(projects.keys())
+            visible = list(teams_cfg.keys())
         else:
-            visible = sorted(_caller_projects(caller))
+            visible = sorted(_caller_teams(caller))
         _reap_tasks_opportunistically()
         rows: list[dict] = []
         for pid in sorted(visible):
-            meta = projects.get(pid, {})
-            project_rows = store.list_project(pid)
-            summary = _summarize_tasks(project_rows)
+            meta = teams_cfg.get(pid, {})
+            team_rows = store.list_team(pid)
+            summary = _summarize_tasks(team_rows)
             meta_block = {
                 "name": pid,
                 "status": meta.get("status", "active") or "active",
@@ -7117,8 +7039,8 @@ def create_mesh_app(
 
         Returns up to ``limit`` rows per status (active / blocked / done /
         failed / cancelled). Visible to the agent itself, the operator,
-        loopback-internal callers, and project members of the agent's
-        project.
+        loopback-internal callers, and team members of the agent's
+        team.
         """
         store = tasks_store
         caller = _extract_verified_agent_id(request)
@@ -7127,8 +7049,8 @@ def create_mesh_app(
             or _caller_is_operator(caller, request)
             or _is_internal_caller(request)
         ):
-            agent_proj = _agent_projects.get(agent_id)
-            if agent_proj is None or not _is_project_member(caller, agent_proj):
+            agent_proj = _agent_teams.get(agent_id)
+            if agent_proj is None or not _is_team_member(caller, agent_proj):
                 raise HTTPException(
                     403,
                     f"Caller {caller} cannot view queue for {agent_id!r}",
@@ -7157,7 +7079,7 @@ def create_mesh_app(
             buckets[key].append({
                 "id": r["id"], "title": r["title"],
                 "status": r["status"],
-                "project_id": r.get("project_id"),
+                "team_id": r.get("team_id"),
                 "blocker_note": r.get("blocker_note"),
                 "updated_at": r.get("updated_at"),
                 "completed_at": r.get("completed_at"),
@@ -7200,14 +7122,14 @@ def create_mesh_app(
         """
         store = tasks_store
         caller = _extract_verified_agent_id(request)
-        if not _is_project_member(caller, team_id):
+        if not _is_team_member(caller, team_id):
             raise HTTPException(
                 403,
                 f"Caller {caller} is not a member of team {team_id!r}",
             )
         floor = _parse_since(since)
         _reap_tasks_opportunistically()
-        rows = store.list_project(team_id, statuses=["done"])
+        rows = store.list_team(team_id, statuses=["done"])
         outputs = []
         for r in rows:
             completed_at = r.get("completed_at") or 0
@@ -7220,7 +7142,6 @@ def create_mesh_app(
             })
         outputs.sort(key=lambda x: x["completed_at"], reverse=True)
         return {
-            "project_id": team_id,
             "team_id": team_id,
             "since": since,
             "outputs": outputs,
@@ -7246,18 +7167,18 @@ def create_mesh_app(
         """
         store = tasks_store
         caller = _extract_verified_agent_id(request)
-        if not _is_project_member(caller, team_id):
+        if not _is_team_member(caller, team_id):
             raise HTTPException(
                 403,
                 f"Caller {caller} is not a member of team {team_id!r}",
             )
-        from src.cli.config import _load_projects
-        projects = _load_projects()
-        if team_id not in projects:
+        from src.cli.config import _load_teams
+        teams_cfg = _load_teams()
+        if team_id not in teams_cfg:
             raise HTTPException(404, f"Team '{team_id}' not found")
-        meta = projects[team_id]
+        meta = teams_cfg[team_id]
         _reap_tasks_opportunistically()
-        rows = store.list_project(team_id)
+        rows = store.list_team(team_id)
         s = _summarize_tasks(rows)
         active = s["counts"]["active"]
         blocked = s["counts"]["blocked"]
@@ -7283,7 +7204,6 @@ def create_mesh_app(
             "members": meta.get("members", []),
         }
         result = {
-            "project": meta_block,
             "team": meta_block,
             "status_text": status_text,
             "counts": s["counts"],
@@ -7307,7 +7227,7 @@ def create_mesh_app(
     # Archive endpoints flip a status flag and stop scheduling. Delete
     # endpoints proxy through the existing ``PendingActions`` store
     # (Task 2d) — a propose-then-confirm flow keyed by
-    # ``target_kind="project"`` / ``"agent"`` and ``action_kind="delete"``,
+    # ``target_kind="team"`` / ``"agent"`` and ``action_kind="delete"``,
     # confirmed via ``/mesh/config/confirm``. Archive must precede delete;
     # the gate is enforced server-side at propose time.
 
@@ -7317,11 +7237,11 @@ def create_mesh_app(
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can archive teams")
-        from src.cli.config import _archive_project, _load_projects
-        if team_name not in _load_projects():
+        from src.cli.config import _archive_team, _load_teams
+        if team_name not in _load_teams():
             raise HTTPException(404, f"Team '{team_name}' not found")
         try:
-            _archive_project(team_name)
+            _archive_team(team_name)
         except ValueError as e:
             raise HTTPException(404, str(e))
         # Real-time cron lifecycle (codex r1 P2): remove the daily
@@ -7338,10 +7258,10 @@ def create_mesh_app(
                     "remove summary cron on archive %s failed: %s",
                     team_name, e,
                 )
-        _emit_team_event(event_bus, "project_archived", agent="operator", name=team_name)
+        _emit_team_event(event_bus, "team_archived", agent="operator", name=team_name)
         return {
-            "archived": True, "project": team_name, "team": team_name,
-            "team_name": team_name, "team_id": team_name, "project_id": team_name,
+            "archived": True, "team": team_name,
+            "team_name": team_name, "team_id": team_name,
         }
 
     @app.post("/mesh/teams/{team_name}/unarchive")
@@ -7350,11 +7270,11 @@ def create_mesh_app(
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can unarchive teams")
-        from src.cli.config import _load_projects, _unarchive_project
-        if team_name not in _load_projects():
+        from src.cli.config import _load_teams, _unarchive_team
+        if team_name not in _load_teams():
             raise HTTPException(404, f"Team '{team_name}' not found")
         try:
-            _unarchive_project(team_name)
+            _unarchive_team(team_name)
         except ValueError as e:
             raise HTTPException(404, str(e))
         # Re-attach the daily work-summary cron when a team is
@@ -7365,7 +7285,7 @@ def create_mesh_app(
         # the schedule to default (codex r2 P2).
         if cron_scheduler is not None:
             try:
-                team_meta = _load_projects().get(team_name) or {}
+                team_meta = _load_teams().get(team_name) or {}
                 _custom_schedule = (
                     (team_meta.get("settings") or {}).get("summary_schedule")
                 )
@@ -7378,10 +7298,10 @@ def create_mesh_app(
                     "ensure_summary_job on unarchive %s failed: %s",
                     team_name, e,
                 )
-        _emit_team_event(event_bus, "project_unarchived", agent="operator", name=team_name)
+        _emit_team_event(event_bus, "team_unarchived", agent="operator", name=team_name)
         return {
-            "archived": False, "project": team_name, "team": team_name,
-            "team_name": team_name, "team_id": team_name, "project_id": team_name,
+            "archived": False, "team": team_name,
+            "team_name": team_name, "team_id": team_name,
         }
 
     @app.post("/mesh/agents/{agent_id}/archive")
@@ -7459,22 +7379,22 @@ def create_mesh_app(
           * team exists
           * team is archived (delete on a live team rejected)
 
-        Stores a pending action with ``target_kind="project"``,
+        Stores a pending action with ``target_kind="team"``,
         ``action_kind="delete"``, ``origin_kind`` from the validated
         ``X-Origin``. Confirmation goes through the existing
         ``/mesh/config/confirm`` endpoint, which now dispatches on
-        ``target_kind``. ``target_kind`` stays ``"project"`` because
+        ``target_kind``. ``target_kind`` is ``"team"`` because
         the pending_actions schema predates the rename — it's a
         backend value, not a domain term.
         """
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can delete teams")
-        from src.cli.config import _load_projects, _project_status
-        projects = _load_projects()
-        if team_name not in projects:
+        from src.cli.config import _load_teams, _team_status
+        teams_cfg = _load_teams()
+        if team_name not in teams_cfg:
             raise HTTPException(404, f"Team '{team_name}' not found")
-        status = _project_status(team_name)
+        status = _team_status(team_name)
         if status != "archived":
             raise HTTPException(
                 400,
@@ -7494,7 +7414,7 @@ def create_mesh_app(
                     (oldest["nonce"],),
                 )
         nonce = str(_uuid.uuid4())
-        members = projects[team_name].get("members", []) or []
+        members = teams_cfg[team_name].get("members", []) or []
         # Short headline shown in the inline chat card (max ~80 chars
         # so it doesn't wrap awkwardly). The longer policy explanation
         # is kept in the payload for the legacy CLI surface.
@@ -7509,7 +7429,7 @@ def create_mesh_app(
         record = pending_actions.store(
             nonce=nonce,
             actor="operator",
-            target_kind="project",
+            target_kind="team",
             target_id=team_name,
             action_kind="delete",
             payload=payload,
@@ -7595,19 +7515,19 @@ def create_mesh_app(
     async def _apply_pending_delete(record: dict) -> dict:
         """Apply a consumed delete pending-action.
 
-        Dispatches on ``target_kind``. Project deletes call
-        ``_delete_project``; agent deletes stop the container, remove
+        Dispatches on ``target_kind``. Team deletes call
+        ``_delete_team``; agent deletes stop the container, remove
         the agent from config + permissions, and tear down per-agent
         runtime state via ``app.cleanup_agent``.
         """
         kind = record["target_kind"]
         target_id = record["target_id"]
-        if kind == "project":
-            from src.cli.config import _delete_project, _load_projects
-            if target_id not in _load_projects():
-                raise HTTPException(404, f"Project '{target_id}' no longer exists")
+        if kind == "team":
+            from src.cli.config import _delete_team, _load_teams
+            if target_id not in _load_teams():
+                raise HTTPException(404, f"Team '{target_id}' no longer exists")
             try:
-                _delete_project(target_id)
+                _delete_team(target_id)
             except ValueError as e:
                 raise HTTPException(404, str(e))
             # Real-time cron lifecycle (codex r1 P2): delete the
@@ -7626,20 +7546,14 @@ def create_mesh_app(
                         target_id, e,
                     )
             # New audit rows use ``delete_team``; historical
-            # ``delete_project`` rows in archived audit data are
-            # untouched and still queryable (they retain the legacy
-            # action verb).
+
             blackboard.log_audit(
                 action="delete_team", target=target_id,
                 change_id=record["nonce"],
             )
-            # ``deleted`` field name retained as ``"project"`` for
-            # back-compat with SDK callers / dashboards that switch on
-            # it; the canonical kind is also surfaced under
-            # ``deleted_kind`` so consumers can opt into the new name.
             return {
-                "success": True, "deleted": "project", "deleted_kind": "team",
-                "name": target_id, "team_id": target_id, "project_id": target_id,
+                "success": True, "deleted": "team",
+                "name": target_id, "team_id": target_id,
             }
         if kind == "agent":
             from src.cli.config import _load_config, _remove_agent
@@ -9060,7 +8974,7 @@ def create_mesh_app(
         method, which the destructive-action review surface (delete-team,
         delete-agent) still uses.
 
-        Accepted shape: ``target_kind in {"project", "agent"}`` +
+        Accepted shape: ``target_kind in {"team", "agent"}`` +
         ``action_kind="delete"``. Any other ``action_kind`` returns
         HTTP 400 — non-delete pending rows are no longer produced.
 
@@ -9091,11 +9005,11 @@ def create_mesh_app(
 
         # Post PR #927 this dispatcher is the delete-only path.
         # ``action_kind`` is always ``"delete"`` and ``target_kind`` is
-        # always one of {"project", "agent"} — the only producers
+        # always one of {"team", "agent"} — the only producers
         # (/mesh/teams/{name}/propose-delete and
         # /mesh/agents/{id}/propose-delete) hard-code those values.
         if record.get("action_kind") == "delete" and record.get("target_kind") in {
-            "project", "agent",
+            "team", "agent",
         }:
             return await _apply_pending_delete(record)
 

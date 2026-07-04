@@ -56,9 +56,7 @@ hides the overflow (preference persisted to
 
 Click the **+ New Team** button on the right side of the team filter row
 to create a new team. Enter a name and optional description. Teams are
-stored on disk under `config/teams/{name}/`; the startup migrator drops
-a `config/projects` symlink at the legacy path so pre-rename code paths
-still resolve.
+stored on disk under `config/teams/{name}/`.
 
 ### Add Agent
 
@@ -85,9 +83,7 @@ become solo agents.
 When a team is selected, a TEAM.md banner appears above the agent grid.
 Edit it to set shared context for all team members. The content is
 pushed to running member agents on save. When no team is selected (Solo
-Agents view), the banner is hidden. (Pre-rename `PROJECT.md` files are
-migrated to `TEAM.md` once at startup; the bootstrap loader reads only
-`TEAM.md`/`team.md`.)
+Agents view), the banner is hidden.
 
 ## Team Tab
 
@@ -425,7 +421,7 @@ The dashboard connects to the mesh via WebSocket at `/ws/events`. Events are str
 | **Pending actions** | `pending_action_created`, `pending_action_resolved`, `pending_action_expired` |
 | **Operator action receipts** | `operator_action_receipt`, `operator_action_receipt_undone`, `operator_action_receipt_superseded` |
 | **Agent lifecycle** | `agent_archived`, `agent_unarchived`, `agent_restarting`, `agent_restarted`, `agent_config_updated` |
-| **Team CRUD** | `team_created`, `team_updated`, `team_deleted`, `team_archived`, `team_unarchived` (PR 3 dropped the dual-emit under legacy `project_*` names — subscribers must listen on `team_*`) |
+| **Team CRUD** | `team_created`, `team_updated`, `team_deleted`, `team_archived`, `team_unarchived` |
 
 Adding a new event-name string anywhere in `src/` without adding the matching `Literal` value will cause `DashboardEvent` to raise `ValidationError`, which the emit-site `try/except` swallows at debug level — the event silently disappears. `tests/test_types.py::test_every_emit_string_in_src_matches_a_dashboard_event_literal` is the regex-sweep guard against that drift.
 
@@ -564,7 +560,7 @@ The tables below are not exhaustive — they cover the user-facing surface area 
 | `GET` | `/dashboard/api/conversations` | List active conversations (open chat panels) |
 | `POST` | `/dashboard/api/conversations/{agent_id}/open` | Mark a conversation open |
 | `POST` | `/dashboard/api/conversations/{agent_id}/close` | Mark a conversation closed |
-| `POST` | `/dashboard/api/broadcast` | Send message to all agents (request body filters by `project` name or `standalone: true`; operator excluded) |
+| `POST` | `/dashboard/api/broadcast` | Send message to all agents (request body filters by `team` name or `standalone: true`; operator excluded) |
 | `POST` | `/dashboard/api/broadcast/stream` | SSE streaming broadcast (same filters as above) |
 
 **Workspace**
@@ -583,7 +579,7 @@ These endpoints power the Work tab. They cover the summary cards, Needs-You pane
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/dashboard/api/workplace/teams` | Teams with rollup status (response payload includes both `team_id` and `project_id` keys per item for back-compat) |
+| `GET` | `/dashboard/api/workplace/teams` | Teams with rollup status |
 | `GET` | `/dashboard/api/workplace/tasks` | All tasks — Stuck Tasks panel + drill-in modal |
 | `GET` | `/dashboard/api/workplace/tasks/{task_id}` | Single task detail with artifacts (drill-in modal "Read full" toggle) |
 | `GET` | `/dashboard/api/workplace/tasks/{task_id}/events` | Per-task event timeline (drill-in modal) |
@@ -655,9 +651,7 @@ These endpoints power the Work tab. They cover the summary cards, Needs-You pane
 
 **Teams**
 
-The canonical surface is `/dashboard/api/teams/*`. PR 3 removed the pre-rename
-`/dashboard/api/projects/*` mirrors; JSON responses still carry a `project_id`
-key alongside `team_id` for consumer back-compat.
+The canonical surface is `/dashboard/api/teams/*`.
 
 | Method | Path | Description |
 |--------|------|-------------|

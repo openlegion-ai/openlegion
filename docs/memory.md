@@ -79,7 +79,7 @@ Persistent markdown files stored on the agent's `/data/workspace` volume.
 | `SOUL.md` | Agent personality and behavioral guidelines | 4K chars | System prompt |
 | `USER.md` | User preferences and working style | 4K chars | System prompt |
 | `MEMORY.md` | Curated long-term facts | 16K chars | System prompt |
-| `TEAM.md` | Team-wide context (optional, per-team, mounted from host, **read-only** when present). Pre-rename `PROJECT.md` files are migrated to `TEAM.md` once at startup; the bootstrap loader reads only `TEAM.md`/`team.md`. | -- | When present in the team config |
+| `TEAM.md` | Team-wide context (optional, per-team, mounted from host, **read-only** when present). | -- | When present in the team config |
 | `SYSTEM.md` | System architecture guide (auto-generated, static preamble, read-only) | capped at 6K chars | System prompt |
 | `HEARTBEAT.md` | Autonomous monitoring rules | -- | Heartbeat dispatch (auto-loaded) |
 | `INTERFACE.md` | Public collaboration contract (inputs, outputs, subscriptions) | 4K chars | Not auto-loaded into system prompt — read by other agents via `get_agent_profile` |

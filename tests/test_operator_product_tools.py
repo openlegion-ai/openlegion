@@ -421,13 +421,13 @@ def _agents_yaml(tmp_path, names: list[str]) -> Path:
 @pytest.fixture
 def v2_app(tmp_path, monkeypatch):
     """Mesh app with v2 on, projects + agents on disk, operator routed."""
-    # Pin the cli/config paths into tmp_path so PROJECTS_DIR + AGENTS_FILE
+    # Pin the cli/config paths into tmp_path so TEAMS_DIR + AGENTS_FILE
     # use the test layout.
     pdir = _projects_layout(tmp_path)
     afile = _agents_yaml(tmp_path, names=["scout", "analyst", "tracker"])
     monkeypatch.chdir(tmp_path)
     import src.cli.config as cli_cfg
-    monkeypatch.setattr(cli_cfg, "PROJECTS_DIR", pdir)
+    monkeypatch.setattr(cli_cfg, "TEAMS_DIR", pdir)
     monkeypatch.setattr(cli_cfg, "AGENTS_FILE", afile)
     monkeypatch.setattr(cli_cfg, "PERMISSIONS_FILE", tmp_path / "config" / "permissions.json")
 
@@ -436,7 +436,7 @@ def v2_app(tmp_path, monkeypatch):
     )
 
     perms_map = {
-        "operator": {"can_route_tasks": True, "can_manage_projects": True},
+        "operator": {"can_route_tasks": True, "can_manage_teams": True},
         "scout":    {"can_route_tasks": True, "can_message": ["analyst", "operator"]},
         "analyst":  {"can_route_tasks": False, "can_message": ["scout"]},
         "tracker":  {"can_route_tasks": False, "can_message": []},
@@ -481,7 +481,7 @@ def _human_origin_headers(agent_id: str = "operator", channel: str = "cli", user
 
 
 @pytest.mark.asyncio
-async def test_endpoint_project_status_returns_counts(v2_app):
+async def test_endpoint_team_status_returns_counts(v2_app):
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         # Create a few tasks
@@ -501,7 +501,7 @@ async def test_endpoint_project_status_returns_counts(v2_app):
 
 
 @pytest.mark.asyncio
-async def test_endpoint_project_status_403_for_non_member(v2_app):
+async def test_endpoint_team_status_403_for_non_member(v2_app):
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.get("/mesh/teams/research/status",
@@ -640,7 +640,7 @@ async def test_endpoint_retry_only_failed(v2_app):
 
 
 @pytest.mark.asyncio
-async def test_endpoint_archive_project(v2_app):
+async def test_endpoint_archive_team(v2_app):
     app, _, tmp_path = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post("/mesh/teams/research/archive",
@@ -657,7 +657,7 @@ async def test_endpoint_archive_project(v2_app):
 
 
 @pytest.mark.asyncio
-async def test_endpoint_delete_project_requires_archive(v2_app):
+async def test_endpoint_delete_team_requires_archive(v2_app):
     """Delete on a live project must be rejected with 400."""
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
@@ -668,7 +668,7 @@ async def test_endpoint_delete_project_requires_archive(v2_app):
 
 
 @pytest.mark.asyncio
-async def test_endpoint_delete_project_happy_path(v2_app):
+async def test_endpoint_delete_team_happy_path(v2_app):
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         # Archive first
@@ -693,15 +693,12 @@ async def test_endpoint_delete_project_happy_path(v2_app):
                          headers=_human_origin_headers())
     assert r.status_code == 200
     body = r.json()
-    # ``target_kind`` stays as ``"project"`` on pending_actions rows
-    # (backend schema value, not a domain term); the confirm response
-    # echoes that.
-    assert body["deleted"] == "project"
+    assert body["deleted"] == "team"
     assert body["name"] == "research"
 
 
 @pytest.mark.asyncio
-async def test_endpoint_delete_project_confirm_with_agent_origin_403(v2_app):
+async def test_endpoint_delete_team_confirm_with_agent_origin_403(v2_app):
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         await c.post("/mesh/teams/research/archive",
@@ -719,7 +716,7 @@ async def test_endpoint_delete_project_confirm_with_agent_origin_403(v2_app):
 
 
 @pytest.mark.asyncio
-async def test_endpoint_delete_project_expired_or_unknown(v2_app):
+async def test_endpoint_delete_team_expired_or_unknown(v2_app):
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post("/mesh/config/confirm",
@@ -765,14 +762,14 @@ def v2_app_cm(tmp_path, monkeypatch):
     afile = _agents_yaml(tmp_path, names=["scout", "analyst", "tracker"])
     monkeypatch.chdir(tmp_path)
     import src.cli.config as cli_cfg
-    monkeypatch.setattr(cli_cfg, "PROJECTS_DIR", pdir)
+    monkeypatch.setattr(cli_cfg, "TEAMS_DIR", pdir)
     monkeypatch.setattr(cli_cfg, "AGENTS_FILE", afile)
     monkeypatch.setattr(cli_cfg, "PERMISSIONS_FILE", tmp_path / "config" / "permissions.json")
     server_module = _reload_server(
         monkeypatch, v2=True, tasks_db=str(tmp_path / "tasks.db"),
     )
     perms_map = {
-        "operator": {"can_route_tasks": True, "can_manage_projects": True},
+        "operator": {"can_route_tasks": True, "can_manage_teams": True},
         "scout":    {"can_route_tasks": True, "can_message": ["analyst", "operator"]},
         "analyst":  {"can_route_tasks": False, "can_message": ["scout"]},
         "tracker":  {"can_route_tasks": False, "can_message": []},
@@ -889,7 +886,7 @@ def v2_app_with_bus(tmp_path, monkeypatch):
     afile = _agents_yaml(tmp_path, names=["scout", "analyst", "tracker"])
     monkeypatch.chdir(tmp_path)
     import src.cli.config as cli_cfg
-    monkeypatch.setattr(cli_cfg, "PROJECTS_DIR", pdir)
+    monkeypatch.setattr(cli_cfg, "TEAMS_DIR", pdir)
     monkeypatch.setattr(cli_cfg, "AGENTS_FILE", afile)
     monkeypatch.setattr(cli_cfg, "PERMISSIONS_FILE", tmp_path / "config" / "permissions.json")
 
@@ -898,7 +895,7 @@ def v2_app_with_bus(tmp_path, monkeypatch):
     )
 
     perms_map = {
-        "operator": {"can_route_tasks": True, "can_manage_projects": True},
+        "operator": {"can_route_tasks": True, "can_manage_teams": True},
         "scout":    {"can_route_tasks": True, "can_message": ["analyst", "operator"]},
         "analyst":  {"can_route_tasks": False, "can_message": ["scout"]},
         "tracker":  {"can_route_tasks": False, "can_message": []},
@@ -969,7 +966,7 @@ async def test_unarchive_agent_emits_agent_unarchived(v2_app_with_bus):
 
 
 @pytest.mark.asyncio
-async def test_archive_project_emits_project_archived(v2_app_with_bus):
+async def test_archive_team_emits_project_archived(v2_app_with_bus):
     app, _, _, bus = v2_app_with_bus
     captured = _capture(bus)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
@@ -978,11 +975,11 @@ async def test_archive_project_emits_project_archived(v2_app_with_bus):
     assert r.status_code == 200
     arch = [e for e in captured if e["type"] == "team_archived"]
     assert len(arch) == 1
-    assert arch[0]["data"]["project_id"] == "research"
+    assert arch[0]["data"]["team_id"] == "research"
 
 
 @pytest.mark.asyncio
-async def test_unarchive_project_emits_project_unarchived(v2_app_with_bus):
+async def test_unarchive_team_emits_project_unarchived(v2_app_with_bus):
     app, _, _, bus = v2_app_with_bus
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         await c.post("/mesh/teams/research/archive",
@@ -993,18 +990,18 @@ async def test_unarchive_project_emits_project_unarchived(v2_app_with_bus):
     assert r.status_code == 200
     unarch = [e for e in captured if e["type"] == "team_unarchived"]
     assert len(unarch) == 1
-    assert unarch[0]["data"]["project_id"] == "research"
+    assert unarch[0]["data"]["team_id"] == "research"
 
 
-# NOTE: ``mesh_create_project`` / ``mesh_delete_project`` use
+# NOTE: ``mesh_create_team`` / ``mesh_delete_team`` use
 # ``_resolve_agent_id("", request)`` which only consults the bearer
 # token when ``_auth_tokens`` is configured. The v2 fixture runs
 # without auth tokens (dev/test mode) so the endpoint returns
 # ``Only the operator can manage projects`` regardless of the
 # ``X-Agent-ID`` header. The equivalent dashboard endpoint —
-# ``POST /api/projects`` / ``DELETE /api/projects/{name}`` — is
+# ``POST /api/teams`` / ``DELETE /api/teams/{name}`` — is
 # covered in ``test_dashboard.py::TestDashboardEventBusCoverage`` and
-# uses the same ``_create_project`` / ``_delete_project`` helpers, so
+# uses the same ``_create_team`` / ``_delete_team`` helpers, so
 # the emit logic is exercised there.
 
 
@@ -1022,7 +1019,7 @@ async def test_mesh_set_project_goal_emits_project_updated(v2_app_with_bus):
     updated = [e for e in captured if e["type"] == "team_updated"]
     assert len(updated) == 1
     assert updated[0]["data"]["field"] == "goal"
-    assert updated[0]["data"]["project_id"] == "research"
+    assert updated[0]["data"]["team_id"] == "research"
 
 
 @pytest.mark.asyncio
@@ -1058,7 +1055,7 @@ async def test_blackboard_delete_emits_blackboard_delete(v2_app_with_bus):
     perms.permissions["operator"] = AgentPermissions(
         agent_id="operator",
         can_route_tasks=True,
-        can_manage_projects=True,
+        can_manage_teams=True,
         blackboard_write=["*"],
     )
 
@@ -1190,7 +1187,7 @@ def v2_app_with_lanes(tmp_path, monkeypatch):
     afile = _agents_yaml(tmp_path, names=["scout", "analyst", "tracker"])
     monkeypatch.chdir(tmp_path)
     import src.cli.config as cli_cfg
-    monkeypatch.setattr(cli_cfg, "PROJECTS_DIR", pdir)
+    monkeypatch.setattr(cli_cfg, "TEAMS_DIR", pdir)
     monkeypatch.setattr(cli_cfg, "AGENTS_FILE", afile)
     monkeypatch.setattr(
         cli_cfg, "PERMISSIONS_FILE", tmp_path / "config" / "permissions.json",
@@ -1201,7 +1198,7 @@ def v2_app_with_lanes(tmp_path, monkeypatch):
     )
 
     perms_map = {
-        "operator": {"can_route_tasks": True, "can_manage_projects": True},
+        "operator": {"can_route_tasks": True, "can_manage_teams": True},
         "scout":    {"can_route_tasks": True, "can_message": ["analyst", "operator"]},
         "analyst":  {"can_route_tasks": False, "can_message": ["scout"]},
         "tracker":  {"can_route_tasks": False, "can_message": []},

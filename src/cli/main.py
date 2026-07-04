@@ -649,7 +649,7 @@ def _run_teams_list(port: int, as_json: bool) -> None:
     teams = data.get("teams", []) if isinstance(data, dict) else []
     if as_json:
         # Emit both keys for back-compat with downstream JSON consumers.
-        click.echo(dumps_safe({"teams": teams, "projects": teams}))
+        click.echo(dumps_safe({"teams": teams}))
         return
     if not teams:
         click.echo("No active teams.")
@@ -731,7 +731,7 @@ def tasks_cmd(agent, team, status, port, as_json):
     if agent:
         qs.append(f"assignee={agent}")
     if team:
-        qs.append(f"project_id={team}")
+        qs.append(f"team_id={team}")
     if status:
         qs.append(f"status={status}")
     suffix = ("?" + "&".join(qs)) if qs else ""
@@ -752,7 +752,7 @@ def tasks_cmd(agent, team, status, port, as_json):
         click.echo(
             f"{(t.get('id') or '')[:22]:<22} {t.get('status', '?'):<10} "
             f"{(t.get('assignee') or '')[:14]:<14} "
-            f"{(t.get('project_id') or '')[:14]:<14} {title}"
+            f"{(t.get('team_id') or '')[:14]:<14} {title}"
         )
 
 

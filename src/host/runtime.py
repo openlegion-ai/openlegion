@@ -506,21 +506,12 @@ class DockerBackend(RuntimeBackend):
             volumes[str(Path(tools_dir).as_posix() if platform.system() == "Windows" else tools_dir)] = {
                 "bind": "/app/tools", "mode": "ro",
             }
-        # Mount team-specific TEAM.md (solo agents get none).
-        # Resolution order honours both new ``TEAM_MD_PATH`` and legacy
-        # ``PROJECT_MD_PATH`` envs (the env-var name is a deploy-time
-        # back-compat surface — the legacy alias keeps existing
-        # systemd units working). The mount inside the container is
-        # ``/app/TEAM.md``; the legacy ``/app/PROJECT.md`` mount was
-        # dropped in PR 3 of the project→team rename. Check
-        # env_overrides first (per-agent), then fall back to extra_env
-        # (system-wide).
+        # Mount team-specific TEAM.md (solo agents get none) at
+        # ``/app/TEAM.md``. Check env_overrides first (per-agent), then
+        # fall back to extra_env (system-wide).
         team_md_path = (env_overrides or {}).get(
             "TEAM_MD_PATH",
-            (env_overrides or {}).get(
-                "PROJECT_MD_PATH",
-                self.extra_env.get("TEAM_MD_PATH", self.extra_env.get("PROJECT_MD_PATH", "")),
-            ),
+            self.extra_env.get("TEAM_MD_PATH", ""),
         )
         if team_md_path and Path(team_md_path).exists():
             host_path = team_md_path
@@ -1094,19 +1085,11 @@ class SandboxBackend(RuntimeBackend):
         ws.mkdir(parents=True, exist_ok=True)
         (ws / "data" / "workspace").mkdir(parents=True, exist_ok=True)
 
-        # Copy team-specific TEAM.md (solo agents get none).
-        # Both ``TEAM_MD_PATH`` (new) and ``PROJECT_MD_PATH`` (legacy)
-        # envs are honoured for back-compat with existing deploy
-        # configs, but the workspace only receives ``TEAM.md`` — the
-        # legacy ``PROJECT.md`` copy was dropped in PR 3. The workspace
-        # bootstrap still has a read-only fallback that picks up a
-        # stray ``PROJECT.md`` left behind by an old migration.
+        # Copy team-specific TEAM.md (solo agents get none) into the
+        # sandbox workspace.
         team_md_path = (env_overrides or {}).get(
             "TEAM_MD_PATH",
-            (env_overrides or {}).get(
-                "PROJECT_MD_PATH",
-                self.extra_env.get("TEAM_MD_PATH", self.extra_env.get("PROJECT_MD_PATH", "")),
-            ),
+            self.extra_env.get("TEAM_MD_PATH", ""),
         )
         if team_md_path and Path(team_md_path).exists():
             shutil.copy2(team_md_path, ws / "TEAM.md")
