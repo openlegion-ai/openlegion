@@ -1089,6 +1089,27 @@ class Tasks:
         )
         return result
 
+    def list_pending(self) -> list[dict]:
+        """All un-started (``PENDING_STATUSES``) tasks with an assignee.
+
+        Used by lane rehydration on mesh boot: the in-memory lane queues are
+        lost on a restart, but the durable task rows survive. Only ``pending``
+        tasks are returned — a task already ``working`` / ``accepted`` may be
+        mid-flight, so re-dispatching it would risk double execution; those are
+        deliberately excluded and left for the assignee (or a stall reaper) to
+        resolve. Unassigned rows are skipped (nothing to dispatch to).
+        Ordered ``created_at ASC`` so recovery preserves arrival order.
+        """
+        placeholders = ",".join("?" * len(PENDING_STATUSES))
+        sql = (
+            f"SELECT {self._SELECT_COLS} FROM tasks "
+            f"WHERE status IN ({placeholders}) AND assignee != '' "
+            f"ORDER BY created_at ASC"
+        )
+        with self._conn() as conn:
+            rows = conn.execute(sql, sorted(PENDING_STATUSES)).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
     def list_project(
         self,
         project_id: str,

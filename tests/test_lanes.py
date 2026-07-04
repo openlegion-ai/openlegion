@@ -1130,3 +1130,91 @@ async def test_steer_error_fallback_carries_system_note():
 
     await lm.enqueue("agent1", "watch update", mode="steer", system_note=True)
     dispatch.assert_awaited_once_with("agent1", "watch update", system_note=True)
+
+
+# ── Rehydration (recover restart-stranded pending tasks) ─────
+
+
+@pytest.mark.asyncio
+async def test_rehydrate_pending_reenqueues_pending_tasks():
+    """Pending durable tasks are re-enqueued into their assignee's lane, with
+    task_id + system_note threaded through and description as the message."""
+    dispatched = []
+
+    async def dispatch(agent, message, **kwargs):
+        dispatched.append({"agent": agent, "message": message, **kwargs})
+        return "ok"
+
+    lm = LaneManager(dispatch_fn=dispatch)
+    store = MagicMock()
+    store.list_pending.return_value = [
+        {"id": "task_1", "assignee": "alpha", "description": "do X", "title": "T1",
+         "origin": {"kind": "human", "channel": "cli", "user": "u1"}, "trace_id": "tr_1"},
+        {"id": "task_2", "assignee": "beta", "description": "", "title": "Fallback title",
+         "origin": None, "trace_id": None},
+    ]
+    lm.set_tasks_store(store)
+
+    n = await lm.rehydrate_pending()
+    assert n == 2
+    # Let the detached enqueue tasks put + dispatch.
+    await asyncio.gather(*list(lm._rehydrate_tasks), return_exceptions=True)
+
+    by_agent = {d["agent"]: d for d in dispatched}
+    assert set(by_agent) == {"alpha", "beta"}
+    assert by_agent["alpha"]["task_id"] == "task_1"
+    assert by_agent["alpha"]["message"] == "do X"
+    assert by_agent["alpha"]["system_note"] is True
+    # Origin reconstructed and forwarded.
+    assert by_agent["alpha"]["origin"].kind == "human"
+    # Empty description falls back to the title.
+    assert by_agent["beta"]["message"] == "Fallback title"
+    assert by_agent["beta"]["task_id"] == "task_2"
+    # No origin → no origin kwarg for that dispatch.
+    assert "origin" not in by_agent["beta"]
+    await lm.stop()
+
+
+@pytest.mark.asyncio
+async def test_rehydrate_pending_skips_unassigned_rows():
+    """A pending row with no assignee cannot be dispatched → skipped."""
+    dispatched = []
+
+    async def dispatch(agent, message, **kwargs):
+        dispatched.append(agent)
+        return "ok"
+
+    lm = LaneManager(dispatch_fn=dispatch)
+    store = MagicMock()
+    store.list_pending.return_value = [
+        {"id": "task_1", "assignee": "", "description": "orphan", "title": "T",
+         "origin": None, "trace_id": None},
+    ]
+    lm.set_tasks_store(store)
+    n = await lm.rehydrate_pending()
+    assert n == 0
+    await asyncio.gather(*list(lm._rehydrate_tasks), return_exceptions=True)
+    assert dispatched == []
+    await lm.stop()
+
+
+@pytest.mark.asyncio
+async def test_rehydrate_pending_noop_without_store():
+    """No tasks store wired → rehydration is a no-op (returns 0)."""
+    lm = LaneManager(dispatch_fn=AsyncMock(return_value="ok"))
+    assert await lm.rehydrate_pending() == 0
+    # A store lacking list_pending is also a no-op.
+    lm.set_tasks_store(object())
+    assert await lm.rehydrate_pending() == 0
+    await lm.stop()
+
+
+@pytest.mark.asyncio
+async def test_rehydrate_pending_survives_store_failure():
+    """A store whose list_pending raises must not blow up rehydration."""
+    lm = LaneManager(dispatch_fn=AsyncMock(return_value="ok"))
+    store = MagicMock()
+    store.list_pending.side_effect = RuntimeError("db gone")
+    lm.set_tasks_store(store)
+    assert await lm.rehydrate_pending() == 0
+    await lm.stop()
