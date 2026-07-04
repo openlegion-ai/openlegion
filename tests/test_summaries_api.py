@@ -33,13 +33,13 @@ def mesh_setup(tmp_path, monkeypatch):
     bypass paths is a real signal, not an accident of grant coverage.
     Project metadata is written to ``tmp_path/config/projects/`` so the
     server-side ``_is_project_member`` check (which reads disk via
-    ``_load_projects``) sees scout as a member of content-seo.
+    ``_load_teams``) sees scout as a member of content-seo.
     """
     import yaml as _yaml
-    # ``PROJECTS_DIR`` is resolved at import time from
+    # ``TEAMS_DIR`` is resolved at import time from
     # ``PROJECT_ROOT/config/projects``, so monkeypatch.chdir doesn't
     # redirect it. Patch the module attribute directly so
-    # ``_load_projects()`` reads from our tmp_path fixture.
+    # ``_load_teams()`` reads from our tmp_path fixture.
     projects_dir = tmp_path / "config" / "projects"
     (projects_dir / "content-seo").mkdir(parents=True, exist_ok=True)
     (projects_dir / "content-seo" / "metadata.yaml").write_text(_yaml.dump({
@@ -49,7 +49,6 @@ def mesh_setup(tmp_path, monkeypatch):
         "status": "active",
     }))
     import src.cli.config as _cli_config
-    monkeypatch.setattr(_cli_config, "PROJECTS_DIR", projects_dir)
     monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
 
     monkeypatch.setenv("OPENLEGION_TEAM_SCOPE_MODE", "warn")
@@ -86,7 +85,7 @@ def mesh_setup(tmp_path, monkeypatch):
     }
     # scout is a member of "content-seo" (per the metadata file above);
     # writer is solo (no team membership).
-    agent_projects = {"scout": {"content-seo"}}
+    agent_teams = {"scout": {"content-seo"}}
 
     app = server.create_mesh_app(
         blackboard=bb,
@@ -96,7 +95,7 @@ def mesh_setup(tmp_path, monkeypatch):
         cost_tracker=costs,
         trace_store=traces,
         auth_tokens=auth_tokens,
-        agent_projects=agent_projects,
+        agent_teams=agent_teams,
     )
     yield {
         "app": app,

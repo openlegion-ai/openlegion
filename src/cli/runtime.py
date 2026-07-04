@@ -20,7 +20,7 @@ from src.cli.channels import ChannelManager
 from src.cli.config import (
     ENV_FILE,
     PROJECT_ROOT,
-    PROJECTS_DIR,
+    TEAMS_DIR,
     _check_docker_running,
     _ensure_docker_image,
     _load_config,
@@ -293,7 +293,7 @@ class RuntimeContext:
         """Initialize and start all components. Called once."""
         self._start_time = time.time()
         # Match detached mode behavior so relative paths (pubsub.db, agent_tools/, config/)
-        # resolve under the OpenLegion project root even when launched elsewhere.
+        # resolve under the OpenLegion repo root even when launched elsewhere.
         os.chdir(PROJECT_ROOT)
         self._validate_prereqs()
         self._select_backend()
@@ -562,7 +562,7 @@ class RuntimeContext:
         self.router = MessageRouter(
             self.permissions, self.agent_urls,
             trace_store=self.trace_store,
-            agent_projects=self.cfg.get("_agent_projects", {}),
+            agent_teams=self.cfg.get("_agent_teams", {}),
         )
         # Create HealthMonitor early so the dashboard router can reference it.
         # Only register() is called here; start() happens in _start_background().
@@ -647,7 +647,7 @@ class RuntimeContext:
             _embedding_providers_with_keys(),
         )
         mesh_port = self.cfg["mesh"]["port"]
-        agent_projects = self.cfg.get("_agent_projects", {})
+        agent_teams = self.cfg.get("_agent_teams", {})
 
         # Respect plan limits on startup — only start up to max_agents.
         # Prevents OOM on downsized servers after a plan downgrade.
@@ -768,12 +768,12 @@ class RuntimeContext:
                     agent_env["OL_INTERNET_ACCESS_ENABLED"] = "true"
                     agent_env["OL_BROWSER_ACCESS_ENABLED"] = "true"
 
-            # Project env vars
-            project_name = agent_projects.get(agent_id)
-            if project_name:
-                project_md = PROJECTS_DIR / project_name / "project.md"
-                agent_env["PROJECT_MD_PATH"] = str(project_md)
-                agent_env["PROJECT_NAME"] = project_name
+            # Team env vars
+            team_name = agent_teams.get(agent_id)
+            if team_name:
+                team_md = TEAMS_DIR / team_name / "team.md"
+                agent_env["TEAM_MD_PATH"] = str(team_md)
+                agent_env["TEAM_NAME"] = team_name
 
             # Proxy env injection
             proxy_url = resolve_agent_proxy(
@@ -838,8 +838,8 @@ class RuntimeContext:
                 self.runtime.extra_env.pop("INITIAL_HEARTBEAT", None)
                 self.runtime.extra_env.pop("INITIAL_INTERFACE", None)
                 self.runtime.extra_env.pop("INITIAL_GREETING", None)
-                self.runtime.extra_env.pop("PROJECT_MD_PATH", None)
-                self.runtime.extra_env.pop("PROJECT_NAME", None)
+                self.runtime.extra_env.pop("TEAM_MD_PATH", None)
+                self.runtime.extra_env.pop("TEAM_NAME", None)
                 self.runtime.extra_env.pop("HTTP_PROXY", None)
                 self.runtime.extra_env.pop("HTTPS_PROXY", None)
                 self.runtime.extra_env.pop("NO_PROXY", None)
@@ -1611,7 +1611,7 @@ class RuntimeContext:
             health_monitor=self.health_monitor,
             cost_tracker=self.cost_tracker,
             notify_fn=self._handle_notify,
-            agent_projects=self.cfg.get("_agent_projects", {}),
+            agent_teams=self.cfg.get("_agent_teams", {}),
             lane_manager=self.lane_manager,
             dispatch_loop=self._dispatch_loop,
             wallet_service_ref=wallet_ref,
@@ -1887,9 +1887,9 @@ class RuntimeContext:
         """
         if not self.cron_scheduler:
             return
-        from src.cli.config import _load_projects
+        from src.cli.config import _load_teams
         try:
-            teams = _load_projects()
+            teams = _load_teams()
         except Exception as e:
             logger.warning("work-summary cron bootstrap failed to load teams: %s", e)
             return
@@ -2110,8 +2110,8 @@ class RuntimeContext:
     def _print_ready(self) -> None:
         agents_cfg = self.cfg.get("agents", {})
         active_agents = list(agents_cfg.keys())
-        agent_projects = self.cfg.get("_agent_projects", {})
-        projects = self.cfg.get("projects", {})
+        agent_teams = self.cfg.get("_agent_teams", {})
+        teams_cfg = self.cfg.get("teams", {})
         mesh_port = self.cfg["mesh"]["port"]
 
         # ── Services ──
@@ -2143,15 +2143,15 @@ class RuntimeContext:
                     if logs:
                         click.echo(logs, err=True)
 
-        # ── Projects ──
-        if projects:
-            assigned = set(agent_projects.keys())
+        # ── Teams ──
+        if teams_cfg:
+            assigned = set(agent_teams.keys())
             standalone = [a for a in active_agents if a not in assigned]
 
-            for pname in sorted(projects.keys()):
-                members = [a for a in active_agents if agent_projects.get(a) == pname]
+            for pname in sorted(teams_cfg.keys()):
+                members = [a for a in active_agents if agent_teams.get(a) == pname]
                 if members:
-                    click.echo(f"\n  Project [{pname}]: {', '.join(members)}")
+                    click.echo(f"\n  Team [{pname}]: {', '.join(members)}")
 
             if standalone:
                 click.echo(f"\n  Solo: {', '.join(standalone)}")

@@ -1535,9 +1535,9 @@ select:focus-visible,
   overflow: hidden;
 }
 
-/* ── Project Hub mobile tab strip ────────────────── */
+/* ── Team Hub mobile tab strip ────────────────── */
 
-.project-hub-tabs {
+.team-hub-tabs {
   /* Border is rendered by the individual tab buttons (border-b-2),
      not the strip itself — avoids the -mb-px gap artifact. */
   display: flex;
@@ -1548,11 +1548,11 @@ select:focus-visible,
   border-bottom: 1px solid rgba(31, 31, 47, 0.6);
 }
 
-.project-hub-tabs::-webkit-scrollbar {
+.team-hub-tabs::-webkit-scrollbar {
   display: none;
 }
 
-.project-hub-tabs > button {
+.team-hub-tabs > button {
   flex-shrink: 0;
   /* Stack the button's own bottom border above the strip border */
   margin-bottom: -1px;
@@ -1564,13 +1564,13 @@ select:focus-visible,
    ≥1024px (lg:flex); below that the mobile strip is already shown, so this
    override is only meaningful in the 1024–1599px side-chat-open band. */
 @media (min-width: 1024px) and (max-width: 1599px) {
-  main.chat-side-open .project-hub-desktop-tabs {
+  main.chat-side-open .team-hub-desktop-tabs {
     display: none !important;
   }
-  main.chat-side-open .project-hub-mobile-tabs {
+  main.chat-side-open .team-hub-mobile-tabs {
     display: flex !important;
   }
-  main.chat-side-open .project-hub-kebab {
+  main.chat-side-open .team-hub-kebab {
     margin-left: auto !important;
   }
 }

@@ -76,9 +76,9 @@ def main() -> None:
         default_model=llm_model, embedding_model=embedding_model,
         thinking=thinking, max_output_tokens=max_output_tokens,
     )
-    project_name = os.environ.get("PROJECT_NAME", "")
+    team_name = os.environ.get("TEAM_NAME", "")
     mesh_client = MeshClient(
-        mesh_url=mesh_url, agent_id=agent_id, project_name=project_name or None,
+        mesh_url=mesh_url, agent_id=agent_id, team_name=team_name or None,
     )
     embed_fn = llm.embed if embedding_model and embedding_model.lower() != "none" else None
     memory = MemoryStore(
@@ -128,7 +128,7 @@ def main() -> None:
     # Copy host-mounted TEAM.md into the workspace. Mounted at /app to
     # avoid Docker creating /data/workspace as root and breaking
     # permissions. Only the canonical name is written; PR 3 of the
-    # project→team rename dropped the legacy ``PROJECT.md`` write but
+    # The project→team rename dropped the legacy ``PROJECT.md`` write but
     # the workspace bootstrap retains a read fallback for any
     # pre-migration files left behind.
     host_team = Path("/app/TEAM.md")

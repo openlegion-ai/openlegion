@@ -1,7 +1,7 @@
 """PR-O'.1 — cross-project blackboard access counter (observability slice).
 
 Pure telemetry. No enforcement. Counter is process-lifetime, surfaced on
-``GET /mesh/system/metrics`` as ``blackboard_cross_project_total``.
+``GET /mesh/system/metrics`` as ``blackboard_cross_team_total``.
 
 The plan (`docs/plans/2026-05-08-post-board-roadmap.md`, Phase 3 PR-O'.1)
 calls out the increment/no-increment matrix exercised below:
@@ -34,7 +34,7 @@ def _build_mesh(tmp_path, monkeypatch, *, auth_tokens=None):
         agent-c is standalone (no project)
 
     Returns ``(app, blackboard, projects_dir, server_module)`` so callers
-    can ``patch('src.cli.config.PROJECTS_DIR', projects_dir)`` for the
+    can ``patch('src.cli.config.TEAMS_DIR', projects_dir)`` for the
     duration of their HTTP calls.
     """
     # Pin the scope flag to warn so the unrelated /mesh/agents enforce
@@ -117,7 +117,7 @@ async def test_cross_project_read_increments_counter(tmp_path, monkeypatch):
     app, bb, projects_dir, server_module = _build_mesh(tmp_path, monkeypatch)
     try:
         bb.write("scratch/note", {"hello": "world"}, written_by="agent-a")
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
             ) as client:
@@ -137,7 +137,7 @@ async def test_cross_project_write_against_existing_increments(tmp_path, monkeyp
     app, bb, projects_dir, server_module = _build_mesh(tmp_path, monkeypatch)
     try:
         bb.write("scratch/note", {"v": 1}, written_by="agent-a")
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
             ) as client:
@@ -166,7 +166,7 @@ async def test_same_project_does_not_increment(tmp_path, monkeypatch):
             }),
         )
         bb.write("scratch/note", {"hello": "world"}, written_by="agent-a")
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
             ) as client:
@@ -192,7 +192,7 @@ async def test_operator_caller_does_not_increment(tmp_path, monkeypatch):
     app, bb, projects_dir, server_module = _build_mesh(tmp_path, monkeypatch)
     try:
         bb.write("scratch/note", {"v": 1}, written_by="agent-a")
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
             ) as client:
@@ -218,7 +218,7 @@ async def test_internal_caller_does_not_increment(tmp_path, monkeypatch):
     app, bb, projects_dir, server_module = _build_mesh(tmp_path, monkeypatch)
     try:
         bb.write("scratch/note", {"v": 1}, written_by="agent-a")
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
             ) as client:
@@ -247,7 +247,7 @@ async def test_new_key_write_does_not_increment(tmp_path, monkeypatch):
     """First write to a key has no prior entry → cannot be cross-project."""
     app, bb, projects_dir, server_module = _build_mesh(tmp_path, monkeypatch)
     try:
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
             ) as client:
@@ -271,7 +271,7 @@ async def test_counter_surfaced_on_system_metrics(tmp_path, monkeypatch):
     )
     try:
         bb.write("scratch/note", {"v": 1}, written_by="agent-a")
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
             ) as client:
@@ -297,8 +297,8 @@ async def test_counter_surfaced_on_system_metrics(tmp_path, monkeypatch):
                 )
         assert op_metrics.status_code == 200
         body = op_metrics.json()
-        assert "blackboard_cross_project_total" in body
-        assert body["blackboard_cross_project_total"] == {"read": 1, "write": 0}
+        assert "blackboard_cross_team_total" in body
+        assert body["blackboard_cross_team_total"] == {"read": 1, "write": 0}
     finally:
         _teardown(app, monkeypatch, server_module)
 
@@ -309,7 +309,7 @@ async def test_delete_existing_cross_project_increments_write(tmp_path, monkeypa
     app, bb, projects_dir, server_module = _build_mesh(tmp_path, monkeypatch)
     try:
         bb.write("scratch/note", {"v": 1}, written_by="agent-a")
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
             ) as client:
@@ -329,7 +329,7 @@ async def test_claim_existing_cross_project_increments_write(tmp_path, monkeypat
     app, bb, projects_dir, server_module = _build_mesh(tmp_path, monkeypatch)
     try:
         existing = bb.write("scratch/note", {"v": 1}, written_by="agent-a")
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
             ) as client:
@@ -355,7 +355,7 @@ async def test_standalone_agent_does_not_increment(tmp_path, monkeypatch):
     try:
         # agent-c is standalone; agent-a is in proj-a.
         bb.write("scratch/note", {"v": 1}, written_by="agent-a")
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
             ) as client:

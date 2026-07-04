@@ -56,10 +56,10 @@ def _patch_projects(membership: dict[str, str]):
     """Return a context manager that swaps ``cli.config._load_config``.
 
     ``membership`` maps agent_id → project_name. ``_load_config`` returns
-    a dict whose ``_agent_projects`` key matches the production shape
+    a dict whose ``_agent_teams`` key matches the production shape
     (built by ``_load_config`` from ``config/projects/<name>/metadata.yaml``).
     """
-    fake_cfg = {"_agent_projects": dict(membership)}
+    fake_cfg = {"_agent_teams": dict(membership)}
     return patch(
         "src.cli.config._load_config",
         return_value=fake_cfg,
@@ -93,7 +93,7 @@ class TestTenantFor:
 
         def fake_loader():
             call_count["n"] += 1
-            return {"_agent_projects": {"alpha": "tenant-a"}}
+            return {"_agent_teams": {"alpha": "tenant-a"}}
 
         with patch("src.cli.config._load_config", side_effect=fake_loader):
             cost._tenant_for("alpha")

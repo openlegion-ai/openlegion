@@ -112,7 +112,7 @@ class TestWorkplaceOutcome:
     def test_outcome_rework_spawns_linked_task(self):
         rec = _create_done_task(
             self.tasks, creator="op", assignee="analyst",
-            title="research X", project_id="research",
+            title="research X", team_id="research",
         )
         resp = self.client.post(
             f"/dashboard/api/workplace/tasks/{rec['id']}/outcome",
@@ -131,7 +131,7 @@ class TestWorkplaceOutcome:
         assert new is not None
         assert new["previous_task_id"] == rec["id"]
         assert new["assignee"] == "analyst"
-        assert new["project_id"] == "research"
+        assert new["team_id"] == "research"
         assert new["title"].startswith("Rework: ")
         assert new["description"] == "go deeper on the legal angle"
 
@@ -201,7 +201,7 @@ class TestWorkplaceOutcome:
         endpoint logic is touched again."""
         rec = _create_done_task(
             self.tasks, creator="op", assignee="analyst",
-            title="research X", project_id="research",
+            title="research X", team_id="research",
         )
         resp = self.client.post(
             f"/dashboard/api/workplace/tasks/{rec['id']}/outcome",
@@ -231,7 +231,7 @@ class TestWorkplaceOutcome:
         """
         rec = _create_done_task(
             self.tasks, creator="op", assignee="analyst", title="t",
-            project_id="research",
+            team_id="research",
         )
         # Initial rating: rework — spawns a follow-up task.
         first = self.client.post(

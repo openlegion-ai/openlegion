@@ -66,26 +66,7 @@ ENV_FILE = PROJECT_ROOT / ".env"
 CONFIG_FILE = PROJECT_ROOT / "config" / "mesh.yaml"
 AGENTS_FILE = PROJECT_ROOT / "config" / "agents.yaml"
 PERMISSIONS_FILE = PROJECT_ROOT / "config" / "permissions.json"
-def _resolve_teams_dir() -> Path:
-    """Pick whichever of config/teams/ or config/projects/ exists.
-
-    Prefers the canonical ``config/teams/``; falls back to
-    ``config/projects/`` so deployments that haven't run the startup
-    migrator yet keep working. When neither exists, returns
-    ``config/teams/`` (the canonical create target).
-    """
-    teams = PROJECT_ROOT / "config" / "teams"
-    projects = PROJECT_ROOT / "config" / "projects"
-    if teams.exists():
-        return teams
-    if projects.exists():
-        return projects
-    return teams
-
-
-TEAMS_DIR = _resolve_teams_dir()
-# Back-compat alias — kept until PR 3.
-PROJECTS_DIR = TEAMS_DIR
+TEAMS_DIR = PROJECT_ROOT / "config" / "teams"
 NETWORK_FILE = PROJECT_ROOT / "config" / "network.yaml"
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 DOCKER_IMAGE = "openlegion-agent:latest"
@@ -209,7 +190,7 @@ _AGENT_PERMISSION_DEFAULTS: dict[str, object] = {
 
 
 def _load_config(mesh_path: Path | None = None) -> dict:
-    """Load mesh config, agent definitions, and project metadata."""
+    """Load mesh config, agent definitions, and team metadata."""
     path = mesh_path or CONFIG_FILE
     cfg: dict = {
         "mesh": {"host": "0.0.0.0", "port": 8420},
@@ -225,14 +206,14 @@ def _load_config(mesh_path: Path | None = None) -> dict:
             agents_data = yaml.safe_load(f) or {}
             cfg.setdefault("agents", {}).update(agents_data.get("agents", {}))
 
-    # Load projects and build reverse map (agent → project)
-    projects = _load_projects()
-    cfg["projects"] = projects
-    agent_projects: dict[str, str] = {}
-    for pname, pdata in projects.items():
+    # Load teams and build reverse map (agent → team)
+    teams = _load_teams()
+    cfg["teams"] = teams
+    agent_teams: dict[str, str] = {}
+    for pname, pdata in teams.items():
         for member in pdata.get("members", []):
-            agent_projects[member] = pname
-    cfg["_agent_projects"] = agent_projects
+            agent_teams[member] = pname
+    cfg["_agent_teams"] = agent_teams
 
     # Load network config
     network_cfg = {}
@@ -760,63 +741,63 @@ def _get_default_model() -> str:
     return cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
 
 
-# ── Project management ──────────────────────────────────────
+# ── Team management ──────────────────────────────────────
 
 
-def _validate_project_name(name: str) -> str:
-    """Validate and return a safe project name (same rules as agent names)."""
+def _validate_team_name(name: str) -> str:
+    """Validate and return a safe team name (same rules as agent names)."""
     try:
         return _validate_agent_name(name)
     except ValueError:
         raise ValueError(
-            f"Invalid project name '{name}': must be 1–64 alphanumeric chars, "
+            f"Invalid team name '{name}': must be 1–64 alphanumeric chars, "
             "hyphens, or underscores (must start with a letter or digit)."
         )
 
 
-def _load_projects() -> dict[str, dict]:
-    """Scan config/projects/*/metadata.yaml and return {name: metadata}."""
+def _load_teams() -> dict[str, dict]:
+    """Scan config/teams/*/metadata.yaml and return {name: metadata}."""
     from src.shared.types import TeamMetadata
 
-    projects: dict[str, dict] = {}
-    if not PROJECTS_DIR.exists():
-        return projects
-    for meta_file in sorted(PROJECTS_DIR.glob("*/metadata.yaml")):
+    teams: dict[str, dict] = {}
+    if not TEAMS_DIR.exists():
+        return teams
+    for meta_file in sorted(TEAMS_DIR.glob("*/metadata.yaml")):
         try:
             dir_name = meta_file.parent.name
             with open(meta_file) as f:
                 data = yaml.safe_load(f) or {}
             pm = TeamMetadata(**data)
-            projects[dir_name] = pm.model_dump()
+            teams[dir_name] = pm.model_dump()
         except Exception as e:
-            logger.warning("Failed to load project %s: %s", meta_file, e)
-    return projects
+            logger.warning("Failed to load team %s: %s", meta_file, e)
+    return teams
 
 
-def _get_agent_project(agent_name: str) -> str | None:
-    """Return the project name an agent belongs to, or None if standalone."""
-    projects = _load_projects()
-    for pname, pdata in projects.items():
+def _get_agent_team(agent_name: str) -> str | None:
+    """Return the team name an agent belongs to, or None if standalone."""
+    teams = _load_teams()
+    for pname, pdata in teams.items():
         if agent_name in pdata.get("members", []):
             return pname
     return None
 
 
-def _create_project(
+def _create_team(
     name: str, description: str = "", members: list[str] | None = None,
 ) -> None:
-    """Create a new project: directory, metadata.yaml, scaffold project.md."""
-    name = _validate_project_name(name)
-    # Validate members upfront before any filesystem writes — prevents partial project creation.
+    """Create a new team: directory, metadata.yaml, scaffold team.md."""
+    name = _validate_team_name(name)
+    # Validate members upfront before any filesystem writes — prevents partial team creation.
     members = list(members or [])
     if "operator" in members:
-        raise ValueError("Operator is a system agent and cannot be assigned to projects")
-    project_dir = PROJECTS_DIR / name
-    if project_dir.exists():
-        raise ValueError(f"Project '{name}' already exists")
+        raise ValueError("Operator is a system agent and cannot be assigned to teams")
+    team_dir = TEAMS_DIR / name
+    if team_dir.exists():
+        raise ValueError(f"Team '{name}' already exists")
 
-    project_dir.mkdir(parents=True, exist_ok=True)
-    (project_dir / "workflows").mkdir(exist_ok=True)
+    team_dir.mkdir(parents=True, exist_ok=True)
+    (team_dir / "workflows").mkdir(exist_ok=True)
 
     from datetime import datetime, timezone
 
@@ -826,62 +807,62 @@ def _create_project(
         name=name,
         description=description,
         created_at=datetime.now(timezone.utc).isoformat(),
-        members=[],  # members added via _add_agent_to_project below
+        members=[],  # members added via _add_agent_to_team below
     )
-    with open(project_dir / "metadata.yaml", "w") as f:
+    with open(team_dir / "metadata.yaml", "w") as f:
         yaml.dump(pm.model_dump(), f, default_flow_style=False, sort_keys=False)
 
-    # Scaffold project.md
-    (project_dir / "project.md").write_text(
+    # Scaffold team.md
+    (team_dir / "team.md").write_text(
         f"# {name}\n\n{description}\n\n"
-        "<!-- Shared context for all agents in this project -->\n"
+        "<!-- Shared context for all agents in this team -->\n"
     )
 
-    # Add initial members (handles removing from old projects + permissions)
+    # Add initial members (handles removing from old teams + permissions)
     for agent in members:
-        _add_agent_to_project(name, agent)
+        _add_agent_to_team(name, agent)
 
 
-def _delete_project(name: str) -> None:
-    """Delete a project directory and clean up agent permissions.
+def _delete_team(name: str) -> None:
+    """Delete a team directory and clean up agent permissions.
 
     Operator product tools (Task 7) require this be preceded by
-    ``_archive_project`` and a human-confirmed pending action; the
+    ``_archive_team`` and a human-confirmed pending action; the
     raw helper retained here is the storage primitive — callers above
     enforce the propose-then-confirm flow.
     """
     import shutil
 
-    project_dir = PROJECTS_DIR / name
-    if not project_dir.exists():
-        raise ValueError(f"Project '{name}' not found")
+    team_dir = TEAMS_DIR / name
+    if not team_dir.exists():
+        raise ValueError(f"Team '{name}' not found")
 
     # Read members before deleting
-    meta_file = project_dir / "metadata.yaml"
+    meta_file = team_dir / "metadata.yaml"
     members: list[str] = []
     if meta_file.exists():
         with open(meta_file) as f:
             data = yaml.safe_load(f) or {}
         members = data.get("members", [])
 
-    # Remove project blackboard permissions from all members
+    # Remove team blackboard permissions from all members
     for agent in members:
-        _remove_project_blackboard_permissions(agent, name)
+        _remove_team_blackboard_permissions(agent, name)
 
-    shutil.rmtree(project_dir)
+    shutil.rmtree(team_dir)
 
 
-def _set_project_status(name: str, status: str) -> None:
-    """Update the ``status`` field on a project's metadata.yaml.
+def _set_team_status(name: str, status: str) -> None:
+    """Update the ``status`` field on a team's metadata.yaml.
 
     Used by archive/unarchive flows. Status is a free-string at the
     storage layer; operator tools restrict valid values to
     ``{"active", "archived"}``.
     """
-    project_dir = PROJECTS_DIR / name
-    meta_file = project_dir / "metadata.yaml"
+    team_dir = TEAMS_DIR / name
+    meta_file = team_dir / "metadata.yaml"
     if not meta_file.exists():
-        raise ValueError(f"Project '{name}' not found")
+        raise ValueError(f"Team '{name}' not found")
     with open(meta_file) as f:
         data = yaml.safe_load(f) or {}
     data["status"] = status
@@ -962,22 +943,22 @@ def _backfill_capabilities_for_existing_agents() -> None:
             logger.exception("Failed to persist back-filled agent capabilities")
 
 
-def _archive_project(name: str) -> None:
-    """Mark a project as archived without deleting its data."""
-    _set_project_status(name, "archived")
+def _archive_team(name: str) -> None:
+    """Mark a team as archived without deleting its data."""
+    _set_team_status(name, "archived")
 
 
-def _unarchive_project(name: str) -> None:
-    """Re-activate an archived project."""
-    _set_project_status(name, "active")
+def _unarchive_team(name: str) -> None:
+    """Re-activate an archived team."""
+    _set_team_status(name, "active")
 
 
-def _project_status(name: str) -> str:
-    """Read a project's status. Returns ``"active"`` for legacy rows missing the field."""
-    project_dir = PROJECTS_DIR / name
-    meta_file = project_dir / "metadata.yaml"
+def _team_status(name: str) -> str:
+    """Read a team's status. Returns ``"active"`` for legacy rows missing the field."""
+    team_dir = TEAMS_DIR / name
+    meta_file = team_dir / "metadata.yaml"
     if not meta_file.exists():
-        raise ValueError(f"Project '{name}' not found")
+        raise ValueError(f"Team '{name}' not found")
     with open(meta_file) as f:
         data = yaml.safe_load(f) or {}
     return data.get("status", "active") or "active"
@@ -1025,21 +1006,21 @@ def _agent_status(name: str) -> str:
     return agents[name].get("status", "active") or "active"
 
 
-def _add_agent_to_project(project: str, agent: str) -> None:
-    """Assign an agent to a project. Removes from old project if any."""
+def _add_agent_to_team(team: str, agent: str) -> None:
+    """Assign an agent to a team. Removes from old team if any."""
     if agent == "operator":
-        raise ValueError("Operator is a system agent and cannot be assigned to projects")
-    project_dir = PROJECTS_DIR / project
-    meta_file = project_dir / "metadata.yaml"
+        raise ValueError("Operator is a system agent and cannot be assigned to teams")
+    team_dir = TEAMS_DIR / team
+    meta_file = team_dir / "metadata.yaml"
     if not meta_file.exists():
-        raise ValueError(f"Project '{project}' not found")
+        raise ValueError(f"Team '{team}' not found")
 
-    # Remove from old project first
-    old_project = _get_agent_project(agent)
-    if old_project and old_project != project:
-        _remove_agent_from_project(old_project, agent)
+    # Remove from old team first
+    old_team = _get_agent_team(agent)
+    if old_team and old_team != team:
+        _remove_agent_from_team(old_team, agent)
 
-    # Add to new project
+    # Add to new team
     with open(meta_file) as f:
         data = yaml.safe_load(f) or {}
     members = data.get("members", [])
@@ -1049,15 +1030,15 @@ def _add_agent_to_project(project: str, agent: str) -> None:
         with open(meta_file, "w") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
-    _add_project_blackboard_permissions(agent, project)
+    _add_team_blackboard_permissions(agent, team)
 
 
-def _remove_agent_from_project(project: str, agent: str) -> None:
-    """Remove an agent from a project (becomes standalone)."""
-    project_dir = PROJECTS_DIR / project
-    meta_file = project_dir / "metadata.yaml"
+def _remove_agent_from_team(team: str, agent: str) -> None:
+    """Remove an agent from a team (becomes standalone)."""
+    team_dir = TEAMS_DIR / team
+    meta_file = team_dir / "metadata.yaml"
     if not meta_file.exists():
-        raise ValueError(f"Project '{project}' not found")
+        raise ValueError(f"Team '{team}' not found")
 
     with open(meta_file) as f:
         data = yaml.safe_load(f) or {}
@@ -1068,18 +1049,18 @@ def _remove_agent_from_project(project: str, agent: str) -> None:
         with open(meta_file, "w") as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False)
 
-    _remove_project_blackboard_permissions(agent, project)
+    _remove_team_blackboard_permissions(agent, team)
 
 
-def _add_project_blackboard_permissions(agent: str, project: str) -> None:
-    """Grant blackboard access for a project member.
+def _add_team_blackboard_permissions(agent: str, team: str) -> None:
+    """Grant blackboard access for a team member.
 
-    Grants ``projects/{project}/*`` and strips any pre-existing ``*``
-    wildcard so an agent cannot accumulate fleet-wide reach via project
+    Grants ``teams/{team}/*`` and strips any pre-existing ``*``
+    wildcard so an agent cannot accumulate fleet-wide reach via team
     moves (Task 5). The MeshClient auto-prefixes all blackboard keys
-    with the project namespace, so agents use natural keys
+    with the team namespace, so agents use natural keys
     (``context/market``) which are transparently stored as
-    ``projects/{project}/context/market``. Each project's data lives
+    ``teams/{team}/context/market``. Each team's data lives
     under its own namespace.
 
     Pre-Task-5 fleets had ``["*"]`` ACLs that survived membership churn;
@@ -1091,50 +1072,50 @@ def _add_project_blackboard_permissions(agent: str, project: str) -> None:
     agent_perms = perms.get("permissions", {}).get(agent)
     if agent_perms is None:
         return
-    project_pattern = f"projects/{project}/*"
+    team_pattern = f"teams/{team}/*"
     for field in ("blackboard_read", "blackboard_write"):
         patterns = agent_perms.get(field, [])
-        # Strip any wildcard — replaced by the explicit project pattern
+        # Strip any wildcard — replaced by the explicit team pattern
         # below. This is the active narrowing for Task 5: an agent that
-        # previously had ``["*"]`` and is then added to a project ends
-        # up with ``["projects/{project}/*"]``.
+        # previously had ``["*"]`` and is then added to a team ends
+        # up with ``["teams/{team}/*"]``.
         narrowed = [p for p in patterns if p != "*"]
-        if project_pattern not in narrowed:
-            narrowed.append(project_pattern)
+        if team_pattern not in narrowed:
+            narrowed.append(team_pattern)
         agent_perms[field] = narrowed
     _save_permissions(perms)
 
 
-def _remove_project_blackboard_permissions(agent: str, project: str) -> None:
-    """Revoke project blackboard access when an agent leaves a project.
+def _remove_team_blackboard_permissions(agent: str, team: str) -> None:
+    """Revoke team blackboard access when an agent leaves a team.
 
-    Strips the project namespace pattern AND any pre-existing ``*``
+    Strips the team namespace pattern AND any pre-existing ``*``
     wildcard. Leaves an agent with whatever non-wildcard, non-target
-    patterns it had — typically empty for a project member, restoring
+    patterns it had — typically empty for a team member, restoring
     the agent to a standalone (no-blackboard) state. Wildcard stripping
     matches the add-side narrowing so an agent that ever had ``*`` does
     not reacquire fleet-wide reach by being added to and then removed
-    from a project (Task 5).
+    from a team (Task 5).
     """
     perms = _load_permissions()
     agent_perms = perms.get("permissions", {}).get(agent)
     if agent_perms is None:
         return
-    project_pattern = f"projects/{project}/*"
+    team_pattern = f"teams/{team}/*"
     for field in ("blackboard_read", "blackboard_write"):
         patterns = agent_perms.get(field, [])
-        # Drop both the target project pattern and any surviving ``*``.
+        # Drop both the target team pattern and any surviving ``*``.
         # The wildcard strip is the safety net for an agent whose ACL
         # was never re-narrowed (e.g. config-edited directly): once the
         # membership system touches it on remove, the wildcard goes.
         agent_perms[field] = [
-            p for p in patterns if p != project_pattern and p != "*"
+            p for p in patterns if p != team_pattern and p != "*"
         ]
     _save_permissions(perms)
 
 
 def _remove_agent(name: str, stop_container: bool = False) -> None:
-    """Remove an agent from config, permissions, and any project membership.
+    """Remove an agent from config, permissions, and any team membership.
 
     If *stop_container* is True, attempt to stop and remove the Docker
     container named ``openlegion_{name}``.  Failures are silently ignored
@@ -1151,11 +1132,11 @@ def _remove_agent(name: str, stop_container: bool = False) -> None:
         except Exception as e:
             logger.warning("Failed to stop/remove container for '%s': %s", name, e)
 
-    # Remove from project if member
-    project = _get_agent_project(name)
-    if project:
+    # Remove from team if member
+    team = _get_agent_team(name)
+    if team:
         with contextlib.suppress(ValueError):
-            _remove_agent_from_project(project, name)
+            _remove_agent_from_team(team, name)
 
     # Remove from agents.yaml
     if AGENTS_FILE.exists():

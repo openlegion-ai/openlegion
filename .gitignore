@@ -36,7 +36,6 @@ config/telegram_paired.json
 config/discord_paired.json
 config/slack_paired.json
 config/whatsapp_paired.json
-PROJECT.md
 SOUL.md
 ROADMAP.md
 benchmark_report.md

@@ -316,13 +316,13 @@ async def test_inbox_visibility_assignee_only(v2_app):
 async def test_project_list_requires_membership(v2_app, monkeypatch):
     app, _, tmp_path = v2_app
     pdir = _projects_layout(tmp_path)
-    monkeypatch.setattr("src.cli.config.PROJECTS_DIR", pdir)
+    monkeypatch.setattr("src.cli.config.TEAMS_DIR", pdir)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         # Scout (member of research) creates a task in research.
         await c.post(
             "/mesh/tasks",
-            json={"assignee": "analyst", "title": "scoped", "project": "research"},
+            json={"assignee": "analyst", "title": "scoped", "team_id": "research"},
             headers={"X-Agent-ID": "scout"},
         )
         # Member can list project tasks.
@@ -972,7 +972,7 @@ async def test_post_write_verify_500_on_assignee_mismatch(v2_app):
         "id": "task_fake",
         "assignee": "wrong",
         "creator": "scout",
-        "project_id": None,
+        "team_id": None,
         "parent_task_id": None,
         "status": "pending",
     }
@@ -997,7 +997,7 @@ async def test_post_write_verify_500_on_status_mismatch(v2_app):
         "id": "task_fake",
         "assignee": "analyst",
         "creator": "scout",
-        "project_id": None,
+        "team_id": None,
         "parent_task_id": None,
         "status": "failed",
     }
@@ -1021,7 +1021,7 @@ async def test_post_write_verify_500_on_creator_mismatch(v2_app):
         "id": "task_fake",
         "assignee": "analyst",
         "creator": "impersonator",
-        "project_id": None,
+        "team_id": None,
         "parent_task_id": None,
         "status": "pending",
     }

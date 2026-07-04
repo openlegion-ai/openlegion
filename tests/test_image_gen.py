@@ -31,7 +31,7 @@ def tmp_artifacts(tmp_path):
 def mock_mesh_client():
     client = AsyncMock()
     client.agent_id = "test-agent"
-    client.project_name = "test-project"
+    client.team_name = "test-team"
     return client
 
 
@@ -201,13 +201,13 @@ async def test_generate_image_empty_slug_prompt(mock_mesh_client, tmp_artifacts)
     assert "generated_image.png" in result["path"]
 
 
-async def test_generate_image_no_project(tmp_artifacts):
-    """Non-project agent should skip blackboard write without error."""
+async def test_generate_image_no_team(tmp_artifacts):
+    """Teamless agent should skip blackboard write without error."""
     from src.agent.builtins.image_gen_tool import generate_image
 
     client = AsyncMock()
     client.agent_id = "standalone-agent"
-    client.project_name = None  # No project
+    client.team_name = None  # No team
     client.image_generate = AsyncMock(return_value=_make_success_response())
 
     result = await generate_image(

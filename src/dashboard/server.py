@@ -8,7 +8,7 @@ Phase 10 §24 — billing-export endpoint.
 
   ``GET /dashboard/api/billing/captcha-rollup?tenant=<id>&period=<period>``
   returns a CSV of CAPTCHA-solver spend rolled up across every agent
-  inside the named tenant (project). Operator-only: gated by the same
+  inside the named tenant (team). Operator-only: gated by the same
   ``ol_session`` cookie + ``X-Requested-With`` posture as every other
   ``/dashboard/*`` endpoint (CSRF unnecessary on GET, but auth is still
   enforced via the ``_verify_dashboard_auth`` dependency on the router).
@@ -704,51 +704,29 @@ def create_dashboard_router(
     # Plan limits — read once at startup; provisioner restarts engine after updating .env
     # 0 = unlimited (self-hosted / open-source) unless env var is explicitly set to 0
     _max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
-    # Plan-tier cap — when OPENLEGION_MAX_TEAMS is set to 0, team/project
+    # Plan-tier cap — when OPENLEGION_MAX_TEAMS is set to 0, team
     # creation is disabled entirely.
-    _max_projects = int(os.environ.get("OPENLEGION_MAX_TEAMS", "0"))
-    _projects_disabled = (
-        _max_projects == 0 and "OPENLEGION_MAX_TEAMS" in os.environ
+    _max_teams = int(os.environ.get("OPENLEGION_MAX_TEAMS", "0"))
+    _teams_disabled = (
+        _max_teams == 0 and "OPENLEGION_MAX_TEAMS" in os.environ
     )
 
-    # Team-lifecycle WebSocket events: callers still pass the pre-rename
-    # ``project_*`` event_type strings for code-reuse; this helper maps
-    # them to the canonical ``team_*`` names that actually fire on the
-    # bus. The pre-rename literals stay in ``DashboardEvent.type`` so
-    # type-safety holds for any historical-record code that parses them
-    # — they're just no longer emitted. PR 3 of the project→team rename
-    # dropped the legacy emit; subscribers must listen on ``team_*``.
-    _PROJECT_TO_TEAM_EVENT = {
-        "project_created": "team_created",
-        "project_updated": "team_updated",
-        "project_deleted": "team_deleted",
-        "project_archived": "team_archived",
-        "project_unarchived": "team_unarchived",
-    }
-
     def _emit_team_event(event_type: str, agent: str, data: dict) -> None:
-        """Emit a team lifecycle event on the bus under the canonical name.
+        """Emit a team lifecycle event (``team_*``) on the bus.
 
-        ``event_type`` accepts the pre-rename ``project_*`` literal for
-        caller convenience — the actual emit happens under the
-        ``team_*`` equivalent looked up via ``_PROJECT_TO_TEAM_EVENT``.
-        Payload augmented with ``team_id`` / ``team_name`` keys mirroring
-        ``project_id`` / ``name`` so subscribers reading either key see
-        the same shape.
+        Payload is augmented with a ``team_name`` key mirroring
+        ``team_id`` / ``name`` so subscribers get a uniform shape.
         """
         if event_bus is None:
             return
         payload = dict(data)
-        if "project_id" in payload and "team_id" not in payload:
-            payload["team_id"] = payload["project_id"]
-        name_value = payload.get("name") or payload.get("project_id")
+        name_value = payload.get("name") or payload.get("team_id")
         if name_value and "team_name" not in payload:
             payload["team_name"] = name_value
-        team_event = _PROJECT_TO_TEAM_EVENT.get(event_type, event_type)
         try:
-            event_bus.emit(team_event, agent=agent, data=payload)
+            event_bus.emit(event_type, agent=agent, data=payload)
         except Exception as e:
-            logger.debug("%s emit failed: %s", team_event, e)
+            logger.debug("%s emit failed: %s", event_type, e)
 
     def _emit_config_changed(scope: str, **extra: Any) -> None:
         """Emit a generic ``config_changed`` event for a System-tab panel.
@@ -1019,7 +997,7 @@ def create_dashboard_router(
         # "last seen". One query for the whole fleet.
         worked_map = cost_tracker.get_all_agents_last_worked()
 
-        agent_projects = cfg.get("_agent_projects", {})
+        agent_teams = cfg.get("_agent_teams", {})
 
         # One fan-out per fleet poll. Drives ``browser_running`` so the
         # frontend can tear down the iframe when an agent's browser
@@ -1060,7 +1038,7 @@ def create_dashboard_router(
                 "model": acfg.get("model", default_model),
                 "avatar": acfg.get("avatar", 1),
                 "color": acfg.get("color"),
-                "project": agent_projects.get(agent_id),
+                "team": agent_teams.get(agent_id),
             }
             if cron_scheduler is not None:
                 hb = cron_scheduler.find_heartbeat_job(agent_id)
@@ -1098,7 +1076,7 @@ def create_dashboard_router(
                     "model": acfg.get("model", default_model),
                     "avatar": acfg.get("avatar", 1),
                     "color": acfg.get("color"),
-                    "project": agent_projects.get(agent_id),
+                    "team": agent_teams.get(agent_id),
                 }
                 agents.append(entry)
 
@@ -2485,10 +2463,9 @@ def create_dashboard_router(
         avatar = body.get("avatar", 1)
         color = body.get("color")
         template = body.get("template", "").strip()
-        # Accept ``team`` (canonical) and fall back to ``project`` for
         # back-compat with pre-PR-3 clients. Either keyword maps to the
         # same per-agent membership write under config/teams/.
-        project = (body.get("team") or body.get("project") or "").strip()
+        team = (body.get("team") or "").strip()
 
         if not name:
             raise HTTPException(status_code=400, detail="name is required")
@@ -2608,17 +2585,17 @@ def create_dashboard_router(
                 hb_schedule = cfg.get("mesh", {}).get("heartbeat_schedule")
                 cron_scheduler.ensure_heartbeat(name, hb_schedule)
             ready = await runtime.wait_for_agent(name, timeout=60)
-            if project:
-                if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", project):
-                    logger.warning("Skipping invalid project name '%s' for agent '%s'", project, name)
-                    project = ""
+            if team:
+                if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", team):
+                    logger.warning("Skipping invalid team name '%s' for agent '%s'", team, name)
+                    team = ""
                 else:
-                    from src.cli.config import _add_agent_to_project
+                    from src.cli.config import _add_agent_to_team
                     try:
-                        _add_agent_to_project(project, name)
+                        _add_agent_to_team(team, name)
                     except ValueError:
-                        logger.warning("Project '%s' not found; agent '%s' created standalone", project, name)
-                        project = ""
+                        logger.warning("Team '%s' not found; agent '%s' created standalone", team, name)
+                        team = ""
             if event_bus is not None:
                 event_bus.emit("agent_state", agent=name,
                     data={"state": "added", "role": role, "ready": ready})
@@ -2626,8 +2603,7 @@ def create_dashboard_router(
                 "created": True,
                 "agent": name,
                 "ready": ready,
-                "team": project or None,
-                "project": project or None,  # legacy alias — drop next major
+                "team": team or None,
             }
         except HTTPException:
             raise
@@ -3784,17 +3760,17 @@ def create_dashboard_router(
         import asyncio
 
         targets = list(agent_registry.keys())
-        project = body.get("project") or ""
-        if not isinstance(project, str):
-            raise HTTPException(status_code=400, detail="project must be a string")
-        if project:
-            from src.cli.config import _load_projects
-            members = set(_load_projects().get(project, {}).get("members", []))
+        team = body.get("team") or ""
+        if not isinstance(team, str):
+            raise HTTPException(status_code=400, detail="team must be a string")
+        if team:
+            from src.cli.config import _load_teams
+            members = set(_load_teams().get(team, {}).get("members", []))
             targets = [a for a in targets if a in members]
         elif body.get("standalone"):
-            from src.cli.config import _load_projects
+            from src.cli.config import _load_teams
             assigned = set()
-            for pdata in _load_projects().values():
+            for pdata in _load_teams().values():
                 assigned.update(pdata.get("members", []))
             targets = [a for a in targets if a not in assigned]
         if not targets:
@@ -3841,17 +3817,17 @@ def create_dashboard_router(
         import asyncio
 
         agents = list(agent_registry.keys())
-        project = body.get("project") or ""
-        if not isinstance(project, str):
-            raise HTTPException(status_code=400, detail="project must be a string")
-        if project:
-            from src.cli.config import _load_projects
-            members = set(_load_projects().get(project, {}).get("members", []))
+        team = body.get("team") or ""
+        if not isinstance(team, str):
+            raise HTTPException(status_code=400, detail="team must be a string")
+        if team:
+            from src.cli.config import _load_teams
+            members = set(_load_teams().get(team, {}).get("members", []))
             agents = [a for a in agents if a in members]
         elif body.get("standalone"):
-            from src.cli.config import _load_projects
+            from src.cli.config import _load_teams
             assigned = set()
-            for pdata in _load_projects().values():
+            for pdata in _load_teams().values():
                 assigned.update(pdata.get("members", []))
             agents = [a for a in agents if a not in assigned]
         if not agents:
@@ -5332,7 +5308,7 @@ def create_dashboard_router(
     #
     # Operator-facing billing reconciliation. Returns the sum of CAPTCHA
     # solver spend across every agent inside the requested tenant
-    # (project), broken down per-agent + a rolled-up total row. CSV is
+    # (team), broken down per-agent + a rolled-up total row. CSV is
     # the lingua franca for finance/billing tooling — keep the schema
     # stable and the column names self-explanatory.
     #
@@ -5446,20 +5422,18 @@ def create_dashboard_router(
         )
 
     # ── Teams ─────────────────────────────────────────────────
-    # The legacy ``/api/projects/*`` mirror routes were removed in PR 3
-    # of the project→team rename. Underlying storage / config helpers
-    # still spell "projects" — that's a backend implementation detail
+    # Team CRUD routes. Storage lives under ``config/teams/``
     # left for a follow-up.
 
     @api_router.get("/api/teams")
     async def api_teams_list() -> dict:
         """List all teams with members."""
-        from src.cli.config import _load_projects
-        projects = _load_projects()
+        from src.cli.config import _load_teams
+        teams_cfg = _load_teams()
         result = []
-        sorted_projects = sorted(projects.items(), key=lambda x: x[1].get("created_at") or "")
-        for i, (pname, pdata) in enumerate(sorted_projects):
-            is_over = _projects_disabled or (_max_projects > 0 and i >= _max_projects)
+        sorted_teams = sorted(teams_cfg.items(), key=lambda x: x[1].get("created_at") or "")
+        for i, (pname, pdata) in enumerate(sorted_teams):
+            is_over = _teams_disabled or (_max_teams > 0 and i >= _max_teams)
             result.append({
                 "name": pname,
                 "team_name": pname,
@@ -5476,20 +5450,20 @@ def create_dashboard_router(
     @api_router.post("/api/teams")
     async def api_teams_create(request: Request) -> dict:
         """Create a new team."""
-        if _projects_disabled:
+        if _teams_disabled:
             raise HTTPException(
                 status_code=403,
                 detail="Teams are not available on your current plan. Upgrade to enable teams.",
             )
-        if _max_projects > 0:
-            from src.cli.config import _load_projects
-            current_count = len(_load_projects())
-            if current_count >= _max_projects:
+        if _max_teams > 0:
+            from src.cli.config import _load_teams
+            current_count = len(_load_teams())
+            if current_count >= _max_teams:
                 raise HTTPException(
                     status_code=403,
-                    detail=f"Team limit reached ({_max_projects}). Upgrade your plan for more teams.",
+                    detail=f"Team limit reached ({_max_teams}). Upgrade your plan for more teams.",
                 )
-        from src.cli.config import _create_project, _load_config
+        from src.cli.config import _create_team, _load_config
         body = await request.json()
         name = body.get("name", "").strip()
         description = sanitize_for_prompt(body.get("description", "")).strip()
@@ -5505,7 +5479,7 @@ def create_dashboard_router(
         if unknown:
             raise HTTPException(status_code=400, detail=f"Unknown agents: {', '.join(unknown)}")
         try:
-            _create_project(name, description=description, members=members)
+            _create_team(name, description=description, members=members)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         # Real-time cron lifecycle: schedule the daily work-summary
@@ -5516,8 +5490,8 @@ def create_dashboard_router(
         # initial-settings enhancement Just Works on both surfaces.
         if cron_scheduler is not None:
             try:
-                from src.cli.config import _load_projects as _load_projects_for_cron
-                persisted = _load_projects_for_cron().get(name) or {}
+                from src.cli.config import _load_teams as _load_teams_for_cron
+                persisted = _load_teams_for_cron().get(name) or {}
                 _custom_schedule = (
                     (persisted.get("settings") or {}).get("summary_schedule")
                 )
@@ -5531,9 +5505,9 @@ def create_dashboard_router(
                     name, e,
                 )
         _emit_team_event(
-            "project_created", agent="operator",
+            "team_created", agent="operator",
             data={
-                "project_id": name,
+                "team_id": name,
                 "name": name,
                 "description": description,
                 "members": list(members),
@@ -5544,9 +5518,9 @@ def create_dashboard_router(
     @api_router.delete("/api/teams/{team_name}")
     async def api_teams_delete(team_name: str) -> dict:
         """Delete a team and release its members."""
-        from src.cli.config import _delete_project
+        from src.cli.config import _delete_team
         try:
-            _delete_project(team_name)
+            _delete_team(team_name)
         except ValueError as e:
             raise HTTPException(status_code=404, detail=str(e))
         # Real-time cron lifecycle: drop the daily work-summary cron
@@ -5565,21 +5539,21 @@ def create_dashboard_router(
                     team_name, e,
                 )
         _emit_team_event(
-            "project_deleted", agent="operator",
-            data={"project_id": team_name, "name": team_name},
+            "team_deleted", agent="operator",
+            data={"team_id": team_name, "name": team_name},
         )
         return {"deleted": True, "name": team_name, "team_name": team_name}
 
     @api_router.post("/api/teams/{team_name}/members")
     async def api_teams_add_member(team_name: str, request: Request) -> dict:
         """Add a member agent to a team."""
-        from src.cli.config import _add_agent_to_project
+        from src.cli.config import _add_agent_to_team
         body = await request.json()
         agent = body.get("agent", "").strip()
         if not agent:
             raise HTTPException(status_code=400, detail="agent is required")
         try:
-            _add_agent_to_project(team_name, agent)
+            _add_agent_to_team(team_name, agent)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         # Auto-restart the agent so new scope takes effect
@@ -5591,9 +5565,9 @@ def create_dashboard_router(
             except Exception as e:
                 logger.warning("Failed to restart agent %s after team change: %s", agent, e)
         _emit_team_event(
-            "project_updated", agent="operator",
+            "team_updated", agent="operator",
             data={
-                "project_id": team_name,
+                "team_id": team_name,
                 "name": team_name,
                 "field": "members",
                 "added": agent,
@@ -5601,7 +5575,6 @@ def create_dashboard_router(
         )
         return {
             "added": True,
-            "project": team_name,
             "team_name": team_name,
             "agent": agent,
             "restarted": restarted,
@@ -5610,9 +5583,9 @@ def create_dashboard_router(
     @api_router.delete("/api/teams/{team_name}/members/{agent}")
     async def api_teams_remove_member(team_name: str, agent: str) -> dict:
         """Remove a member agent from a team."""
-        from src.cli.config import _remove_agent_from_project
+        from src.cli.config import _remove_agent_from_team
         try:
-            _remove_agent_from_project(team_name, agent)
+            _remove_agent_from_team(team_name, agent)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         # Auto-restart the agent so new scope takes effect
@@ -5624,9 +5597,9 @@ def create_dashboard_router(
             except Exception as e:
                 logger.warning("Failed to restart agent %s after team change: %s", agent, e)
         _emit_team_event(
-            "project_updated", agent="operator",
+            "team_updated", agent="operator",
             data={
-                "project_id": team_name,
+                "team_id": team_name,
                 "name": team_name,
                 "field": "members",
                 "removed": agent,
@@ -5634,22 +5607,21 @@ def create_dashboard_router(
         )
         return {
             "removed": True,
-            "project": team_name,
             "team_name": team_name,
             "agent": agent,
             "restarted": restarted,
         }
 
-    # ── Project PROJECT.md ─────────────────────────────────
+    # ── Team TEAM brief (team.md) ──────────────────────────
 
-    def _resolve_project_path(project: str) -> Path:
-        """Validate project name and return path to its project.md."""
-        from src.cli.config import PROJECTS_DIR, _validate_project_name
+    def _resolve_team_path(team: str) -> Path:
+        """Validate a team name and return the path to its team.md."""
+        from src.cli.config import TEAMS_DIR, _validate_team_name
         try:
-            _validate_project_name(project)
+            _validate_team_name(team)
         except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid project name")
-        return PROJECTS_DIR / project / "project.md"
+            raise HTTPException(status_code=400, detail="Invalid team name")
+        return TEAMS_DIR / team / "team.md"
 
     @api_router.get("/api/team")
     async def api_team_read(team: str = "") -> dict:
@@ -5658,15 +5630,14 @@ def create_dashboard_router(
             raise HTTPException(status_code=400, detail="team parameter is required")
         if runtime is None:
             raise HTTPException(status_code=503, detail="Runtime not available")
-        project_path = _resolve_project_path(team)
-        if not project_path.parent.exists():
+        team_path = _resolve_team_path(team)
+        if not team_path.parent.exists():
             raise HTTPException(status_code=404, detail=f"Team '{team}' not found")
-        exists = project_path.exists()
-        content = project_path.read_text(errors="replace")[:200_000] if exists else ""
+        exists = team_path.exists()
+        content = team_path.read_text(errors="replace")[:200_000] if exists else ""
         return {
             "content": content,
             "exists": exists,
-            "project": team,
             "team": team,
         }
 
@@ -5683,15 +5654,15 @@ def create_dashboard_router(
             raise HTTPException(status_code=400, detail="content must be a string")
         content = sanitize_for_prompt(content)
 
-        project_path = _resolve_project_path(team)
-        if not project_path.parent.exists():
+        team_path = _resolve_team_path(team)
+        if not team_path.parent.exists():
             raise HTTPException(status_code=404, detail=f"Team '{team}' not found")
-        project_path.write_text(content)
+        team_path.write_text(content)
 
         # Push to team members only
-        from src.cli.config import _load_projects
-        projects_data = _load_projects()
-        pdata = projects_data.get(team, {})
+        from src.cli.config import _load_teams
+        teams_data = _load_teams()
+        pdata = teams_data.get(team, {})
         members = set(pdata.get("members", []))
         push_targets = [a for a in agent_registry.keys() if a in members]
 
@@ -5716,17 +5687,17 @@ def create_dashboard_router(
                 push_results[aid] = ok
 
         _emit_team_event(
-            "project_updated", agent="operator",
+            "team_updated", agent="operator",
             data={
-                "project_id": team,
+                "team_id": team,
                 "name": team,
-                "field": "project_md",
+                "field": "team_md",
             },
         )
 
         return {
             "saved": True,
-            "size": project_path.stat().st_size,
+            "size": team_path.stat().st_size,
             "pushed": push_results,
         }
 
@@ -5761,21 +5732,21 @@ def create_dashboard_router(
         return result
 
     @api_router.get("/api/comms/activity")
-    async def api_comms_activity(limit: int = 100, project: str = "") -> dict:
+    async def api_comms_activity(limit: int = 100, team: str = "") -> dict:
         """Recent inter-agent communication: blackboard writes/deletes + pubsub events."""
 
         limit = max(1, min(limit, 500))
-        project_prefix = f"projects/{project}/" if project else ""
+        team_prefix = f"teams/{team}/" if team else ""
         activity: list[dict] = []
 
         # 1. Blackboard event_log (persisted in SQLite)
         try:
-            if project_prefix:
+            if team_prefix:
                 rows = blackboard.db.execute(
                     "SELECT event_type, key, agent_id, data, timestamp "
                     "FROM event_log WHERE key LIKE ? "
                     "ORDER BY id DESC LIMIT ?",
-                    (project_prefix + "%", limit),
+                    (team_prefix + "%", limit),
                 ).fetchall()
             else:
                 rows = blackboard.db.execute(
@@ -5803,12 +5774,12 @@ def create_dashboard_router(
         # 2. PubSub events (persisted in SQLite when db_path is set)
         if pubsub and getattr(pubsub, "_db", None) is not None:
             try:
-                if project_prefix:
+                if team_prefix:
                     rows = pubsub._db.execute(
                         "SELECT topic, data, created_at "
                         "FROM events WHERE topic LIKE ? "
                         "ORDER BY id DESC LIMIT ?",
-                        (project_prefix + "%", limit),
+                        (team_prefix + "%", limit),
                     ).fetchall()
                 else:
                     rows = pubsub._db.execute(
@@ -5839,7 +5810,7 @@ def create_dashboard_router(
         if pubsub:
             with pubsub._lock:
                 for t, agents in pubsub.subscriptions.items():
-                    if project_prefix and not t.startswith(project_prefix):
+                    if team_prefix and not t.startswith(team_prefix):
                         continue
                     subs[t] = list(agents)
 
@@ -6355,8 +6326,8 @@ def create_dashboard_router(
             "app_url": app_url,
             "plan_limits": {
                 "max_agents": _max_agents,
-                "max_projects": _max_projects,
-                "projects_enabled": not _projects_disabled,
+                "max_teams": _max_teams,
+                "teams_enabled": not _teams_disabled,
             },
         }
 
@@ -6923,7 +6894,7 @@ def create_dashboard_router(
     _STORAGE_DB_SUFFIXES = {".db", ".db-wal", ".db-shm"}
 
     def _scan_storage(root: Path) -> dict:
-        """Scan project root for storage breakdown (blocking I/O).
+        """Scan the repo root for storage breakdown (blocking I/O).
 
         Uses os.walk with dir pruning to avoid descending into source,
         git, and virtualenv directories.
@@ -7556,13 +7527,13 @@ def create_dashboard_router(
 
         Mirrors the agent-side reader (``AgentLoop._fetch_goals`` reads
         via ``mesh_client._scope_key``): team agents read
-        ``projects/{team}/goals/{agent_id}``, solo agents read the raw
+        ``teams/{team}/goals/{agent_id}``, solo agents read the raw
         ``goals/{agent_id}`` key.
         """
-        from src.cli.config import _load_projects
-        for pname, pdata in _load_projects().items():
+        from src.cli.config import _load_teams
+        for pname, pdata in _load_teams().items():
             if agent_id in pdata.get("members", []):
-                return f"projects/{pname}/goals/{agent_id}"
+                return f"teams/{pname}/goals/{agent_id}"
         return f"goals/{agent_id}"
 
     @api_router.get("/api/agents/{agent_id}/goals")
@@ -7832,7 +7803,7 @@ def create_dashboard_router(
 
     @api_router.get("/api/workplace/tasks")
     async def api_workplace_tasks(
-        project_id: str | None = None,
+        team_id: str | None = None,
         assignee: str | None = None,
         status: str | None = None,
     ) -> dict:
@@ -7845,10 +7816,10 @@ def create_dashboard_router(
         try:
             if assignee:
                 rows = tasks_store.list_inbox(
-                    assignee, project_id=project_id, include_terminal=True,
+                    assignee, team_id=team_id, include_terminal=True,
                 )
-            elif project_id:
-                rows = tasks_store.list_project(project_id)
+            elif team_id:
+                rows = tasks_store.list_team(team_id)
             else:
                 # Fleet-wide listing — operator-only data is acceptable
                 # because the dashboard is operator-authenticated.
@@ -7869,12 +7840,12 @@ def create_dashboard_router(
     @api_router.get("/api/workplace/teams")
     async def api_workplace_teams() -> dict:
         """Team status rollups for the Workplace > team-status tab."""
-        from src.cli.config import _load_projects
-        projects = _load_projects()
+        from src.cli.config import _load_teams
+        teams_cfg = _load_teams()
         result = []
-        for pname, pdata in projects.items():
+        for pname, pdata in teams_cfg.items():
             try:
-                rows = tasks_store.list_project(pname)
+                rows = tasks_store.list_team(pname)
             except Exception:
                 rows = []
             counts: dict[str, int] = {}

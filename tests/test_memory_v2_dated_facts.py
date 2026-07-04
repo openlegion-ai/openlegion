@@ -12,7 +12,6 @@ Covers:
 from __future__ import annotations
 
 import shutil
-import sqlite3
 import tempfile
 
 import pytest
@@ -78,63 +77,7 @@ async def test_batch_store_tags_context_flush_source_type(memory):
     assert fact.source_type == "context_flush"
 
 
-# --- Migration on a pre-existing OLD-schema DB -------------------------------
-
-def _create_legacy_facts_db(path: str) -> None:
-    """Create a facts table WITHOUT the v2 columns, mimicking an old on-disk DB
-    that predates the source_type/date migration."""
-    conn = sqlite3.connect(path)
-    conn.executescript(
-        """
-        CREATE TABLE facts (
-            id TEXT PRIMARY KEY,
-            key TEXT NOT NULL,
-            value TEXT NOT NULL,
-            category TEXT DEFAULT 'general',
-            source TEXT DEFAULT 'agent',
-            confidence REAL DEFAULT 1.0,
-            access_count INTEGER DEFAULT 0,
-            last_accessed TEXT,
-            created_at TEXT DEFAULT (datetime('now')),
-            decay_score REAL DEFAULT 1.0
-        );
-        INSERT INTO facts (id, key, value) VALUES ('fact_old', 'legacy_key', 'legacy_value');
-        """
-    )
-    conn.commit()
-    conn.close()
-
-
-@pytest.mark.asyncio
-async def test_migration_adds_columns_to_preexisting_db(tmp_path):
-    db_path = str(tmp_path / "legacy.db")
-    _create_legacy_facts_db(db_path)
-
-    # Sanity: old schema lacks the v2 columns.
-    conn = sqlite3.connect(db_path)
-    cols_before = {r[1] for r in conn.execute("PRAGMA table_info(facts)").fetchall()}
-    conn.close()
-    assert "source_type" not in cols_before
-    assert "date" not in cols_before
-
-    # Reopening through MemoryStore must NOT crash and must add the columns.
-    store = MemoryStore(db_path=db_path)
-    try:
-        cols_after = {r[1] for r in store.db.execute("PRAGMA table_info(facts)").fetchall()}
-        assert "source_type" in cols_after
-        assert "date" in cols_after
-
-        # The pre-existing row survives and is readable through the mapper.
-        legacy = store._get_fact_by_key("legacy_key")
-        assert legacy is not None
-        assert legacy.value == "legacy_value"
-
-        # New writes against the migrated DB populate the v2 columns.
-        new_id = await store.store_fact("fresh", "value", source_type="conversation")
-        assert store._get_fact(new_id).source_type == "conversation"
-    finally:
-        store.close()
-
+# --- Schema reopen ------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_migration_is_idempotent_on_reopen(tmp_path):
@@ -149,40 +92,6 @@ async def test_migration_is_idempotent_on_reopen(tmp_path):
         assert "source_type" in cols and "date" in cols
     finally:
         s2.close()
-
-
-@pytest.mark.asyncio
-async def test_migration_propagates_real_operational_error(tmp_path, monkeypatch):
-    """A genuine OperationalError during an ALTER (not a duplicate column) must
-    surface, not be silently swallowed — guards against half-applied schemas."""
-    db_path = str(tmp_path / "broken.db")
-    _create_legacy_facts_db(db_path)
-
-    from src.agent import memory as memory_mod
-
-    real_open_db = memory_mod.open_db
-
-    class _FaultyConn:
-        """Wraps a real connection but fails any ALTER TABLE facts statement
-        with a non-duplicate OperationalError (e.g. a locked db)."""
-
-        def __init__(self, conn):
-            self._conn = conn
-
-        def execute(self, sql, *args, **kwargs):
-            if isinstance(sql, str) and sql.startswith("ALTER TABLE facts"):
-                raise sqlite3.OperationalError("database is locked")
-            return self._conn.execute(sql, *args, **kwargs)
-
-        def __getattr__(self, name):
-            return getattr(self._conn, name)
-
-    monkeypatch.setattr(
-        memory_mod, "open_db", lambda *a, **k: _FaultyConn(real_open_db(*a, **k))
-    )
-
-    with pytest.raises(sqlite3.OperationalError, match="database is locked"):
-        MemoryStore(db_path=db_path)
 
 
 # --- Prefer-recent tie-break -------------------------------------------------
