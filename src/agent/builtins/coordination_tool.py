@@ -231,8 +231,8 @@ async def hand_off(
     artifact_ref: str | None = None
 
     # Validate target exists in the registry — fail closed if the roster
-    # is unreachable and we can't resolve the target's project scope.
-    target_project: str | None = None
+    # is unreachable and we can't resolve the target's team scope.
+    target_team: str | None = None
     target_is_global = False
     try:
         registry = await mesh_client.list_agents()
@@ -241,38 +241,38 @@ async def hand_off(
             return {"error": f"Agent '{to}' not found. Available: {available}"}
         target_info = registry.get(to, {})
         if isinstance(target_info, dict):
-            target_project = target_info.get("project")
+            target_team = target_info.get("team")
             target_is_global = target_info.get("scope") == "global"
     except Exception as e:
-        # Standalone senders need to resolve target project to write
+        # Standalone senders need to resolve the target team to write
         # the task into the correct scope.
         if not mesh_client.team_name:
             return {"error": f"Cannot hand off: fleet roster unavailable ({e})"}
         logger.debug("Fleet roster check failed, proceeding with validated ID: %s", e)
 
-    # Pick the project scope:
+    # Pick the team scope:
     #   - operator + any other fleet-global agent (``scope: "global"``
-    #     on the registry): project=None. Triggering on both the literal
+    #     on the registry): team=None. Triggering on both the literal
     #     reserved name AND the registry hint keeps the path correct
     #     when the roster lookup fails (no hint available) AND stays
     #     forward-compatible if other global agents are added later.
-    #   - cross-project worker handoffs: target's project
-    #   - same-project handoffs: caller's project
+    #   - cross-team worker handoffs: target's team
+    #   - same-team handoffs: caller's team
     if to == "operator" or target_is_global:
-        write_project = None
-    elif target_project:
-        write_project = target_project
+        write_team = None
+    elif target_team:
+        write_team = target_team
     else:
-        write_project = mesh_client.team_name
+        write_team = mesh_client.team_name
     # Round-4 forensic trace: if the registry doesn't surface a
-    # ``project`` key for the target (e.g. post-rename drift) we fall
-    # back to sender's team_name — log both inputs so the operator can
-    # see the resolution path on the next E2E.
+    # ``team`` key for the target we fall back to sender's team_name —
+    # log both inputs so the operator can see the resolution path on
+    # the next E2E.
     logger.info(
-        "hand_off scope resolution to=%s target_project=%r "
-        "target_is_global=%s sender_team=%r write_project=%r",
-        to, target_project, target_is_global,
-        mesh_client.team_name, write_project,
+        "hand_off scope resolution to=%s target_team=%r "
+        "target_is_global=%s sender_team=%r write_team=%r",
+        to, target_team, target_is_global,
+        mesh_client.team_name, write_team,
     )
 
     if data and data.strip():
@@ -309,7 +309,7 @@ async def hand_off(
         try:
             await mesh_client.write_blackboard(
                 artifact_ref, parsed_data, ttl=_HANDOFF_TTL,
-                project=write_project,
+                team=write_team,
                 global_scope=operator_bound,
             )
         except Exception as e:
@@ -365,7 +365,7 @@ async def hand_off(
             assignee=to,
             title=title or "(handoff)",
             description=description,
-            project=write_project,
+            team_id=write_team,
             priority=0,
             parent_task_id=parent_task_id,
             artifact_refs=[artifact_ref] if artifact_ref else None,
@@ -415,7 +415,7 @@ async def hand_off(
         "stored_team_id=%s",
         task_id, to,
         record.get("assignee"), record.get("creator"),
-        record.get("parent_task_id"), record.get("project_id"),
+        record.get("parent_task_id"), record.get("team_id"),
     )
 
     # Wake the target so they pick up the task immediately. The task

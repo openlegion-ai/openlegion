@@ -778,16 +778,16 @@ class TestREPLProjectCommand:
 
         ctx = _MockCtx(agent_urls={"bot1": "http://bot1:8400", "bot2": "http://bot2:8400"})
         ctx.cfg["agents"] = {"bot1": {"role": "a"}, "bot2": {"role": "b"}}
-        ctx.cfg["_agent_projects"] = {"bot1": "alpha"}
+        ctx.cfg["_agent_teams"] = {"bot1": "alpha"}
 
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
             repl = REPLSession(ctx)
         return repl, projects_dir
 
     def test_project_list(self, tmp_path, capsys):
         repl, projects_dir = self._make_repl(tmp_path)
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
-            repl._cmd_project("list")
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
+            repl._cmd_team("list")
         out = capsys.readouterr().out
         assert "alpha" in out
         assert "bot1" in out
@@ -795,25 +795,25 @@ class TestREPLProjectCommand:
 
     def test_project_use_and_clear(self, tmp_path, capsys):
         repl, projects_dir = self._make_repl(tmp_path)
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
-            repl._cmd_project("use alpha")
-        assert repl._active_project == "alpha"
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
+            repl._cmd_team("use alpha")
+        assert repl._active_team == "alpha"
 
-        repl._cmd_project("use none")
-        assert repl._active_project is None
+        repl._cmd_team("use none")
+        assert repl._active_team is None
 
     def test_project_use_unknown(self, tmp_path, capsys):
         repl, projects_dir = self._make_repl(tmp_path)
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
-            repl._cmd_project("use nonexistent")
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
+            repl._cmd_team("use nonexistent")
         out = capsys.readouterr().out
-        assert "Unknown project" in out
-        assert repl._active_project is None
+        assert "Unknown team" in out
+        assert repl._active_team is None
 
     def test_project_info(self, tmp_path, capsys):
         repl, projects_dir = self._make_repl(tmp_path)
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
-            repl._cmd_project("info alpha")
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
+            repl._cmd_team("info alpha")
         out = capsys.readouterr().out
         assert "alpha" in out
         assert "Alpha project" in out
@@ -828,44 +828,44 @@ class TestREPLBlackboardProjectScoping:
 
         bb = Blackboard(db_path=str(tmp_path / "bb.db"))
         ctx = _MockCtx(agent_urls={"bot1": "http://bot1:8400"}, blackboard=bb)
-        ctx.cfg["_agent_projects"] = {"bot1": "alpha"}
+        ctx.cfg["_agent_teams"] = {"bot1": "alpha"}
         repl = REPLSession(ctx)
         return repl, bb
 
     def test_set_and_get_with_project(self, tmp_path, capsys):
         repl, bb = self._make_repl_with_bb(tmp_path)
-        repl._active_project = "alpha"
+        repl._active_team = "alpha"
 
         repl._cmd_blackboard('set mykey {"val": 1}')
         out = capsys.readouterr().out
-        assert "projects/alpha/mykey" in out
+        assert "teams/alpha/mykey" in out
 
         repl._cmd_blackboard("get mykey")
         out = capsys.readouterr().out
-        assert "projects/alpha/mykey" in out
+        assert "teams/alpha/mykey" in out
         bb.close()
 
     def test_list_with_project_scoping(self, tmp_path, capsys):
         repl, bb = self._make_repl_with_bb(tmp_path)
-        bb.write("projects/alpha/ctx", {"v": 1}, written_by="test")
+        bb.write("teams/alpha/ctx", {"v": 1}, written_by="test")
         bb.write("global/other", {"v": 2}, written_by="test")
 
-        repl._active_project = "alpha"
+        repl._active_team = "alpha"
         repl._cmd_blackboard("list")
         out = capsys.readouterr().out
-        assert "projects/alpha/ctx" in out
+        assert "teams/alpha/ctx" in out
         assert "global/other" not in out
         bb.close()
 
     def test_list_bypass_with_all_flag(self, tmp_path, capsys):
         repl, bb = self._make_repl_with_bb(tmp_path)
-        bb.write("projects/alpha/ctx", {"v": 1}, written_by="test")
+        bb.write("teams/alpha/ctx", {"v": 1}, written_by="test")
         bb.write("global/other", {"v": 2}, written_by="test")
 
-        repl._active_project = "alpha"
+        repl._active_team = "alpha"
         repl._cmd_blackboard("list --all")
         out = capsys.readouterr().out
-        assert "projects/alpha/ctx" in out
+        assert "teams/alpha/ctx" in out
         assert "global/other" in out
         bb.close()
 
@@ -891,7 +891,7 @@ class TestJsonOutput:
             patch("src.cli.config.AGENTS_FILE", agents_file),
             patch("src.cli.config.PERMISSIONS_FILE", perms_file),
             patch("src.cli.config.PROJECT_ROOT", tmp_path),
-            patch("src.cli.config.PROJECTS_DIR", tmp_path / "projects"),
+            patch("src.cli.config.TEAMS_DIR", tmp_path / "projects"),
         ):
             runner = CliRunner()
             result = runner.invoke(cli, ["status", "--json"])
@@ -1032,7 +1032,7 @@ class TestStatusEnhanced:
             patch("src.cli.config.AGENTS_FILE", agents_file),
             patch("src.cli.config.PERMISSIONS_FILE", perms_file),
             patch("src.cli.config.PROJECT_ROOT", tmp_path),
-            patch("src.cli.config.PROJECTS_DIR", tmp_path / "projects"),
+            patch("src.cli.config.TEAMS_DIR", tmp_path / "projects"),
         ):
             runner = CliRunner()
             result = runner.invoke(cli, ["status", "--wide"])
@@ -1060,7 +1060,7 @@ class TestStatusEnhanced:
             patch("src.cli.config.AGENTS_FILE", agents_file),
             patch("src.cli.config.PERMISSIONS_FILE", perms_file),
             patch("src.cli.config.PROJECT_ROOT", tmp_path),
-            patch("src.cli.config.PROJECTS_DIR", tmp_path / "projects"),
+            patch("src.cli.config.TEAMS_DIR", tmp_path / "projects"),
         ):
             runner = CliRunner()
             result = runner.invoke(cli, ["status", "--json"])
@@ -1351,7 +1351,7 @@ class TestJsonGlobalFlag:
             patch("src.cli.config.AGENTS_FILE", agents_file),
             patch("src.cli.config.PERMISSIONS_FILE", perms_file),
             patch("src.cli.config.PROJECT_ROOT", tmp_path),
-            patch("src.cli.config.PROJECTS_DIR", tmp_path / "projects"),
+            patch("src.cli.config.TEAMS_DIR", tmp_path / "projects"),
         ):
             runner = CliRunner()
             result = runner.invoke(cli, ["--json", "status"])
@@ -1503,10 +1503,7 @@ class TestWorkplaceCLICommands:
             result = runner.invoke(cli, ["--json", "teams"])
         assert result.exit_code == 0
         payload = json.loads(result.output)
-        # JSON mode emits both keys for back-compat with downstream
-        # consumers that parse either name.
         assert payload["teams"][0]["name"] == "research"
-        assert payload["projects"][0]["name"] == "research"
 
     def test_team_command_shows_one(self):
         runner = CliRunner()
@@ -1532,7 +1529,7 @@ class TestWorkplaceCLICommands:
         runner = CliRunner()
         body = {"enabled": True, "tasks": [
             {"id": "task_abc", "status": "working", "assignee": "alpha",
-             "project_id": "research", "title": "dig"},
+             "team_id": "research", "title": "dig"},
         ]}
         with self._patched_get(body):
             result = runner.invoke(cli, ["tasks"])

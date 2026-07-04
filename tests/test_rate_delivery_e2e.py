@@ -97,7 +97,7 @@ async def test_rate_delivery_rework_spawns_linked_task_end_to_end(
     seed = tasks_store.create(
         creator="operator", assignee="analyst",
         title="research the legal angle",
-        project_id="research",
+        team_id="research",
         description="initial brief",
     )
     tasks_store.update_status(seed["id"], "working", actor="analyst")
@@ -154,7 +154,7 @@ async def test_rate_delivery_rework_spawns_linked_task_end_to_end(
     assert spawned is not None, "rework task not persisted"
     assert spawned["previous_task_id"] == seed["id"]
     assert spawned["assignee"] == "analyst"
-    assert spawned["project_id"] == "research"
+    assert spawned["team_id"] == "research"
     # Title prefix is the contract the dashboard's rework-card UI relies
     # on (see ``test_workplace_outcome.py::test_outcome_rework_spawns_linked_task``).
     assert spawned["title"].startswith("Rework: ")

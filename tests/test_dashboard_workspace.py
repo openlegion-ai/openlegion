@@ -413,12 +413,12 @@ class TestProjectProxy:
             yaml.dump({"name": name, "members": ["test_agent"]})
         )
         if with_md:
-            (proj_dir / "project.md").write_text("# My Project")
+            (proj_dir / "team.md").write_text("# My Project")
         return proj_dir
 
     @pytest.mark.asyncio
     async def test_read_project_requires_param(self):
-        """GET /api/project without project param returns 400."""
+        """GET /api/team without team param returns 400."""
         runtime = MagicMock()
         app = _make_dashboard_app(runtime=runtime)
         async with AsyncClient(
@@ -429,7 +429,7 @@ class TestProjectProxy:
 
     @pytest.mark.asyncio
     async def test_read_project_empty(self, tmp_project_dir):
-        """GET /api/project?project=X returns empty when project.md doesn't exist."""
+        """GET /api/team?team=X returns empty when team.md doesn't exist."""
         from unittest.mock import patch
         projects_dir = tmp_project_dir / "projects"
         self._setup_project(projects_dir)
@@ -438,7 +438,7 @@ class TestProjectProxy:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
         ) as client:
-            with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            with patch("src.cli.config.TEAMS_DIR", projects_dir):
                 resp = await client.get("/dashboard/api/team", params={"team": "testproj"})
             assert resp.status_code == 200
             data = resp.json()
@@ -447,7 +447,7 @@ class TestProjectProxy:
 
     @pytest.mark.asyncio
     async def test_read_project_with_content(self, tmp_project_dir):
-        """GET /api/project?project=X returns content from project.md."""
+        """GET /api/team?team=X returns content from team.md."""
         from unittest.mock import patch
         projects_dir = tmp_project_dir / "projects"
         self._setup_project(projects_dir, with_md=True)
@@ -456,7 +456,7 @@ class TestProjectProxy:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
         ) as client:
-            with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            with patch("src.cli.config.TEAMS_DIR", projects_dir):
                 resp = await client.get("/dashboard/api/team", params={"team": "testproj"})
             assert resp.status_code == 200
             data = resp.json()
@@ -465,7 +465,7 @@ class TestProjectProxy:
 
     @pytest.mark.asyncio
     async def test_read_project_no_runtime(self):
-        """GET /api/project?project=X returns 503 without runtime."""
+        """GET /api/team?team=X returns 503 without runtime."""
         app = _make_dashboard_app(runtime=None)
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
@@ -475,7 +475,7 @@ class TestProjectProxy:
 
     @pytest.mark.asyncio
     async def test_write_project_requires_param(self):
-        """PUT /api/project without project param returns 400."""
+        """PUT /api/team without team param returns 400."""
         runtime = MagicMock()
         app = _make_dashboard_app(runtime=runtime)
         async with AsyncClient(
@@ -490,7 +490,7 @@ class TestProjectProxy:
 
     @pytest.mark.asyncio
     async def test_write_project_saves_and_pushes(self, tmp_project_dir):
-        """PUT /api/project?project=X saves to project dir and pushes to members."""
+        """PUT /api/team?team=X saves to the team dir and pushes to members."""
         from unittest.mock import patch
         projects_dir = tmp_project_dir / "projects"
         proj_dir = self._setup_project(projects_dir)
@@ -503,7 +503,7 @@ class TestProjectProxy:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
         ) as client:
-            with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            with patch("src.cli.config.TEAMS_DIR", projects_dir):
                 resp = await client.put(
                     "/dashboard/api/team",
                     params={"team": "testproj"},
@@ -517,7 +517,7 @@ class TestProjectProxy:
             assert data["pushed"]["test_agent"] is True
 
             # Verify file was written to project dir
-            content = (proj_dir / "project.md").read_text()
+            content = (proj_dir / "team.md").read_text()
             assert "Updated Project" in content
 
             # Verify transport was called to push to member agent
@@ -529,7 +529,7 @@ class TestProjectProxy:
 
     @pytest.mark.asyncio
     async def test_write_project_no_runtime(self):
-        """PUT /api/project?project=X returns 503 without runtime."""
+        """PUT /api/team?team=X returns 503 without runtime."""
         app = _make_dashboard_app(runtime=None)
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
@@ -544,7 +544,7 @@ class TestProjectProxy:
 
     @pytest.mark.asyncio
     async def test_write_project_sanitizes_content(self, tmp_project_dir):
-        """PUT /api/project?project=X sanitizes invisible characters."""
+        """PUT /api/team?team=X sanitizes invisible characters."""
         from unittest.mock import patch
         projects_dir = tmp_project_dir / "projects"
         self._setup_project(projects_dir)
@@ -553,7 +553,7 @@ class TestProjectProxy:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
         ) as client:
-            with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            with patch("src.cli.config.TEAMS_DIR", projects_dir):
                 resp = await client.put(
                     "/dashboard/api/team",
                     params={"team": "testproj"},
@@ -562,7 +562,7 @@ class TestProjectProxy:
                 )
             assert resp.status_code == 200
             proj_dir = projects_dir / "testproj"
-            content = (proj_dir / "project.md").read_text()
+            content = (proj_dir / "team.md").read_text()
             assert "\u200B" not in content
             assert "\u202E" not in content
             assert "cleantexthere" in content

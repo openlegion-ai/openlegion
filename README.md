@@ -275,15 +275,12 @@ as a single FastAPI process.
 ### Blackboard (Shared State Store)
 
 SQLite-backed key-value store with versioning, TTL, and garbage collection.
-Team agents' blackboard access is automatically scoped to `projects/{name}/*` —
+Team agents' blackboard access is automatically scoped to `teams/{name}/*` —
 agents use natural keys (e.g. `tasks/research_abc123`) while the MeshClient
 transparently namespaces them under the team. Solo agents have no automatic
 team scoping; they can access only keys explicitly granted via ACL.
 
-The on-disk prefix is `projects/{name}/*` — that's a backend storage
-namespace, not a domain term, and renaming it is intentionally out of
-scope for the project→team rename (the change would invalidate every
-existing blackboard write).
+The on-disk prefix is `teams/{name}/*`.
 
 | Namespace | Purpose | Example |
 |-----------|---------|---------|
@@ -311,7 +308,7 @@ the next model in the chain retries the full request from the start.
 
 ### Permission Matrix
 
-Every inter-agent operation is checked against per-agent ACLs. The shape — agents call the blackboard with **natural keys** (e.g. `read_blackboard("tasks/foo")`) and `MeshClient` transparently namespaces them under the active team, so the patterns below are matched against the resolved key (`projects/myteam/tasks/foo`):
+Every inter-agent operation is checked against per-agent ACLs. The shape — agents call the blackboard with **natural keys** (e.g. `read_blackboard("tasks/foo")`) and `MeshClient` transparently namespaces them under the active team, so the patterns below are matched against the resolved key (`teams/myteam/tasks/foo`):
 
 ```json
 {
@@ -319,8 +316,8 @@ Every inter-agent operation is checked against per-agent ACLs. The shape — age
     "can_message": ["*"],
     "can_publish": ["research_complete"],
     "can_subscribe": ["new_lead"],
-    "blackboard_read": ["projects/myproject/*"],
-    "blackboard_write": ["projects/myproject/*"],
+    "blackboard_read": ["teams/myteam/*"],
+    "blackboard_write": ["teams/myteam/*"],
     "allowed_apis": ["llm", "brave_search"],
     "allowed_credentials": ["brightdata_*"],
     "browser_actions": null
@@ -332,7 +329,7 @@ Matching is **exact match (or `*`)** for `can_message`, `can_publish`, and `can_
 
 `browser_actions` semantics: `null` (default) = all known actions allowed; `["*"]` = explicit allow-all; specific list (e.g. `["browser_navigate", "browser_screenshot"]`) = narrow allowlist; `[]` = deny all browser use even when `can_use_browser` is true.
 
-Blackboard patterns use the `projects/{name}/*` namespace. When an agent joins a
+Blackboard patterns use the `teams/{name}/*` namespace. When an agent joins a
 team, it receives read/write access to that namespace. Solo agents have no
 automatic team scoping; they can access only keys explicitly granted via ACL.
 
@@ -413,8 +410,7 @@ structured output and optional blackboard promotions.
 ### Chat Mode (`POST /chat`)
 
 Accepts a user message. On the first message, loads bootstrap workspace files
-into the system prompt — TEAM.md (team members only; pre-rename `PROJECT.md`
-files are migrated to `TEAM.md` once at startup), SYSTEM.md, INSTRUCTIONS.md,
+into the system prompt — TEAM.md (team members only), SYSTEM.md, INSTRUCTIONS.md,
 SOUL.md, USER.md, MEMORY.md — injects
 a live Runtime Context
 block (permissions, budget, fleet, cron), and searches memory for relevant facts.
@@ -535,7 +531,7 @@ Layer 4: Learnings                ← Self-improvement through failure tracking
   │
 Layer 3: Workspace Files          ← Durable, human-readable storage
   │  Bootstrap files loaded into the first-message system prompt:
-  │    TEAM.md (team members only; pre-rename `PROJECT.md` migrated to `TEAM.md` at startup), SYSTEM.md, INSTRUCTIONS.md,
+  │    TEAM.md (team members only), SYSTEM.md, INSTRUCTIONS.md,
   │    SOUL.md, USER.md, MEMORY.md
   │  Other workspace files:
   │    HEARTBEAT.md             (autonomous monitoring rules)
@@ -708,8 +704,8 @@ openlegion [--verbose/-v] [--quiet/-q] [--json]
 ├── stop                                                   # Stop the runtime + agent containers
 ├── chat [name] [--port PORT]                              # Connect to a running agent
 ├── status [--port PORT] [--wide/-w] [--watch N] [--json]  # Show agent status
-├── teams [--port PORT] [--json]                           # List active teams (alias: ``projects``)
-├── team <team_id> [--port PORT] [--json]                  # Show one team (members, blockers, task counts) (alias: ``project``)
+├── teams [--port PORT] [--json]                           # List active teams
+├── team <team_id> [--port PORT] [--json]                  # Show one team (members, blockers, task counts)
 ├── tasks [--agent X] [--team Y] [--status S] [--port PORT] [--json]   # List durable task records
 ├── pending [--port PORT] [--json]                         # List pending actions awaiting confirmation
 ├── confirm <nonce> [--port PORT]                          # Confirm a pending action
@@ -744,7 +740,7 @@ openlegion [--verbose/-v] [--quiet/-q] [--json]
 /blackboard [list|get|set|del]       View/edit shared blackboard entries
 /queue                               Show agent task queue status
 /cron [list|del|pause|resume|run]    Manage cron jobs
-/project [list|use|info]              Manage multi-team namespaces
+/team [list|use|info]                 Manage multi-team namespaces
 /credential [add|list|remove]        Manage API credentials
 /traces [id]                         Show recent request traces
 /logs [--level LEVEL]                Show recent runtime logs
@@ -785,9 +781,7 @@ Templates are offered during first-run setup (via `openlegion start`):
 ### `TEAM.md` — Per-Team Context
 
 Each team has its own `TEAM.md` stored in
-`config/projects/{name}/team.md`. (The on-disk dir stays
-`config/projects/` during PR 2 of the project→team rename;
-the legacy filename `project.md` still resolves as a fallback.)
+`config/teams/{name}/team.md`.
 The file is mounted into team member agents' containers and loaded into
 their system prompts. Solo agents (not on a team) do not receive any
 TEAM.md.
@@ -1132,7 +1126,7 @@ config/
 ├── mesh.yaml                           # Framework settings
 ├── agents.yaml                         # Agent definitions (per-team)
 ├── permissions.json                    # Per-agent ACLs
-└── teams/                              # Multi-team namespaces (pre-rename ``config/projects/`` resolves via a startup-migrator symlink)
+└── teams/                              # Multi-team namespaces
 ```
 
 ---

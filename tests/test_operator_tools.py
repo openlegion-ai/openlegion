@@ -1702,7 +1702,7 @@ async def test_set_agent_goals_writes_scoped_key():
     """Team agent target → write under its project scope, no TTL."""
     from src.agent.builtins.operator_tools import set_agent_goals
 
-    mc = _goals_mesh_client({"researcher": {"project": "alpha"}})
+    mc = _goals_mesh_client({"researcher": {"team": "alpha"}})
     result = await set_agent_goals(
         "researcher", ["Find 10 qualified leads per week."], mesh_client=mc,
     )
@@ -1721,7 +1721,7 @@ async def test_set_agent_goals_writes_scoped_key():
     assert value["goals"] == ["Find 10 qualified leads per week."]
     assert value["set_by"] == "operator"
     assert "updated_at" in value
-    assert kwargs["project"] == "alpha"
+    assert kwargs["team"] == "alpha"
     # Goals persist until changed — no TTL on the write.
     assert kwargs.get("ttl") is None
     mc.delete_blackboard.assert_not_awaited()
@@ -1729,7 +1729,7 @@ async def test_set_agent_goals_writes_scoped_key():
 
 @pytest.mark.asyncio
 async def test_set_agent_goals_solo_agent_unscoped():
-    """Solo agent (no project in registry) → raw key, project=None."""
+    """Solo agent (no team in registry) → raw key, team=None."""
     from src.agent.builtins.operator_tools import set_agent_goals
 
     mc = _goals_mesh_client({"solo-bot": {}})
@@ -1739,7 +1739,7 @@ async def test_set_agent_goals_solo_agent_unscoped():
     assert result["set"] is True
     args, kwargs = mc.write_blackboard.call_args
     assert args[0] == "goals/solo-bot"
-    assert kwargs["project"] is None
+    assert kwargs["team"] is None
 
 
 @pytest.mark.asyncio
@@ -1747,11 +1747,11 @@ async def test_set_agent_goals_clear_deletes_key():
     """goals=[] clears via delete_blackboard with the same scoping."""
     from src.agent.builtins.operator_tools import set_agent_goals
 
-    mc = _goals_mesh_client({"researcher": {"project": "alpha"}})
+    mc = _goals_mesh_client({"researcher": {"team": "alpha"}})
     result = await set_agent_goals("researcher", [], mesh_client=mc)
     assert result == {"cleared": True, "agent_id": "researcher"}
     mc.delete_blackboard.assert_awaited_once_with(
-        "goals/researcher", project="alpha",
+        "goals/researcher", team="alpha",
     )
     mc.write_blackboard.assert_not_awaited()
 
@@ -1774,7 +1774,7 @@ async def test_set_agent_goals_caps_count_and_length():
     """Max 5 goals; each goal must be a non-empty string <=300 chars."""
     from src.agent.builtins.operator_tools import set_agent_goals
 
-    mc = _goals_mesh_client({"researcher": {"project": "alpha"}})
+    mc = _goals_mesh_client({"researcher": {"team": "alpha"}})
 
     result = await set_agent_goals(
         "researcher", [f"goal {i}" for i in range(6)], mesh_client=mc,
@@ -1801,7 +1801,7 @@ async def test_set_agent_goals_unknown_agent_lists_available():
     """Unknown target → error naming the available agents."""
     from src.agent.builtins.operator_tools import set_agent_goals
 
-    mc = _goals_mesh_client({"writer": {}, "scout": {"project": "alpha"}})
+    mc = _goals_mesh_client({"writer": {}, "scout": {"team": "alpha"}})
     result = await set_agent_goals("ghost", ["Do things."], mesh_client=mc)
     assert "error" in result
     assert "not found" in result["error"]
@@ -1816,7 +1816,7 @@ async def test_set_agent_goals_requires_operator(monkeypatch):
     from src.agent.builtins.operator_tools import set_agent_goals
 
     monkeypatch.delenv("ALLOWED_TOOLS", raising=False)
-    mc = _goals_mesh_client({"researcher": {"project": "alpha"}})
+    mc = _goals_mesh_client({"researcher": {"team": "alpha"}})
     result = await set_agent_goals("researcher", ["Goal."], mesh_client=mc)
     assert "error" in result
     mc.write_blackboard.assert_not_awaited()

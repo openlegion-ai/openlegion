@@ -130,7 +130,7 @@ async def generate_image(
         return {"error": f"Image generated but failed to save: {e}"}
 
     # Register as artifact on blackboard if possible
-    if workspace_manager and mesh_client.project_name:
+    if workspace_manager and mesh_client.team_name:
         try:
             await mesh_client.write_blackboard(
                 f"artifacts/{filename}",

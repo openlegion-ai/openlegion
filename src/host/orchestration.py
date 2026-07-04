@@ -1,21 +1,17 @@
 """Durable orchestration task records.
 
-Replaces the legacy blackboard-dict handoff format
-(``tasks/{agent_id}/{handoff_id}`` and ``global/tasks/operator/{handoff_id}``)
-with a typed SQLite table. ``coordination_tool`` reads/writes here for
-all of hand_off / check_inbox / update_status / complete_task. The
-legacy blackboard path was sunset after the v2 rollout — see
-``orchestration_migration.py`` for the one-shot data conversion that
-runs at mesh startup.
+A typed SQLite table backing the coordination verbs —
+``coordination_tool`` reads/writes here for all of hand_off /
+check_inbox / update_status / complete_task.
 
 Schema mirrors the Blackboard pattern in ``src/host/mesh.py`` and
 ``src/host/pending_actions.py``: SQLite WAL, ``busy_timeout=30000``,
-schema migration via ``executescript()``.
+one canonical schema created via ``executescript()``.
 
 The storage layer enforces status transition validity (so direct callers
 cannot corrupt state) and bounds the table by stamping
 ``retention_until`` on terminal transitions (default 90 days). Reaping
-is opportunistic — callers (typically the inbox / project list endpoints)
+is opportunistic — callers (typically the inbox / team list endpoints)
 invoke ``reap_expired`` on their hot path so no separate scheduler is
 needed at this slice.
 
@@ -125,7 +121,7 @@ _VALID_TRANSITIONS: dict[str, frozenset[str]] = {
 }
 
 # Default retention window for terminal rows. Operators can raise / lower
-# this per-project later (see plan Task 6 §3); this slice ships the
+# this per-team later (see plan Task 6 §3); this slice ships the
 # fleet default only.
 DEFAULT_RETENTION_SECONDS: int = 90 * 24 * 60 * 60  # 90 days
 
@@ -240,17 +236,6 @@ class Tasks:
         # tests don't trip ``database is locked`` on the shared
         # connection.
         self._mem_lock = threading.Lock()
-        # Active name of the team-membership column on the ``tasks``
-        # table. PR 2 created the column as ``project_id``; PR 3
-        # renames it to ``team_id`` via :mod:`src.host.team_migration`
-        # at startup (now default-on). When the rename hasn't run yet
-        # (e.g. a customer with ``OPENLEGION_TEAM_MIGRATION_RENAME_DB=0``,
-        # or a stale DB picked up before the migration fired) this
-        # attribute drops back to ``project_id`` so existing reads
-        # / writes keep working. SQL string builders below splice
-        # ``self._team_col`` into the query — never hard-code the
-        # column name.
-        self._team_col = "team_id"
         self._init_schema()
 
     def set_event_bus(self, bus) -> None:
@@ -299,11 +284,10 @@ class Tasks:
     def _init_schema(self) -> None:
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True) if self.db_path != ":memory:" else None
         with self._conn() as conn:
-            # Fresh schemas land with ``team_id`` (post-rename name). The
-            # ``CREATE TABLE IF NOT EXISTS`` is a no-op on pre-rename
-            # databases that still have ``project_id`` — the actual
-            # column-name resolution happens below via the PRAGMA
-            # introspection step.
+            # Canonical schema v1 (``PRAGMA user_version = 1``). There is
+            # exactly one shape — no lazy ALTER chains, no legacy column
+            # detection. A database created by any earlier scheme is not
+            # supported (pre-release: no users, no data to migrate).
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS tasks (
                     id TEXT PRIMARY KEY,
@@ -324,7 +308,23 @@ class Tasks:
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
                     completed_at REAL,
-                    retention_until REAL
+                    retention_until REAL,
+                    outcome TEXT,
+                    feedback_text TEXT,
+                    previous_task_id TEXT,
+                    result_summary TEXT,
+                    -- Per-task reasoning depth ("off"/"low"/"medium"/"high",
+                    -- NULL = use the assignee's configured default).
+                    thinking TEXT,
+                    -- Per-turn correlation id (``tr_<hex12>``) that minted
+                    -- this task, so a session can be reconstructed by
+                    -- JOINing tasks / usage / traces on one key. Nullable:
+                    -- paths with no active trace keep NULL.
+                    trace_id TEXT,
+                    -- When set_outcome was called, separately from
+                    -- completed_at, so count_outcomes_since doesn't
+                    -- undercount lagged operator reviews.
+                    outcome_set_at REAL
                 );
                 CREATE INDEX IF NOT EXISTS idx_tasks_assignee_status
                     ON tasks (assignee, status);
@@ -334,6 +334,16 @@ class Tasks:
                     ON tasks (retention_until);
                 CREATE INDEX IF NOT EXISTS idx_tasks_parent_task_id
                     ON tasks (parent_task_id);
+                CREATE INDEX IF NOT EXISTS idx_tasks_team_status
+                    ON tasks (team_id, status);
+                CREATE INDEX IF NOT EXISTS idx_tasks_previous_task
+                    ON tasks (previous_task_id);
+                -- Partial index: most rows have outcome IS NULL (work isn't
+                -- rated yet), so the predicate keeps the index small for
+                -- the heartbeat's per-outcome scan.
+                CREATE INDEX IF NOT EXISTS idx_tasks_outcome_set_at
+                    ON tasks (outcome, outcome_set_at)
+                    WHERE outcome IS NOT NULL;
 
                 CREATE TABLE IF NOT EXISTS task_events (
                     event_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -358,116 +368,8 @@ class Tasks:
                     notified_at REAL NOT NULL
                 );
 
+                PRAGMA user_version = 1;
             """)
-            # Resolve the active column name. ``team_id`` is canonical;
-            # ``project_id`` is the pre-rename column kept readable so
-            # downgrades / opted-out instances still work. The composite
-            # status index is rebuilt against whichever column is live.
-            existing_cols = {
-                row[1]
-                for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
-            }
-            if "team_id" in existing_cols:
-                self._team_col = "team_id"
-                conn.execute("DROP INDEX IF EXISTS idx_tasks_project_status")
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_tasks_team_status "
-                    "ON tasks (team_id, status)"
-                )
-            elif "project_id" in existing_cols:
-                self._team_col = "project_id"
-                conn.execute(
-                    "CREATE INDEX IF NOT EXISTS idx_tasks_project_status "
-                    "ON tasks (project_id, status)"
-                )
-            else:  # pragma: no cover — defensive: schema in a broken state
-                self._team_col = "team_id"
-            # Task 9 PR 4 — outcome capture migration. Existing
-            # databases predate the outcome / feedback columns; ALTER
-            # TABLE ... ADD COLUMN is a metadata-only op in SQLite so
-            # this is fast on populated DBs and safe to re-run after
-            # the column already exists (we filter known names below).
-            existing = {
-                row[1]
-                for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
-            }
-            outcome_columns = (
-                ("outcome", "TEXT"),
-                ("feedback_text", "TEXT"),
-                ("previous_task_id", "TEXT"),
-                ("result_summary", "TEXT"),
-                # B4 — per-task reasoning depth ("off"/"low"/"medium"/
-                # "high", NULL = use the assignee's configured default).
-                ("thinking", "TEXT"),
-                # Session observability (Phase 1) — the per-turn
-                # correlation id (``tr_<hex12>``) that minted this task so
-                # a session can be reconstructed by JOINing tasks / usage /
-                # traces on one key instead of timestamp archaeology.
-                # Nullable: pre-existing rows and paths with no active
-                # trace keep NULL.
-                ("trace_id", "TEXT"),
-            )
-            for col_name, col_type in outcome_columns:
-                if col_name not in existing:
-                    conn.execute(
-                        f"ALTER TABLE tasks ADD COLUMN {col_name} {col_type}"
-                    )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_tasks_previous_task "
-                "ON tasks (previous_task_id)"
-            )
-            # PR-U — outcome_set_at column. Tracks when set_outcome was
-            # called, separately from completed_at, so the heartbeat
-            # query (count_outcomes_since) doesn't undercount lagged
-            # operator reviews. See _ensure_outcome_set_at_column for
-            # migration / backfill semantics.
-            self._ensure_outcome_set_at_column(conn)
-            # Partial index on (outcome, outcome_set_at). Most rows have
-            # outcome IS NULL (work isn't rated yet), so the partial
-            # predicate keeps the index small and fast for the
-            # heartbeat's per-outcome scan.
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_tasks_outcome_set_at "
-                "ON tasks (outcome, outcome_set_at) "
-                "WHERE outcome IS NOT NULL"
-            )
-
-    @staticmethod
-    def _ensure_outcome_set_at_column(conn: sqlite3.Connection) -> None:
-        """PR-U: add outcome_set_at column if missing. Idempotent.
-
-        Both the ALTER and the backfill UPDATE are safe to run repeatedly:
-        the ALTER is gated by PRAGMA inspection (with a duplicate-column
-        catch for concurrent-init races, mirroring the pattern in
-        ``mesh.py``); the UPDATE is WHERE-guarded so already-stamped rows
-        are no-ops. This shape recovers from a mid-init crash where the
-        ALTER committed but the backfill did not — re-init still walks
-        the backfill UPDATE instead of short-circuiting on the column
-        being present. Rows with both ``outcome`` and ``completed_at``
-        NULL are left alone (anomalous; better to not invent data).
-        """
-        cols = {
-            row[1]
-            for row in conn.execute("PRAGMA table_info(tasks)").fetchall()
-        }
-        if "outcome_set_at" not in cols:
-            try:
-                conn.execute(
-                    "ALTER TABLE tasks ADD COLUMN outcome_set_at REAL"
-                )
-            except sqlite3.OperationalError as e:
-                if "duplicate column" not in str(e).lower():
-                    raise
-                # Another process won the race; column exists — proceed
-                # to backfill.
-        # Always run backfill — WHERE clause makes it idempotent on
-        # already-stamped rows. Recovers from prior partial migrations
-        # (ALTER committed, UPDATE didn't) on a subsequent re-init.
-        conn.execute(
-            "UPDATE tasks SET outcome_set_at = completed_at "
-            "WHERE outcome IS NOT NULL AND outcome_set_at IS NULL "
-            "AND completed_at IS NOT NULL"
-        )
 
     # ── Helpers ─────────────────────────────────────────────────
 
@@ -690,7 +592,7 @@ class Tasks:
         """Map a SELECT-* row to a public-facing task dict."""
         return {
             "id": row[0],
-            "project_id": row[1],
+            "team_id": row[1],
             "parent_task_id": row[2],
             "title": row[3],
             "description": row[4],
@@ -723,22 +625,14 @@ class Tasks:
             "trace_id": row[25],
         }
 
-    # ``{team_col}`` is filled in at query time from ``self._team_col``
-    # (``team_id`` post-rename, ``project_id`` on pre-rename DBs). The
-    # public dict key from :meth:`_row_to_dict` stays ``"project_id"``
-    # for API back-compat — callers and tests still read that key.
-    _SELECT_COLS_TEMPLATE = (
-        "id, {team_col}, parent_task_id, title, description, creator, "
+    _SELECT_COLS = (
+        "id, team_id, parent_task_id, title, description, creator, "
         "assignee, status, priority, dependencies_json, artifact_refs_json, "
         "blocker_note, origin_kind, origin_channel, origin_user, "
         "created_at, updated_at, completed_at, retention_until, "
         "outcome, feedback_text, previous_task_id, outcome_set_at, "
         "result_summary, thinking, trace_id"
     )
-
-    @property
-    def _SELECT_COLS(self) -> str:
-        return self._SELECT_COLS_TEMPLATE.format(team_col=self._team_col)
 
     def _assert_stored_matches(
         self, record: dict, *, expected: dict, context: str,
@@ -799,7 +693,7 @@ class Tasks:
         assignee: str,
         title: str,
         description: str | None = None,
-        project_id: str | None = None,
+        team_id: str | None = None,
         parent_task_id: str | None = None,
         priority: int = 0,
         dependencies: list[str] | None = None,
@@ -885,16 +779,16 @@ class Tasks:
 
         with self._conn() as conn:
             conn.execute(
-                f"INSERT INTO tasks "
-                f"(id, {self._team_col}, parent_task_id, title, description, "
-                f"creator, assignee, status, priority, dependencies_json, "
-                f"artifact_refs_json, blocker_note, origin_kind, "
-                f"origin_channel, origin_user, created_at, updated_at, "
-                f"completed_at, retention_until, thinking, trace_id) "
-                f"VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, NULL, "
-                f"?, ?, ?, ?, ?, NULL, NULL, ?, ?)",
+                "INSERT INTO tasks "
+                "(id, team_id, parent_task_id, title, description, "
+                "creator, assignee, status, priority, dependencies_json, "
+                "artifact_refs_json, blocker_note, origin_kind, "
+                "origin_channel, origin_user, created_at, updated_at, "
+                "completed_at, retention_until, thinking, trace_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, NULL, "
+                "?, ?, ?, ?, ?, NULL, NULL, ?, ?)",
                 (
-                    tid, project_id, parent_task_id, title, description,
+                    tid, team_id, parent_task_id, title, description,
                     creator, assignee, priority,
                     json.dumps(dependencies) if dependencies else None,
                     json.dumps(artifact_refs) if artifact_refs else None,
@@ -907,7 +801,7 @@ class Tasks:
                 {
                     "title": title,
                     "assignee": assignee,
-                    "project_id": project_id,
+                    "team_id": team_id,
                 },
             )
         # Task 9 — surface to the dashboard. Compact payload (title, no
@@ -917,7 +811,7 @@ class Tasks:
             agent=creator,
             data={
                 "task_id": tid,
-                "project_id": project_id,
+                "team_id": team_id,
                 "creator": creator,
                 "assignee": assignee,
                 "title": title,
@@ -948,7 +842,7 @@ class Tasks:
             expected={
                 "assignee": assignee,
                 "creator": creator,
-                "project_id": project_id,
+                "team_id": team_id,
                 "parent_task_id": parent_task_id,
                 "status": "pending",
             },
@@ -962,7 +856,7 @@ class Tasks:
             "tasks.create stored task=%s creator=%s assignee=%s "
             "team_id=%s parent_task_id=%s status=%s title=%r",
             tid, creator, assignee,
-            record.get("project_id"), parent_task_id,
+            record.get("team_id"), parent_task_id,
             record.get("status"), (title or "")[:80],
         )
         return record
@@ -1049,21 +943,21 @@ class Tasks:
         self,
         assignee: str,
         *,
-        project_id: str | None = None,
+        team_id: str | None = None,
         include_terminal: bool = False,
     ) -> list[dict]:
         """List tasks assigned to ``assignee``.
 
         By default, terminal tasks (done / failed / cancelled) are excluded
         — matches the blackboard ``check_inbox`` semantics. Pass
-        ``include_terminal=True`` to see history. ``project_id`` further
-        narrows to a single project.
+        ``include_terminal=True`` to see history. ``team_id`` further
+        narrows to a single team.
         """
         clauses = ["assignee = ?"]
         params: list[Any] = [assignee]
-        if project_id is not None:
-            clauses.append(f"{self._team_col} = ?")
-            params.append(project_id)
+        if team_id is not None:
+            clauses.append("team_id = ?")
+            params.append(team_id)
         if not include_terminal:
             placeholders = ",".join("?" * len(TERMINAL_STATUSES))
             clauses.append(f"status NOT IN ({placeholders})")
@@ -1082,22 +976,21 @@ class Tasks:
         # bisect: if create stored ``assignee=X`` and list_inbox queries
         # ``assignee=Y`` the mismatch falls out instantly.
         logger.info(
-            "tasks.list_inbox assignee=%r project_id=%r "
-            "include_terminal=%s rows=%d team_col=%s",
-            assignee, project_id, include_terminal,
-            len(result), self._team_col,
+            "tasks.list_inbox assignee=%r team_id=%r "
+            "include_terminal=%s rows=%d",
+            assignee, team_id, include_terminal, len(result),
         )
         return result
 
-    def list_project(
+    def list_team(
         self,
-        project_id: str,
+        team_id: str,
         *,
         statuses: list[str] | None = None,
     ) -> list[dict]:
-        """List tasks in a project. Optional ``statuses`` filter."""
-        clauses = [f"{self._team_col} = ?"]
-        params: list[Any] = [project_id]
+        """List tasks in a team. Optional ``statuses`` filter."""
+        clauses = ["team_id = ?"]
+        params: list[Any] = [team_id]
         if statuses:
             invalid = [s for s in statuses if s not in VALID_STATUSES]
             if invalid:
@@ -1163,10 +1056,10 @@ class Tasks:
         cutoff = time.time() - since_seconds
         with self._conn() as conn:
             rows = conn.execute(
-                f"SELECT outcome, COUNT(*) FROM tasks "
-                f"WHERE {self._team_col} = ? AND outcome IS NOT NULL "
-                f"AND outcome_set_at IS NOT NULL AND outcome_set_at >= ? "
-                f"GROUP BY outcome",
+                "SELECT outcome, COUNT(*) FROM tasks "
+                "WHERE team_id = ? AND outcome IS NOT NULL "
+                "AND outcome_set_at IS NOT NULL AND outcome_set_at >= ? "
+                "GROUP BY outcome",
                 (team_id, cutoff),
             ).fetchall()
         return {row[0]: int(row[1] or 0) for row in rows if row[0]}
@@ -1518,16 +1411,16 @@ class Tasks:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 row = conn.execute(
-                    f"SELECT status, {self._team_col}, assignee, title, "
-                    f"outcome, parent_task_id "
-                    f"FROM tasks WHERE id=?",
+                    "SELECT status, team_id, assignee, title, "
+                    "outcome, parent_task_id "
+                    "FROM tasks WHERE id=?",
                     (task_id,),
                 ).fetchone()
                 if not row:
                     conn.execute("ROLLBACK")
                     raise TaskNotFound(task_id)
                 (
-                    current, project_id, assignee, task_title, task_outcome,
+                    current, team_id, assignee, task_title, task_outcome,
                     task_parent_id,
                 ) = (
                     row[0], row[1], row[2], row[3], row[4], row[5],
@@ -1622,13 +1515,13 @@ class Tasks:
                             "task_id": task_id,
                             "agent_id": assignee,
                             "parent_task_id": task_parent_id,
-                            "project": project_id,
+                            "team_id": team_id,
                             "title": task_title,
                             "ts": datetime.now(timezone.utc).isoformat(),
                         }
                 conn.execute("COMMIT")
                 emitted_change = (
-                    current, status, project_id, assignee,
+                    current, status, team_id, assignee,
                     task_title, task_outcome,
                 )
             except (TaskNotFound, InvalidStatusTransition):
@@ -1638,12 +1531,12 @@ class Tasks:
                 raise
         if emitted_change is not None:
             (
-                old_status, new_status, project_id, assignee,
+                old_status, new_status, team_id, assignee,
                 task_title, task_outcome,
             ) = emitted_change
             payload: dict = {
                 "task_id": task_id,
-                "project_id": project_id,
+                "team_id": team_id,
                 "assignee": assignee,
                 "old_status": old_status,
                 "new_status": new_status,
@@ -1716,15 +1609,15 @@ class Tasks:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 row = conn.execute(
-                    f"SELECT assignee, status, {self._team_col}, title, outcome "
-                    f"FROM tasks WHERE id=?",
+                    "SELECT assignee, status, team_id, title, outcome "
+                    "FROM tasks WHERE id=?",
                     (task_id,),
                 ).fetchone()
                 if not row:
                     conn.execute("ROLLBACK")
                     raise TaskNotFound(task_id)
                 (
-                    old_assignee, current_status, project_id,
+                    old_assignee, current_status, team_id,
                     task_title, task_outcome,
                 ) = row
                 if current_status in TERMINAL_STATUSES:
@@ -1741,14 +1634,14 @@ class Tasks:
                     {"from": old_assignee, "to": new_assignee, "reason": reason},
                 )
                 conn.execute("COMMIT")
-                emitted = (current_status, project_id, task_title, task_outcome)
+                emitted = (current_status, team_id, task_title, task_outcome)
             except (TaskNotFound, InvalidStatusTransition):
                 raise
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
         if emitted is not None:
-            current_status, project_id, task_title, task_outcome = emitted
+            current_status, team_id, task_title, task_outcome = emitted
             # Reroute is a status_changed event with old==new status; the
             # assignee field carries the *new* assignee so the dashboard
             # sees who picked up the work. The audit row already records
@@ -1762,7 +1655,7 @@ class Tasks:
                 agent=actor,
                 data={
                     "task_id": task_id,
-                    "project_id": project_id,
+                    "team_id": team_id,
                     "assignee": new_assignee,
                     "old_status": current_status,
                     "new_status": current_status,
@@ -1804,20 +1697,20 @@ class Tasks:
         # Captured outside the txn so the EventBus emit (which can hop
         # across the asyncio loop) doesn't run while we hold BEGIN
         # IMMEDIATE — same pattern as ``update_status`` above.
-        emitted_project: str | None = None
+        emitted_team: str | None = None
         emitted_committed = False
         with self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 row = conn.execute(
-                    f"SELECT artifact_refs_json, {self._team_col} FROM tasks WHERE id=?",
+                    "SELECT artifact_refs_json, team_id FROM tasks WHERE id=?",
                     (task_id,),
                 ).fetchone()
                 if not row:
                     conn.execute("ROLLBACK")
                     raise TaskNotFound(task_id)
                 refs = json.loads(row[0]) if row[0] else []
-                emitted_project = row[1]
+                emitted_team = row[1]
                 if ref not in refs:
                     refs.append(ref)
                 conn.execute(
@@ -1843,7 +1736,7 @@ class Tasks:
                 agent=actor,
                 data={
                     "task_id": task_id,
-                    "project_id": emitted_project,
+                    "team_id": emitted_team,
                     "ref": ref,
                     "actor": actor,
                 },
@@ -1894,14 +1787,14 @@ class Tasks:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 row = conn.execute(
-                    f"SELECT status, outcome, {self._team_col}, assignee "
-                    f"FROM tasks WHERE id=?",
+                    "SELECT status, outcome, team_id, assignee "
+                    "FROM tasks WHERE id=?",
                     (task_id,),
                 ).fetchone()
                 if not row:
                     conn.execute("ROLLBACK")
                     raise TaskNotFound(task_id)
-                current_status, current_outcome, project_id, assignee = row
+                current_status, current_outcome, team_id, assignee = row
                 if current_status not in TERMINAL_STATUSES:
                     conn.execute("ROLLBACK")
                     raise InvalidStatusTransition(
@@ -1930,20 +1823,20 @@ class Tasks:
                     },
                 )
                 conn.execute("COMMIT")
-                emitted = (current_status, project_id, assignee, current_outcome)
+                emitted = (current_status, team_id, assignee, current_outcome)
             except (TaskNotFound, InvalidStatusTransition):
                 raise
             except Exception:
                 conn.execute("ROLLBACK")
                 raise
         if emitted is not None:
-            current_status, project_id, assignee, previous_outcome = emitted
+            current_status, team_id, assignee, previous_outcome = emitted
             self._safe_emit(
                 "task_outcome",
                 agent=actor,
                 data={
                     "task_id": task_id,
-                    "project_id": project_id,
+                    "team_id": team_id,
                     "assignee": assignee,
                     "status": current_status,
                     "outcome": outcome,
@@ -1964,7 +1857,7 @@ class Tasks:
     ) -> dict:
         """Spawn a new task from a "needs rework" outcome.
 
-        Inherits ``assignee`` and ``project_id`` from ``previous_task_id``
+        Inherits ``assignee`` and ``team_id`` from ``previous_task_id``
         so the same agent picks up the redo. The new task's title is
         ``"Rework: {previous_title}"`` and its description (the brief
         the agent reads) is the operator's feedback followed by an
@@ -2006,18 +1899,18 @@ class Tasks:
         inherited_trace_id = previous.get("trace_id")
         with self._conn() as conn:
             conn.execute(
-                f"INSERT INTO tasks "
-                f"(id, {self._team_col}, parent_task_id, title, description, "
-                f"creator, assignee, status, priority, dependencies_json, "
-                f"artifact_refs_json, blocker_note, origin_kind, "
-                f"origin_channel, origin_user, created_at, updated_at, "
-                f"completed_at, retention_until, outcome, feedback_text, "
-                f"previous_task_id, trace_id) "
-                f"VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, "
-                f"NULL, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?)",
+                "INSERT INTO tasks "
+                "(id, team_id, parent_task_id, title, description, "
+                "creator, assignee, status, priority, dependencies_json, "
+                "artifact_refs_json, blocker_note, origin_kind, "
+                "origin_channel, origin_user, created_at, updated_at, "
+                "completed_at, retention_until, outcome, feedback_text, "
+                "previous_task_id, trace_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, "
+                "NULL, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?)",
                 (
                     new_id,
-                    previous.get("project_id"),
+                    previous.get("team_id"),
                     previous.get("parent_task_id"),
                     new_title,
                     new_description,
@@ -2037,7 +1930,7 @@ class Tasks:
                 {
                     "title": new_title,
                     "assignee": previous["assignee"],
-                    "project_id": previous.get("project_id"),
+                    "team_id": previous.get("team_id"),
                     "previous_task_id": previous_task_id,
                     "kind": "rework",
                 },
@@ -2049,7 +1942,7 @@ class Tasks:
             agent=actor,
             data={
                 "task_id": new_id,
-                "project_id": previous.get("project_id"),
+                "team_id": previous.get("team_id"),
                 "creator": actor,
                 "assignee": previous["assignee"],
                 "title": new_title,
@@ -2072,7 +1965,7 @@ class Tasks:
             expected={
                 "assignee": previous["assignee"],
                 "creator": actor,
-                "project_id": previous.get("project_id"),
+                "team_id": previous.get("team_id"),
                 "parent_task_id": previous.get("parent_task_id"),
                 "status": "pending",
             },

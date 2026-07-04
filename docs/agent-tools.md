@@ -82,7 +82,7 @@ An OS-level device profile is selected by `BROWSER_DEVICE_PROFILE` (`desktop-win
 | Tool | Parameters | Description |
 |------|-----------|-------------|
 | `list_agents` | -- | Discover agents on your team (solo agents see only themselves) |
-| `read_blackboard` | `key` | Read from the team-scoped blackboard. Keys are auto-namespaced under `projects/{name}/` (legacy on-disk prefix retained through PR 2) — agents use natural keys like `tasks/abc` |
+| `read_blackboard` | `key` | Read from the team-scoped blackboard. Keys are auto-namespaced under `teams/{name}/` — agents use natural keys like `tasks/abc` |
 | `write_blackboard` | `key`, `value` | Write a JSON value to the team-scoped blackboard |
 | `list_blackboard` | `prefix` (default "") | Browse team blackboard entries by prefix. Returns key names, authors, timestamps, and 200-char value previews. |
 | `publish_event` | `topic`, `data` | Publish event to mesh pub/sub |
@@ -96,7 +96,7 @@ An OS-level device profile is selected by `BROWSER_DEVICE_PROFILE` (`desktop-win
 
 **Team isolation:** Blackboard tools (`read_blackboard`, `write_blackboard`, `list_blackboard`, `save_artifact`) are only available to agents assigned to a team. Solo agents cannot access the blackboard — calls return an error explaining they must be added to a team first.
 
-**Team context:** Agents assigned to a team automatically receive a `TEAM.md` file mounted read-only in their workspace. This file contains the team description and shared context, visible to the agent from its first turn without any tool call. (Pre-rename `PROJECT.md` files are migrated to `TEAM.md` once at startup; the bootstrap loader reads only `TEAM.md`/`team.md`.)
+**Team context:** Agents assigned to a team automatically receive a `TEAM.md` file mounted read-only in their workspace. This file contains the team description and shared context, visible to the agent from its first turn without any tool call.
 
 ### Workspace
 
@@ -212,10 +212,7 @@ The following tools are only available to the **operator agent** (when `ALLOWED_
 #### Fleet & Team Management (`operator_tools.py`)
 
 The operator exposes the canonical team-named tools (`inspect_teams`,
-`manage_team`, `create_team`, `add_agents_to_team`, …). The eight
-legacy `*_project` names are preserved as recoverable error stubs
-that return `{"error": "renamed", "new_tool": "*_team", ...}` so a
-stale LLM prompt fails fast and retries on the canonical name.
+`manage_team`, `create_team`, `add_agents_to_team`, …).
 
 | Tool | Parameters | Description |
 |------|-----------|-------------|
@@ -240,8 +237,8 @@ stale LLM prompt fails fast and retries on the canonical name.
 | `update_team_context` | `team_name`, `context` | Update the shared `TEAM.md` context for a team. |
 | `set_team_goal` | `team_name`, `north_star`, `success_criteria` (default []) | Save the team's vision (≤2000 chars) and up to 10 success criteria (each ≤200 chars). Rendered prominently on every team card in the Board tab. Pass empty values to clear. No confirmation required — call proactively whenever the user describes a team goal. |
 | `list_agent_queue` | `agent_id`, `limit` (default 10, max 100) | Read an agent's task queue: current and recent tasks grouped by status (`active` / `blocked` / `done` / `failed` / `cancelled`), up to `limit` rows per bucket. |
-| `get_team_outputs` | `team_id` (alias `project_id` accepted), `since` (default ""; ISO timestamp or duration like `"24h"`/`"7d"`) | Completed task artifacts for a team in a time window. Default window is the last 7 days. |
-| `summarize_team_progress` | `team_id` (alias `project_id` accepted) | Synthesized status summary for a team: structured counts + narrative `status_text` + top blockers + recent completions + `ask_for_user` list. |
+| `get_team_outputs` | `team_id`, `since` (default ""; ISO timestamp or duration like `"24h"`/`"7d"`) | Completed task artifacts for a team in a time window. Default window is the last 7 days. |
+| `summarize_team_progress` | `team_id` | Synthesized status summary for a team: structured counts + narrative `status_text` + top blockers + recent completions + `ask_for_user` list. |
 | `compose_work_summary` | `scope_kind` (default `"team"`; `team` / `solo`), `scope_id` (default ""), `period_hours` (default 24) | Compose and persist a work summary (the Work tab's default landing surface) from recent task activity: narrative + metrics + highlights. |
 | `manage_goals` | `action` (e.g. `set` / `add` / `update` / `remove`), `goals`, `goal`, `name`, `team_names` | Manage tracked business goals shown on the user's Work tab. Source of truth is `GOALS.json` (rendered to `GOALS.md` for humans). |
 | `rate_delivery` | `task_id`, `outcome`, `feedback` (default "") | Record an outcome rating on a completed task. Operator's per-task judgment — drives the agent-feedback loop (memory writes + auto-rework spawn). |

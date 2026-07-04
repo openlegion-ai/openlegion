@@ -1,10 +1,7 @@
 """Per-agent X11 display + KasmVNC port pair allocator.
 
-PR 1 of the per-agent VNC isolation work.  The shared-display design
-(one ``Xvnc :99`` for every agent — see :mod:`src.browser.__main__`'s
-legacy path) leaks every agent's browser content to every VNC viewer
-because KasmVNC streams the whole framebuffer.  Per-agent isolation
-requires one Xvnc per agent.
+Per-agent VNC isolation: one Xvnc per agent, so no agent's browser
+content is ever visible through another agent's VNC viewer.
 
 This module owns the allocation of ``(display_num, vnc_port)`` pairs.
 Display ``N`` pairs with port ``VNC_PORT_BASE + N`` so a single integer
@@ -31,10 +28,7 @@ Range
 * display ``100..163`` — 64 slots, the soft ceiling for concurrent
   browsers (matches the ``OPENLEGION_BROWSER_MAX_CONCURRENT`` clamp in
   :mod:`src.browser.__main__`).
-* port ``6100..6163`` — paired 1:1.  The legacy shared display lives on
-  ``:99`` / ``:6080``; starting per-agent slots at 100 lets both code
-  paths coexist during the flag-gated rollout (PR 2 deletes the
-  legacy path).
+* port ``6100..6163`` — paired 1:1.
 
 The allocator itself is sync — slots are claimed under :class:`asyncio.Lock`
 in :class:`BrowserManager` so we don't need a second lock here.
@@ -255,10 +249,8 @@ class DisplayAllocator:
                     cleaned += 1
             else:
                 # Port held by something — drop slot from pool.  When the
-                # holder is the legacy shared Xvnc (which lives on :99 +
-                # :6080, not in our range), this branch is never reached
-                # for our slots.  When the holder is a same-range X server
-                # left by a peer process (rare), dropping is correct.
+                # holder is a same-range X server left by a peer process
+                # (rare), dropping is correct.
                 self._free.remove(display)
                 live += 1
         if cleaned or live:
