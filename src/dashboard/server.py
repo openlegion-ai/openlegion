@@ -3198,6 +3198,12 @@ def create_dashboard_router(
                 from src.host.transport import HttpTransport
                 if isinstance(transport, HttpTransport):
                     transport.register(agent_id, url)
+            # Re-establish health monitoring if this agent had been deregistered
+            # (e.g. archived, then unarchived and restarted). A normal restart of
+            # an already-monitored agent is left untouched. Mirrors the batch
+            # restart and boot-reconcile paths, which register unconditionally.
+            if health_monitor is not None and agent_id not in getattr(health_monitor, "agents", {}):
+                health_monitor.register(agent_id)
             ready = await runtime.wait_for_agent(agent_id, timeout=60)
             # Push proxy config to browser service
             await _push_browser_proxy_for_agent(agent_id)
