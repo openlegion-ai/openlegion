@@ -190,6 +190,40 @@ def _system_note_from_mesh_request(request: Request) -> bool:
     )
 
 
+def _install_protocol_version_guard(app: FastAPI) -> None:
+    """Reject mesh→agent requests from a version-incompatible mesh.
+
+    Fires only when BOTH the mesh-internal marker and a protocol-version
+    header are present and the major version is incompatible — a rolling
+    upgrade that left this container talking to a differently-versioned mesh.
+    A request with no version header is always allowed (agent self-calls,
+    reachability probes, first-party callers), so the check is non-breaking.
+    ``/status`` is exempt so health/reachability polling never trips it.
+    """
+    from starlette.responses import JSONResponse as _StarletteJSONResponse
+
+    from src.shared.trace import PROTOCOL_VERSION, PROTOCOL_VERSION_HEADER, protocol_compatible
+
+    @app.middleware("http")
+    async def _enforce_protocol_version(request: Request, call_next):
+        if (
+            request.headers.get("x-mesh-internal")
+            and request.url.path != "/status"
+            and not protocol_compatible(request.headers.get(PROTOCOL_VERSION_HEADER))
+        ):
+            return _StarletteJSONResponse(
+                {
+                    "detail": (
+                        f"protocol version mismatch: mesh sent "
+                        f"{request.headers.get(PROTOCOL_VERSION_HEADER)!r}, "
+                        f"agent speaks {PROTOCOL_VERSION!r}"
+                    )
+                },
+                status_code=426,
+            )
+        return await call_next(request)
+
+
 def create_agent_app(loop: AgentLoop) -> FastAPI:
     """Create the FastAPI application for an agent container."""
     # M19: disable interactive API docs / OpenAPI schema by default; gate dev
@@ -201,6 +235,7 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
     )
     app = FastAPI(title=f"OpenLegion Agent: {loop.agent_id}", **_docs_kwargs)
     _install_body_size_limit(app)
+    _install_protocol_version_guard(app)
     _task_accept_lock = asyncio.Lock()
 
     @app.post("/task")

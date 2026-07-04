@@ -36,6 +36,10 @@ class Transport(abc.ABC):
             from src.shared.trace import trace_headers
             headers = trace_headers()
         headers.setdefault("x-mesh-internal", "1")
+        # Advertise the wire-protocol version so the agent server can reject a
+        # version-skewed mesh (rolling upgrade) instead of mis-decoding JSON.
+        from src.shared.trace import PROTOCOL_VERSION, PROTOCOL_VERSION_HEADER
+        headers.setdefault(PROTOCOL_VERSION_HEADER, PROTOCOL_VERSION)
         return headers
 
     @abc.abstractmethod
