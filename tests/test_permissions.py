@@ -640,7 +640,7 @@ def operator_inbox_matrix(tmp_path):
     cfg = {
         "permissions": {
             "scout": {
-                "blackboard_write": ["projects/growth/*"],
+                "blackboard_write": ["teams/growth/*"],
             },
         },
     }
@@ -698,7 +698,7 @@ def self_inbox_matrix(tmp_path):
             # No blackboard_read at all → deny-all default glob.
             "content-creator": {},
             # Non-matching project-scoped read.
-            "scout": {"blackboard_read": ["projects/x/*"]},
+            "scout": {"blackboard_read": ["teams/x/*"]},
             # ID-prefix collision target: "dev" must NOT match "dev-lead".
             "dev": {"blackboard_read": []},
             "dev-lead": {"blackboard_read": []},
@@ -735,7 +735,7 @@ class TestSelfInboxCarveOut:
             "scout", "inbox/scout/task_event/abc"
         ) is True
         # Sanity: its real ACL still works for project keys.
-        assert m.can_read_blackboard("scout", "projects/x/notes") is True
+        assert m.can_read_blackboard("scout", "teams/x/notes") is True
 
     def test_cross_agent_inbox_denied(self, self_inbox_matrix):
         """An agent is STILL denied another agent's inbox."""
@@ -765,10 +765,10 @@ class TestSelfInboxCarveOut:
         # Trusted callers bypass everything.
         assert m.can_read_blackboard("mesh", "inbox/anyone/x") is True
         # Normal glob match still works.
-        assert m.can_read_blackboard("scout", "projects/x/file") is True
+        assert m.can_read_blackboard("scout", "teams/x/file") is True
         # Non-inbox key with empty ACL is still denied (no broadening).
         assert m.can_read_blackboard(
-            "content-creator", "projects/social-media/post"
+            "content-creator", "teams/social-media/post"
         ) is False
         # Global-output self carve-out unchanged.
         assert m.can_read_blackboard(
@@ -1087,13 +1087,9 @@ class TestControlPlanePermissions:
         op = on_disk["permissions"]["operator"]
         for field in self._CONTROL_PLANE_FIELDS:
             assert op.get(field) is True, field
-        # Legacy can_manage_projects must NOT be persisted into new
-        # configs — Pydantic still mirrors it as a read-time alias for
-        # on-disk back-compat, but new writes use the canonical name.
-        assert "can_manage_projects" not in op, (
-            "operator permissions.json should not carry the legacy "
-            "can_manage_projects key on fresh setup"
-        )
+        # The legacy ``can_manage_projects`` spelling no longer exists —
+        # fresh setups persist only the canonical field.
+        assert "can_manage_projects" not in op
 
     def test_can_manage_fleet_method(self, tmp_path):
         m = self._matrix(tmp_path, {
@@ -1145,12 +1141,12 @@ class TestControlPlanePermissions:
 
 
 def test_wildcard_blackboard_acl_replaced_on_project_add(tmp_path, monkeypatch):
-    """Pin: ``_add_project_blackboard_permissions`` strips any
+    """Pin: ``_add_team_blackboard_permissions`` strips any
     pre-existing ``*`` wildcard and replaces it with the project-scoped
     grant. An agent with broad fleet-wide reach can no longer carry it
     forward through a project join.
     """
-    from src.cli.config import _add_project_blackboard_permissions
+    from src.cli.config import _add_team_blackboard_permissions
 
     perms_file = tmp_path / "permissions.json"
     perms_file.write_text(json.dumps({
@@ -1163,7 +1159,7 @@ def test_wildcard_blackboard_acl_replaced_on_project_add(tmp_path, monkeypatch):
     }))
     monkeypatch.setattr("src.cli.config.PERMISSIONS_FILE", perms_file)
 
-    _add_project_blackboard_permissions("rover", "alpha")
+    _add_team_blackboard_permissions("rover", "alpha")
 
     perms = json.loads(perms_file.read_text())
     read = perms["permissions"]["rover"]["blackboard_read"]
@@ -1171,8 +1167,8 @@ def test_wildcard_blackboard_acl_replaced_on_project_add(tmp_path, monkeypatch):
     # Wildcard is gone — replaced by the project pattern.
     assert "*" not in read
     assert "*" not in write
-    assert "projects/alpha/*" in read
-    assert "projects/alpha/*" in write
+    assert "teams/alpha/*" in read
+    assert "teams/alpha/*" in write
 
 
 def test_wildcard_blackboard_acl_replaced_then_stripped_on_remove(tmp_path, monkeypatch):
@@ -1182,8 +1178,8 @@ def test_wildcard_blackboard_acl_replaced_then_stripped_on_remove(tmp_path, monk
     agent cannot reacquire fleet-wide reach by leaving a project.
     """
     from src.cli.config import (
-        _add_project_blackboard_permissions,
-        _remove_project_blackboard_permissions,
+        _add_team_blackboard_permissions,
+        _remove_team_blackboard_permissions,
     )
 
     perms_file = tmp_path / "permissions.json"
@@ -1197,8 +1193,8 @@ def test_wildcard_blackboard_acl_replaced_then_stripped_on_remove(tmp_path, monk
     }))
     monkeypatch.setattr("src.cli.config.PERMISSIONS_FILE", perms_file)
 
-    _add_project_blackboard_permissions("rover", "alpha")
-    _remove_project_blackboard_permissions("rover", "alpha")
+    _add_team_blackboard_permissions("rover", "alpha")
+    _remove_team_blackboard_permissions("rover", "alpha")
 
     perms = json.loads(perms_file.read_text())
     read = perms["permissions"]["rover"]["blackboard_read"]
@@ -1206,8 +1202,8 @@ def test_wildcard_blackboard_acl_replaced_then_stripped_on_remove(tmp_path, monk
     # No wildcard, no project pattern — agent is back to standalone.
     assert "*" not in read
     assert "*" not in write
-    assert "projects/alpha/*" not in read
-    assert "projects/alpha/*" not in write
+    assert "teams/alpha/*" not in read
+    assert "teams/alpha/*" not in write
 
 
 def test_arbitrary_keys_blocked_after_project_remove_strips_wildcard(tmp_path, monkeypatch):
@@ -1217,8 +1213,8 @@ def test_arbitrary_keys_blocked_after_project_remove_strips_wildcard(tmp_path, m
     project's keys.
     """
     from src.cli.config import (
-        _add_project_blackboard_permissions,
-        _remove_project_blackboard_permissions,
+        _add_team_blackboard_permissions,
+        _remove_team_blackboard_permissions,
     )
 
     perms_file = tmp_path / "permissions.json"
@@ -1232,14 +1228,14 @@ def test_arbitrary_keys_blocked_after_project_remove_strips_wildcard(tmp_path, m
     }))
     monkeypatch.setattr("src.cli.config.PERMISSIONS_FILE", perms_file)
 
-    _add_project_blackboard_permissions("rover", "alpha")
-    _remove_project_blackboard_permissions("rover", "alpha")
+    _add_team_blackboard_permissions("rover", "alpha")
+    _remove_team_blackboard_permissions("rover", "alpha")
 
     pm = PermissionMatrix(config_path=str(perms_file))
     # No more wildcard reach across namespaces — Task 5 enforced.
-    assert not pm.can_read_blackboard("rover", "projects/alpha/secret")
-    assert not pm.can_read_blackboard("rover", "projects/beta/secret")
-    assert not pm.can_write_blackboard("rover", "projects/beta/note")
+    assert not pm.can_read_blackboard("rover", "teams/alpha/secret")
+    assert not pm.can_read_blackboard("rover", "teams/beta/secret")
+    assert not pm.can_write_blackboard("rover", "teams/beta/note")
 
 
 class TestCorruptPermissionsFailClosed:
@@ -1368,11 +1364,11 @@ class TestCanAccessCredentialSystemTier:
 
 # ── Goals namespace hardening (set_agent_goals PR) ─────────────────────
 #
-# Goals (``goals/{agent_id}`` / ``projects/{team}/goals/{agent_id}``) are
+# Goals (``goals/{agent_id}`` / ``teams/{team}/goals/{agent_id}``) are
 # standing instructions injected into the target agent's every prompt.
 # The write side is operator-only (endpoint carve-out in server.py), so
 # ``can_write_blackboard`` fail-closes the namespace for workers — a
-# teammate's ``projects/{team}/*`` write wildcard must NOT cover a peer's
+# teammate's ``teams/{team}/*`` write wildcard must NOT cover a peer's
 # goals key (prompt-injection channel into persistent context). The read
 # side gets a tight self-carve-out so goal delivery never depends on
 # per-template ACL variance.
@@ -1386,7 +1382,7 @@ def goals_matrix(tmp_path):
             # Team-scoped write wildcard — must NOT reach the goals keys.
             "dev": {
                 "blackboard_read": [],
-                "blackboard_write": ["projects/alpha/*"],
+                "blackboard_write": ["teams/alpha/*"],
             },
             # Full write wildcard — must NOT reach the goals keys either.
             "rogue": {
@@ -1404,18 +1400,18 @@ class TestGoalsNamespaceHardening:
     def test_worker_cannot_write_peer_goals_key(self, goals_matrix):
         """Wildcard ACLs do not cover the goals namespace (raw or scoped)."""
         m = goals_matrix
-        assert m.can_write_blackboard("dev", "projects/alpha/goals/peer") is False
-        assert m.can_write_blackboard("dev", "projects/alpha/goals/dev") is False
+        assert m.can_write_blackboard("dev", "teams/alpha/goals/peer") is False
+        assert m.can_write_blackboard("dev", "teams/alpha/goals/dev") is False
         assert m.can_write_blackboard("rogue", "goals/peer") is False
-        assert m.can_write_blackboard("rogue", "projects/alpha/goals/peer") is False
+        assert m.can_write_blackboard("rogue", "teams/alpha/goals/peer") is False
         # Non-goals keys under the same wildcards still work.
-        assert m.can_write_blackboard("dev", "projects/alpha/context/x") is True
+        assert m.can_write_blackboard("dev", "teams/alpha/context/x") is True
         assert m.can_write_blackboard("rogue", "context/x") is True
 
     def test_goals_write_guard_short_projects_key_no_error(self, goals_matrix):
-        """``projects/x`` (no third segment) must not IndexError."""
+        """``teams/x`` (no third segment) must not IndexError."""
         m = goals_matrix
-        assert m.can_write_blackboard("rogue", "projects/x") is True
+        assert m.can_write_blackboard("rogue", "teams/x") is True
 
     def test_mesh_can_still_write_goals(self, goals_matrix):
         """Trusted internal caller bypasses the namespace guard."""
@@ -1425,16 +1421,16 @@ class TestGoalsNamespaceHardening:
         """Self-read carve-out: raw and team-scoped forms, empty ACL."""
         m = goals_matrix
         assert m.can_read_blackboard("dev", "goals/dev") is True
-        assert m.can_read_blackboard("dev", "projects/alpha/goals/dev") is True
-        assert m.can_read_blackboard("dev", "projects/beta/goals/dev") is True
+        assert m.can_read_blackboard("dev", "teams/alpha/goals/dev") is True
+        assert m.can_read_blackboard("dev", "teams/beta/goals/dev") is True
 
     def test_agent_cannot_read_other_agents_goals_via_carveout(self, goals_matrix):
         """The carve-out is strictly self-scoped and shape-exact."""
         m = goals_matrix
         # Another agent's goals key — denied absent a matching ACL.
         assert m.can_read_blackboard("dev", "goals/lead") is False
-        assert m.can_read_blackboard("dev", "projects/alpha/goals/lead") is False
+        assert m.can_read_blackboard("dev", "teams/alpha/goals/lead") is False
         # Deeper keys that merely END in /goals/{id} do NOT match.
-        assert m.can_read_blackboard("dev", "projects/alpha/x/goals/dev") is False
+        assert m.can_read_blackboard("dev", "teams/alpha/x/goals/dev") is False
         # ID-prefix collision: "dev" must not match "dev-lead".
         assert m.can_read_blackboard("dev", "goals/dev-lead") is False

@@ -182,8 +182,8 @@ Every inter-agent operation checks per-agent ACLs defined in `config/permissions
     "can_message": [],
     "can_publish": ["research_complete"],
     "can_subscribe": ["new_lead"],
-    "blackboard_read": ["projects/sales/*"],
-    "blackboard_write": ["projects/sales/*"],
+    "blackboard_read": ["teams/sales/*"],
+    "blackboard_write": ["teams/sales/*"],
     "allowed_apis": ["llm", "brave_search"],
     "allowed_credentials": ["brave_search_*"],
     "can_use_browser": true,
@@ -192,7 +192,7 @@ Every inter-agent operation checks per-agent ACLs defined in `config/permissions
 }
 ```
 
-- **Team-scoped blackboard** -- agents can only access keys under their team's namespace (`projects/{name}/*`, on-disk prefix retained through PR 2 of the project→team rename). The `MeshClient` auto-prefixes all blackboard keys with the team namespace, so agents use natural keys while isolation is enforced transparently. Solo agents get empty blackboard permissions.
+- **Team-scoped blackboard** -- agents can only access keys under their team's namespace (`teams/{name}/*`). The `MeshClient` auto-prefixes all blackboard keys with the team namespace, so agents use natural keys while isolation is enforced transparently. Solo agents get empty blackboard permissions.
 - **Glob patterns** for blackboard paths and credential access
 - **Explicit allowlists** for messaging, pub/sub, API access, and credential access
 - **Default deny** -- if not listed, it's blocked
@@ -470,7 +470,7 @@ Both caps are opt-in (no default). Configure with USD amounts; enforcement uses 
 - `CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH` — short-circuits with `solver_outcome="cost_cap"` before provider HTTP when the agent's running monthly spend would exceed the cap.
 - `CAPTCHA_COST_LIMIT_USD_PER_TENANT_MONTH` — same pattern at tenant (team) granularity. The metrics tick emits **threshold alerts at 50 % / 80 % / 100 %** of the cap (once per crossing per month) on the EventBus as `tenant_spend_threshold` events.
 
-Tenant lookup is by `_tenant_for(agent_id)` reverse-mapping `config/projects/`; agents not enrolled on a team have no tenant and do not appear in tenant rollups. State resets at month rollover.
+Tenant lookup is by `_tenant_for(agent_id)` reverse-mapping `config/teams/`; agents not enrolled on a team have no tenant and do not appear in tenant rollups. State resets at month rollover.
 
 When a cap is configured but the solver provider name or the (provider, kind) price is unknown, the solve **fails closed** with `solver_outcome="provider_missing"` or `"price_missing"` rather than letting an untrackable charge slip past. Reset by configuring the provider, waiting for next month, or explicitly disabling the cap.
 
@@ -492,7 +492,7 @@ These are known, accepted limitations — documented so no one mistakes a best-e
 
 - **(M23) Stored agent memory can carry plaintext prompt injection that re-injects on future tasks.** Untrusted text an agent commits to its own memory (via the memory store) is replayed into that agent's LLM context on later tasks. `sanitize_for_prompt()` runs on that path, but it is **Unicode hygiene only** (strips invisible / smuggling codepoints — see Unicode Sanitization above); it is **not** a prompt-injection defense and does not detect or neutralize natural-language injection. A poisoned memory will re-inject every time it is loaded. The blast radius is **per-agent** — an agent's memory is private to that agent and does not cross into other agents — but a single agent can persistently re-prompt itself. Treat agent memory as attacker-influenceable if the agent ever processes untrusted input.
 
-- **(L19) The `global/` blackboard namespace is fleet-shared, and `wallet_allowed_contracts == []` means allow-all.** Two by-design quirks worth stating plainly: (a) `global/` is a **fleet-wide** namespace, not a per-team or per-agent one. The operator-handoff sub-prefixes have explicit carve-outs (`global/tasks/operator/*` is operator-read-only but any agent may write; `global/output/{agent}/*` is per-sender — see `can_read_blackboard` / `can_write_blackboard` in `src/host/permissions.py`), but any *other* `global/*` key is governed only by an agent's normal `blackboard_read` / `blackboard_write` globs — so a `global/*` glob grants cross-cutting fleet-wide access, unlike the team-scoped `projects/{name}/*` keys. Treat `global/` as shared state, not an isolation boundary, and avoid broad `global/*` globs. (b) For the wallet contract dimension, `wallet_allowed_contracts == []` means **allow-all** (`can_access_wallet_contract` returns `True` on the empty list — `permissions.py:382-383`), not deny-all — the empty list is the "no contract restriction" sentinel. This is still gated by `can_use_wallet*`, so it is not an open door, but the `[]`-means-allow-all polarity is the **opposite** of `allowed_credentials` (`[]` = deny-all) and must not be confused.
+- **(L19) The `global/` blackboard namespace is fleet-shared, and `wallet_allowed_contracts == []` means allow-all.** Two by-design quirks worth stating plainly: (a) `global/` is a **fleet-wide** namespace, not a per-team or per-agent one. The operator-handoff sub-prefixes have explicit carve-outs (`global/tasks/operator/*` is operator-read-only but any agent may write; `global/output/{agent}/*` is per-sender — see `can_read_blackboard` / `can_write_blackboard` in `src/host/permissions.py`), but any *other* `global/*` key is governed only by an agent's normal `blackboard_read` / `blackboard_write` globs — so a `global/*` glob grants cross-cutting fleet-wide access, unlike the team-scoped `teams/{name}/*` keys. Treat `global/` as shared state, not an isolation boundary, and avoid broad `global/*` globs. (b) For the wallet contract dimension, `wallet_allowed_contracts == []` means **allow-all** (`can_access_wallet_contract` returns `True` on the empty list — `permissions.py:382-383`), not deny-all — the empty list is the "no contract restriction" sentinel. This is still gated by `can_use_wallet*`, so it is not an open door, but the `[]`-means-allow-all polarity is the **opposite** of `allowed_credentials` (`[]` = deny-all) and must not be confused.
 
 ## File-transfer Endpoints
 

@@ -28,7 +28,7 @@ agents:
     instructions: |
       You are a content researcher. You gather information for the writer.
 
-      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
+      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the team.
 
       ## Your workflow
       1. Call check_inbox() for content briefs and requests
@@ -87,7 +87,7 @@ agents:
     instructions: |
       You are a content writer. You turn research briefs into polished content.
 
-      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
+      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the team.
 
       ## Your workflow
       1. Call check_inbox() to get research briefs
@@ -153,7 +153,7 @@ agents:
     instructions: |
       You are an editor. You review drafts for quality.
 
-      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
+      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the team.
 
       ## Your workflow
       1. Call check_inbox() for draft review requests

@@ -1,6 +1,6 @@
 """Tests for multi-team support: CRUD, config loading, permissions wiring.
 
-These tests exercise the underlying ``_create_project`` / ``_load_projects``
+These tests exercise the underlying ``_create_team`` / ``_load_teams``
 helpers in ``src/cli/config.py``, which still carry their legacy names as
 the back-compat surface for the project→team rename. The behaviour they
 verify IS the team-domain logic; only the Python identifiers and the
@@ -15,59 +15,59 @@ import pytest
 import yaml
 
 from src.cli.config import (
-    _add_agent_to_project,
-    _add_project_blackboard_permissions,
-    _create_project,
-    _delete_project,
-    _get_agent_project,
+    _add_agent_to_team,
+    _add_team_blackboard_permissions,
+    _create_team,
+    _delete_team,
+    _get_agent_team,
     _load_config,
-    _load_projects,
+    _load_teams,
     _remove_agent,
-    _remove_agent_from_project,
-    _remove_project_blackboard_permissions,
-    _validate_project_name,
+    _remove_agent_from_team,
+    _remove_team_blackboard_permissions,
+    _validate_team_name,
 )
 
 
 class TestValidateProjectName:
     def test_valid_names(self):
-        assert _validate_project_name("my-project") == "my-project"
-        assert _validate_project_name("project1") == "project1"
-        assert _validate_project_name("A_B-C") == "A_B-C"
+        assert _validate_team_name("my-project") == "my-project"
+        assert _validate_team_name("project1") == "project1"
+        assert _validate_team_name("A_B-C") == "A_B-C"
 
     def test_invalid_empty(self):
-        with pytest.raises(ValueError, match="Invalid project name"):
-            _validate_project_name("")
+        with pytest.raises(ValueError, match="Invalid team name"):
+            _validate_team_name("")
 
     def test_invalid_special_chars(self):
-        with pytest.raises(ValueError, match="Invalid project name"):
-            _validate_project_name("my project")
+        with pytest.raises(ValueError, match="Invalid team name"):
+            _validate_team_name("my project")
 
     def test_invalid_start_char(self):
-        with pytest.raises(ValueError, match="Invalid project name"):
-            _validate_project_name("-start")
+        with pytest.raises(ValueError, match="Invalid team name"):
+            _validate_team_name("-start")
 
     def test_path_traversal_rejected(self):
         for name in ["../escape", "foo/bar", "..", "./current", "a/../b"]:
-            with pytest.raises(ValueError, match="Invalid project name"):
-                _validate_project_name(name)
+            with pytest.raises(ValueError, match="Invalid team name"):
+                _validate_team_name(name)
 
     def test_max_length_boundary(self):
         # 64 chars should pass
-        assert _validate_project_name("a" * 64) == "a" * 64
+        assert _validate_team_name("a" * 64) == "a" * 64
         # 65 chars should fail
-        with pytest.raises(ValueError, match="Invalid project name"):
-            _validate_project_name("a" * 65)
+        with pytest.raises(ValueError, match="Invalid team name"):
+            _validate_team_name("a" * 65)
 
     def test_underscore_start_rejected(self):
-        with pytest.raises(ValueError, match="Invalid project name"):
-            _validate_project_name("_underscore")
+        with pytest.raises(ValueError, match="Invalid team name"):
+            _validate_team_name("_underscore")
 
 
 class TestLoadProjects:
     def test_no_projects_dir(self, tmp_path):
-        with patch("src.cli.config.PROJECTS_DIR", tmp_path / "nonexistent"):
-            result = _load_projects()
+        with patch("src.cli.config.TEAMS_DIR", tmp_path / "nonexistent"):
+            result = _load_teams()
         assert result == {}
 
     def test_load_single_project(self, tmp_path):
@@ -77,8 +77,8 @@ class TestLoadProjects:
         meta = {"name": "my-proj", "description": "Test", "members": ["agent1"]}
         (proj_dir / "metadata.yaml").write_text(yaml.dump(meta))
 
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
-            result = _load_projects()
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
+            result = _load_teams()
 
         assert "my-proj" in result
         assert result["my-proj"]["description"] == "Test"
@@ -91,8 +91,8 @@ class TestLoadProjects:
             d.mkdir(parents=True)
             (d / "metadata.yaml").write_text(yaml.dump({"name": name, "members": []}))
 
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
-            result = _load_projects()
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
+            result = _load_teams()
 
         assert len(result) == 2
         assert "alpha" in result
@@ -108,8 +108,8 @@ class TestLoadProjects:
             "name": "metadata-name", "members": [],
         }))
 
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
-            result = _load_projects()
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
+            result = _load_teams()
 
         assert "dir-name" in result
         assert "metadata-name" not in result
@@ -120,8 +120,8 @@ class TestLoadProjects:
         d.mkdir(parents=True)
         (d / "metadata.yaml").write_text("{{invalid yaml")
 
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
-            result = _load_projects()
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
+            result = _load_teams()
 
         assert result == {}
 
@@ -135,16 +135,16 @@ class TestGetAgentProject:
             "name": "proj1", "members": ["agent1", "agent2"],
         }))
 
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
-            assert _get_agent_project("agent1") == "proj1"
-            assert _get_agent_project("agent2") == "proj1"
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
+            assert _get_agent_team("agent1") == "proj1"
+            assert _get_agent_team("agent2") == "proj1"
 
     def test_standalone_agent(self, tmp_path):
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir(parents=True)
 
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
-            assert _get_agent_project("standalone") is None
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
+            assert _get_agent_team("standalone") is None
 
 
 class TestCreateProject:
@@ -154,10 +154,10 @@ class TestCreateProject:
         perms_file.write_text(json.dumps({"permissions": {}}))
 
         with (
-            patch("src.cli.config.PROJECTS_DIR", projects_dir),
+            patch("src.cli.config.TEAMS_DIR", projects_dir),
             patch("src.cli.config.PERMISSIONS_FILE", perms_file),
         ):
-            _create_project("test-proj", description="A test project")
+            _create_team("test-proj", description="A test project")
 
         meta_file = projects_dir / "test-proj" / "metadata.yaml"
         assert meta_file.exists()
@@ -166,9 +166,9 @@ class TestCreateProject:
         assert data["description"] == "A test project"
         assert data["members"] == []
 
-        project_md = projects_dir / "test-proj" / "project.md"
-        assert project_md.exists()
-        assert "test-proj" in project_md.read_text()
+        team_md = projects_dir / "test-proj" / "team.md"
+        assert team_md.exists()
+        assert "test-proj" in team_md.read_text()
 
         workflows_dir = projects_dir / "test-proj" / "workflows"
         assert workflows_dir.is_dir()
@@ -185,20 +185,20 @@ class TestCreateProject:
         }))
 
         with (
-            patch("src.cli.config.PROJECTS_DIR", projects_dir),
+            patch("src.cli.config.TEAMS_DIR", projects_dir),
             patch("src.cli.config.PERMISSIONS_FILE", perms_file),
         ):
-            _create_project("my-proj", members=["agent1", "agent2"])
+            _create_team("my-proj", members=["agent1", "agent2"])
 
         meta = yaml.safe_load((projects_dir / "my-proj" / "metadata.yaml").read_text())
         assert meta["members"] == ["agent1", "agent2"]
 
         # Only the project-specific pattern is granted (no shared patterns)
         perms = json.loads(perms_file.read_text())
-        assert perms["permissions"]["agent1"]["blackboard_read"] == ["projects/my-proj/*"]
-        assert perms["permissions"]["agent1"]["blackboard_write"] == ["projects/my-proj/*"]
-        assert perms["permissions"]["agent2"]["blackboard_read"] == ["projects/my-proj/*"]
-        assert perms["permissions"]["agent2"]["blackboard_write"] == ["projects/my-proj/*"]
+        assert perms["permissions"]["agent1"]["blackboard_read"] == ["teams/my-proj/*"]
+        assert perms["permissions"]["agent1"]["blackboard_write"] == ["teams/my-proj/*"]
+        assert perms["permissions"]["agent2"]["blackboard_read"] == ["teams/my-proj/*"]
+        assert perms["permissions"]["agent2"]["blackboard_write"] == ["teams/my-proj/*"]
 
     def test_create_moves_agent_from_existing_project(self, tmp_path):
         """Creating a project with members already in another project moves them."""
@@ -214,17 +214,17 @@ class TestCreateProject:
         perms_file.write_text(json.dumps({
             "permissions": {
                 "agent1": {
-                    "blackboard_read": ["projects/old-proj/*"],
-                    "blackboard_write": ["projects/old-proj/*"],
+                    "blackboard_read": ["teams/old-proj/*"],
+                    "blackboard_write": ["teams/old-proj/*"],
                 },
             }
         }))
 
         with (
-            patch("src.cli.config.PROJECTS_DIR", projects_dir),
+            patch("src.cli.config.TEAMS_DIR", projects_dir),
             patch("src.cli.config.PERMISSIONS_FILE", perms_file),
         ):
-            _create_project("new-proj", members=["agent1"])
+            _create_team("new-proj", members=["agent1"])
 
         # Agent should be in new project only
         new_meta = yaml.safe_load((projects_dir / "new-proj" / "metadata.yaml").read_text())
@@ -236,8 +236,8 @@ class TestCreateProject:
 
         # Permissions updated: new project pattern present, old one gone
         perms = json.loads(perms_file.read_text())
-        assert perms["permissions"]["agent1"]["blackboard_read"] == ["projects/new-proj/*"]
-        assert perms["permissions"]["agent1"]["blackboard_write"] == ["projects/new-proj/*"]
+        assert perms["permissions"]["agent1"]["blackboard_read"] == ["teams/new-proj/*"]
+        assert perms["permissions"]["agent1"]["blackboard_write"] == ["teams/new-proj/*"]
 
     def test_create_duplicate_raises(self, tmp_path):
         projects_dir = tmp_path / "projects"
@@ -246,11 +246,11 @@ class TestCreateProject:
         perms_file.write_text(json.dumps({"permissions": {}}))
 
         with (
-            patch("src.cli.config.PROJECTS_DIR", projects_dir),
+            patch("src.cli.config.TEAMS_DIR", projects_dir),
             patch("src.cli.config.PERMISSIONS_FILE", perms_file),
         ):
             with pytest.raises(ValueError, match="already exists"):
-                _create_project("existing")
+                _create_team("existing")
 
     def test_create_with_operator_member_rejected_no_partial_state(self, tmp_path):
         """Operator in initial members must raise BEFORE the project dir is created (no partial state)."""
@@ -260,40 +260,40 @@ class TestCreateProject:
         perms_file.write_text(json.dumps({"permissions": {}}))
 
         with (
-            patch("src.cli.config.PROJECTS_DIR", projects_dir),
+            patch("src.cli.config.TEAMS_DIR", projects_dir),
             patch("src.cli.config.PERMISSIONS_FILE", perms_file),
         ):
             with pytest.raises(ValueError, match="system agent"):
-                _create_project("new-proj", members=["agent1", "operator"])
+                _create_team("new-proj", members=["agent1", "operator"])
         # Project directory must not exist — rejection happens before any filesystem writes
         assert not (projects_dir / "new-proj").exists()
 
 
 class TestDeleteProject:
-    def test_delete_project(self, tmp_path):
+    def test_delete_team(self, tmp_path):
         projects_dir = tmp_path / "projects"
         proj_dir = projects_dir / "doomed"
         proj_dir.mkdir(parents=True)
         (proj_dir / "metadata.yaml").write_text(yaml.dump({
             "name": "doomed", "members": ["agent1"],
         }))
-        (proj_dir / "project.md").write_text("# doomed")
+        (proj_dir / "team.md").write_text("# doomed")
 
         perms_file = tmp_path / "permissions.json"
         perms_file.write_text(json.dumps({
             "permissions": {
                 "agent1": {
-                    "blackboard_read": ["projects/doomed/*"],
-                    "blackboard_write": ["projects/doomed/*"],
+                    "blackboard_read": ["teams/doomed/*"],
+                    "blackboard_write": ["teams/doomed/*"],
                 },
             }
         }))
 
         with (
-            patch("src.cli.config.PROJECTS_DIR", projects_dir),
+            patch("src.cli.config.TEAMS_DIR", projects_dir),
             patch("src.cli.config.PERMISSIONS_FILE", perms_file),
         ):
-            _delete_project("doomed")
+            _delete_team("doomed")
 
         assert not proj_dir.exists()
 
@@ -303,9 +303,9 @@ class TestDeleteProject:
         assert perms["permissions"]["agent1"]["blackboard_write"] == []
 
     def test_delete_nonexistent_raises(self, tmp_path):
-        with patch("src.cli.config.PROJECTS_DIR", tmp_path / "nope"):
+        with patch("src.cli.config.TEAMS_DIR", tmp_path / "nope"):
             with pytest.raises(ValueError, match="not found"):
-                _delete_project("ghost")
+                _delete_team("ghost")
 
 
 class TestAddRemoveAgentProject:
@@ -333,28 +333,28 @@ class TestAddRemoveAgentProject:
         projects_dir, perms_file = self._setup(tmp_path)
 
         with (
-            patch("src.cli.config.PROJECTS_DIR", projects_dir),
+            patch("src.cli.config.TEAMS_DIR", projects_dir),
             patch("src.cli.config.PERMISSIONS_FILE", perms_file),
         ):
-            _add_agent_to_project("proj1", "agent1")
+            _add_agent_to_team("proj1", "agent1")
 
         meta = yaml.safe_load((projects_dir / "proj1" / "metadata.yaml").read_text())
         assert "agent1" in meta["members"]
 
         # Agent gets only project-scoped blackboard permissions
         perms = json.loads(perms_file.read_text())
-        assert perms["permissions"]["agent1"]["blackboard_read"] == ["projects/proj1/*"]
-        assert perms["permissions"]["agent1"]["blackboard_write"] == ["projects/proj1/*"]
+        assert perms["permissions"]["agent1"]["blackboard_read"] == ["teams/proj1/*"]
+        assert perms["permissions"]["agent1"]["blackboard_write"] == ["teams/proj1/*"]
 
     def test_add_agent_idempotent(self, tmp_path):
         projects_dir, perms_file = self._setup(tmp_path)
 
         with (
-            patch("src.cli.config.PROJECTS_DIR", projects_dir),
+            patch("src.cli.config.TEAMS_DIR", projects_dir),
             patch("src.cli.config.PERMISSIONS_FILE", perms_file),
         ):
-            _add_agent_to_project("proj1", "agent1")
-            _add_agent_to_project("proj1", "agent1")
+            _add_agent_to_team("proj1", "agent1")
+            _add_agent_to_team("proj1", "agent1")
 
         meta = yaml.safe_load((projects_dir / "proj1" / "metadata.yaml").read_text())
         assert meta["members"].count("agent1") == 1
@@ -362,7 +362,7 @@ class TestAddRemoveAgentProject:
         # Pattern should not be duplicated
         perms = json.loads(perms_file.read_text())
         read_patterns = perms["permissions"]["agent1"]["blackboard_read"]
-        assert read_patterns.count("projects/proj1/*") == 1
+        assert read_patterns.count("teams/proj1/*") == 1
 
     def test_add_to_nonexistent_project_raises(self, tmp_path):
         projects_dir = tmp_path / "projects"
@@ -371,11 +371,11 @@ class TestAddRemoveAgentProject:
         perms_file.write_text(json.dumps({"permissions": {"agent1": {}}}))
 
         with (
-            patch("src.cli.config.PROJECTS_DIR", projects_dir),
+            patch("src.cli.config.TEAMS_DIR", projects_dir),
             patch("src.cli.config.PERMISSIONS_FILE", perms_file),
         ):
             with pytest.raises(ValueError, match="not found"):
-                _add_agent_to_project("ghost", "agent1")
+                _add_agent_to_team("ghost", "agent1")
 
     def test_add_operator_rejected(self, tmp_path):
         """Operator is a system agent and must never be assignable to a project."""
@@ -387,11 +387,11 @@ class TestAddRemoveAgentProject:
         perms_file.write_text(json.dumps({"permissions": {"operator": {}}}))
 
         with (
-            patch("src.cli.config.PROJECTS_DIR", projects_dir),
+            patch("src.cli.config.TEAMS_DIR", projects_dir),
             patch("src.cli.config.PERMISSIONS_FILE", perms_file),
         ):
             with pytest.raises(ValueError, match="system agent"):
-                _add_agent_to_project("proj1", "operator")
+                _add_agent_to_team("proj1", "operator")
         # Members list must remain empty — no partial write before the rejection
         meta = yaml.safe_load((proj_dir / "metadata.yaml").read_text())
         assert meta["members"] == []
@@ -408,17 +408,17 @@ class TestAddRemoveAgentProject:
         perms_file.write_text(json.dumps({
             "permissions": {
                 "agent1": {
-                    "blackboard_read": ["projects/proj1/*"],
-                    "blackboard_write": ["projects/proj1/*"],
+                    "blackboard_read": ["teams/proj1/*"],
+                    "blackboard_write": ["teams/proj1/*"],
                 },
             }
         }))
 
         with (
-            patch("src.cli.config.PROJECTS_DIR", projects_dir),
+            patch("src.cli.config.TEAMS_DIR", projects_dir),
             patch("src.cli.config.PERMISSIONS_FILE", perms_file),
         ):
-            _remove_agent_from_project("proj1", "agent1")
+            _remove_agent_from_team("proj1", "agent1")
 
         meta = yaml.safe_load((proj_dir / "metadata.yaml").read_text())
         assert "agent1" not in meta["members"]
@@ -442,17 +442,17 @@ class TestAddRemoveAgentProject:
         perms_file.write_text(json.dumps({
             "permissions": {
                 "agent1": {
-                    "blackboard_read": ["projects/proj1/*"],
-                    "blackboard_write": ["projects/proj1/*"],
+                    "blackboard_read": ["teams/proj1/*"],
+                    "blackboard_write": ["teams/proj1/*"],
                 },
             }
         }))
 
         with (
-            patch("src.cli.config.PROJECTS_DIR", projects_dir),
+            patch("src.cli.config.TEAMS_DIR", projects_dir),
             patch("src.cli.config.PERMISSIONS_FILE", perms_file),
         ):
-            _add_agent_to_project("proj2", "agent1")
+            _add_agent_to_team("proj2", "agent1")
 
         # Removed from proj1
         meta1 = yaml.safe_load((projects_dir / "proj1" / "metadata.yaml").read_text())
@@ -464,8 +464,8 @@ class TestAddRemoveAgentProject:
 
         # Permissions updated: new project pattern only
         perms = json.loads(perms_file.read_text())
-        assert perms["permissions"]["agent1"]["blackboard_read"] == ["projects/proj2/*"]
-        assert perms["permissions"]["agent1"]["blackboard_write"] == ["projects/proj2/*"]
+        assert perms["permissions"]["agent1"]["blackboard_read"] == ["teams/proj2/*"]
+        assert perms["permissions"]["agent1"]["blackboard_write"] == ["teams/proj2/*"]
 
 
 class TestBlackboardPermissions:
@@ -480,20 +480,20 @@ class TestBlackboardPermissions:
         }))
 
         with patch("src.cli.config.PERMISSIONS_FILE", perms_file):
-            _add_project_blackboard_permissions("bot", "marketing")
+            _add_team_blackboard_permissions("bot", "marketing")
 
         perms = json.loads(perms_file.read_text())
         read = perms["permissions"]["bot"]["blackboard_read"]
         write = perms["permissions"]["bot"]["blackboard_write"]
-        assert read == ["projects/marketing/*"]
-        assert write == ["projects/marketing/*"]
+        assert read == ["teams/marketing/*"]
+        assert write == ["teams/marketing/*"]
 
     def test_add_permissions_appends_alongside_existing_patterns(self, tmp_path):
-        """``_add_project_blackboard_permissions`` appends the project
+        """``_add_team_blackboard_permissions`` appends the project
         pattern; pre-existing narrower patterns survive. Pin: the helper
         is additive, never a full replacement of the agent's existing
         ACL. Other tests rely on this when an agent is moved between
-        projects (the ``_add_agent_to_project`` move sequence calls
+        projects (the ``_add_agent_to_team`` move sequence calls
         remove-then-add, so the appended pattern is the only project
         pattern that ever co-exists with non-project patterns)."""
         perms_file = tmp_path / "permissions.json"
@@ -507,7 +507,7 @@ class TestBlackboardPermissions:
         }))
 
         with patch("src.cli.config.PERMISSIONS_FILE", perms_file):
-            _add_project_blackboard_permissions("bot", "marketing")
+            _add_team_blackboard_permissions("bot", "marketing")
 
         perms = json.loads(perms_file.read_text())
         read = perms["permissions"]["bot"]["blackboard_read"]
@@ -517,8 +517,8 @@ class TestBlackboardPermissions:
         assert "tasks/bot/*" in read
         assert "output/bot/*" in write
         # Project pattern was appended.
-        assert "projects/marketing/*" in read
-        assert "projects/marketing/*" in write
+        assert "teams/marketing/*" in read
+        assert "teams/marketing/*" in write
 
     def test_remove_permissions(self, tmp_path):
         """Removing project permissions clears ALL blackboard access."""
@@ -526,21 +526,21 @@ class TestBlackboardPermissions:
         perms_file.write_text(json.dumps({
             "permissions": {
                 "bot": {
-                    "blackboard_read": ["projects/marketing/*"],
-                    "blackboard_write": ["projects/marketing/*"],
+                    "blackboard_read": ["teams/marketing/*"],
+                    "blackboard_write": ["teams/marketing/*"],
                 },
             }
         }))
 
         with patch("src.cli.config.PERMISSIONS_FILE", perms_file):
-            _remove_project_blackboard_permissions("bot", "marketing")
+            _remove_team_blackboard_permissions("bot", "marketing")
 
         perms = json.loads(perms_file.read_text())
         assert perms["permissions"]["bot"]["blackboard_read"] == []
         assert perms["permissions"]["bot"]["blackboard_write"] == []
 
     def test_remove_permissions_only_strips_target_project(self, tmp_path):
-        """``_remove_project_blackboard_permissions`` is targeted: it strips
+        """``_remove_team_blackboard_permissions`` is targeted: it strips
         the named project's pattern only. Other patterns (including other
         projects' patterns and non-project patterns like ``context/global``)
         survive. Pin: leaving project A does not nuke an agent's access
@@ -551,28 +551,28 @@ class TestBlackboardPermissions:
                 "bot": {
                     "blackboard_read": [
                         "context/global",
-                        "projects/marketing/*",
-                        "projects/sales/*",
+                        "teams/marketing/*",
+                        "teams/sales/*",
                     ],
                     "blackboard_write": [
                         "output/bot/*",
-                        "projects/marketing/*",
+                        "teams/marketing/*",
                     ],
                 },
             },
         }))
 
         with patch("src.cli.config.PERMISSIONS_FILE", perms_file):
-            _remove_project_blackboard_permissions("bot", "marketing")
+            _remove_team_blackboard_permissions("bot", "marketing")
 
         perms = json.loads(perms_file.read_text())
         read = perms["permissions"]["bot"]["blackboard_read"]
         write = perms["permissions"]["bot"]["blackboard_write"]
         # Marketing is gone.
-        assert "projects/marketing/*" not in read
-        assert "projects/marketing/*" not in write
+        assert "teams/marketing/*" not in read
+        assert "teams/marketing/*" not in write
         # Sales survives (other project).
-        assert "projects/sales/*" in read
+        assert "teams/sales/*" in read
         # Non-project patterns survive.
         assert "context/global" in read
         assert "output/bot/*" in write
@@ -596,13 +596,12 @@ class TestLoadConfigWithProjects:
         with (
             patch("src.cli.config.CONFIG_FILE", config_file),
             patch("src.cli.config.AGENTS_FILE", agents_file),
-            patch("src.cli.config.PROJECTS_DIR", projects_dir),
+            patch("src.cli.config.TEAMS_DIR", projects_dir),
         ):
             cfg = _load_config(config_file)
 
-        assert "projects" in cfg
-        assert "myproject" in cfg["projects"]
-        assert cfg["_agent_projects"]["bot1"] == "myproject"
+        assert "myproject" in cfg["teams"]
+        assert cfg["_agent_teams"]["bot1"] == "myproject"
 
     def test_config_no_projects(self, tmp_path):
         config_file = tmp_path / "mesh.yaml"
@@ -615,12 +614,12 @@ class TestLoadConfigWithProjects:
         with (
             patch("src.cli.config.CONFIG_FILE", config_file),
             patch("src.cli.config.AGENTS_FILE", agents_file),
-            patch("src.cli.config.PROJECTS_DIR", projects_dir),
+            patch("src.cli.config.TEAMS_DIR", projects_dir),
         ):
             cfg = _load_config(config_file)
 
-        assert cfg["projects"] == {}
-        assert cfg["_agent_projects"] == {}
+        assert cfg["teams"] == {}
+        assert cfg["_agent_teams"] == {}
 
 
 class TestRemoveAgentCleansProject:
@@ -641,18 +640,18 @@ class TestRemoveAgentCleansProject:
         perms_file.write_text(json.dumps({
             "permissions": {
                 "agent1": {
-                    "blackboard_read": ["projects/proj1/*"],
-                    "blackboard_write": ["projects/proj1/*"],
+                    "blackboard_read": ["teams/proj1/*"],
+                    "blackboard_write": ["teams/proj1/*"],
                 },
                 "agent2": {
-                    "blackboard_read": ["projects/proj1/*"],
-                    "blackboard_write": ["projects/proj1/*"],
+                    "blackboard_read": ["teams/proj1/*"],
+                    "blackboard_write": ["teams/proj1/*"],
                 },
             }
         }))
 
         with (
-            patch("src.cli.config.PROJECTS_DIR", projects_dir),
+            patch("src.cli.config.TEAMS_DIR", projects_dir),
             patch("src.cli.config.AGENTS_FILE", agents_file),
             patch("src.cli.config.PERMISSIONS_FILE", perms_file),
         ):
@@ -677,26 +676,26 @@ class TestMeshClientKeyScoping:
 
     def test_scope_key_with_project(self):
         from src.agent.mesh_client import MeshClient
-        client = MeshClient("http://mesh:8420", "bot1", project_name="alpha")
-        assert client._scope_key("context/market") == "projects/alpha/context/market"
-        assert client._scope_key("goals/researcher") == "projects/alpha/goals/researcher"
+        client = MeshClient("http://mesh:8420", "bot1", team_name="alpha")
+        assert client._scope_key("context/market") == "teams/alpha/context/market"
+        assert client._scope_key("goals/researcher") == "teams/alpha/goals/researcher"
 
     def test_scope_key_standalone(self):
         from src.agent.mesh_client import MeshClient
-        client = MeshClient("http://mesh:8420", "bot1", project_name=None)
+        client = MeshClient("http://mesh:8420", "bot1", team_name=None)
         assert client._scope_key("context/market") == "context/market"
 
     def test_scope_key_empty(self):
         from src.agent.mesh_client import MeshClient
-        client = MeshClient("http://mesh:8420", "bot1", project_name="alpha")
-        assert client._scope_key("") == "projects/alpha/"
+        client = MeshClient("http://mesh:8420", "bot1", team_name="alpha")
+        assert client._scope_key("") == "teams/alpha/"
 
     def _mock_client(self, project_name, response_data, status_code=200):
         """Create a MeshClient with mocked httpx transport."""
         from unittest.mock import AsyncMock, MagicMock
 
         from src.agent.mesh_client import MeshClient
-        client = MeshClient("http://mesh:8420", "bot1", project_name=project_name)
+        client = MeshClient("http://mesh:8420", "bot1", team_name=project_name)
         mock_http = MagicMock()
         mock_http.is_closed = False
         mock_resp = MagicMock()
@@ -714,22 +713,22 @@ class TestMeshClientKeyScoping:
     async def test_read_blackboard_uses_scoped_key(self):
         """read_blackboard sends the project-prefixed key in the URL."""
         client, mock_http = self._mock_client(
-            "alpha", {"key": "projects/alpha/context/market", "value": {"data": 1}},
+            "alpha", {"key": "teams/alpha/context/market", "value": {"data": 1}},
         )
         result = await client.read_blackboard("context/market")
         url = mock_http.get.call_args[0][0]
-        assert "projects/alpha/context/market" in url
+        assert "teams/alpha/context/market" in url
         assert result["value"] == {"data": 1}
 
     @pytest.mark.asyncio
     async def test_write_blackboard_uses_scoped_key(self):
         """write_blackboard sends the project-prefixed key in the URL."""
         client, mock_http = self._mock_client(
-            "alpha", {"key": "projects/alpha/goals/v1", "version": 1},
+            "alpha", {"key": "teams/alpha/goals/v1", "version": 1},
         )
         await client.write_blackboard("goals/v1", {"objective": "test"})
         url = mock_http.put.call_args[0][0]
-        assert "projects/alpha/goals/v1" in url
+        assert "teams/alpha/goals/v1" in url
 
     @pytest.mark.asyncio
     async def test_delete_blackboard_project_scoping(self):
@@ -738,28 +737,28 @@ class TestMeshClientKeyScoping:
         # Default: caller's own project prefix.
         await client.delete_blackboard("goals/researcher")
         url = mock_http.delete.call_args[0][0]
-        assert "projects/alpha/goals/researcher" in url
+        assert "teams/alpha/goals/researcher" in url
         # Explicit project= override (operator clearing a team agent's key).
-        await client.delete_blackboard("goals/researcher", project="beta")
+        await client.delete_blackboard("goals/researcher", team="beta")
         url = mock_http.delete.call_args[0][0]
-        assert "projects/beta/goals/researcher" in url
+        assert "teams/beta/goals/researcher" in url
         # global_scope bypasses both.
         await client.delete_blackboard("goals/researcher", global_scope=True)
         url = mock_http.delete.call_args[0][0]
-        assert "projects/" not in url
+        assert "teams/" not in url
         assert "goals/researcher" in url
 
     @pytest.mark.asyncio
     async def test_list_blackboard_scopes_prefix_and_strips_keys(self):
         """list_blackboard scopes the prefix and strips project prefix from returned keys."""
         client, mock_http = self._mock_client("alpha", [
-            {"key": "projects/alpha/context/market", "value": {"data": 1}},
-            {"key": "projects/alpha/context/competitor", "value": {"data": 2}},
+            {"key": "teams/alpha/context/market", "value": {"data": 1}},
+            {"key": "teams/alpha/context/competitor", "value": {"data": 2}},
         ])
         entries = await client.list_blackboard("context/")
         # Prefix was scoped in the request
         params = mock_http.get.call_args[1]["params"]
-        assert params["prefix"] == "projects/alpha/context/"
+        assert params["prefix"] == "teams/alpha/context/"
         # Keys were stripped in the response
         assert entries[0]["key"] == "context/market"
         assert entries[1]["key"] == "context/competitor"
@@ -773,7 +772,7 @@ class TestMeshClientKeyScoping:
         await client.read_blackboard("context/market")
         url = mock_http.get.call_args[0][0]
         # No project prefix — raw key in URL
-        assert "projects/" not in url
+        assert "teams/" not in url
         assert "context/market" in url
 
 
@@ -781,53 +780,53 @@ class TestCrossProjectPermissionIsolation:
     """Verify PermissionMatrix enforces cross-project isolation."""
 
     def test_project_agent_can_access_own_namespace(self, tmp_path):
-        """Agent with projects/alpha/* can read/write under that namespace."""
+        """Agent with teams/alpha/* can read/write under that namespace."""
         from src.host.permissions import PermissionMatrix
 
         perms_file = tmp_path / "perms.json"
         perms_file.write_text(json.dumps({
             "permissions": {
                 "bot1": {
-                    "blackboard_read": ["projects/alpha/*"],
-                    "blackboard_write": ["projects/alpha/*"],
+                    "blackboard_read": ["teams/alpha/*"],
+                    "blackboard_write": ["teams/alpha/*"],
                 },
             }
         }))
         pm = PermissionMatrix(config_path=str(perms_file))
 
-        assert pm.can_read_blackboard("bot1", "projects/alpha/context/market")
-        assert pm.can_read_blackboard("bot1", "projects/alpha/goals/v1")
-        assert pm.can_write_blackboard("bot1", "projects/alpha/tasks/todo")
+        assert pm.can_read_blackboard("bot1", "teams/alpha/context/market")
+        assert pm.can_read_blackboard("bot1", "teams/alpha/goals/v1")
+        assert pm.can_write_blackboard("bot1", "teams/alpha/tasks/todo")
 
     def test_project_agent_cannot_access_other_project(self, tmp_path):
-        """Agent with projects/alpha/* CANNOT access projects/beta/*."""
+        """Agent with teams/alpha/* CANNOT access teams/beta/*."""
         from src.host.permissions import PermissionMatrix
 
         perms_file = tmp_path / "perms.json"
         perms_file.write_text(json.dumps({
             "permissions": {
                 "bot1": {
-                    "blackboard_read": ["projects/alpha/*"],
-                    "blackboard_write": ["projects/alpha/*"],
+                    "blackboard_read": ["teams/alpha/*"],
+                    "blackboard_write": ["teams/alpha/*"],
                 },
             }
         }))
         pm = PermissionMatrix(config_path=str(perms_file))
 
-        assert not pm.can_read_blackboard("bot1", "projects/beta/context/market")
-        assert not pm.can_write_blackboard("bot1", "projects/beta/goals/v1")
-        assert not pm.can_read_blackboard("bot1", "projects/beta/anything")
+        assert not pm.can_read_blackboard("bot1", "teams/beta/context/market")
+        assert not pm.can_write_blackboard("bot1", "teams/beta/goals/v1")
+        assert not pm.can_read_blackboard("bot1", "teams/beta/anything")
 
     def test_project_agent_cannot_access_global_keys(self, tmp_path):
-        """Agent with projects/alpha/* CANNOT access unprefixed global keys."""
+        """Agent with teams/alpha/* CANNOT access unprefixed global keys."""
         from src.host.permissions import PermissionMatrix
 
         perms_file = tmp_path / "perms.json"
         perms_file.write_text(json.dumps({
             "permissions": {
                 "bot1": {
-                    "blackboard_read": ["projects/alpha/*"],
-                    "blackboard_write": ["projects/alpha/*"],
+                    "blackboard_read": ["teams/alpha/*"],
+                    "blackboard_write": ["teams/alpha/*"],
                 },
             }
         }))
@@ -853,7 +852,7 @@ class TestCrossProjectPermissionIsolation:
         pm = PermissionMatrix(config_path=str(perms_file))
 
         assert not pm.can_read_blackboard("solo", "context/anything")
-        assert not pm.can_read_blackboard("solo", "projects/alpha/data")
+        assert not pm.can_read_blackboard("solo", "teams/alpha/data")
         assert not pm.can_write_blackboard("solo", "anything")
 
     def test_two_projects_fully_isolated(self, tmp_path):
@@ -864,24 +863,24 @@ class TestCrossProjectPermissionIsolation:
         perms_file.write_text(json.dumps({
             "permissions": {
                 "alpha_worker": {
-                    "blackboard_read": ["projects/alpha/*"],
-                    "blackboard_write": ["projects/alpha/*"],
+                    "blackboard_read": ["teams/alpha/*"],
+                    "blackboard_write": ["teams/alpha/*"],
                 },
                 "beta_worker": {
-                    "blackboard_read": ["projects/beta/*"],
-                    "blackboard_write": ["projects/beta/*"],
+                    "blackboard_read": ["teams/beta/*"],
+                    "blackboard_write": ["teams/beta/*"],
                 },
             }
         }))
         pm = PermissionMatrix(config_path=str(perms_file))
 
         # alpha_worker can access alpha, not beta
-        assert pm.can_read_blackboard("alpha_worker", "projects/alpha/data")
-        assert not pm.can_read_blackboard("alpha_worker", "projects/beta/data")
+        assert pm.can_read_blackboard("alpha_worker", "teams/alpha/data")
+        assert not pm.can_read_blackboard("alpha_worker", "teams/beta/data")
 
         # beta_worker can access beta, not alpha
-        assert pm.can_read_blackboard("beta_worker", "projects/beta/data")
-        assert not pm.can_read_blackboard("beta_worker", "projects/alpha/data")
+        assert pm.can_read_blackboard("beta_worker", "teams/beta/data")
+        assert not pm.can_read_blackboard("beta_worker", "teams/alpha/data")
 
         # Neither can access global keys
         assert not pm.can_read_blackboard("alpha_worker", "context/global")

@@ -46,7 +46,7 @@ agents:
       price data. You detect changes against your last snapshot and publish
       events when prices move.
 
-      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
+      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the team.
 
       ## URL configuration
       Targets are defined in your HEARTBEAT.md file. Each target has:
@@ -217,7 +217,7 @@ agents:
       competitive reports. You are event-driven — you activate when the crawler
       hands off a price change.
 
-      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
+      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the team.
 
       ## Workflow
 

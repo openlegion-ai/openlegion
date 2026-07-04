@@ -352,7 +352,7 @@ class CostTracker:
             "by_model": by_model,
         }
 
-    # ── Team-level budget enforcement (formerly "project-level") ──────────
+    # ── Team-level budget enforcement ──────────────────────────────────
 
     def set_team_budget(
         self,
@@ -369,14 +369,10 @@ class CostTracker:
         }
 
     def get_team_spend(self, team: str, period: str = "today") -> dict:
-        """Aggregate spend across all member agents for a team.
-
-        Response includes BOTH ``team`` and ``project`` keys for
-        back-compat through PR 3.
-        """
+        """Aggregate spend across all member agents for a team."""
         tbudget = self._team_budgets.get(team)
         if tbudget is None:
-            return {"team": team, "project": team, "error": "No team budget configured"}
+            return {"team": team, "error": "No team budget configured"}
         members = tbudget["members"]
         total_cost = 0.0
         total_tokens = 0
@@ -392,7 +388,6 @@ class CostTracker:
             })
         return {
             "team": team,
-            "project": team,  # back-compat alias
             "period": period,
             "total_cost": round(total_cost, 4),
             "total_tokens": total_tokens,

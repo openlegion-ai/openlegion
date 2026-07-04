@@ -287,9 +287,9 @@ def test_list_agents_scoped_by_project(mesh_components, tmp_path):
         yaml.dump({"name": "teamA", "members": ["alice", "bob"]})
     )
 
-    with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+    with patch("src.cli.config.TEAMS_DIR", projects_dir):
         # Scoped by project
-        resp = client.get("/mesh/agents", params={"project": "teamA"})
+        resp = client.get("/mesh/agents", params={"team": "teamA"})
         assert resp.status_code == 200
         agents = resp.json()
         assert "alice" in agents
@@ -794,7 +794,7 @@ def test_introspect_returns_fleet_standalone(tmp_path):
     client = TestClient(app)
 
     # alice is standalone (not in any project) — sees only herself
-    with patch("src.cli.config._load_projects", return_value={}):
+    with patch("src.cli.config._load_teams", return_value={}):
         response = client.get(
             "/mesh/introspect",
             params={"section": "fleet"},
@@ -833,7 +833,7 @@ def test_introspect_returns_fleet_project_scoped(tmp_path):
         yaml.dump({"name": "teamX", "members": ["alice", "bob"]})
     )
 
-    with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+    with patch("src.cli.config.TEAMS_DIR", projects_dir):
         response = client.get(
             "/mesh/introspect",
             params={"section": "fleet"},
@@ -937,7 +937,7 @@ def test_introspect_non_operator_fleet_omits_model(tmp_path):
     app = create_mesh_app(bb, pubsub, router, perms)
     client = TestClient(app)
 
-    with patch("src.cli.config._load_projects", return_value={}):
+    with patch("src.cli.config._load_teams", return_value={}):
         response = client.get(
             "/mesh/introspect",
             params={"section": "fleet"},
@@ -1120,13 +1120,13 @@ def test_publish_event_project_isolation(tmp_path):
     router = MessageRouter(permissions=perms, agent_registry={})
     app = create_mesh_app(
         bb, pubsub, router, perms,
-        agent_projects={"alice": "sales"},
+        agent_teams={"alice": "sales"},
     )
     client = TestClient(app)
 
     # Publishing to project-scoped topic should succeed
     resp = client.post("/mesh/publish", json={
-        "topic": "projects/sales/research_done",
+        "topic": "teams/sales/research_done",
         "source": "alice",
         "payload": {"msg": "done"},
     })
@@ -1134,7 +1134,7 @@ def test_publish_event_project_isolation(tmp_path):
 
     # Publishing to wrong project prefix should fail
     resp = client.post("/mesh/publish", json={
-        "topic": "projects/engineering/research_done",
+        "topic": "teams/engineering/research_done",
         "source": "alice",
         "payload": {},
     })
@@ -1167,20 +1167,20 @@ def test_subscribe_project_isolation(tmp_path):
     router = MessageRouter(permissions=perms, agent_registry={})
     app = create_mesh_app(
         bb, pubsub, router, perms,
-        agent_projects={"bob": "engineering"},
+        agent_teams={"bob": "engineering"},
     )
     client = TestClient(app)
 
     # Subscribing to project-scoped topic should succeed
     resp = client.post("/mesh/subscribe", params={
-        "topic": "projects/engineering/deploy_ready",
+        "topic": "teams/engineering/deploy_ready",
         "agent_id": "bob",
     })
     assert resp.status_code == 200
 
     # Subscribing to other project's topic should fail
     resp = client.post("/mesh/subscribe", params={
-        "topic": "projects/sales/new_lead",
+        "topic": "teams/sales/new_lead",
         "agent_id": "bob",
     })
     assert resp.status_code == 403
@@ -1204,7 +1204,7 @@ def test_standalone_agent_no_project_restriction(tmp_path):
     router = MessageRouter(permissions=perms, agent_registry={})
     app = create_mesh_app(
         bb, pubsub, router, perms,
-        agent_projects={},  # solo is not in any project
+        agent_teams={},  # solo is not in any project
     )
     client = TestClient(app)
 
@@ -1375,7 +1375,7 @@ def test_project_cost_endpoint(tmp_path):
     resp = client.get("/mesh/costs/team/teamA", params={"period": "today"})
     assert resp.status_code == 200
     data = resp.json()
-    assert data["project"] == "teamA"
+    assert data["team"] == "teamA"
     assert data["total_tokens"] == 4500
     assert data["total_cost"] > 0
     assert len(data["agents"]) == 2
@@ -1404,7 +1404,7 @@ def test_register_scopes_subscriptions(tmp_path):
     router = MessageRouter(permissions=perms, agent_registry={})
     app = create_mesh_app(
         bb, pubsub, router, perms,
-        agent_projects={"alice": "sales"},
+        agent_teams={"alice": "sales"},
     )
     client = TestClient(app)
 
@@ -1414,8 +1414,8 @@ def test_register_scopes_subscriptions(tmp_path):
     assert resp.status_code == 200
 
     # Topics should be scoped
-    assert "alice" in pubsub.get_subscribers("projects/sales/research_complete")
-    assert "alice" in pubsub.get_subscribers("projects/sales/deploy_ready")
+    assert "alice" in pubsub.get_subscribers("teams/sales/research_complete")
+    assert "alice" in pubsub.get_subscribers("teams/sales/deploy_ready")
     # Should NOT be subscribed to raw topic
     assert "alice" not in pubsub.get_subscribers("research_complete")
 
@@ -1590,7 +1590,7 @@ def test_delete_rejects_history_namespace(tmp_path):
 
     # Project-scoped history key
     resp = client.delete(
-        "/mesh/blackboard/projects/myproject/history/item1",
+        "/mesh/blackboard/teams/myproject/history/item1",
         params={"agent_id": "agent1"},
     )
     assert resp.status_code == 400
@@ -1916,9 +1916,9 @@ def test_agent_profile_basic(mesh_components):
     })
 
     # Set up some state the profile should reflect
-    pubsub.subscribe("projects/teamA/research_complete", "research")
-    bb.add_watch("research", "projects/teamA/feedback/*")
-    bb.write("projects/teamA/sources/topic-1", {"data": "brief"}, written_by="research")
+    pubsub.subscribe("teams/teamA/research_complete", "research")
+    bb.add_watch("research", "teams/teamA/feedback/*")
+    bb.write("teams/teamA/sources/topic-1", {"data": "brief"}, written_by="research")
 
     # No requesting_agent — falls through to _require_any_auth which is
     # a no-op when no auth_tokens are configured (test fixture).
@@ -1929,10 +1929,10 @@ def test_agent_profile_basic(mesh_components):
     # Role is empty string — /mesh/register does not accept a role param
     assert data["role"] == ""
     assert data["capabilities"] == ["web_search", "memory_save"]
-    # No agent_projects in fixture, so project prefix is NOT stripped
-    assert "projects/teamA/research_complete" in data["subscriptions"]
-    assert "projects/teamA/feedback/*" in data["watches"]
-    assert "projects/teamA/sources/topic-1" in data["recent_writes"]
+    # No agent_teams in fixture, so project prefix is NOT stripped
+    assert "teams/teamA/research_complete" in data["subscriptions"]
+    assert "teams/teamA/feedback/*" in data["watches"]
+    assert "teams/teamA/sources/topic-1" in data["recent_writes"]
     assert data["interface"] is None  # No INTERFACE.md on the container
 
 
@@ -2302,8 +2302,8 @@ def _wake_block_app(tmp_path):
         "scout": AgentPermissions(
             agent_id="scout",
             can_message=["*"],
-            blackboard_read=["projects/growth/*"],
-            blackboard_write=["projects/growth/*"],
+            blackboard_read=["teams/growth/*"],
+            blackboard_write=["teams/growth/*"],
         ),
         "operator": AgentPermissions(
             agent_id="operator",

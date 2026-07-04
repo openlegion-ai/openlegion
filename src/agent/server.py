@@ -721,9 +721,8 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
 
         TEAM.md is fleet-wide (not per-agent), so it's separate from the
         identity file allowlist. The mesh pushes updates here after the
-        user edits it on the dashboard. PR 3 of the project→team rename
-        dropped the ``PUT /project`` alias and the dual-write to
-        ``PROJECT.md`` — only the canonical name is touched.
+        user edits it on the dashboard. Only the canonical ``TEAM.md``
+        name is touched.
         """
         if not request.headers.get("x-mesh-internal"):
             raise HTTPException(

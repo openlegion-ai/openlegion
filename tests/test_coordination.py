@@ -16,9 +16,9 @@ def _make_mesh_client(agent_id="scout", standalone=False):
     mc.is_standalone = standalone
     # Both names are set so coordination_tool (which now reads
     # ``team_name``) and any back-compat callers that still read
-    # ``project_name`` see the same value.
+    # ``team_name`` see the same value.
     mc.team_name = None if standalone else "default"
-    mc.project_name = None if standalone else "default"
+    mc.team_name = None if standalone else "default"
     mc.list_agents = AsyncMock(return_value={})
     mc.write_blackboard = AsyncMock(return_value={"version": 1})
     mc.read_blackboard = AsyncMock(return_value={"value": {"status": "pending"}})
@@ -88,7 +88,7 @@ class TestHandOff:
 
     @pytest.mark.asyncio
     async def test_hand_off_standalone_fails_closed_on_roster_error(self):
-        """Standalone agent fails handoff when roster lookup errors (can't resolve target project)."""
+        """Standalone agent fails handoff when roster lookup errors (can't resolve target team)."""
         from src.agent.builtins.coordination_tool import hand_off
 
         mc = _make_mesh_client(standalone=True)
@@ -126,7 +126,7 @@ class TestHandOff:
 
     @pytest.mark.asyncio
     async def test_hand_off_to_operator_writes_with_global_scope(self):
-        """Operator handoffs route to the global namespace (project=None)
+        """Operator handoffs route to the global namespace (team_id=None)
         on ``create_task``. Codex r1 finding on the legacy-removal PR:
         the v2 collapse needs explicit coverage that the operator's
         fleet-global scope is preserved end-to-end.
@@ -136,14 +136,14 @@ class TestHandOff:
         succeed via arm B (``target_is_global``) even if arm A (the
         literal-name check) is dropped. The whole point is to pin arm
         A independently. The operator entry here has an explicit
-        non-global project value so arm B is FALSE, forcing arm A to
+        non-global team value so arm B is FALSE, forcing arm A to
         carry the test.
         """
         from src.agent.builtins.coordination_tool import hand_off
 
         mc = _make_mesh_client(agent_id="strategist")
         # NB: no ``scope: "global"`` here — arm A independence relies on it.
-        mc.list_agents.return_value = {"operator": {"project": "ops"}}
+        mc.list_agents.return_value = {"operator": {"team": "ops"}}
 
         result = await hand_off(
             to="operator",
@@ -152,13 +152,13 @@ class TestHandOff:
         )
 
         assert result["handed_off"] is True
-        # The create_task call must carry project=None so the row lands
-        # in the fleet-global scope. A non-None project here would land
-        # the task in the caller's project and operator wouldn't see it.
+        # The create_task call must carry team_id=None so the row lands
+        # in the fleet-global scope. A non-None team here would land
+        # the task in the caller's team and operator wouldn't see it.
         kwargs = mc.create_task.call_args.kwargs
-        assert kwargs["project"] is None, (
-            f"operator handoff must write with project=None, got "
-            f"{kwargs.get('project')!r}"
+        assert kwargs["team_id"] is None, (
+            f"operator handoff must write with team_id=None, got "
+            f"{kwargs.get('team_id')!r}"
         )
 
     @pytest.mark.asyncio
@@ -172,7 +172,7 @@ class TestHandOff:
         from src.agent.builtins.coordination_tool import hand_off
 
         mc = _make_mesh_client(agent_id="dev-publisher")
-        mc.list_agents.return_value = {"operator": {"project": "ops"}}
+        mc.list_agents.return_value = {"operator": {"team": "ops"}}
         mc.wake_agent.side_effect = Exception(
             "Client error '403 Forbidden' for url "
             "'http://host.docker.internal:8420/mesh/wake?target=operator'"
@@ -197,7 +197,7 @@ class TestHandOff:
         from src.agent.builtins.coordination_tool import hand_off
 
         mc = _make_mesh_client(agent_id="dev-publisher")
-        mc.list_agents.return_value = {"operator": {"project": "ops"}}
+        mc.list_agents.return_value = {"operator": {"team": "ops"}}
         mc.wake_agent.side_effect = Exception(
             "Server error '500 Internal Server Error' for url "
             "'http://host.docker.internal:8420/mesh/wake'"
@@ -220,7 +220,7 @@ class TestHandOff:
         from src.agent.builtins.coordination_tool import hand_off
 
         mc = _make_mesh_client(agent_id="scout")
-        mc.list_agents.return_value = {"writer": {"project": "scout"}}
+        mc.list_agents.return_value = {"writer": {"team": "scout"}}
         mc.wake_agent.side_effect = Exception("connection refused")
 
         result = await hand_off(
@@ -236,14 +236,14 @@ class TestHandOff:
     async def test_hand_off_to_global_scope_agent_writes_with_global_scope(self):
         """Forward-compat: any agent with ``scope: "global"`` on the
         registry (not just the literal name "operator") routes with
-        project=None. Codex r1 flagged that the v2 collapse dropped
+        team_id=None. Codex r1 flagged that the v2 collapse dropped
         the broader detection — restored with this test as the pin."""
         from src.agent.builtins.coordination_tool import hand_off
 
         mc = _make_mesh_client(agent_id="worker")
         # A hypothetical future global agent — e.g. a fleet-wide
         # monitor that isn't called "operator" but has the same
-        # cross-project addressability.
+        # cross-team addressability.
         mc.list_agents.return_value = {
             "fleet-monitor": {"scope": "global", "role": "monitor"},
         }
@@ -256,9 +256,9 @@ class TestHandOff:
 
         assert result["handed_off"] is True
         kwargs = mc.create_task.call_args.kwargs
-        assert kwargs["project"] is None, (
-            f"scope=global handoff must write with project=None, got "
-            f"{kwargs.get('project')!r}"
+        assert kwargs["team_id"] is None, (
+            f"scope=global handoff must write with team_id=None, got "
+            f"{kwargs.get('team_id')!r}"
         )
 
     @pytest.mark.asyncio
@@ -273,7 +273,7 @@ class TestHandOff:
 
         mc = _make_mesh_client(agent_id="social-publisher")
         mc.team_name = "social-media"
-        mc.list_agents.return_value = {"operator": {"project": "ops"}}
+        mc.list_agents.return_value = {"operator": {"team": "ops"}}
 
         result = await hand_off(
             to="operator",
@@ -318,16 +318,16 @@ class TestHandOff:
 
     @pytest.mark.asyncio
     async def test_hand_off_cross_project_routes_to_target_project(self):
-        """Worker → worker in a different project: task lands in the
-        TARGET's project namespace, not the caller's. Without this the
-        recipient's inbox scan (filtered by their own project) would
+        """Worker → worker in a different team: task lands in the
+        TARGET's team namespace, not the caller's. Without this the
+        recipient's inbox scan (filtered by their own team) would
         never see the task. Codex r1 coverage pin."""
         from src.agent.builtins.coordination_tool import hand_off
 
         mc = _make_mesh_client(agent_id="scout")
         mc.team_name = "research-team"
         mc.list_agents.return_value = {
-            "publisher": {"role": "writer", "project": "publishing-team"},
+            "publisher": {"role": "writer", "team": "publishing-team"},
         }
 
         result = await hand_off(
@@ -338,22 +338,22 @@ class TestHandOff:
 
         assert result["handed_off"] is True
         kwargs = mc.create_task.call_args.kwargs
-        assert kwargs["project"] == "publishing-team", (
-            f"cross-project handoff must write into the TARGET's "
-            f"project, got {kwargs.get('project')!r}"
+        assert kwargs["team_id"] == "publishing-team", (
+            f"cross-team handoff must write into the TARGET's "
+            f"team, got {kwargs.get('team_id')!r}"
         )
 
     @pytest.mark.asyncio
     async def test_hand_off_same_project_uses_callers_team_name(self):
-        """Worker → worker in the same project (no explicit
-        ``project`` on the registry entry): task lands in the caller's
-        own project. The previous test covers cross-project; this one
+        """Worker → worker in the same team (no explicit
+        ``team`` on the registry entry): task lands in the caller's
+        own team. The previous test covers cross-team; this one
         pins the default fall-through."""
         from src.agent.builtins.coordination_tool import hand_off
 
         mc = _make_mesh_client(agent_id="scout")
         mc.team_name = "research-team"
-        # No ``project`` key on the target — same-project default.
+        # No ``team`` key on the target — same-team default.
         mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
 
         result = await hand_off(
@@ -364,7 +364,7 @@ class TestHandOff:
 
         assert result["handed_off"] is True
         kwargs = mc.create_task.call_args.kwargs
-        assert kwargs["project"] == "research-team"
+        assert kwargs["team_id"] == "research-team"
 
     @pytest.mark.asyncio
     async def test_hand_off_invalid_agent_id_format(self):

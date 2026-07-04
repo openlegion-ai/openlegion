@@ -3539,7 +3539,7 @@ class BrowserManager:
         # tracker which percentages crossed THIS tick, and ships a
         # ``tenant_spend_threshold`` payload through the same metrics_sink.
         # Keeping it on the metrics tick (not on every ``add_cost``) avoids
-        # firing a flag-load + project-config read on the hot solve path.
+        # firing a flag-load + team-config read on the hot solve path.
         try:
             await self._emit_tenant_threshold_alerts(now)
         except Exception as e:

@@ -981,7 +981,7 @@ class InlineSetup:
         """Run the streamlined inline setup flow.
 
         Steps: provider → key (with validation) → model selection →
-        optional base URL.  Simpler than the full wizard: no project
+        optional base URL.  Simpler than the full wizard: no team
         creation step, no collaboration step.
         """
         from src.cli.config import _PROVIDER_MODELS, _PROVIDERS, _set_env_key
