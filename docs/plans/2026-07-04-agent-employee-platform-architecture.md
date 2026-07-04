@@ -365,12 +365,43 @@ as code lands.
   version are both present (missing = fail-open, `/status` exempt) — non-breaking by
   construction. One complete emit→check pair, no unread header. 11 tests; touched suites
   green (223 passed).
-- **Next up (staged, not yet landed):** lane rehydration (needs agent-readiness timing +
-  pending-only CAS claim — care required, B9); personnel-file export/import (large);
-  then the atomic **project→team rename** (B5 — backend + SPA + pinned tests in one PR).
-  These are the remaining Phase-0 units; Phases 1–5 follow. **Pace is gated by the
-  "seamless / don't break" bar** — each unit lands green with a regression test, so the
-  structural units are deliberately not rushed.
+- **✅ Landed — lane rehydration (PR #1183).** `Tasks.list_pending()` (pending-only, no
+  double-exec) + `LaneManager.rehydrate_pending()` (best-effort, at-least-once, tracked
+  detached enqueues) + a boot startup hook with an env-overridable settle delay. Verified
+  transient-unreachable-safe (`_direct_dispatch` returns `"(no response)"`, never marks the
+  task failed). Tests in `test_orchestration.py` + `test_lanes.py`.
+- **✅ Landed — personnel-file export v1 (PR #1184).** `GET /mesh/agents/{id}/export`
+  (operator-only, read-only): bundles config + permission ACL + cron + best-effort workspace
+  markdown. Memory DB (embeddings) + import deferred to follow-ups. Tests in
+  `test_agent_export.py`.
+
+### PR ledger (as of 2026-07-04)
+| PR | Unit | CI |
+|---|---|---|
+| #1180 | archive → health-monitor deregistration (+ restart re-register) | green |
+| #1181 | mesh↔agent protocol version handshake | green |
+| #1182 | this plan doc | — |
+| #1183 | lane rehydration | green |
+| #1184 | personnel-file export v1 | pending |
+
+All five branch off `main`; a local integration merge of all four code branches is **conflict-free
+and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes recorded above).
+
+### YOU ARE HERE → next phase
+1. **Merge the foundation to `main`** (#1180/#1181/#1183, then #1184 when green; #1182 anytime).
+   Blocked only on the CLA (human signs). Merge incrementally — do NOT big-bang.
+2. **Then the atomic project→team rename** off freshly-merged `main` — the linchpin. Follow
+   Appendix A.1 (removal manifest), A.2 (attach points), **B5** (pinned tests + frozen tab IDs —
+   do NOT touch `chat`/`fleet`/`workplace`/`system`), and **C.2** (rename-completion: no
+   `projects/` prefix or `project_id` alias left behind). Ships as ONE PR: backend + SPA
+   (`app.js`/`index.html`) + updated pinned tests + blackboard re-key.
+3. **Then Phases 1–5** (team-first store → collaboration substrate → agenda-loop workday →
+   leads → earned autonomy + hibernation). §8 decisions #2/#3/#5/#6 are RATIFIED and unblock
+   Phases 3–4; #1 (scratch volume) and #4 (destructive cleanup) stand at safe defaults.
+
+**Handoff note:** this doc is the source of truth — a fresh session can continue from here without
+this session's chat history. Read §5 (keep/refactor/remove), Appendices A–C (surgical manifest +
+regression register + dead-code ledger), and §8 (ratified decisions) before starting the rename.
 
 ---
 
