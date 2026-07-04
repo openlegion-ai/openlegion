@@ -320,6 +320,9 @@ team boundary makes it mechanical when it does.
    suppression) and the **designated cheap-model tier** for coordination traffic.
 4. Confirm the **destructive-cleanup mandate** (delete all migration/shim/lazy-migration code; reset
    to canonical v1 schemas) is authorized given no users/data.
+5. **(New — from Appendix B6)** Decide whether "solo agent = team-of-one" is allowed to grant
+   previously-isolated solo agents blackboard access + team context, or whether a team-of-one must
+   stay self-scoped so isolation is preserved in behavior.
 
 ---
 
@@ -444,4 +447,142 @@ are point-in-time; treat symbol names as the durable anchor.
 3. **Team-first (Phase 1) must precede Team Drive/Scratch (Phase 2)** — the volume lifecycle owner is
    the new team store; there is nowhere to hang volume create/delete until it exists.
 4. **Model tiering (Phase 0/3) needs the pin widened first** — otherwise every tiered call 403s.
+
+---
+
+## Appendix B — Regression risk register
+
+Verified against the tree by two targeted regression-audit passes. Ranked by severity. Each entry:
+the change, the invariant it threatens, the confirmed failure, and the required mitigation. **These
+are the "don't break things that matter" gates — several change how a phase must be implemented.**
+
+### B1 — 🔴 CRITICAL: "Dual lanes" as written would corrupt agent state
+- **Invariant:** the agent runtime is **single-lane by explicit design**. A chat arriving during a
+  task is shunted to the steer queue with the code comment *"prevents concurrent state corruption
+  (shared loop_detector, state, flush_triggered)"* (`loop.py:3026-3028`). Execution is mutually
+  excluded by `_chat_lock` (`loop.py:426`, held at `3078`/`5094`), the `state != "idle"` guards
+  (`server.py:210`, `loop.py:2357`), and the `current_task is not None` redirect (`loop.py:3029`).
+- **Failure if built naively:** a true second parallel worker calling `/chat` while a task runs
+  would interleave two turns over the **same** shared mutable state — `_chat_messages`
+  (`loop.py:421`), `state` (`:413`), `_loop_detector` (`:446`, `.reset()` per turn), `current_task`,
+  and concurrent memory-DB writes + context compaction. Result: corrupted conversation, cross-reset
+  loop detection, double memory writes. This is the single most dangerous item in the plan.
+- **Mitigation (reframes Phase 3):** the "interactive lane" must be **steer-style injection into the
+  running turn** (the mechanism that already exists, `lanes.py:337-374`), NOT a second parallel
+  execution. True parallelism inside one agent requires per-lane splitting of `_chat_messages` /
+  `state` / `_loop_detector` / memory — out of scope. **Rewrite the Phase-3 "dual lanes" item to
+  "priority steer lane"**: an interactive request preempts/injects, it does not run concurrently.
+
+### B2 — 🔴 CRITICAL: Removing heartbeat suppression can starve real work of budget
+- **Invariant:** idle heartbeats skip the LLM (`cron.py:543-554`) precisely because spend is a
+  **single flat per-agent daily ledger** with **no coordination-vs-work separation** (`costs.py`
+  `track`/`preflight_check` key on `agent` only). Budget is enforced **pre-flight** — a call that
+  would exceed the cap is *blocked*, not warned (`credentials.py:1388`).
+- **Failure:** make every 15-min heartbeat a full agenda-loop LLM call (Phase 3) and those ticks bill
+  the same daily cap. An agent can **exhaust its daily budget on agenda ticks and then have real task
+  work hard-blocked** with a "Budget exceeded" error. With the effective default of **$10/day** (see
+  B7), this bites fast.
+- **Mitigation (sequencing):** the **cheap-model tier for coordination traffic MUST land with or
+  before** the suppression removal, AND introduce a **spend split** (separate coordination sub-budget
+  from work budget, or exempt cheap-tier coordination from the work cap). Do not remove the LLM-skip
+  until both exist. Keep a deterministic-probe fast path so truly-idle ticks still cost ~nothing.
+
+### B3 — 🔴 CRITICAL: Hibernation fights three existing subsystems
+- **Invariant/failures (all confirmed):**
+  1. **Health monitor** auto-restarts any unreachable container within ~90s (`health.py:349-445`,
+     `MAX_FAILURES=3`, `POLL_INTERVAL=30`) and has **no "intentionally stopped" awareness**. A
+     hibernated container is restarted against its will. *(Latent bug found: the archive path
+     `server.py:7387-7428` also fails to `health_monitor.unregister` — only delete/remove paths do,
+     `server.py:7680` — so archived agents may already be getting silently restarted.)*
+  2. **Direct hot path:** CLI/dashboard call the agent container **directly** (`repl.py:1665`,
+     `dashboard/server.py:2907`); a stopped container → connection refused → user sees an error. No
+     mesh-side wake-then-forward exists.
+  3. **Cron dispatch** to a stopped container is caught and swallowed as an error-count bump
+     (`cron.py:687-692`) — no wake, no retry.
+- **Mitigation:** hibernation is **not** "just stop the container." It needs (a) a hibernated-state
+  flag the health monitor respects (or `unregister` like the delete path), (b) a **wake-then-forward
+  shim** in front of both the direct CLI/dashboard path and cron dispatch, (c) fixing the archive
+  deregistration bug first (it's the same mechanism). Scope Phase 5 hibernation accordingly.
+
+### B4 — 🟠 HIGH: Enforcing team budgets can block an entire team on a 0/unset default
+- **Invariant:** budget `0` means **block everything**, not unlimited (`costs.py:277,298`); only a
+  *truly-missing* per-agent key falls back to defaults (`costs.py:273`). `get_team_spend` returns
+  `{"error": "No team budget configured"}` with **no `daily_limit` key** when unset (`costs.py:377`).
+- **Failure:** a new enforced team envelope that defaults to `0`, or whose unset path reads
+  `daily_limit` off that error dict, either **blocks every team member's LLM call** or **KeyErrors**.
+- **Mitigation:** define envelope semantics explicitly — **unset/`0` = unlimited**, ship generous
+  defaults, surface the block on `tasks.blocker_note` (today budget-exceeded surfaces only as a proxy
+  error string, *not* promoted to `blocker_note` — wire that promotion so team-budget blocks aren't
+  silent).
+
+### B5 — 🟠 HIGH: The project→team rename breaks specific pinned tests + must not touch frozen IDs
+- **Confirmed pins that break** on shim removal: `test_team_migration.py:203,313` (`project_id`
+  column), `test_mesh.py:1075-1116` (`projects/{name}/` prefix), `test_dashboard.py:3182-3251`
+  (`/api/projects/*`), `:5565,5574` (`project_id` emission), `can_manage_projects` in
+  `test_edit_soft_endpoint.py` + `test_operator_internet_access.py`.
+- **Hard trap:** the four tab IDs `chat/fleet/workplace/system` are **frozen** (Constraint #5) and
+  pinned by `test_dashboard_ui.py:314-322`. A blanket "rename project/fleet→team" sweep that touches
+  `id: 'fleet'`/`id: 'workplace'` **breaks URL stability and the test**. Rename **labels and the
+  `project` domain term only** — never the tab IDs.
+- **Also:** `test_dashboard_ui.py:2389-2410` pins CLAUDE.md module rows + constraint text. Every
+  removal touching CLAUDE.md must update the pinning test in the same PR (per the repo's own
+  "`make test` even for docs-only changes" rule).
+- **Mitigation:** treat these tests as **part of the rename PR** — update in lockstep, and add an
+  explicit "do not touch tab IDs" guard to the rename checklist.
+
+### B6 — 🟠 HIGH: "Solo agent = team-of-one" loosens solo-agent isolation
+- **Invariant:** solo/standalone agents are **blocked from the blackboard entirely**
+  (`mesh_tool.py:96-99` `_STANDALONE_ERROR`, enforced on every op) and get **no TEAM.md**
+  (`workspace.py:693`). This is a real isolation posture, not an accident.
+- **Failure:** unifying every solo agent into a team-of-one flips `is_standalone → False`, **granting
+  blackboard read/write + a team-context surface** to agents that are deliberately isolated today —
+  an expansion of cross-agent reachability on a blackboard that is "shared by design" (audit H10).
+- **Mitigation:** intended or not, this is a **security decision** (added to §8 open decisions). If
+  unifying the code path, keep a team-of-one's blackboard scoped to itself so the isolation is
+  preserved in behavior even as the code unifies.
+
+### B7 — 🟡 MEDIUM: Agent-server bearer auth breaks every direct caller unless wired first
+- **Confirmed:** the agent server is unauthenticated; **no caller sends a token** to it, and the
+  per-agent token in `runtime.auth_tokens` is the **agent→mesh** direction, **not wired into the
+  mesh→agent transport** (`transport.py:29-39` sets only `x-mesh-internal` + trace). Enforcing bearer
+  auth breaks the mesh transport, CLI (`repl.py`), dashboard, and health checks (`is_reachable`).
+- **Mitigation:** wire a mesh→agent token through `_resolve_headers` (and every direct caller) **in
+  the same change** that enforces it; keep `GET /status` exempt for reachability probes. Sequence
+  behind the ICC-off network fix (which already carries the load), so this is defense-in-depth, not a
+  flag day.
+
+### B8 — 🟡 MEDIUM: Blackboard "demotion" must not evict non-artifact riders
+- **Confirmed riders that MUST keep a home:** `goals/{agent}` (`loop.py:1840`), `inbox/{agent}/
+  task_event/` back-edges (`coordination_tool.py:553`), `claim_task` CAS (`mesh.py:196`),
+  `signals/{agent}` (`cron.py:716`), `status/*` + template working namespaces
+  (`tasks/*,reviews/*,drafts/*,…` across `src/templates/*.yaml`). **Only `output/*` and `artifacts/*`
+  are deliverable-shaped** — those are all that move to the Team Drive.
+- **Mitigation:** scope "demote to signals" to **moving `output/*`/`artifacts/*` payloads only**;
+  everything else stays. Even `hand_off` only moves its `data` blob — its task row + inbox event
+  remain.
+
+### B9 — 🟡 MEDIUM: Lane rehydration can double-execute without a claim
+- **Confirmed:** there is **no `dispatched`/`claimed` flag** on the task row and no idempotency key on
+  `create_task`. `list_inbox(include_terminal=False)` returns `pending` **and** `working`/`accepted`/
+  `blocked`.
+- **Mitigation:** drive rehydration off `PENDING_STATUSES = {pending}` **only** and **CAS-claim**
+  (`write_if_version`) before dispatch, so a crash-loop restart can't re-run the same task. (Already
+  in Appendix A.3 #2; restated here as the regression it prevents.)
+
+### B-pre — Pre-existing issues found while auditing (NOT caused by the plan, worth fixing)
+1. **Archive path health-monitor leak** — `archive_agent_endpoint` never `unregister`s from the
+   health monitor (`server.py:7387-7428` vs delete `:7680`), so archived agents are candidates for
+   the ~90s auto-restart. Latent today; blocks hibernation until fixed.
+2. **Config write lost-update race** — non-atomic load→mutate→save in `cli/config.py:246-260`
+   (documented). The Personnel-File import path would widen the window; fix with a file lock or
+   atomic temp+rename before adding import.
+3. **`config/settings.json` absent → $10/day effective budget default** (`costs.py:36`), while the
+   dashboard's saved default is $50/200. Silent, surprisingly low cap; make the default explicit.
+4. **`MessageRouter.message_log` is an in-memory `deque(10000)`** (`mesh.py:759`) — inter-agent
+   message history is lost on restart and unbounded-per-window. The Threads store should replace it.
+5. **Monotonic port allocation never reclaims** (`runtime.py` `_next_port`) — a long-lived mesh with
+   agent churn drifts upward. Low severity; cosmetic until very long uptimes.
+6. **SandboxBackend feature divergence** — microVM backend uses per-agent dir copies, so Team Drive/
+   Scratch, live `TEAM.md` push, and any shared-volume feature have **no analog**. Either commit to a
+   sync layer or explicitly scope teams to `DockerBackend` and document the sandbox limitation.
 ```
