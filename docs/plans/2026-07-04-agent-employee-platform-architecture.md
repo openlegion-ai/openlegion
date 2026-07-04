@@ -347,6 +347,19 @@ as code lands.
   The remaining real B4 work is only the **team-envelope semantics** (unset/`0` =
   unlimited), not blocker_note plumbing. Chat-turn budget errors surface directly in the
   chat stream (no task, no blocker_note needed).
+- **✅ Landed — mesh↔agent protocol version handshake (Phase-0 insurance).**
+  `X-Protocol-Version` added to `src/shared/trace.py` (`protocol_headers` +
+  `protocol_compatible`); emitted by the mesh transport on every mesh→agent hop; the
+  agent server rejects (426) only when `x-mesh-internal` AND an incompatible major
+  version are both present (missing = fail-open, `/status` exempt) — non-breaking by
+  construction. One complete emit→check pair, no unread header. 11 tests; touched suites
+  green (223 passed).
+- **Next up (staged, not yet landed):** lane rehydration (needs agent-readiness timing +
+  pending-only CAS claim — care required, B9); personnel-file export/import (large);
+  then the atomic **project→team rename** (B5 — backend + SPA + pinned tests in one PR).
+  These are the remaining Phase-0 units; Phases 1–5 follow. **Pace is gated by the
+  "seamless / don't break" bar** — each unit lands green with a regression test, so the
+  structural units are deliberately not rushed.
 
 ---
 
