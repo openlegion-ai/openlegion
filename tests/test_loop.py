@@ -5480,3 +5480,39 @@ class TestEmergencyPruneCalibration:
         )
         assert progressed is True, "forced-progress backstop must shed content"
         assert len(loop._chat_messages) < before_n
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_uses_utility_model_when_configured():
+    """Per-call model tiering: heartbeats are coordination traffic, so a
+    configured utility model (LLM_UTILITY_MODEL) rides the heartbeat's
+    LLM call as model=."""
+    loop = _make_loop()
+    loop.llm.utility_model = "openai/gpt-4.1-nano"
+    loop.llm.chat = AsyncMock(
+        return_value=LLMResponse(content="HEARTBEAT_OK", tokens_used=50),
+    )
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+
+    result = await loop.execute_heartbeat("Check stuff")
+
+    assert result["skipped"] is False
+    assert result["outcome"] == "ok"
+    assert loop.llm.chat.call_args.kwargs["model"] == "openai/gpt-4.1-nano"
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_call_shape_unchanged_without_utility_model():
+    """Feature off (empty utility_model) → the heartbeat LLM call carries
+    no model kwarg — byte-for-byte today's behavior."""
+    loop = _make_loop()
+    loop.llm.utility_model = ""
+    loop.llm.chat = AsyncMock(
+        return_value=LLMResponse(content="HEARTBEAT_OK", tokens_used=50),
+    )
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+
+    result = await loop.execute_heartbeat("Check stuff")
+
+    assert result["outcome"] == "ok"
+    assert "model" not in loop.llm.chat.call_args.kwargs

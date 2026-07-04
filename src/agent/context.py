@@ -15,6 +15,7 @@ import time
 from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any
 
+from src.agent.llm import utility_model_kwargs
 from src.agent.workspace import _MEMORY_HEAD_BUDGET
 from src.shared.models import get_context_window
 from src.shared.utils import sanitize_for_prompt, setup_logging
@@ -598,6 +599,9 @@ class ContextManager:
                 messages=[{"role": "user", "content": extract_prompt}],
                 max_tokens=1024,
                 temperature=0.3,
+                # Extraction is coordination overhead, not task reasoning —
+                # route to the cheap utility model when one is configured.
+                **utility_model_kwargs(self.llm),
             )
             raw = response.content.strip()
             # Strip markdown code fences if present (e.g. ```json\n...\n```)
@@ -767,6 +771,9 @@ class ContextManager:
                 system="You compile concise, durable agent memory.",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=1500, temperature=0.3,
+                # Memory consolidation is maintenance overhead — cheap
+                # utility model when configured.
+                **utility_model_kwargs(llm),
             )
         except Exception as e:
             logger.warning("Memory consolidation LLM call failed: %s", e)
@@ -1073,6 +1080,10 @@ class ContextManager:
                     messages=[{"role": "user", "content": prompt}],
                     max_tokens=max_tokens,
                     temperature=0.3,
+                    # Summarization (incl. every _summarize_compact chunk /
+                    # fold call, which all funnel through here) is context
+                    # overhead — cheap utility model when configured.
+                    **utility_model_kwargs(self.llm),
                 )
                 return response.content.strip() or None
             except Exception as e:

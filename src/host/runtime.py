@@ -109,6 +109,28 @@ class RuntimeBackend(abc.ABC):
         until wired, agents start with no MCP servers."""
         self._connectors = store
 
+    def _utility_model_from_config(self) -> str:
+        """Deployment-wide cheap model for coordination/utility LLM traffic
+        (``llm.utility_model`` in ``config/mesh.yaml``), injected as the
+        ``LLM_UTILITY_MODEL`` container env.
+
+        Read fresh from config at every container start — at the backend
+        level rather than per caller — so every start path (initial boot,
+        REPL /restart, health-monitor restart, dashboard restart, mesh
+        restart endpoint) picks it up without per-caller plumbing, and a
+        config edit applies on the next (re)start. Empty string = feature
+        off (the env var is then omitted entirely). Same source of truth
+        the mesh-side model pin reads, so agent-side tiered calls are
+        never 403'd.
+        """
+        try:
+            from src.cli.config import _load_config
+            value = _load_config().get("llm", {}).get("utility_model", "")
+        except Exception:
+            logger.debug("utility model: config load failed", exc_info=True)
+            return ""
+        return value if isinstance(value, str) else ""
+
     def _mcp_snapshot_for(self, agent_id: str) -> tuple[list[dict], int]:
         """``MCP_SERVERS``-shaped dicts for every connector assigned to
         this agent, plus the catalog generation the snapshot was taken
@@ -491,6 +513,9 @@ class DockerBackend(RuntimeBackend):
             )
         if thinking:
             environment["THINKING"] = thinking
+        utility_model = self._utility_model_from_config()
+        if utility_model:
+            environment["LLM_UTILITY_MODEL"] = utility_model
         environment.update(self.extra_env)
         if env_overrides:
             environment.update(env_overrides)
@@ -1165,6 +1190,9 @@ class SandboxBackend(RuntimeBackend):
             )
         if thinking:
             env_cfg["THINKING"] = thinking
+        utility_model = self._utility_model_from_config()
+        if utility_model:
+            env_cfg["LLM_UTILITY_MODEL"] = utility_model
         env_cfg.update(self.extra_env)
         if env_overrides:
             env_cfg.update(env_overrides)

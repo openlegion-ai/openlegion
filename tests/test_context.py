@@ -1370,3 +1370,114 @@ class TestChunkedSummarization:
         chunks = ContextManager._chunk_message_texts(msgs, chunk_size=100, tool_chars=200)
         assert len(chunks) == 1
         assert len(chunks[0]) <= 100
+
+
+# ── Per-call model tiering: utility model on summarization/extraction ──────
+#
+# When the LLMClient carries a configured utility_model (from the
+# LLM_UTILITY_MODEL container env), every ContextManager-internal utility
+# chat call (summarize, fact extraction, memory consolidation) must route to
+# it via model=. When unset, the call shape must be exactly today's — no
+# model kwarg at all.
+
+
+class TestUtilityModelTiering:
+    @pytest.mark.asyncio
+    async def test_summarize_text_uses_utility_model_when_configured(self):
+        llm = MagicMock()
+        llm.utility_model = "openai/gpt-4.1-nano"
+        llm.chat = AsyncMock(
+            return_value=LLMResponse(content="a summary", tokens_used=10),
+        )
+        cm = ContextManager(max_tokens=1000, llm=llm)
+
+        out = await cm._summarize_text("summarize this")
+
+        assert out == "a summary"
+        assert llm.chat.call_args.kwargs["model"] == "openai/gpt-4.1-nano"
+
+    @pytest.mark.asyncio
+    async def test_summarize_text_call_shape_unchanged_when_unset(self):
+        llm = MagicMock()
+        llm.utility_model = ""  # feature off
+        llm.chat = AsyncMock(
+            return_value=LLMResponse(content="a summary", tokens_used=10),
+        )
+        cm = ContextManager(max_tokens=1000, llm=llm)
+
+        await cm._summarize_text("summarize this")
+
+        assert "model" not in llm.chat.call_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_mocked_llm_without_utility_attr_treated_as_off(self):
+        """The standard MagicMock double (utility_model is a MagicMock,
+        not a str) must behave exactly like feature-off."""
+        llm = MagicMock()
+        llm.chat = AsyncMock(
+            return_value=LLMResponse(content="a summary", tokens_used=10),
+        )
+        cm = ContextManager(max_tokens=1000, llm=llm)
+
+        await cm._summarize_text("summarize this")
+
+        assert "model" not in llm.chat.call_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_compaction_utility_calls_all_carry_utility_model(self):
+        """End-to-end through maybe_compact: both the fact-extraction call
+        and the summarize call ride the utility model."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            workspace = WorkspaceManager(workspace_dir=tmpdir)
+            llm = MagicMock()
+            llm.utility_model = "openai/gpt-4.1-nano"
+            llm.chat = AsyncMock(
+                side_effect=[
+                    LLMResponse(
+                        content='[{"key": "topic", "value": "tiering", "category": "fact"}]',
+                        tokens_used=30,
+                    ),
+                    LLMResponse(content="Summary: tiering.", tokens_used=30),
+                ]
+            )
+
+            cm = ContextManager(max_tokens=100, llm=llm, workspace=workspace)
+            msgs = _make_messages(10, chars_each=200)
+            _, did_compact = await cm.maybe_compact("system", msgs)
+
+            assert did_compact is True
+            assert llm.chat.call_count >= 2
+            for call in llm.chat.call_args_list:
+                assert call.kwargs["model"] == "openai/gpt-4.1-nano"
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    @pytest.mark.asyncio
+    async def test_compaction_call_shape_unchanged_when_unset(self):
+        """Feature off → NO utility chat call carries a model kwarg
+        (byte-for-byte today's behavior)."""
+        tmpdir = tempfile.mkdtemp()
+        try:
+            workspace = WorkspaceManager(workspace_dir=tmpdir)
+            llm = MagicMock()
+            llm.utility_model = ""
+            llm.chat = AsyncMock(
+                side_effect=[
+                    LLMResponse(
+                        content='[{"key": "topic", "value": "tiering", "category": "fact"}]',
+                        tokens_used=30,
+                    ),
+                    LLMResponse(content="Summary: tiering.", tokens_used=30),
+                ]
+            )
+
+            cm = ContextManager(max_tokens=100, llm=llm, workspace=workspace)
+            msgs = _make_messages(10, chars_each=200)
+            _, did_compact = await cm.maybe_compact("system", msgs)
+
+            assert did_compact is True
+            for call in llm.chat.call_args_list:
+                assert "model" not in call.kwargs
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)

@@ -1266,6 +1266,25 @@ def create_mesh_app(
             allowed.update(m for m in extra if isinstance(m, str) and m)
         return allowed or None
 
+    def _deployment_utility_model() -> str:
+        """Deployment-configured cheap model for coordination/utility LLM
+        traffic (``llm.utility_model`` — per-call model tiering hook).
+
+        The value is operator/deployment-controlled, never agent-chosen,
+        so the model pin always accepts it: an agent cannot widen its own
+        allowlist through this. Read from the SAME config the container
+        env wiring (``LLM_UTILITY_MODEL`` in ``runtime.py``) serves, so
+        agent-side tiered calls (summarization, heartbeat) are never
+        403'd. Empty string = feature off (pin behavior unchanged).
+        """
+        try:
+            from src.cli.config import _load_config
+            value = _load_config().get("llm", {}).get("utility_model", "")
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("model-pin: utility model config load failed: %s", e)
+            return ""
+        return value if isinstance(value, str) else ""
+
     def _enforce_model_pin(agent_id: str, request: Request, api_request: APIProxyRequest) -> None:
         """403 when an agent requests an LLM model it isn't pinned to.
 
@@ -1305,6 +1324,15 @@ def create_mesh_app(
                 return name.rsplit("/", 1)[-1].lower()
 
             allowed_bare = {_bare(m) for m in allowed}
+            # The deployment-configured utility model is ALWAYS acceptable
+            # (per-call model tiering): it is operator-controlled config,
+            # so this widens nothing an agent can influence. Same
+            # prefix-insensitive compare as the allowlist so bare and
+            # prefixed spellings both pass. The is_model_compatible gate
+            # below still runs for it.
+            utility_model = _deployment_utility_model()
+            if utility_model:
+                allowed_bare.add(_bare(utility_model))
             if _bare(requested_model) not in allowed_bare:
                 _record_denial(
                     "permission", caller=agent_id, target=requested_model,

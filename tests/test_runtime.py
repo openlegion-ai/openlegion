@@ -3084,3 +3084,84 @@ class TestDispatchTransportErrorSurfacing:
         result = await dispatch_fn("agent-x", "resume task")
 
         assert result == "(no response)"
+
+
+# ── Per-call model tiering: LLM_UTILITY_MODEL container env ────────────────
+#
+# ``llm.utility_model`` is injected at the runtime-backend level (read fresh
+# from config at every container start) so EVERY start path — initial boot,
+# REPL /restart, health-monitor restart, dashboard restart — carries it
+# without per-caller plumbing. Unset = the env var is omitted entirely.
+
+
+class TestUtilityModelEnv:
+    def _make_sandbox(self, tmp_path):
+        project_root = tmp_path / "project"
+        project_root.mkdir()
+        backend = SandboxBackend.__new__(SandboxBackend)
+        backend.project_root = project_root
+        backend.mesh_host_port = 8420
+        backend.agents = {}
+        backend.auth_tokens = {}
+        backend.extra_env = {}
+        backend._workspace_root = tmp_path / ".openlegion" / "agents"
+        backend._workspace_root.mkdir(parents=True)
+        return backend
+
+    def test_env_present_when_configured(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "src.cli.config._load_config",
+            lambda *a, **k: {"llm": {"utility_model": "openai/gpt-4.1-nano"}},
+        )
+        backend = self._make_sandbox(tmp_path)
+        ws = backend._prepare_workspace(
+            agent_id="tiered", role="test", tools_dir="",
+            system_prompt="", model="openai/gpt-4o-mini",
+        )
+        env_content = (ws / ".agent.env").read_text()
+        assert "LLM_UTILITY_MODEL=openai/gpt-4.1-nano" in env_content
+
+    def test_env_absent_when_unset(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "src.cli.config._load_config",
+            lambda *a, **k: {"llm": {"default_model": "openai/gpt-4o-mini"}},
+        )
+        backend = self._make_sandbox(tmp_path)
+        ws = backend._prepare_workspace(
+            agent_id="untiered", role="test", tools_dir="",
+            system_prompt="", model="openai/gpt-4o-mini",
+        )
+        env_content = (ws / ".agent.env").read_text()
+        assert "LLM_UTILITY_MODEL" not in env_content
+
+    def test_env_absent_when_empty_string(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "src.cli.config._load_config",
+            lambda *a, **k: {"llm": {"utility_model": ""}},
+        )
+        backend = self._make_sandbox(tmp_path)
+        ws = backend._prepare_workspace(
+            agent_id="empty", role="test", tools_dir="",
+            system_prompt="", model="",
+        )
+        env_content = (ws / ".agent.env").read_text()
+        assert "LLM_UTILITY_MODEL" not in env_content
+
+    def test_helper_reads_config_and_survives_load_failure(self, monkeypatch):
+        backend = SandboxBackend.__new__(SandboxBackend)
+        monkeypatch.setattr(
+            "src.cli.config._load_config",
+            lambda *a, **k: {"llm": {"utility_model": "cheap/model"}},
+        )
+        assert backend._utility_model_from_config() == "cheap/model"
+        # Non-string value → treated as unset.
+        monkeypatch.setattr(
+            "src.cli.config._load_config",
+            lambda *a, **k: {"llm": {"utility_model": 42}},
+        )
+        assert backend._utility_model_from_config() == ""
+        # A config read failure must never block an agent start.
+        def _boom(*a, **k):
+            raise OSError("unreadable")
+        monkeypatch.setattr("src.cli.config._load_config", _boom)
+        assert backend._utility_model_from_config() == ""

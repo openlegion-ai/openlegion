@@ -398,7 +398,6 @@ as code lands.
      delete it in a follow-up once dev instances have cycled (no users, so soon).
   6. Dev-container-only test failures exist (root user + forced HTTPS_PROXY break
      `test_builtins.py` chmod/http_tool tests locally); they pass in CI — don't chase them.
-
 ### PR ledger (as of 2026-07-04)
 | PR | Unit | CI |
 |---|---|---|
@@ -442,6 +441,23 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   hunks (`_caller_teams` / `_is_team_member` / publish-subscribe prefix gates), the schema
   collapse, the re-key's collision semantics on genuinely pre-rename DBs, and the protocol
   handshake emit/check pair are clean.
+- **✅ Landed — per-call model tiering hook (Phase-0 residual a).** New optional
+  `llm.utility_model` config (unset = byte-identical behavior). Both A.C4 blockers closed:
+  (1) `_enforce_model_pin` widened — the deployment-configured utility model is always
+  acceptable via the existing `_bare()` prefix-insensitive compare (operator-controlled
+  config, not agent-choosable; `is_model_compatible` still runs), read through the same
+  `_load_config()` the pin already uses; (2) agent-side `model=` threaded at the utility
+  call sites — `context.py` `_summarize_text` (all `_summarize_compact` chunk/fold calls
+  funnel through it), `_extract_and_store_facts`, `_maybe_consolidate_memory`, and
+  `loop.py` `execute_heartbeat` — via `llm.utility_model_kwargs()` (`{}` when off, so the
+  call shape is unchanged). Container wiring: `LLM_UTILITY_MODEL` injected at the
+  runtime-backend level (`runtime.py`, both Docker + Sandbox env builds, read fresh from
+  config per start) so every start path (boot, REPL /restart, health-monitor restart,
+  dashboard restart) is covered without per-caller plumbing; `LLMClient` picks it up
+  mirroring the `MESH_AUTH_TOKEN` ctor pattern. Spend split + broader tiering policy
+  deliberately NOT included (this is the hook only). Tests in `test_llm_model_pin.py`,
+  `test_llm.py`, `test_context.py`, `test_loop.py`, `test_runtime.py`.
+
 
 ### YOU ARE HERE → next phase
 Foundation (#1180/#1181/#1183/#1184) and the rename (#1185) are merged. Phase 0's removal
