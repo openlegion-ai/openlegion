@@ -7451,6 +7451,76 @@ def create_mesh_app(
                 logger.debug("agent_unarchived emit failed: %s", e)
         return {"archived": False, "agent_id": agent_id}
 
+    @app.get("/mesh/agents/{agent_id}/export")
+    async def export_agent_endpoint(agent_id: str, request: Request) -> dict:
+        """Export an agent's portable personnel file (operator-only).
+
+        Read-only. Bundles the durable, host-side pieces of an agent's
+        identity — its config (``agents.yaml`` entry), permission ACL, and
+        cron/heartbeat schedule — plus, best-effort, its workspace markdown
+        (SOUL / INSTRUCTIONS / MEMORY / learnings) fetched from the running
+        container. The workspace is ``None`` when the agent isn't reachable;
+        the host-side pieces are always present. This is the v1 bundle: the
+        binary memory DB (model-specific embeddings) is a deferred follow-up,
+        and the raw fact text it derives from already lives in MEMORY.md here.
+
+        The bundle is a plain JSON document the operator can archive, diff,
+        or hand to an import path to recreate the agent elsewhere.
+        """
+        caller = _extract_verified_agent_id(request)
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can export agents")
+        from src.cli.config import _load_config
+
+        cfg = _load_config()
+        agent_cfg = cfg.get("agents", {}).get(agent_id)
+        if agent_cfg is None:
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+
+        # Permissions (deny-all default for an unknown agent).
+        try:
+            perms = permissions.get_permissions(agent_id).model_dump()
+        except Exception as e:
+            logger.warning("export_agent: permissions read for %s failed: %s", agent_id, e)
+            perms = None
+
+        # Cron / heartbeat jobs owned by this agent.
+        cron_jobs: list[dict] = []
+        if cron_scheduler is not None:
+            try:
+                cron_jobs = [
+                    j for j in cron_scheduler.list_jobs() if j.get("agent") == agent_id
+                ]
+            except Exception as e:
+                logger.warning("export_agent: cron read for %s failed: %s", agent_id, e)
+
+        # Workspace markdown — best-effort from the running container; a
+        # stopped/unreachable agent simply yields ``None`` (host-side bundle
+        # is still complete and useful).
+        workspace: dict[str, str] | None = None
+        if transport is not None:
+            try:
+                listing = await transport.request(agent_id, "GET", "/workspace")
+                names = [f["name"] for f in listing.get("files", []) if f.get("name")]
+                gathered: dict[str, str] = {}
+                for name in names:
+                    doc = await transport.request(agent_id, "GET", f"/workspace/{name}")
+                    if isinstance(doc, dict) and "content" in doc:
+                        gathered[name] = doc["content"]
+                workspace = gathered or None
+            except Exception as e:
+                logger.debug("export_agent: workspace fetch for %s failed: %s", agent_id, e)
+                workspace = None
+
+        return {
+            "bundle_version": 1,
+            "agent_id": agent_id,
+            "config": agent_cfg,
+            "permissions": perms,
+            "cron_jobs": cron_jobs,
+            "workspace": workspace,
+        }
+
     @app.post("/mesh/teams/{team_name}/propose-delete")
     async def propose_delete_team(team_name: str, request: Request) -> dict:
         """Propose deletion of an archived team. Returns nonce for human confirm.
