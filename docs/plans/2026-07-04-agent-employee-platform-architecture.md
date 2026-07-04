@@ -326,6 +326,30 @@ team boundary makes it mechanical when it does.
 
 ---
 
+## Appendix D — Implementation log (live)
+
+Chronological record of what has actually landed on the branch, and any plan
+corrections discovered during implementation. Keeps this doc the source of truth
+as code lands.
+
+- **Env + baseline.** Project installed (`pip install -e .[dev]`); green baseline
+  established (`test_orchestration/lanes/health/costs` = 304 passed).
+- **✅ Landed — archive→health-monitor deregistration (B-pre #1 / prerequisite for B3
+  hibernation).** `archive_agent_endpoint` now calls `health_monitor.unregister(agent_id)`
+  before stopping the container, mirroring the delete path — the poller no longer
+  auto-restarts an intentionally-stopped container within ~90s. Regression test added
+  (`tests/test_archive_health_dereg.py`, 2 tests green).
+- **✎ Plan correction — B4 `blocker_note` piece is ALREADY handled; do NOT build it.**
+  A budget-exceeded `RuntimeError` on the task path already reaches the task exception
+  handler (`loop.py:1795`) → `status="failed", error=str(e)`, and the mesh already
+  promotes `error`→`blocker_note` on failed transitions (`server.py:6486-6489`). So a
+  dedicated "promote budget block to blocker_note" change would be **redundant code**.
+  The remaining real B4 work is only the **team-envelope semantics** (unset/`0` =
+  unlimited), not blocker_note plumbing. Chat-turn budget errors surface directly in the
+  chat stream (no task, no blocker_note needed).
+
+---
+
 ## Appendix A — Codebase reconciliation & surgical manifest
 
 Verified against the tree by four parallel code-audit passes. **This appendix is authoritative on
