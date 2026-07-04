@@ -5502,6 +5502,64 @@ class TestDashboardEventBusCoverage:
             assert e["data"]["agent_id"] == "alpha"
 
     @patch("src.cli.config._load_config")
+    def test_restart_reregisters_health_for_deregistered_agent(self, mock_load):
+        """A restart after archive-deregistration re-establishes monitoring.
+
+        Archive removes the agent from the health monitor (so the poller
+        doesn't fight the intentional stop). Restarting an unarchived agent
+        must put it back under monitoring — otherwise a restored agent runs
+        unmonitored until the next mesh reboot.
+        """
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4o-mini"},
+            "agents": {
+                "alpha": {
+                    "role": "tester", "tools_dir": "",
+                    "model": "openai/gpt-4o-mini",
+                },
+            },
+            "network": {},
+        }
+        runtime = self.components["runtime"]
+        runtime.start_agent.return_value = "http://localhost:8401"
+        runtime.wait_for_agent = AsyncMock(return_value=True)
+        health = self.components["health_monitor"]
+
+        # Simulate the post-archive state: alpha deregistered from health.
+        health.unregister("alpha")
+        assert "alpha" not in health.agents
+
+        resp = self.client.post("/dashboard/api/agents/alpha/restart")
+        assert resp.status_code == 200, resp.text
+        # Restored to monitoring by the restart path.
+        assert "alpha" in health.agents
+
+    @patch("src.cli.config._load_config")
+    def test_restart_preserves_health_for_monitored_agent(self, mock_load):
+        """A normal restart of an already-monitored agent must not clobber its
+        existing health record — the re-register guard only fills a gap."""
+        mock_load.return_value = {
+            "llm": {"default_model": "openai/gpt-4o-mini"},
+            "agents": {
+                "alpha": {
+                    "role": "tester", "tools_dir": "",
+                    "model": "openai/gpt-4o-mini",
+                },
+            },
+            "network": {},
+        }
+        runtime = self.components["runtime"]
+        runtime.start_agent.return_value = "http://localhost:8401"
+        runtime.wait_for_agent = AsyncMock(return_value=True)
+        health = self.components["health_monitor"]
+
+        # alpha is registered by the harness; the guard must leave it as-is.
+        original = health.agents["alpha"]
+        resp = self.client.post("/dashboard/api/agents/alpha/restart")
+        assert resp.status_code == 200, resp.text
+        assert health.agents["alpha"] is original
+
+    @patch("src.cli.config._load_config")
     def test_restart_endpoint_propagates_max_output_tokens(self, mock_load):
         """A single-agent dashboard restart must carry the operator's
         per-agent output cap into the new container's env, or it silently

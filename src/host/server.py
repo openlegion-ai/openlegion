@@ -7414,7 +7414,8 @@ def create_mesh_app(
         # Deregister from health monitoring BEFORE stopping the container, so
         # the poller doesn't see the intentional stop as a failure and fight
         # the archive by auto-restarting it (~90s window). Mirrors the delete
-        # path; the unarchive endpoint re-registers on restore.
+        # path. Monitoring is re-established when the agent is next started
+        # (the restart / boot-reconcile paths re-register a deregistered agent).
         if health_monitor is not None:
             try:
                 health_monitor.unregister(agent_id)
