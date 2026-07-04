@@ -77,13 +77,13 @@ class TestTeamMetadataSchema:
 
 
 @pytest.mark.asyncio
-async def test_set_project_goal_happy_path():
+async def test_set_team_goal_happy_path():
     from src.agent.builtins.operator_tools import set_team_goal
 
     mc = MagicMock()
     mc.set_team_goal = AsyncMock(return_value={
         "success": True,
-        "project_name": "growth",
+        "team_name": "growth",
         "north_star": "Ship $10k MRR",
         "success_criteria": ["100 visits/day"],
     })
@@ -93,7 +93,7 @@ async def test_set_project_goal_happy_path():
         mesh_client=mc,
     )
     assert result["success"] is True
-    assert result["project_name"] == "growth"
+    assert result["team_name"] == "growth"
     mc.set_team_goal.assert_awaited_once_with(
         "growth", "Ship $10k MRR", ["100 visits/day"],
     )
@@ -270,7 +270,7 @@ async def test_endpoint_set_goal_persists(goal_app):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["success"] is True
-    assert body["project_name"] == "growth"
+    assert body["team_name"] == "growth"
     assert body["north_star"] == "Ship $10k MRR landing page in 2 weeks"
     assert body["success_criteria"] == ["100 visits/day", "5 demo bookings/wk"]
 

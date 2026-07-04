@@ -6994,7 +6994,6 @@ def create_mesh_app(
             "description": meta.get("description", ""),
         }
         result["team"] = meta_block
-        result["team"] = meta_block
         return result
 
     @app.get("/mesh/teams/status")

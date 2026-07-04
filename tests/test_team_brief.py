@@ -95,7 +95,7 @@ def brief_app(tmp_path, monkeypatch):
         "members": ["scout", "analyst"],
         "created_at": "2026-06-01T00:00:00+00:00",
     }))
-    (research / "project.md").write_text(
+    (research / "team.md").write_text(
         "# research\n\nShared context.\n\n## Workflow\n\nscout -> analyst\n",
     )
     monkeypatch.setattr(config_module, "TEAMS_DIR", projects_dir)
@@ -115,7 +115,7 @@ def brief_app(tmp_path, monkeypatch):
         permissions=permissions,
         transport=fake_transport,  # type: ignore[arg-type]
     )
-    yield app, fake_transport, research / "project.md"
+    yield app, fake_transport, research / "team.md"
     blackboard.close()
     monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
     importlib.reload(server_module)

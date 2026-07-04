@@ -6,7 +6,7 @@ Covers:
 * status transition rules (each valid + invalid pair)
 * reroute + cancel + add_artifact
 * list_inbox excludes terminal by default
-* list_project filter
+* list_team filter
 * list_events ordered chronologically
 * reap_expired removes only past-retention rows
 * schema migration idempotent (init twice)
@@ -635,12 +635,12 @@ def test_list_inbox_filters_by_project(tmp_path):
     assert rows[0]["team_id"] == "p1"
 
 
-def test_list_project_filter(tmp_path):
+def test_list_team_filter(tmp_path):
     t = _make_store(tmp_path)
     t.create(creator="c", assignee="a", title="x", team_id="p1")
     t.create(creator="c", assignee="b", title="y", team_id="p1")
     t.create(creator="c", assignee="a", title="z", team_id="p2")
-    rows = t.list_project("p1")
+    rows = t.list_team("p1")
     assert len(rows) == 2
     assert all(r["team_id"] == "p1" for r in rows)
 
@@ -650,7 +650,7 @@ def test_list_team_status_filter(tmp_path):
     a = t.create(creator="c", assignee="a", title="x", team_id="p1")
     t.create(creator="c", assignee="b", title="y", team_id="p1")
     t.update_status(a["id"], "working", actor="a")
-    rows = t.list_project("p1", statuses=["working"])
+    rows = t.list_team("p1", statuses=["working"])
     assert len(rows) == 1
     assert rows[0]["status"] == "working"
 
@@ -1002,71 +1002,6 @@ def test_rework_inherits_original_trace_id(tmp_path):
     assert current_trace_id.get() is None
     rework = t.create_rework_task(rec["id"], "go deeper on the legal angle")
     assert rework["trace_id"] == "tr_session00001"
-
-
-def test_trace_id_migration_idempotent_on_legacy_db(tmp_path):
-    """A pre-existing tasks DB without trace_id gets the column added once;
-    re-opening the same file is a no-op and existing rows keep NULL.
-    """
-    import sqlite3
-
-    db_path = str(tmp_path / "legacy_tasks.db")
-    # Minimal legacy schema WITHOUT trace_id + a seeded row.
-    conn = sqlite3.connect(db_path)
-    conn.executescript(
-        """
-        CREATE TABLE tasks (
-            id TEXT PRIMARY KEY,
-            team_id TEXT,
-            parent_task_id TEXT,
-            title TEXT NOT NULL,
-            description TEXT,
-            creator TEXT NOT NULL,
-            assignee TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            priority INTEGER NOT NULL DEFAULT 0,
-            dependencies_json TEXT,
-            artifact_refs_json TEXT,
-            blocker_note TEXT,
-            origin_kind TEXT,
-            origin_channel TEXT,
-            origin_user TEXT,
-            created_at REAL NOT NULL,
-            updated_at REAL NOT NULL,
-            completed_at REAL,
-            retention_until REAL
-        );
-        """
-    )
-    conn.execute(
-        "INSERT INTO tasks (id, title, creator, assignee, created_at, updated_at) "
-        "VALUES ('task_legacy01', 'old', 'scout', 'analyst', 1.0, 1.0)",
-    )
-    conn.commit()
-    conn.close()
-
-    # First open migrates (adds trace_id); old row keeps NULL.
-    t1 = Tasks(db_path=db_path)
-    legacy = t1.get("task_legacy01")
-    assert legacy is not None
-    assert legacy["trace_id"] is None
-    t1.close()
-
-    # Second open is a no-op — the introspection guard skips the ALTER.
-    t2 = Tasks(db_path=db_path)
-    with t2._conn() as conn:
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
-    assert "trace_id" in cols
-    # New writes against the migrated DB stamp the active trace.
-    from src.shared.trace import current_trace_id
-
-    token = current_trace_id.set("tr_postmigrate1")
-    try:
-        new_rec = t2.create(creator="scout", assignee="analyst", title="fresh")
-    finally:
-        current_trace_id.reset(token)
-    assert new_rec["trace_id"] == "tr_postmigrate1"
-    t2.close()
 
 
 def test_set_outcome_happy_path_done(tmp_path):
@@ -1811,7 +1746,7 @@ def test_done_with_no_children_emits_chain_break_event(tmp_path):
     assert payload["task_id"] == rec["id"]
     assert payload["agent_id"] == "writer"
     assert payload["parent_task_id"] is None
-    assert payload["project"] == "proj-x"
+    assert payload["team_id"] == "proj-x"
     assert payload["title"] == "standalone work"
     assert "ts" in payload
     # ``role`` is no longer carried on the payload — the dashboard

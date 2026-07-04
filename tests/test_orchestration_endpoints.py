@@ -322,7 +322,7 @@ async def test_project_list_requires_membership(v2_app, monkeypatch):
         # Scout (member of research) creates a task in research.
         await c.post(
             "/mesh/tasks",
-            json={"assignee": "analyst", "title": "scoped", "project": "research"},
+            json={"assignee": "analyst", "title": "scoped", "team_id": "research"},
             headers={"X-Agent-ID": "scout"},
         )
         # Member can list project tasks.

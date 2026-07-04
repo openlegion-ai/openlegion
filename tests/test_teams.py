@@ -36,31 +36,31 @@ class TestValidateProjectName:
         assert _validate_team_name("A_B-C") == "A_B-C"
 
     def test_invalid_empty(self):
-        with pytest.raises(ValueError, match="Invalid project name"):
+        with pytest.raises(ValueError, match="Invalid team name"):
             _validate_team_name("")
 
     def test_invalid_special_chars(self):
-        with pytest.raises(ValueError, match="Invalid project name"):
+        with pytest.raises(ValueError, match="Invalid team name"):
             _validate_team_name("my project")
 
     def test_invalid_start_char(self):
-        with pytest.raises(ValueError, match="Invalid project name"):
+        with pytest.raises(ValueError, match="Invalid team name"):
             _validate_team_name("-start")
 
     def test_path_traversal_rejected(self):
         for name in ["../escape", "foo/bar", "..", "./current", "a/../b"]:
-            with pytest.raises(ValueError, match="Invalid project name"):
+            with pytest.raises(ValueError, match="Invalid team name"):
                 _validate_team_name(name)
 
     def test_max_length_boundary(self):
         # 64 chars should pass
         assert _validate_team_name("a" * 64) == "a" * 64
         # 65 chars should fail
-        with pytest.raises(ValueError, match="Invalid project name"):
+        with pytest.raises(ValueError, match="Invalid team name"):
             _validate_team_name("a" * 65)
 
     def test_underscore_start_rejected(self):
-        with pytest.raises(ValueError, match="Invalid project name"):
+        with pytest.raises(ValueError, match="Invalid team name"):
             _validate_team_name("_underscore")
 
 
@@ -166,9 +166,9 @@ class TestCreateProject:
         assert data["description"] == "A test project"
         assert data["members"] == []
 
-        project_md = projects_dir / "test-proj" / "project.md"
-        assert project_md.exists()
-        assert "test-proj" in project_md.read_text()
+        team_md = projects_dir / "test-proj" / "team.md"
+        assert team_md.exists()
+        assert "test-proj" in team_md.read_text()
 
         workflows_dir = projects_dir / "test-proj" / "workflows"
         assert workflows_dir.is_dir()
@@ -277,7 +277,7 @@ class TestDeleteProject:
         (proj_dir / "metadata.yaml").write_text(yaml.dump({
             "name": "doomed", "members": ["agent1"],
         }))
-        (proj_dir / "project.md").write_text("# doomed")
+        (proj_dir / "team.md").write_text("# doomed")
 
         perms_file = tmp_path / "permissions.json"
         perms_file.write_text(json.dumps({
@@ -600,8 +600,7 @@ class TestLoadConfigWithProjects:
         ):
             cfg = _load_config(config_file)
 
-        assert "projects" in cfg
-        assert "myproject" in cfg["projects"]
+        assert "myproject" in cfg["teams"]
         assert cfg["_agent_teams"]["bot1"] == "myproject"
 
     def test_config_no_projects(self, tmp_path):
@@ -619,7 +618,7 @@ class TestLoadConfigWithProjects:
         ):
             cfg = _load_config(config_file)
 
-        assert cfg["projects"] == {}
+        assert cfg["teams"] == {}
         assert cfg["_agent_teams"] == {}
 
 
@@ -740,7 +739,7 @@ class TestMeshClientKeyScoping:
         url = mock_http.delete.call_args[0][0]
         assert "teams/alpha/goals/researcher" in url
         # Explicit project= override (operator clearing a team agent's key).
-        await client.delete_blackboard("goals/researcher", project="beta")
+        await client.delete_blackboard("goals/researcher", team="beta")
         url = mock_http.delete.call_args[0][0]
         assert "teams/beta/goals/researcher" in url
         # global_scope bypasses both.

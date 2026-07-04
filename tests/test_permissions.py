@@ -1087,13 +1087,9 @@ class TestControlPlanePermissions:
         op = on_disk["permissions"]["operator"]
         for field in self._CONTROL_PLANE_FIELDS:
             assert op.get(field) is True, field
-        # Legacy can_manage_teams must NOT be persisted into new
-        # configs — Pydantic still mirrors it as a read-time alias for
-        # on-disk back-compat, but new writes use the canonical name.
-        assert "can_manage_teams" not in op, (
-            "operator permissions.json should not carry the legacy "
-            "can_manage_teams key on fresh setup"
-        )
+        # The legacy ``can_manage_projects`` spelling no longer exists —
+        # fresh setups persist only the canonical field.
+        assert "can_manage_projects" not in op
 
     def test_can_manage_fleet_method(self, tmp_path):
         m = self._matrix(tmp_path, {

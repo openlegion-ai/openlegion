@@ -486,18 +486,18 @@ async def test_endpoint_team_status_returns_counts(v2_app):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         # Create a few tasks
         await c.post("/mesh/tasks",
-                     json={"assignee": "analyst", "title": "t1", "project": "research"},
+                     json={"assignee": "analyst", "title": "t1", "team_id": "research"},
                      headers={"X-Agent-ID": "operator"})
         await c.post("/mesh/tasks",
-                     json={"assignee": "scout", "title": "t2", "project": "research"},
+                     json={"assignee": "scout", "title": "t2", "team_id": "research"},
                      headers={"X-Agent-ID": "operator"})
         r = await c.get("/mesh/teams/research/status",
                         headers={"X-Agent-ID": "operator"})
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["counts"]["active"] == 2
-    assert body["project"]["name"] == "research"
-    assert body["project"]["status"] == "active"
+    assert body["team"]["name"] == "research"
+    assert body["team"]["status"] == "active"
 
 
 @pytest.mark.asyncio
@@ -526,7 +526,7 @@ async def test_endpoint_agent_queue_buckets(v2_app):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         # Create one task for analyst, then mark it done
         r = await c.post("/mesh/tasks",
-                         json={"assignee": "analyst", "title": "t1", "project": "research"},
+                         json={"assignee": "analyst", "title": "t1", "team_id": "research"},
                          headers={"X-Agent-ID": "operator"})
         tid = r.json()["id"]
         await c.post(f"/mesh/tasks/{tid}/status",
@@ -549,7 +549,7 @@ async def test_endpoint_project_outputs_filters_by_since(v2_app):
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post("/mesh/tasks",
-                         json={"assignee": "analyst", "title": "report", "project": "research"},
+                         json={"assignee": "analyst", "title": "report", "team_id": "research"},
                          headers={"X-Agent-ID": "operator"})
         tid = r.json()["id"]
         await c.post(f"/mesh/tasks/{tid}/status",
@@ -584,7 +584,7 @@ async def test_endpoint_reroute_blocks_when_target_over_budget(v2_app):
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post("/mesh/tasks",
-                         json={"assignee": "analyst", "title": "t1", "project": "research"},
+                         json={"assignee": "analyst", "title": "t1", "team_id": "research"},
                          headers={"X-Agent-ID": "operator"})
         tid = r.json()["id"]
         # Reroute to scout (over budget) — should fail with structured error
@@ -606,7 +606,7 @@ async def test_endpoint_retry_failed_task_clones(v2_app):
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post("/mesh/tasks",
-                         json={"assignee": "analyst", "title": "t1", "project": "research"},
+                         json={"assignee": "analyst", "title": "t1", "team_id": "research"},
                          headers={"X-Agent-ID": "operator"})
         tid = r.json()["id"]
         await c.post(f"/mesh/tasks/{tid}/status",
@@ -630,7 +630,7 @@ async def test_endpoint_retry_only_failed(v2_app):
     app, _, _ = v2_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post("/mesh/tasks",
-                         json={"assignee": "analyst", "title": "t1", "project": "research"},
+                         json={"assignee": "analyst", "title": "t1", "team_id": "research"},
                          headers={"X-Agent-ID": "operator"})
         tid = r.json()["id"]
         # Task is still pending — retry must refuse
@@ -1241,7 +1241,7 @@ async def test_reroute_wakes_new_assignee(v2_app_with_lanes):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post(
             "/mesh/tasks",
-            json={"assignee": "analyst", "title": "investigate", "project": "research"},
+            json={"assignee": "analyst", "title": "investigate", "team_id": "research"},
             headers={"X-Agent-ID": "operator"},
         )
         tid = r.json()["id"]
@@ -1269,7 +1269,7 @@ async def test_retry_wakes_clone_assignee(v2_app_with_lanes):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post(
             "/mesh/tasks",
-            json={"assignee": "analyst", "title": "build report", "project": "research"},
+            json={"assignee": "analyst", "title": "build report", "team_id": "research"},
             headers={"X-Agent-ID": "operator"},
         )
         tid = r.json()["id"]
@@ -1305,7 +1305,7 @@ async def test_cancel_wakes_prior_assignee(v2_app_with_lanes):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post(
             "/mesh/tasks",
-            json={"assignee": "analyst", "title": "scan logs", "project": "research"},
+            json={"assignee": "analyst", "title": "scan logs", "team_id": "research"},
             headers={"X-Agent-ID": "operator"},
         )
         tid = r.json()["id"]
@@ -1336,7 +1336,7 @@ async def test_cancel_does_not_wake_self_canceller(v2_app_with_lanes):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post(
             "/mesh/tasks",
-            json={"assignee": "analyst", "title": "tail logs", "project": "research"},
+            json={"assignee": "analyst", "title": "tail logs", "team_id": "research"},
             headers={"X-Agent-ID": "operator"},
         )
         tid = r.json()["id"]
@@ -1366,7 +1366,7 @@ async def test_cancel_blocked_task_wakes_assignee(v2_app_with_lanes):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post(
             "/mesh/tasks",
-            json={"assignee": "analyst", "title": "needs input", "project": "research"},
+            json={"assignee": "analyst", "title": "needs input", "team_id": "research"},
             headers={"X-Agent-ID": "operator"},
         )
         tid = r.json()["id"]
@@ -1402,7 +1402,7 @@ async def test_reroute_to_unregistered_agent_succeeds_without_wake(v2_app_with_l
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post(
             "/mesh/tasks",
-            json={"assignee": "analyst", "title": "drift", "project": "research"},
+            json={"assignee": "analyst", "title": "drift", "team_id": "research"},
             headers={"X-Agent-ID": "operator"},
         )
         tid = r.json()["id"]
@@ -1432,7 +1432,7 @@ async def test_reroute_propagates_human_origin_to_wake(v2_app_with_lanes):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post(
             "/mesh/tasks",
-            json={"assignee": "analyst", "title": "ship it", "project": "research"},
+            json={"assignee": "analyst", "title": "ship it", "team_id": "research"},
             headers=headers,
         )
         tid = r.json()["id"]
@@ -1463,7 +1463,7 @@ async def test_agent_origin_does_not_request_auto_notify(v2_app_with_lanes):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post(
             "/mesh/tasks",
-            json={"assignee": "analyst", "title": "self start", "project": "research"},
+            json={"assignee": "analyst", "title": "self start", "team_id": "research"},
             headers={"X-Agent-ID": "operator"},
         )
         tid = r.json()["id"]

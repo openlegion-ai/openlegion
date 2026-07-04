@@ -1,7 +1,7 @@
 """PR-O'.1 — cross-project blackboard access counter (observability slice).
 
 Pure telemetry. No enforcement. Counter is process-lifetime, surfaced on
-``GET /mesh/system/metrics`` as ``blackboard_cross_project_total``.
+``GET /mesh/system/metrics`` as ``blackboard_cross_team_total``.
 
 The plan (`docs/plans/2026-05-08-post-board-roadmap.md`, Phase 3 PR-O'.1)
 calls out the increment/no-increment matrix exercised below:
@@ -297,8 +297,8 @@ async def test_counter_surfaced_on_system_metrics(tmp_path, monkeypatch):
                 )
         assert op_metrics.status_code == 200
         body = op_metrics.json()
-        assert "blackboard_cross_project_total" in body
-        assert body["blackboard_cross_project_total"] == {"read": 1, "write": 0}
+        assert "blackboard_cross_team_total" in body
+        assert body["blackboard_cross_team_total"] == {"read": 1, "write": 0}
     finally:
         _teardown(app, monkeypatch, server_module)
 

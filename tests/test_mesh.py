@@ -961,7 +961,7 @@ async def test_router_blocks_cross_project_messaging():
     msg = AgentMessage(from_agent="alice", to="bob", type="query", payload={})
     result = await router.route(msg)
     assert "error" in result
-    assert "Cross-project" in result["error"]
+    assert "Cross-team" in result["error"]
 
 
 @pytest.mark.asyncio
@@ -982,7 +982,7 @@ async def test_router_allows_same_project_messaging():
     msg = AgentMessage(from_agent="alice", to="bob", type="query", payload={})
     result = await router.route(msg)
     # Should fail with "no agent" error, NOT cross-project error
-    assert "Cross-project" not in result.get("error", "")
+    assert "Cross-team" not in result.get("error", "")
     assert "No agent found" in result.get("error", "")
 
 
@@ -1003,7 +1003,7 @@ async def test_router_allows_standalone_to_project_messaging():
     from src.shared.types import AgentMessage
     msg = AgentMessage(from_agent="standalone", to="bob", type="query", payload={})
     result = await router.route(msg)
-    assert "Cross-project" not in result.get("error", "")
+    assert "Cross-team" not in result.get("error", "")
     assert "No agent found" in result.get("error", "")
 
 

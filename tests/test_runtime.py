@@ -208,9 +208,7 @@ class TestSandboxBackend:
         """Workspace directory is created with expected structure."""
         project_root = tmp_path / "project"
         project_root.mkdir()
-        # Create a team-specific context file (not global). Test the
-        # legacy ``PROJECT_MD_PATH`` env name still works as an alias for
-        # ``TEAM_MD_PATH`` so existing deploys don't break.
+        # Create a team-specific context file (not global).
         team_md = tmp_path / "team_context.md"
         team_md.write_text("# Test Team")
 
@@ -223,7 +221,7 @@ class TestSandboxBackend:
         backend.mesh_host_port = 8420
         backend.agents = {}
         backend.auth_tokens = {}
-        backend.extra_env = {"PROJECT_MD_PATH": str(team_md)}
+        backend.extra_env = {"TEAM_MD_PATH": str(team_md)}
         backend._workspace_root = tmp_path / ".openlegion" / "agents"
         backend._workspace_root.mkdir(parents=True)
 
@@ -238,8 +236,6 @@ class TestSandboxBackend:
         assert ws.exists()
         assert (ws / "data" / "workspace").is_dir()
         assert (ws / "TEAM.md").read_text() == "# Test Team"
-        # PR 3 dropped the legacy PROJECT.md write — only TEAM.md ships.
-        assert not (ws / "PROJECT.md").exists()
         assert (ws / "tools" / "my_tool.py").read_text() == "# tool"
         assert (ws / ".agent.env").exists()
 

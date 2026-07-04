@@ -807,7 +807,7 @@ class TestREPLProjectCommand:
         with patch("src.cli.config.TEAMS_DIR", projects_dir):
             repl._cmd_team("use nonexistent")
         out = capsys.readouterr().out
-        assert "Unknown project" in out
+        assert "Unknown team" in out
         assert repl._active_team is None
 
     def test_project_info(self, tmp_path, capsys):

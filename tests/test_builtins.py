@@ -2325,7 +2325,7 @@ class TestStandaloneBlackboardGuards:
         from src.agent.builtins.mesh_tool import read_blackboard
         result = await read_blackboard(key="foo", mesh_client=self._standalone_client())
         assert "error" in result
-        assert "not assigned to a project" in result["error"]
+        assert "not assigned to a team" in result["error"]
 
     @pytest.mark.asyncio
     async def test_operator_can_read_global_handoff_output(self):
@@ -2353,7 +2353,7 @@ class TestStandaloneBlackboardGuards:
         """The operator is fleet-global and trusted (host authorizes it for
         every blackboard op). Its read tool must NOT block on a non-global
         key — it reads ANY key in global scope so it can monitor team data
-        — otherwise it hits a misleading "not assigned to a project" error
+        — otherwise it hits a misleading "not assigned to a team" error
         and can loop."""
         from src.agent.builtins.mesh_tool import read_blackboard
         mc = self._standalone_client()
@@ -2411,14 +2411,14 @@ class TestStandaloneBlackboardGuards:
             key="foo", value="bar", mesh_client=self._standalone_client(),
         )
         assert "error" in result
-        assert "not assigned to a project" in result["error"]
+        assert "not assigned to a team" in result["error"]
 
     @pytest.mark.asyncio
     async def test_list_blackboard_blocked_for_standalone(self):
         from src.agent.builtins.mesh_tool import list_blackboard
         result = await list_blackboard(prefix="", mesh_client=self._standalone_client())
         assert "error" in result
-        assert "not assigned to a project" in result["error"]
+        assert "not assigned to a team" in result["error"]
 
     @pytest.mark.asyncio
     async def test_save_artifact_skips_blackboard_for_standalone(self, tmp_path):
