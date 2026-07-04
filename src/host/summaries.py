@@ -38,7 +38,7 @@ from src.shared.utils import dumps_safe, setup_logging
 logger = setup_logging("host.summaries")
 
 
-# Frozen set of valid scope kinds. ``team`` covers project-attached
+# Frozen set of valid scope kinds. ``team`` covers team-attached
 # work; ``solo`` is a synthetic scope for agents that aren't members
 # of any team (so the Work tab can still surface a single "Solo agents"
 # card without inventing a fake team).

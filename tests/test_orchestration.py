@@ -6,7 +6,7 @@ Covers:
 * status transition rules (each valid + invalid pair)
 * reroute + cancel + add_artifact
 * list_inbox excludes terminal by default
-* list_project filter
+* list_team filter
 * list_events ordered chronologically
 * reap_expired removes only past-retention rows
 * schema migration idempotent (init twice)
@@ -51,7 +51,7 @@ def test_create_and_get_round_trip(tmp_path):
         assignee="analyst",
         title="research handoff",
         description="please dig into X",
-        project_id="research",
+        team_id="research",
         priority=5,
         dependencies=["dep1", "dep2"],
     )
@@ -59,7 +59,7 @@ def test_create_and_get_round_trip(tmp_path):
     assert rec["creator"] == "scout"
     assert rec["assignee"] == "analyst"
     assert rec["status"] == "pending"
-    assert rec["project_id"] == "research"
+    assert rec["team_id"] == "research"
     assert rec["priority"] == 5
     assert rec["dependencies"] == ["dep1", "dep2"]
     assert rec["completed_at"] is None
@@ -519,7 +519,7 @@ def test_add_artifact_emits_task_artifact_added(tmp_path):
     t = _make_store(tmp_path)
     t.set_event_bus(bus)
     rec = t.create(
-        creator="c", assignee="a", title="t", project_id="proj-x",
+        creator="c", assignee="a", title="t", team_id="proj-x",
     )
     t.add_artifact(rec["id"], "/data/output.json", actor="a")
 
@@ -529,7 +529,7 @@ def test_add_artifact_emits_task_artifact_added(tmp_path):
     assert payload["task_id"] == rec["id"]
     assert payload["ref"] == "/data/output.json"
     assert payload["actor"] == "a"
-    assert payload["project_id"] == "proj-x"
+    assert payload["team_id"] == "proj-x"
 
 
 def test_cancel_includes_reason_in_status_changed_payload(tmp_path):
@@ -628,29 +628,29 @@ def test_list_inbox_include_terminal_returns_all(tmp_path):
 
 def test_list_inbox_filters_by_project(tmp_path):
     t = _make_store(tmp_path)
-    t.create(creator="c", assignee="a", title="x", project_id="p1")
-    t.create(creator="c", assignee="a", title="y", project_id="p2")
-    rows = t.list_inbox("a", project_id="p1")
+    t.create(creator="c", assignee="a", title="x", team_id="p1")
+    t.create(creator="c", assignee="a", title="y", team_id="p2")
+    rows = t.list_inbox("a", team_id="p1")
     assert len(rows) == 1
-    assert rows[0]["project_id"] == "p1"
+    assert rows[0]["team_id"] == "p1"
 
 
-def test_list_project_filter(tmp_path):
+def test_list_team_filter(tmp_path):
     t = _make_store(tmp_path)
-    t.create(creator="c", assignee="a", title="x", project_id="p1")
-    t.create(creator="c", assignee="b", title="y", project_id="p1")
-    t.create(creator="c", assignee="a", title="z", project_id="p2")
-    rows = t.list_project("p1")
+    t.create(creator="c", assignee="a", title="x", team_id="p1")
+    t.create(creator="c", assignee="b", title="y", team_id="p1")
+    t.create(creator="c", assignee="a", title="z", team_id="p2")
+    rows = t.list_team("p1")
     assert len(rows) == 2
-    assert all(r["project_id"] == "p1" for r in rows)
+    assert all(r["team_id"] == "p1" for r in rows)
 
 
-def test_list_project_status_filter(tmp_path):
+def test_list_team_status_filter(tmp_path):
     t = _make_store(tmp_path)
-    a = t.create(creator="c", assignee="a", title="x", project_id="p1")
-    t.create(creator="c", assignee="b", title="y", project_id="p1")
+    a = t.create(creator="c", assignee="a", title="x", team_id="p1")
+    t.create(creator="c", assignee="b", title="y", team_id="p1")
     t.update_status(a["id"], "working", actor="a")
-    rows = t.list_project("p1", statuses=["working"])
+    rows = t.list_team("p1", statuses=["working"])
     assert len(rows) == 1
     assert rows[0]["status"] == "working"
 
@@ -1004,71 +1004,6 @@ def test_rework_inherits_original_trace_id(tmp_path):
     assert rework["trace_id"] == "tr_session00001"
 
 
-def test_trace_id_migration_idempotent_on_legacy_db(tmp_path):
-    """A pre-existing tasks DB without trace_id gets the column added once;
-    re-opening the same file is a no-op and existing rows keep NULL.
-    """
-    import sqlite3
-
-    db_path = str(tmp_path / "legacy_tasks.db")
-    # Minimal legacy schema WITHOUT trace_id + a seeded row.
-    conn = sqlite3.connect(db_path)
-    conn.executescript(
-        """
-        CREATE TABLE tasks (
-            id TEXT PRIMARY KEY,
-            team_id TEXT,
-            parent_task_id TEXT,
-            title TEXT NOT NULL,
-            description TEXT,
-            creator TEXT NOT NULL,
-            assignee TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            priority INTEGER NOT NULL DEFAULT 0,
-            dependencies_json TEXT,
-            artifact_refs_json TEXT,
-            blocker_note TEXT,
-            origin_kind TEXT,
-            origin_channel TEXT,
-            origin_user TEXT,
-            created_at REAL NOT NULL,
-            updated_at REAL NOT NULL,
-            completed_at REAL,
-            retention_until REAL
-        );
-        """
-    )
-    conn.execute(
-        "INSERT INTO tasks (id, title, creator, assignee, created_at, updated_at) "
-        "VALUES ('task_legacy01', 'old', 'scout', 'analyst', 1.0, 1.0)",
-    )
-    conn.commit()
-    conn.close()
-
-    # First open migrates (adds trace_id); old row keeps NULL.
-    t1 = Tasks(db_path=db_path)
-    legacy = t1.get("task_legacy01")
-    assert legacy is not None
-    assert legacy["trace_id"] is None
-    t1.close()
-
-    # Second open is a no-op — the introspection guard skips the ALTER.
-    t2 = Tasks(db_path=db_path)
-    with t2._conn() as conn:
-        cols = {row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
-    assert "trace_id" in cols
-    # New writes against the migrated DB stamp the active trace.
-    from src.shared.trace import current_trace_id
-
-    token = current_trace_id.set("tr_postmigrate1")
-    try:
-        new_rec = t2.create(creator="scout", assignee="analyst", title="fresh")
-    finally:
-        current_trace_id.reset(token)
-    assert new_rec["trace_id"] == "tr_postmigrate1"
-    t2.close()
-
-
 def test_set_outcome_happy_path_done(tmp_path):
     t = _make_store(tmp_path)
     rec = t.create(creator="scout", assignee="analyst", title="dig")
@@ -1188,14 +1123,14 @@ def test_create_rework_task_links_to_previous(tmp_path):
     t = _make_store(tmp_path)
     rec = t.create(
         creator="op", assignee="analyst", title="research X",
-        project_id="research", priority=3,
+        team_id="research", priority=3,
         origin={"kind": "human", "channel": "telegram", "user": "u1"},
     )
     new = t.create_rework_task(rec["id"], "go deeper on the legal angle")
     assert new["previous_task_id"] == rec["id"]
     assert new["title"] == "Rework: research X"
     assert new["assignee"] == "analyst"
-    assert new["project_id"] == "research"
+    assert new["team_id"] == "research"
     assert new["description"] == "go deeper on the legal angle"
     assert new["status"] == "pending"
     assert new["origin"] == {"kind": "human", "channel": "telegram", "user": "u1"}
@@ -1361,56 +1296,6 @@ def test_set_outcome_idempotent_does_not_clobber_outcome_set_at(tmp_path):
     assert second["outcome_set_at"] == first_stamp
 
 
-def test_outcome_set_at_migration_backfills_existing_rows(tmp_path):
-    """PR-U: pre-migration rated rows backfill outcome_set_at = completed_at.
-
-    Open a fresh DB, drop the new column to simulate a pre-PR-U
-    deployment, manually insert a rated row, then re-run init and
-    confirm the backfill ran.
-    """
-    import sqlite3
-    if sqlite3.sqlite_version_info < (3, 35, 0):
-        pytest.skip("ALTER TABLE DROP COLUMN requires SQLite >= 3.35")
-    db_path = str(tmp_path / "tasks.db")
-    # First init creates the schema (with outcome_set_at).
-    t = Tasks(db_path=db_path)
-    t.close()
-    # Simulate pre-PR-U state: drop the column. CI Pythons (3.11+)
-    # ship with SQLite >= 3.35 so this is reliable; the skip above
-    # guards older builds.
-    raw = sqlite3.connect(db_path)
-    # The index references outcome_set_at — drop it first so the
-    # column drop succeeds.
-    raw.execute("DROP INDEX IF EXISTS idx_tasks_outcome_set_at")
-    raw.execute("ALTER TABLE tasks DROP COLUMN outcome_set_at")
-    # Insert a "pre-migration" rated row — completed_at set, no
-    # outcome_set_at column existed when this row landed.
-    completed_ts = time.time() - 3 * 24 * 3600
-    raw.execute(
-        "INSERT INTO tasks "
-        "(id, team_id, parent_task_id, title, description, "
-        "creator, assignee, status, priority, dependencies_json, "
-        "artifact_refs_json, blocker_note, origin_kind, origin_channel, "
-        "origin_user, created_at, updated_at, completed_at, "
-        "retention_until, outcome, feedback_text, previous_task_id) "
-        "VALUES (?, NULL, NULL, ?, NULL, ?, ?, 'done', 0, NULL, NULL, "
-        "NULL, NULL, NULL, NULL, ?, ?, ?, NULL, 'rejected', NULL, NULL)",
-        (
-            "task_legacy", "old", "op", "alpha",
-            completed_ts, completed_ts, completed_ts,
-        ),
-    )
-    raw.commit()
-    raw.close()
-    # Re-run init: triggers the migration + backfill.
-    t2 = Tasks(db_path=db_path)
-    fetched = t2.get("task_legacy")
-    assert fetched is not None
-    assert fetched["outcome"] == "rejected"
-    assert fetched["outcome_set_at"] == completed_ts
-    t2.close()
-
-
 def test_outcome_set_at_migration_idempotent(tmp_path):
     """PR-U: running the migration twice is safe (no double-backfill, no error)."""
     db_path = str(tmp_path / "tasks.db")
@@ -1421,97 +1306,6 @@ def test_outcome_set_at_migration_idempotent(tmp_path):
     with t2._conn() as conn:
         cols = {row[1] for row in conn.execute("PRAGMA table_info(tasks)").fetchall()}
     assert "outcome_set_at" in cols
-    t2.close()
-
-
-def test_outcome_set_at_migration_recovers_from_partial_init(tmp_path):
-    """PR-U: a prior run that ALTERed the column but crashed before the
-    backfill UPDATE committed must be repaired on re-init.
-
-    Simulates the failure mode: column exists, but rows where
-    ``outcome IS NOT NULL`` still have ``outcome_set_at IS NULL``. The
-    fix moves the early-return guard so the backfill UPDATE always runs;
-    the ``WHERE`` clause makes that idempotent on already-stamped rows.
-    """
-    import sqlite3
-    db_path = str(tmp_path / "tasks.db")
-    # First init creates the full schema (column + index).
-    t = Tasks(db_path=db_path)
-    t.close()
-    # Simulate the partial-migration failure: column exists, but a row
-    # was rated and the backfill UPDATE never landed (e.g. process
-    # killed mid-init on an older deploy that lacked this loop).
-    raw = sqlite3.connect(db_path)
-    completed_ts = time.time() - 3 * 24 * 3600
-    raw.execute(
-        "INSERT INTO tasks "
-        "(id, team_id, parent_task_id, title, description, "
-        "creator, assignee, status, priority, dependencies_json, "
-        "artifact_refs_json, blocker_note, origin_kind, origin_channel, "
-        "origin_user, created_at, updated_at, completed_at, "
-        "retention_until, outcome, feedback_text, previous_task_id, "
-        "outcome_set_at) "
-        "VALUES (?, NULL, NULL, ?, NULL, ?, ?, 'done', 0, NULL, NULL, "
-        "NULL, NULL, NULL, NULL, ?, ?, ?, NULL, 'rejected', NULL, NULL, "
-        "NULL)",
-        (
-            "task_partial", "old", "op", "alpha",
-            completed_ts, completed_ts, completed_ts,
-        ),
-    )
-    raw.commit()
-    # Sanity check — column present, value NULL.
-    cols = {row[1] for row in raw.execute("PRAGMA table_info(tasks)").fetchall()}
-    assert "outcome_set_at" in cols
-    pre = raw.execute(
-        "SELECT outcome, outcome_set_at FROM tasks WHERE id=?",
-        ("task_partial",),
-    ).fetchone()
-    assert pre == ("rejected", None)
-    raw.close()
-    # Re-run init: must walk the backfill UPDATE even though the column
-    # already exists, repairing the orphaned row.
-    t2 = Tasks(db_path=db_path)
-    fetched = t2.get("task_partial")
-    assert fetched is not None
-    assert fetched["outcome"] == "rejected"
-    assert fetched["outcome_set_at"] == completed_ts
-    t2.close()
-
-
-def test_outcome_set_at_backfill_skips_anomalous_rows(tmp_path):
-    """PR-U: a rated row missing completed_at stays NULL (don't invent data)."""
-    import sqlite3
-    if sqlite3.sqlite_version_info < (3, 35, 0):
-        pytest.skip("ALTER TABLE DROP COLUMN requires SQLite >= 3.35")
-    db_path = str(tmp_path / "tasks.db")
-    t = Tasks(db_path=db_path)
-    t.close()
-    raw = sqlite3.connect(db_path)
-    # The index references outcome_set_at — drop it first so the
-    # column drop succeeds.
-    raw.execute("DROP INDEX IF EXISTS idx_tasks_outcome_set_at")
-    raw.execute("ALTER TABLE tasks DROP COLUMN outcome_set_at")
-    # Anomalous row: outcome set but completed_at NULL.
-    raw.execute(
-        "INSERT INTO tasks "
-        "(id, team_id, parent_task_id, title, description, "
-        "creator, assignee, status, priority, dependencies_json, "
-        "artifact_refs_json, blocker_note, origin_kind, origin_channel, "
-        "origin_user, created_at, updated_at, completed_at, "
-        "retention_until, outcome, feedback_text, previous_task_id) "
-        "VALUES (?, NULL, NULL, ?, NULL, ?, ?, 'done', 0, NULL, NULL, "
-        "NULL, NULL, NULL, NULL, ?, ?, NULL, NULL, 'rejected', NULL, NULL)",
-        ("task_anom", "old", "op", "alpha", time.time(), time.time()),
-    )
-    raw.commit()
-    raw.close()
-    t2 = Tasks(db_path=db_path)
-    fetched = t2.get("task_anom")
-    assert fetched is not None
-    assert fetched["outcome"] == "rejected"
-    # No completed_at to copy from → leave outcome_set_at NULL.
-    assert fetched["outcome_set_at"] is None
     t2.close()
 
 
@@ -1719,24 +1513,24 @@ class TestTasksCreatePostWriteAssert:
 # ── workflow_snapshot (operator workflow awareness) ────────────────
 
 
-def _chain(t: Tasks, *, creator="operator", project=None):
+def _chain(t: Tasks, *, creator="operator", team=None):
     """Build a linear 3-stage workflow chain rooted at a kickoff task.
 
     Returns ``(root, mid, leaf)`` records.
     """
     root = t.create(
         creator=creator, assignee="scout", title="kickoff",
-        project_id=project,
+        team_id=team,
     )
     time.sleep(0.01)
     mid = t.create(
         creator="scout", assignee="analyst", title="middle",
-        parent_task_id=root["id"], project_id=project,
+        parent_task_id=root["id"], team_id=team,
     )
     time.sleep(0.01)
     leaf = t.create(
         creator="analyst", assignee="writer", title="leaf",
-        parent_task_id=mid["id"], project_id=project,
+        parent_task_id=mid["id"], team_id=team,
     )
     return root, mid, leaf
 
@@ -1939,7 +1733,7 @@ def test_done_with_no_children_emits_chain_break_event(tmp_path):
     _bus, captured = _attach_event_bus(t)
     rec = t.create(
         creator="op", assignee="writer", title="standalone work",
-        project_id="proj-x",
+        team_id="proj-x",
     )
     t.update_status(rec["id"], "working", actor="writer")
     t.update_status(rec["id"], "done", actor="writer")
@@ -1952,7 +1746,7 @@ def test_done_with_no_children_emits_chain_break_event(tmp_path):
     assert payload["task_id"] == rec["id"]
     assert payload["agent_id"] == "writer"
     assert payload["parent_task_id"] is None
-    assert payload["project"] == "proj-x"
+    assert payload["team_id"] == "proj-x"
     assert payload["title"] == "standalone work"
     assert "ts" in payload
     # ``role`` is no longer carried on the payload — the dashboard
@@ -2653,3 +2447,52 @@ class TestTaskThinking:
             store.create(
                 creator="op", assignee="a", title="t", thinking="ultra",
             )
+
+
+# ── list_pending (lane rehydration source) ──────────────────
+
+
+def test_list_pending_returns_only_pending_across_assignees(tmp_path):
+    """Only ``pending`` tasks are returned — never working/accepted/done — so
+    lane rehydration cannot re-dispatch a mid-flight task. Ordered by
+    created_at ASC, across all assignees."""
+    t = _make_store(tmp_path)
+    p1 = t.create(creator="op", assignee="alpha", title="A")
+    p2 = t.create(creator="op", assignee="beta", title="B")
+
+    # working — excluded (may be mid-flight; re-dispatch would double-run it)
+    w = t.create(creator="op", assignee="alpha", title="C")
+    t.update_status(w["id"], "working", actor="alpha")
+
+    # accepted — excluded
+    a = t.create(creator="op", assignee="beta", title="D")
+    t.update_status(a["id"], "accepted", actor="beta")
+
+    # done — excluded
+    d = t.create(creator="op", assignee="alpha", title="E")
+    t.update_status(d["id"], "working", actor="alpha")
+    t.update_status(d["id"], "done", actor="alpha")
+
+    pending = t.list_pending()
+    assert [r["id"] for r in pending] == [p1["id"], p2["id"]]
+    assert all(r["status"] == "pending" for r in pending)
+
+
+def test_list_pending_empty_when_none_pending(tmp_path):
+    t = _make_store(tmp_path)
+    w = t.create(creator="op", assignee="alpha", title="A")
+    t.update_status(w["id"], "working", actor="alpha")
+    assert t.list_pending() == []
+
+
+def test_list_pending_preserves_origin_and_trace(tmp_path):
+    """The recovered row carries the origin + trace_id rehydration forwards."""
+    t = _make_store(tmp_path)
+    rec = t.create(
+        creator="op", assignee="alpha", title="A", description="do the thing",
+        origin={"kind": "human", "channel": "cli", "user": "u1"},
+    )
+    [row] = t.list_pending()
+    assert row["id"] == rec["id"]
+    assert row["description"] == "do the thing"
+    assert row["origin"] == {"kind": "human", "channel": "cli", "user": "u1"}

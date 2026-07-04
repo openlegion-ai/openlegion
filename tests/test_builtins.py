@@ -2325,7 +2325,7 @@ class TestStandaloneBlackboardGuards:
         from src.agent.builtins.mesh_tool import read_blackboard
         result = await read_blackboard(key="foo", mesh_client=self._standalone_client())
         assert "error" in result
-        assert "not assigned to a project" in result["error"]
+        assert "not assigned to a team" in result["error"]
 
     @pytest.mark.asyncio
     async def test_operator_can_read_global_handoff_output(self):
@@ -2353,25 +2353,25 @@ class TestStandaloneBlackboardGuards:
         """The operator is fleet-global and trusted (host authorizes it for
         every blackboard op). Its read tool must NOT block on a non-global
         key — it reads ANY key in global scope so it can monitor team data
-        — otherwise it hits a misleading "not assigned to a project" error
+        — otherwise it hits a misleading "not assigned to a team" error
         and can loop."""
         from src.agent.builtins.mesh_tool import read_blackboard
         mc = self._standalone_client()
         mc.agent_id = "operator"
         mc.read_blackboard = AsyncMock(return_value={
-            "key": "projects/social-media/status/social-publisher",
+            "key": "teams/social-media/status/social-publisher",
             "value": {"state": "working"},
         })
 
         result = await read_blackboard(
-            key="projects/social-media/status/social-publisher",
+            key="teams/social-media/status/social-publisher",
             mesh_client=mc,
         )
 
         assert result["exists"] is True
         assert result["value"] == {"state": "working"}
         mc.read_blackboard.assert_awaited_once_with(
-            "projects/social-media/status/social-publisher", global_scope=True,
+            "teams/social-media/status/social-publisher", global_scope=True,
         )
 
     @pytest.mark.asyncio
@@ -2411,14 +2411,14 @@ class TestStandaloneBlackboardGuards:
             key="foo", value="bar", mesh_client=self._standalone_client(),
         )
         assert "error" in result
-        assert "not assigned to a project" in result["error"]
+        assert "not assigned to a team" in result["error"]
 
     @pytest.mark.asyncio
     async def test_list_blackboard_blocked_for_standalone(self):
         from src.agent.builtins.mesh_tool import list_blackboard
         result = await list_blackboard(prefix="", mesh_client=self._standalone_client())
         assert "error" in result
-        assert "not assigned to a project" in result["error"]
+        assert "not assigned to a team" in result["error"]
 
     @pytest.mark.asyncio
     async def test_save_artifact_skips_blackboard_for_standalone(self, tmp_path):
@@ -2643,7 +2643,7 @@ class TestListAgentsProjectScope:
     async def test_list_agents_project_scope(self):
         """MeshClient.list_agents passes project param when in a project."""
         from src.agent.mesh_client import MeshClient
-        client = MeshClient("http://mesh:8420", "bot1", project_name="teamA")
+        client = MeshClient("http://mesh:8420", "bot1", team_name="teamA")
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {"bot1": {"url": "...", "role": "dev"}}
@@ -2657,14 +2657,14 @@ class TestListAgentsProjectScope:
 
         http_client.get.assert_called_once()
         call_kwargs = http_client.get.call_args
-        assert call_kwargs.kwargs.get("params", {}).get("project") == "teamA"
+        assert call_kwargs.kwargs.get("params", {}).get("team") == "teamA"
         assert "agent_id" not in call_kwargs.kwargs.get("params", {})
 
     @pytest.mark.asyncio
     async def test_list_agents_standalone_sees_all(self):
         """Standalone agents see all registered agents (no filtering)."""
         from src.agent.mesh_client import MeshClient
-        client = MeshClient("http://mesh:8420", "solo", project_name=None)
+        client = MeshClient("http://mesh:8420", "solo", team_name=None)
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
@@ -2684,7 +2684,7 @@ class TestListAgentsProjectScope:
         params = call_kwargs.kwargs.get("params", {})
         # Standalone agents send no filters — see all agents
         assert "agent_id" not in params
-        assert "project" not in params
+        assert "team" not in params
         assert "other" in result
 
 

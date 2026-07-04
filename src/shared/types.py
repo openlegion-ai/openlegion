@@ -408,7 +408,7 @@ class AgentPermissions(BaseModel):
     # ``can_spawn`` (Task 3 narrowed semantics): gates EPHEMERAL fleet-spawn
     # only — the ``POST /mesh/spawn`` / ``spawn_fleet_agent`` capability that
     # creates short-lived TTL-bounded peer agents. Durable fleet operations
-    # (creating named agents, managing projects, editing config, viewing fleet
+    # (creating named agents, managing teams, editing config, viewing fleet
     # metrics, routing tasks, requesting user credentials) live on the
     # dedicated control-plane permissions below; the in-container
     # ``spawn_subagent`` helper is ungated and separate.
@@ -426,13 +426,7 @@ class AgentPermissions(BaseModel):
     # on existing agent records default to False at load time so
     # pre-existing configs don't accidentally grant durable powers.
     can_manage_fleet: bool = False         # /mesh/agents/create, register/deregister
-    # ``can_manage_teams`` (new canonical name; ``can_manage_projects``
-    # kept as a back-compat alias). Either flag granted upstream is
-    # mirrored onto the other via :meth:`_unify_manage_teams_alias` so
-    # existing yaml configs that still spell ``can_manage_projects`` keep
-    # working until PR 3 retires the alias.
     can_manage_teams: bool = False         # team create/archive, membership
-    can_manage_projects: bool = False      # DEPRECATED: alias for can_manage_teams
     can_edit_agent_config: bool = False    # edit another agent's instructions/soul/etc. (apply-immediately + undo)
     can_view_fleet_metrics: bool = False   # /mesh/system/metrics, /mesh/agents/{id}/metrics
     can_route_tasks: bool = False          # durable task records (Task 6)
@@ -443,16 +437,6 @@ class AgentPermissions(BaseModel):
     wallet_spend_limit_daily_usd: float = 0.0
     wallet_rate_limit_per_hour: int = 0
     wallet_allowed_contracts: list[str] = []
-
-    @model_validator(mode="after")
-    def _unify_manage_teams_alias(self) -> "AgentPermissions":
-        # Either flag granted on input implies both are set downstream so
-        # callers can read either field without an OR. PR 3 removes the
-        # alias entirely.
-        if self.can_manage_teams or self.can_manage_projects:
-            object.__setattr__(self, "can_manage_teams", True)
-            object.__setattr__(self, "can_manage_projects", True)
-        return self
 
 
 # === Agent Configuration ===
@@ -1004,7 +988,7 @@ class DashboardEvent(BaseModel):
         "operator_action_receipt",
         "operator_action_receipt_undone",
         "operator_action_receipt_superseded",
-        # Agent / project lifecycle — archive/unarchive emit so the SPA
+        # Agent / team lifecycle — archive/unarchive emit so the SPA
         # refreshes the relevant list without a full reload.
         "agent_archived",
         "agent_unarchived",
@@ -1017,12 +1001,8 @@ class DashboardEvent(BaseModel):
         # the new value live (secret fields are redacted in the
         # payload).
         "agent_config_updated",
-        # Team (formerly "project") CRUD — create / update / delete so
-        # the teams list refreshes without polling. The 5 legacy
-        # ``project_*`` literals were dropped on 2026-05-18 (see
-        # refactor/drop-dead-project-literals): PR 3 of the rename had
-        # already stopped emitting them, and no consumer / dispatcher /
-        # historical-record code in src/ or tests/ still references them.
+        # Team CRUD — create / update / delete so the teams list
+        # refreshes without polling.
         "team_created",
         "team_updated",
         "team_deleted",

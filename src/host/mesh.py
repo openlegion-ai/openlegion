@@ -102,39 +102,27 @@ class Blackboard:
             );
             CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);
             CREATE INDEX IF NOT EXISTS idx_audit_log_target ON audit_log(target);
+            -- Composite index covers BOTH the default
+            -- ``WHERE archived=0 ORDER BY id DESC LIMIT 20`` audit-log view
+            -- AND the archive UPDATE's ``WHERE archived=0 AND timestamp<?``
+            -- predicate.
+            CREATE INDEX IF NOT EXISTS idx_audit_log_active ON audit_log(archived, id DESC);
+
+            PRAGMA user_version = 1;
         """)
-        # Migrate legacy DBs that pre-date the ``undoable`` and ``archived``
-        # columns. Default 0 means "not undoable" / "not archived" so
-        # historic rows fail closed. Run BEFORE creating the composite
-        # ``idx_audit_log_active`` below, since the index references the
-        # ``archived`` column which legacy DBs lack until ALTER runs.
-        existing_audit_cols = {
-            row[1]
-            for row in self.db.execute("PRAGMA table_info(audit_log)").fetchall()
-        }
-        for col in ("undoable", "archived"):
-            if col not in existing_audit_cols:
-                try:
-                    self.db.execute(
-                        f"ALTER TABLE audit_log ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0"
-                    )
-                except sqlite3.OperationalError as e:
-                    if "duplicate column" not in str(e).lower():
-                        raise
-        # Drop the legacy low-cardinality archived-only index if it was
-        # left over from a prior schema. The composite
-        # ``idx_audit_log_active`` below replaces it.
-        try:
-            self.db.execute("DROP INDEX IF EXISTS idx_audit_log_archived")
-        except sqlite3.OperationalError:
-            pass
-        # Composite index covers BOTH the default
-        # ``WHERE archived=0 ORDER BY id DESC LIMIT 20`` audit-log view
-        # AND the archive UPDATE's ``WHERE archived=0 AND timestamp<?``
-        # predicate. Created here (post-migration) so legacy DBs have the
-        # ``archived`` column by the time SQLite resolves the reference.
+        # One-shot re-key for the project→team rename: live entries and
+        # persisted watcher patterns written under the pre-rename
+        # ``projects/{team}/`` namespace move to ``teams/{team}/``.
+        # Idempotent (LIKE-guarded); OR REPLACE resolves the pathological
+        # both-spellings-exist collision in favour of the old row's value
+        # landing on the new key.
         self.db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_audit_log_active ON audit_log(archived, id DESC)"
+            "UPDATE OR REPLACE entries SET key = 'teams/' || substr(key, 10) "
+            "WHERE key LIKE 'projects/%'"
+        )
+        self.db.execute(
+            "UPDATE OR REPLACE watchers SET pattern = 'teams/' || substr(pattern, 10) "
+            "WHERE pattern LIKE 'projects/%'"
         )
         self.db.commit()
         self._load_watchers()
@@ -751,14 +739,14 @@ class MessageRouter:
         permissions: PermissionMatrix,
         agent_registry: dict[str, str],
         trace_store: Any = None,
-        agent_projects: dict[str, str] | None = None,
+        agent_teams: dict[str, str] | None = None,
     ):
         self.permissions = permissions
         self.agent_registry: dict[str, str] = agent_registry
         self.agent_roles: dict[str, str] = {}
         self.message_log: deque[dict] = deque(maxlen=10_000)
         self._capabilities_cache: dict[str, list[str]] = {}
-        self._agent_projects: dict[str, str] = agent_projects or {}
+        self._agent_teams: dict[str, str] = agent_teams or {}
         self._registry_lock = threading.Lock()
         self._client: httpx.AsyncClient | None = None
         self._client_lock: asyncio.Lock | None = None
@@ -787,22 +775,22 @@ class MessageRouter:
 
     async def route(self, message: AgentMessage) -> dict:
         """Route a message. Resolves capability-based addressing. Enforces permissions."""
-        # Cross-project message blocking
-        if self._agent_projects:
-            from_project = self._agent_projects.get(message.from_agent)
-            to_project = self._agent_projects.get(message.to)
+        # Cross-team message blocking
+        if self._agent_teams:
+            from_team = self._agent_teams.get(message.from_agent)
+            to_team = self._agent_teams.get(message.to)
             system_agents = {"mesh"}
             if (
-                from_project and to_project
-                and from_project != to_project
+                from_team and to_team
+                and from_team != to_team
                 and message.from_agent not in system_agents
                 and message.to not in system_agents
             ):
                 logger.warning(
-                    "Cross-project messaging blocked: %s (%s) -> %s (%s)",
-                    message.from_agent, from_project, message.to, to_project,
+                    "Cross-team messaging blocked: %s (%s) -> %s (%s)",
+                    message.from_agent, from_team, message.to, to_team,
                 )
-                return {"error": "Cross-project messaging not allowed"}
+                return {"error": "Cross-team messaging not allowed"}
 
         if not self.permissions.can_message(message.from_agent, message.to):
             logger.warning(f"Permission denied: {message.from_agent} -> {message.to}")

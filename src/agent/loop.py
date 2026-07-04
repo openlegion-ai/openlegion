@@ -142,7 +142,7 @@ _MAX_STEER_INTERRUPTS = 3  # max times a steer can interrupt a final answer per 
 # ContextVar so tools (e.g. notify_user) can detect heartbeat mode
 _heartbeat_mode: ContextVar[bool] = ContextVar("_heartbeat_mode", default=False)
 
-# Tools that require a project blackboard — excluded for standalone agents.
+# Tools that require a team blackboard — excluded for standalone agents.
 _BLACKBOARD_TOOLS = frozenset({
     "read_blackboard", "write_blackboard", "list_blackboard",
     "publish_event", "subscribe_event", "watch_blackboard",
@@ -453,7 +453,7 @@ class AgentLoop:
             self._excluded_tools: frozenset[str] | None = None
         else:
             self._allowed_tools = None
-            # Standalone agents have no project blackboard — hide those tools.
+            # Standalone agents have no team blackboard — hide those tools.
             excluded: set[str] = (
                 set(_BLACKBOARD_TOOLS) if mesh_client.is_standalone else set()
             )
@@ -833,11 +833,11 @@ class AgentLoop:
                     logger.debug("System metrics fetch failed: %s", e)
             self._introspect_cache = data
             self._introspect_cache_ts = now
-            # Sync project assignment from mesh host (supports runtime add/remove)
-            project = data.get("project")
-            if project != self.mesh_client.project_name:
-                logger.info("Project assignment updated: %s → %s", self.mesh_client.project_name, project)
-                self.mesh_client.project_name = project
+            # Sync team assignment from mesh host (supports runtime add/remove)
+            team = data.get("team")
+            if team != self.mesh_client.team_name:
+                logger.info("Team assignment updated: %s → %s", self.mesh_client.team_name, team)
+                self.mesh_client.team_name = team
             # Refresh SYSTEM.md on disk so bootstrap picks it up next prompt
             if self.workspace:
                 try:
@@ -2054,7 +2054,7 @@ class AgentLoop:
         # so the cached system prefix stays byte-identical turn-to-turn.
         volatile: list[str] = []
 
-        # Load workspace identity + project files into system prompt. The head is
+        # Load workspace identity + team files into system prompt. The head is
         # stable (cached); the ## Recent slice is relocated below the breakpoint.
         if self.workspace:
             bootstrap = self.workspace.get_bootstrap_content(include_recent=False)
@@ -2403,7 +2403,7 @@ class AgentLoop:
                 if goals:
                     parts.append(f"## Your Current Goals\n\n{sanitize_for_prompt(format_dict(goals))}")
 
-                # 2. Bootstrap (identity, instructions, project)
+                # 2. Bootstrap (identity, instructions, team)
                 if self.workspace:
                     bootstrap = self.workspace.get_bootstrap_content()
                     if bootstrap:

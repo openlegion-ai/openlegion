@@ -46,9 +46,9 @@ Public surface:
 
 Tenant rollup (Phase 10 §24):
   * :func:`_tenant_for(agent_id)` — resolve an agent to its tenant via
-    project membership in ``config/projects/`` (operators group agents
-    into projects, and each project IS the tenant scope for billing
-    rollups). Cached LRU(256). Returns ``None`` for unprojected agents.
+    team membership in ``config/teams/`` (operators group agents
+    into teams, and each team IS the tenant scope for billing
+    rollups). Cached LRU(256). Returns ``None`` for teamless agents.
   * :func:`get_tenant_total(tenant_id, since=None)` — sum every per-agent
     bucket whose owner resolves to ``tenant_id``. ``since`` is reserved
     for future snapshot-window filtering; today the in-memory state is
@@ -553,13 +553,13 @@ async def restore(path: Path | str | None = None) -> int:
 # tenant-aware READ helpers that walk the same ``_state`` dict and group
 # agents by their resolved tenant.
 #
-# **Tenant resolution.** The engine groups agents into projects via
-# ``config/projects/<name>/metadata.yaml``; each project's ``members``
+# **Tenant resolution.** The engine groups agents into teams via
+# ``config/teams/<name>/metadata.yaml``; each team's ``members``
 # list IS the tenant boundary for billing rollup. ``_tenant_for(agent_id)``
-# resolves an agent → project name (or ``None`` for unprojected agents).
-# Cached LRU(256) — projects rarely change at runtime, and the cache cuts
+# resolves an agent → team name (or ``None`` for teamless agents).
+# Cached LRU(256) — teams rarely change at runtime, and the cache cuts
 # ~256 YAML reads per CSV export down to one. Operators who reshape
-# projects must call :func:`reset_tenant_cache` (or restart the service)
+# teams must call :func:`reset_tenant_cache` (or restart the service)
 # to invalidate.
 #
 # **Threshold alerts.** Operators configure
@@ -577,18 +577,15 @@ async def restore(path: Path | str | None = None) -> int:
 def _tenant_for(agent_id: str) -> str | None:
     """Resolve an agent ID to its tenant ID (team name).
 
-    Reads ``config/teams/`` (canonical) — falls back to
-    ``config/projects/`` for pre-migration deployments where the
-    startup migrator (:mod:`src.host.team_migration`) hasn't yet
-    renamed the directory. Both paths funnel through
-    :func:`src.cli.config._load_config` which builds the reverse
-    ``agent → team`` map at load time. Returns the team name for
-    ``agent_id``, or ``None`` when the agent isn't in any team.
+    Reads ``config/teams/`` via :func:`src.cli.config._load_config`,
+    which builds the reverse ``agent → team`` map at load time. Returns
+    the team name for ``agent_id``, or ``None`` when the agent isn't in
+    any team.
 
     LRU(256) cached because the CSV export and threshold-alert paths can
     each call it once per agent in the tenant's fleet — a 50-agent tenant
     on a 60s metrics tick would be 3000 YAML reads/min without the cache.
-    Agents are added to / removed from projects rarely (operator action),
+    Agents are added to / removed from teams rarely (operator action),
     and the cache invalidation hook is :func:`reset_tenant_cache`.
 
     The lookup is intentionally read-only and does NOT mutate config —
@@ -606,18 +603,18 @@ def _tenant_for(agent_id: str) -> str | None:
     except Exception as e:
         logger.debug("tenant lookup: _load_config failed: %s", e)
         return None
-    agent_projects = cfg.get("_agent_projects") or {}
-    project = agent_projects.get(agent_id)
-    if not isinstance(project, str) or not project:
+    agent_teams = cfg.get("_agent_teams") or {}
+    team = agent_teams.get(agent_id)
+    if not isinstance(team, str) or not team:
         return None
-    return project
+    return team
 
 
 def reset_tenant_cache() -> None:
     """Invalidate the :func:`_tenant_for` LRU cache.
 
-    Call after mutating ``config/projects/`` so subsequent rollups see
-    the new membership. Tests and the dashboard's project-edit endpoints
+    Call after mutating ``config/teams/`` so subsequent rollups see
+    the new membership. Tests and the dashboard's team-edit endpoints
     use this hook.
     """
     _tenant_for.cache_clear()

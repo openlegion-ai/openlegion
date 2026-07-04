@@ -38,7 +38,7 @@ const _IDENTITY_FILE_MAP = {
   ],
   memory: [
     { file: 'MEMORY.md', label: 'Memory', cap: 16000, access: 'auto', desc: 'Facts and context the agent remembers across sessions. Auto-updated during conversations — you can also edit directly. Only the compiled head + newest log entries are injected into the prompt; older log entries stay on disk, recalled via memory search.' },
-    { file: 'USER.md', label: 'Preferences', cap: 4000, access: 'both', desc: 'Your preferences, communication style, and project context. Helps the agent serve you better over time.' },
+    { file: 'USER.md', label: 'Preferences', cap: 4000, access: 'both', desc: 'Your preferences, communication style, and team context. Helps the agent serve you better over time.' },
     { file: 'HEARTBEAT.md', label: 'Auto-checkup', cap: null, access: 'both', desc: 'Rules for what the agent does during periodic autonomous wakeups — what to check, what to work on, when to notify you.' },
   ],
 };
@@ -425,7 +425,7 @@ function dashboard() {
     broadcastMessage: '',
     _broadcastPending: null,
 
-    // Breadcrumb project context
+    // Breadcrumb team context
     _detailReturnTeam: null,
 
     // Identity file save flash
@@ -1077,7 +1077,7 @@ function dashboard() {
       return this.settingsData?.plan_limits?.max_agents ?? 0;
     },
     get maxTeams() {
-      return this.settingsData?.plan_limits?.max_projects ?? 0;
+      return this.settingsData?.plan_limits?.max_teams ?? 0;
     },
     get runningAgents() {
       return this.agents.filter(a => a.running !== false && a.id !== 'operator');
@@ -1089,7 +1089,7 @@ function dashboard() {
     get teamsEnabled() {
       const limits = this.settingsData?.plan_limits;
       if (!limits) return true; // no limits loaded yet, allow everything
-      return limits.projects_enabled !== false;
+      return limits.teams_enabled !== false;
     },
     get atTeamLimit() {
       if (!this.teamsEnabled) return true;
@@ -1130,7 +1130,7 @@ function dashboard() {
       // User-fleet view: excludes the operator system agent. Drives all stats (cost, tokens, health),
       // count-against-quota displays, and broadcast targeting. Operator is rendered separately via displayAgents.
       if (this.activeTeam) {
-        return this.agents.filter(a => a.id !== 'operator' && a.project === this.activeTeam);
+        return this.agents.filter(a => a.id !== 'operator' && a.team === this.activeTeam);
       }
       const base = this.teams.length > 0 ? this.soloAgents : this.agents;
       return base.filter(a => a.id !== 'operator');
@@ -1318,22 +1318,9 @@ function dashboard() {
         } catch (e) { /* ignore */ }
       });
 
-      // Restore the currently-active team. Reads the new ``activeTeam`` key,
-      // falling back to the legacy ``activeProject`` key one time so users
-      // upgrading from PR 2 don't lose their selection. The legacy key is
-      // cleared after migration so subsequent reads stay clean.
+      // Restore the currently-active team.
       try {
-        let active = localStorage.getItem('activeTeam');
-        if (!active) {
-          const legacy = localStorage.getItem('activeProject');
-          if (legacy) {
-            active = legacy;
-            localStorage.setItem('activeTeam', legacy);
-          }
-        }
-        if (localStorage.getItem('activeProject') !== null) {
-          localStorage.removeItem('activeProject');
-        }
+        const active = localStorage.getItem('activeTeam');
         if (active) this.activeTeam = active;
       } catch (_) { /* ignore */ }
 
@@ -3430,12 +3417,12 @@ function dashboard() {
           return tid ? `Tune ${tid}` : 'Tune agent';
         case 'delete_agent':
           return tid ? `Remove agent ${tid}` : 'Remove agent';
-        case 'delete_project':
-          return tid ? `Remove project ${tid}` : 'Remove project';
+        case 'delete_team':
+          return tid ? `Remove team ${tid}` : 'Remove team';
         case 'archive_agent':
           return tid ? `Archive agent ${tid}` : 'Archive agent';
-        case 'archive_project':
-          return tid ? `Archive project ${tid}` : 'Archive project';
+        case 'archive_team':
+          return tid ? `Archive team ${tid}` : 'Archive team';
         default: {
           const verb = (k || 'action').replace(/_/g, ' ').trim();
           const tail = [tkind, tid].filter(Boolean).join(' ').trim();
@@ -3545,11 +3532,11 @@ function dashboard() {
     // Build the small grey sub-line shared by every Needs-you card.
     // Joins the populated bits with " · " so blank fields don't leave
     // dangling separators.
-    _needsYouSubtitle({ actor, expiresAt, project, text }) {
+    _needsYouSubtitle({ actor, expiresAt, team, text }) {
       const parts = [];
       if (expiresAt) parts.push('expires in ' + this.workplaceFormatExpiry(expiresAt));
       if (actor) parts.push('from ' + actor);
-      if (project) parts.push('project ' + project);
+      if (team) parts.push('team ' + team);
       if (text) {
         const trimmed = text.length > 80 ? text.slice(0, 77) + '...' : text;
         parts.push(trimmed);
@@ -3591,7 +3578,7 @@ function dashboard() {
     // Phase 4 — Stuck tasks: tasks that have been pending or working
     // for >24h with no status change. Computed from ``workplaceTasks``
     // by checking ``updated_at`` (or ``created_at`` for never-started
-    // tasks). Returns an array of ``{id, title, assignee, project_id,
+    // tasks). Returns an array of ``{id, title, assignee, team_id,
     // status, stuck_seconds, stuck_label}`` so the template can
     // render the count badge + ``Stuck for N days`` caption without
     // recomputing on every reactive read. Capped at 25 to keep the
@@ -3626,7 +3613,7 @@ function dashboard() {
           id: t.id,
           title: t.title || '(untitled)',
           assignee: t.assignee || '',
-          project_id: t.project_id || '',
+          team_id: t.team_id || '',
           status: t.status,
           stuck_seconds: age,
           stuck_label: label,
@@ -3656,7 +3643,7 @@ function dashboard() {
         id: task.id,
         title: task.title || '(untitled)',
         assignee: task.assignee || '',
-        project_id: task.project_id || '',
+        team_id: task.team_id || '',
       };
     },
 
@@ -3935,7 +3922,7 @@ function dashboard() {
       if (existing) return;
       const isDestructive = (
         data.action_kind === 'delete'
-        && (data.target_kind === 'project' || data.target_kind === 'agent')
+        && (data.target_kind === 'team' || data.target_kind === 'agent')
       );
       this.chatHistories[target].push({
         role: 'pending_action_card',
@@ -4114,7 +4101,7 @@ function dashboard() {
         // immediately; background reload fills in the rest.
         const stub = {
           id: data.task_id,
-          project_id: data.project_id,
+          team_id: data.team_id,
           creator: data.creator,
           assignee: data.assignee,
           title: data.title || '(untitled)',
@@ -4815,12 +4802,12 @@ function dashboard() {
         // Brief (TEAM.md) edited elsewhere — live-reload the content for the
         // active team unless the user is mid-edit (don't clobber their buffer).
         // Two producers: the dashboard's own TEAM.md save emits
-        // field 'project_md' (dashboard/server.py), while the operator
+        // field 'team_md' (dashboard/server.py), while the operator
         // agent's update_team_context mesh endpoint emits field 'context'
         // (host/server.py).
         const d = evt.data || {};
-        const changedTeam = d.team_name || d.name || d.team_id || d.project_id;
-        if ((d.field === 'project_md' || d.field === 'context') &&
+        const changedTeam = d.team_name || d.name || d.team_id;
+        if ((d.field === 'team_md' || d.field === 'context') &&
             changedTeam === this.activeTeam &&
             !this.teamEditing && typeof this.fetchTeamContent === 'function') {
           this.fetchTeamContent();
@@ -5626,7 +5613,7 @@ function dashboard() {
     },
 
     async _fetchCoordination() {
-      // Only fetch when we have a project with agents
+      // Only fetch when we have a team with agents
       const proj = this.activeTeam;
       if (!proj || !this.agents.length) return;
       try {
@@ -6405,7 +6392,7 @@ function dashboard() {
       const todayMs = midnight.getTime();
       const inflight = [], doneToday = [];
       for (const t of (this.workplaceTasks || [])) {
-        if (t.project_id !== team) continue;
+        if (t.team_id !== team) continue;
         if (active[t.status]) inflight.push(t);
         else if (t.status === 'done' && ((t.completed_at || 0) * 1000) >= todayMs) doneToday.push(t);
       }
@@ -6549,18 +6536,15 @@ function dashboard() {
 
 
     _bbTeamPrefix() {
-      // Scope blackboard keys to the active team. The on-disk key
-      // namespace is still ``projects/`` — that's a backend storage
-      // prefix, not a domain term, and renaming it is a separate
-      // migration outside the project→team rename's scope.
-      return this.activeTeam ? `projects/${this.activeTeam}/` : '';
+      // Scope blackboard keys to the active team.
+      return this.activeTeam ? `teams/${this.activeTeam}/` : '';
     },
 
     _bbStripTeamPrefix(key) {
       const pfx = this._bbTeamPrefix();
       if (pfx && key.startsWith(pfx)) return key.slice(pfx.length);
-      // If no active team, still strip any projects/*/  prefix for display.
-      const m = key.match(/^projects\/[^/]+\/(.*)/);
+      // If no active team, still strip any teams/*/ prefix for display.
+      const m = key.match(/^teams\/[^/]+\/(.*)/);
       return m ? m[1] : key;
     },
 
@@ -6585,7 +6569,7 @@ function dashboard() {
       try {
         const team = this.activeTeam;
         const params = new URLSearchParams({ limit: '100' });
-        if (team) params.set('project', team);
+        if (team) params.set('team', team);
         const resp = await fetch(`${window.__config.apiBase}/comms/activity?${params}`);
         if (resp.ok) {
           const data = await resp.json();
@@ -6616,7 +6600,7 @@ function dashboard() {
         // Gather artifacts from all agents in the current team
         const team = this.activeTeam;
         if (!team) { this.artifactsList = []; this.artifactsLoading = false; return; }
-        const teamAgents = this.agents.filter(a => a.project === team);
+        const teamAgents = this.agents.filter(a => a.team === team);
         const results = await Promise.allSettled(
           teamAgents.map(async (a) => {
             const resp = await fetch(`${window.__config.apiBase}/agents/${a.id}/artifacts`, { credentials: 'same-origin' });
@@ -7483,7 +7467,7 @@ function dashboard() {
         });
         if (resp.ok) {
           const data = await resp.json();
-          const teamName = data.team || data.project;
+          const teamName = data.team;
           const teamNote = teamName ? ` in ${teamName}` : '';
           this.showToast(data.ready ? `${data.agent} added and ready${teamNote}` : `${data.agent} added (starting)${teamNote}`);
           this.addAgentMode = false;
@@ -9144,7 +9128,7 @@ function dashboard() {
       if (this.activeTeam) {
         return this.filteredAgents.filter(a => !a.over_limit);
       }
-      return this.agents.filter(a => a.id !== 'operator' && !a.over_limit && !a.project);
+      return this.agents.filter(a => a.id !== 'operator' && !a.over_limit && !a.team);
     },
 
     sendBroadcast() {
@@ -9207,7 +9191,7 @@ function dashboard() {
       const tabKeywords = {
         chat: ['chat', 'operator', 'message', 'talk', 'ask'],
         workplace: ['work', 'home', 'board', 'kanban', 'tasks', 'activity', 'delivered', 'in progress', 'stuck'],
-        fleet: ['team', 'agents', 'fleet', 'cards', 'project'],
+        fleet: ['team', 'agents', 'fleet', 'cards'],
         system: ['settings', 'system', 'costs', 'cron', 'schedules', 'automation', 'credentials', 'api keys', 'connections', 'integrations', 'infrastructure', 'pricing', 'browsers', 'pubsub', 'blackboard', 'comms', 'communication', 'storage', 'uploads', 'disk', 'network', 'proxy', 'socks'],
       };
       for (const [tabId, keywords] of Object.entries(tabKeywords)) {
@@ -9229,15 +9213,14 @@ function dashboard() {
           results.push({ type: 'action', label: act.label, desc: act.desc, action: act.action });
         }
       }
-      // Match teams (legacy 'standalone' / 'unassigned' / 'project' keywords kept
-      // for back-compat — users with muscle memory still find the action).
+      // Match teams.
       if (this.teams.length > 0) {
         if ('standalone'.startsWith(q) || 'unassigned'.startsWith(q) || 'solo'.startsWith(q)) {
           results.push({ type: 'action', label: 'Solo agents', desc: 'Show agents not in any team', action: () => { this.switchTab('fleet'); this.switchTeam(null); } });
         }
         for (const t of this.teams) {
           const tname = (t.name || '').toLowerCase();
-          if (tname.includes(q) || 'team'.startsWith(q) || 'project'.startsWith(q)) {
+          if (tname.includes(q) || 'team'.startsWith(q)) {
             results.push({ type: 'action', label: t.name, desc: `Switch to team (${(t.members || []).length} members)`, action: () => { this.switchTab('fleet'); this.switchTeam(t.name); } });
           }
         }

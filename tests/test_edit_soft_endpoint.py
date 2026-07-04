@@ -66,7 +66,7 @@ def mesh_app(tmp_path, monkeypatch):
     importlib.reload(server_module)
 
     perms_map = {
-        "operator": {"can_route_tasks": True, "can_manage_projects": True},
+        "operator": {"can_route_tasks": True, "can_manage_teams": True},
         "writer": {"can_route_tasks": False},
         "researcher": {"can_route_tasks": False},
     }
@@ -375,7 +375,7 @@ def _vault_wired_mesh_app(tmp_path, monkeypatch, provider_keys: dict[str, str]):
     pubsub = PubSub()
     permissions = PermissionMatrix()
     for aid, p in (
-        ("operator", {"can_route_tasks": True, "can_manage_projects": True}),
+        ("operator", {"can_route_tasks": True, "can_manage_teams": True}),
         ("writer", {"can_route_tasks": False}),
     ):
         permissions.permissions[aid] = AgentPermissions(agent_id=aid, **p)
@@ -803,7 +803,7 @@ async def test_edit_soft_model_clears_quarantine(tmp_path, monkeypatch):
     pubsub = PubSub()
     permissions = PermissionMatrix()
     permissions.permissions["operator"] = AgentPermissions(
-        agent_id="operator", can_route_tasks=True, can_manage_projects=True,
+        agent_id="operator", can_route_tasks=True, can_manage_teams=True,
     )
     permissions.permissions["writer"] = AgentPermissions(agent_id="writer")
     router = MessageRouter(permissions, {})
@@ -870,7 +870,7 @@ async def test_edit_soft_non_model_field_does_not_clear_quarantine(
     pubsub = PubSub()
     permissions = PermissionMatrix()
     permissions.permissions["operator"] = AgentPermissions(
-        agent_id="operator", can_route_tasks=True, can_manage_projects=True,
+        agent_id="operator", can_route_tasks=True, can_manage_teams=True,
     )
     permissions.permissions["writer"] = AgentPermissions(agent_id="writer")
     router = MessageRouter(permissions, {})

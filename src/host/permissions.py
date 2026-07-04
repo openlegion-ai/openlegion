@@ -174,7 +174,6 @@ class PermissionMatrix:
                 can_manage_cron=default.can_manage_cron,
                 can_manage_fleet=default.can_manage_fleet,
                 can_manage_teams=default.can_manage_teams,
-                can_manage_projects=default.can_manage_projects,
                 can_edit_agent_config=default.can_edit_agent_config,
                 can_view_fleet_metrics=default.can_view_fleet_metrics,
                 can_route_tasks=default.can_route_tasks,
@@ -250,11 +249,11 @@ class PermissionMatrix:
         # Self-goals carve-out: an agent may ALWAYS read its OWN goals key
         # (raw or team-scoped form) — goal delivery must never depend on
         # per-template ACL variance. Tight match: exactly goals/{id} or
-        # projects/{team}/goals/{id} — not arbitrary keys that merely end
+        # teams/{team}/goals/{id} — not arbitrary keys that merely end
         # in /goals/{id}.
         if key == f"goals/{agent_id}":
             return True
-        if key.startswith("projects/"):
+        if key.startswith("teams/"):
             p = key.split("/")
             if len(p) == 4 and p[2] == "goals" and p[3] == agent_id:
                 return True
@@ -275,11 +274,11 @@ class PermissionMatrix:
             return True
         # Goals are standing instructions injected into the target agent's
         # every prompt. Only the operator (endpoint carve-out in server.py)
-        # or the mesh itself may write them — a teammate's projects/{team}/*
+        # or the mesh itself may write them — a teammate's teams/{team}/*
         # write wildcard must NOT cover a peer's goals key (prompt-injection
         # channel into persistent context).
         parts = key.split("/", 2)
-        tail = parts[2] if key.startswith("projects/") and len(parts) == 3 else key
+        tail = parts[2] if key.startswith("teams/") and len(parts) == 3 else key
         if tail.startswith("goals/"):
             return False
         perms = self.get_permissions(agent_id)
@@ -349,7 +348,7 @@ class PermissionMatrix:
         Task 3 narrowed the semantics: this gates short-lived spawns
         (subagent / cron-triggered / template apply for transient
         helpers) only. Durable fleet operations (creating named agents,
-        managing projects, editing config, viewing fleet metrics,
+        managing teams, editing config, viewing fleet metrics,
         routing tasks, requesting user credentials) live on dedicated
         control-plane checks below.
         """

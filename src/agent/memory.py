@@ -175,6 +175,7 @@ class MemoryStore:
                 key TEXT NOT NULL,
                 value TEXT NOT NULL,
                 category TEXT DEFAULT 'general',
+                category_id INTEGER REFERENCES categories(id),
                 source TEXT DEFAULT 'agent',
                 confidence REAL DEFAULT 1.0,
                 access_count INTEGER DEFAULT 0,
@@ -250,36 +251,9 @@ class MemoryStore:
                 flush_triggered INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             );
+
+            PRAGMA user_version = 1;
         """)
-        # Lazy migrations: ADD COLUMN on pre-existing on-disk DBs so a redeploy
-        # against an older schema doesn't crash. Each is idempotent — we only run
-        # the ALTER when the column is genuinely absent (checked via
-        # PRAGMA table_info), so a real OperationalError (locked db, disk error,
-        # constraint failure) propagates instead of being silently swallowed.
-        existing_cols = {
-            row[1] for row in self.db.execute("PRAGMA table_info(facts)")
-        }
-        # (column_name, ALTER statement)
-        migrations = (
-            (
-                "category_id",
-                "ALTER TABLE facts ADD COLUMN category_id INTEGER REFERENCES categories(id)",
-            ),
-            # Memory v2: dated + sourced facts (enables prefer-recent retrieval).
-            (
-                "source_type",
-                "ALTER TABLE facts ADD COLUMN source_type TEXT DEFAULT 'conversation'",
-            ),
-            # NOTE: ADD COLUMN cannot carry a non-constant default on a
-            # non-empty table (SQLite "Cannot add a column with non-constant
-            # default"), so `date` is added WITHOUT a default here — pre-existing
-            # rows backfill to NULL (sort last under prefer-recent, acceptable),
-            # and `_store_fact_sync` stamps `date` explicitly on every write.
-            ("date", "ALTER TABLE facts ADD COLUMN date TEXT"),
-        )
-        for column, ddl in migrations:
-            if column not in existing_cols:
-                self.db.execute(ddl)
         self.db.commit()
         # Reconcile the dimension the vec0 tables were built at against the
         # configured dimension (rebuilds on an embedding-provider switch).

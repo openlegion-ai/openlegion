@@ -169,7 +169,7 @@ def test_operator_backfill_grants_can_use_internet(tmp_path, monkeypatch):
         "permissions": {
             "operator": {
                 "can_manage_fleet": True,
-                "can_manage_projects": True,
+                "can_manage_teams": True,
                 "can_edit_agent_config": True,
                 "can_view_fleet_metrics": True,
                 "can_route_tasks": True,
@@ -210,7 +210,7 @@ def test_operator_backfill_preserves_explicit_false(tmp_path, monkeypatch):
             "operator": {
                 "can_use_internet": False,
                 "can_manage_fleet": True,
-                "can_manage_projects": True,
+                "can_manage_teams": True,
                 "can_edit_agent_config": True,
                 "can_view_fleet_metrics": True,
                 "can_route_tasks": True,
