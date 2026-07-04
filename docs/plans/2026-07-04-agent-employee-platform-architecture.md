@@ -310,19 +310,30 @@ team boundary makes it mechanical when it does.
 
 ---
 
-## 8. Open decisions for the lead
+## 8. Decisions (ratified 2026-07-04)
 
-1. Ratify the **security tradeoff ledger** (§4) — specifically the shared `/team/scratch` volume and
-   the wallet/credential-agent exclusion from it.
-2. Ratify amending **Constraint #1** ("no router hierarchy," leads permitted) and **Constraint #12**
-   (leads get no permission ceiling).
-3. Ratify the **cost-philosophy inversion** (budget-governed autonomy replacing activity
-   suppression) and the **designated cheap-model tier** for coordination traffic.
-4. Confirm the **destructive-cleanup mandate** (delete all migration/shim/lazy-migration code; reset
-   to canonical v1 schemas) is authorized given no users/data.
-5. **(New — from Appendix B6)** Decide whether "solo agent = team-of-one" is allowed to grant
-   previously-isolated solo agents blackboard access + team context, or whether a team-of-one must
-   stay self-scoped so isolation is preserved in behavior.
+Status: **RATIFIED** except items 1 and 4, which stand at their safe defaults pending an explicit call.
+
+1. Security tradeoff ledger (§4) — shared `/team/scratch` volume: **not yet ratified.** Default:
+   proceed **git-Drive-first**; raw shared scratch stays deferred/opt-in (safer default), so Phase 2
+   is not blocked. Revisit before shipping raw scratch.
+2. ✅ **RATIFIED — leads approved, no privilege.** Amend **Constraint #1** to "no *router* hierarchy"
+   (accountability leads permitted; users still address any agent directly); **Constraint #12**
+   unchanged (leads get NO permission ceiling; the operator-still-gated test stays intact).
+   Unblocks Phase 4.
+3. ✅ **RATIFIED — cost-philosophy inversion approved.** Replace heartbeat suppression with a
+   budget-governed agenda loop + a **designated cheap-model tier** for coordination traffic. The
+   coordination/work **spend-split must land first** (B2) before the LLM-skip is removed. Unblocks
+   Phase 3.
+4. Destructive-cleanup mandate — **authorized in principle** (no users/data); each rename/schema
+   collapse still lands atomically with its pinned-test updates (B5) and completes its C.1 deletion.
+5. ✅ **RATIFIED — team-of-one stays self-scoped.** The solo→team-of-one unification is a code-path
+   merge only; a team-of-one's blackboard/context is scoped to itself, preserving today's isolation
+   posture. **This removes the B6 security risk entirely** — no previously-isolated solo agent gains
+   shared reachability.
+6. ✅ **Delivery: separate PR per unit.** Each logical unit lands as its own GitHub PR off `main`
+   (green + regression-tested + lint-clean), reviewed incrementally, rather than one accumulating
+   branch.
 
 ---
 
