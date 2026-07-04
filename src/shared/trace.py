@@ -43,17 +43,14 @@ PROTOCOL_VERSION_HEADER = "X-Protocol-Version"
 PROTOCOL_VERSION = "1"
 
 
-def protocol_headers() -> dict[str, str]:
-    """Return the protocol-version header dict for a mesh→agent request."""
-    return {PROTOCOL_VERSION_HEADER: PROTOCOL_VERSION}
-
-
 def protocol_compatible(raw: str | None) -> bool:
     """True if a peer's advertised protocol version is compatible with ours.
 
-    Compatibility is major-version equality. A missing/empty/garbage value is
-    treated as compatible (fail-open) so the header's introduction is
-    non-breaking and unversioned first-party callers are never rejected.
+    Compatibility is major-version equality (``"1"`` ≡ ``"1.4"``). A missing,
+    empty, or whitespace-only value is treated as compatible (fail-open) so the
+    header's introduction is non-breaking and unversioned first-party callers
+    are never rejected. A present, non-empty value whose major differs — a real
+    version we don't speak, or an unparseable one — is rejected.
     """
     if not raw:
         return True
@@ -138,7 +135,6 @@ __all__ = [
     "ORIGIN_HEADER",
     "PROTOCOL_VERSION_HEADER",
     "PROTOCOL_VERSION",
-    "protocol_headers",
     "protocol_compatible",
     "current_trace_id",
     "current_origin",

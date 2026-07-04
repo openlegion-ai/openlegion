@@ -201,20 +201,21 @@ def _install_protocol_version_guard(app: FastAPI) -> None:
     ``/status`` is exempt so health/reachability polling never trips it.
     """
     from starlette.responses import JSONResponse as _StarletteJSONResponse
+
     from src.shared.trace import PROTOCOL_VERSION, PROTOCOL_VERSION_HEADER, protocol_compatible
 
     @app.middleware("http")
     async def _enforce_protocol_version(request: Request, call_next):
+        peer_version = request.headers.get(PROTOCOL_VERSION_HEADER)
         if (
             request.headers.get("x-mesh-internal")
             and request.url.path != "/status"
-            and not protocol_compatible(request.headers.get(PROTOCOL_VERSION_HEADER))
+            and not protocol_compatible(peer_version)
         ):
             return _StarletteJSONResponse(
                 {
                     "detail": (
-                        f"protocol version mismatch: mesh sent "
-                        f"{request.headers.get(PROTOCOL_VERSION_HEADER)!r}, "
+                        f"protocol version mismatch: mesh sent {peer_version!r}, "
                         f"agent speaks {PROTOCOL_VERSION!r}"
                     )
                 },

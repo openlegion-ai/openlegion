@@ -20,9 +20,7 @@ from src.shared.trace import (
     PROTOCOL_VERSION,
     PROTOCOL_VERSION_HEADER,
     protocol_compatible,
-    protocol_headers,
 )
-
 
 # ── pure compatibility function ────────────────────────────────────────────
 
@@ -31,7 +29,9 @@ def test_protocol_compatible_same_major():
 
 
 def test_protocol_compatible_missing_is_fail_open():
-    # Missing/empty/garbage → compatible, so the header is non-breaking.
+    # Missing/empty/whitespace-only → compatible (fail-open), so the header is
+    # non-breaking for unversioned callers. (A present garbage value is NOT
+    # fail-open — see test_protocol_incompatible_non_numeric.)
     assert protocol_compatible(None) is True
     assert protocol_compatible("") is True
     assert protocol_compatible("   ") is True
@@ -47,8 +47,10 @@ def test_protocol_compatible_ignores_minor():
     assert protocol_compatible(f"{PROTOCOL_VERSION.split('.')[0]}.7") is True
 
 
-def test_protocol_headers_carries_version():
-    assert protocol_headers() == {PROTOCOL_VERSION_HEADER: PROTOCOL_VERSION}
+def test_protocol_incompatible_non_numeric():
+    # A present, non-empty, unparseable value is NOT a version we speak → reject.
+    # (Distinct from missing/whitespace, which is fail-open.)
+    assert protocol_compatible("abc") is False
 
 
 # ── transport emits the header (mesh→agent) ────────────────────────────────

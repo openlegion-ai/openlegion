@@ -14,10 +14,10 @@ from fastapi.testclient import TestClient
 
 
 def _build_app(tmp_path, monkeypatch, *, agent="scout"):
+    import src.cli.config as cli_config
     from src.host.mesh import Blackboard, MessageRouter, PubSub
     from src.host.permissions import PermissionMatrix
     from src.host.server import create_mesh_app
-    import src.cli.config as cli_config
 
     # Stub config I/O so the endpoint doesn't touch real config files.
     monkeypatch.setattr(cli_config, "_load_config", lambda: {"agents": {agent: {}}})
