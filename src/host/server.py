@@ -7411,6 +7411,15 @@ def create_mesh_app(
                 cron_scheduler.remove_agent_jobs(agent_id)
             except Exception as e:
                 logger.warning("archive_agent: cron cleanup for %s failed: %s", agent_id, e)
+        # Deregister from health monitoring BEFORE stopping the container, so
+        # the poller doesn't see the intentional stop as a failure and fight
+        # the archive by auto-restarting it (~90s window). Mirrors the delete
+        # path; the unarchive endpoint re-registers on restore.
+        if health_monitor is not None:
+            try:
+                health_monitor.unregister(agent_id)
+            except Exception as e:
+                logger.warning("archive_agent: health deregister for %s failed: %s", agent_id, e)
         # Best-effort container stop. Failures here don't break archive.
         if container_manager is not None:
             try:
