@@ -577,8 +577,8 @@ class CronScheduler:
                             "Only call tools if there is actual work to do.\n"
                             "2. If nothing needs attention, respond HEARTBEAT_OK "
                             "immediately. Do NOT make unnecessary tool calls.\n"
-                            "3. Report what you worked on to the USER via "
-                            "notify_user.\n"
+                            "3. Use notify_user ONLY for actionable updates, alerts, or scheduled digest outputs. "
+                            "If everything is normal, stay silent and return HEARTBEAT_OK.\n"
                         )
                         if not agent_standalone:
                             hb_rules += (

@@ -2424,7 +2424,7 @@ class AgentLoop:
                     f"{inbox_line}"
                     f"- If nothing in HEARTBEAT.md, {nothing_clause} needs attention, reply HEARTBEAT_OK immediately.\n"
                     f"- You have max {max_iters} iterations.\n"
-                    f"- Use notify_user to report results to the user.\n"
+                    f"- Use notify_user only for actionable updates, alerts, or scheduled digest outputs. If nothing meaningful changed, reply HEARTBEAT_OK without notifying the user.\n"
                 )
 
                 # 4. Learnings — avoid repeating past mistakes (half of chat cap)
