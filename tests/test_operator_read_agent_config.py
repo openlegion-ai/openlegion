@@ -215,7 +215,7 @@ async def test_get_agent_config_strips_agent_id_from_permissions(tmp_path):
     try:
         with patch("src.cli.config.AGENTS_FILE", agents_path), \
              patch("src.cli.config.CONFIG_FILE", cfg_dir / "mesh.yaml"), \
-             patch("src.cli.config.PROJECTS_DIR", cfg_dir / "projects"):
+             patch("src.cli.config.TEAMS_DIR", cfg_dir / "projects"):
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
             ) as client:

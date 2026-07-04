@@ -1555,7 +1555,7 @@
                   :title="proj.over_limit ? 'Team over plan limit' : (proj.members || []).length + ' member' + ((proj.members || []).length !== 1 ? 's' : '')">
                   <span x-text="proj.name"></span>
                   <svg x-show="proj.over_limit" x-cloak class="w-3 h-3 text-gray-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-                  <span class="opacity-60 ml-0.5" x-text="'(' + agents.filter(a => a.project === proj.name).length + ')'"></span>
+                  <span class="opacity-60 ml-0.5" x-text="'(' + agents.filter(a => a.team === proj.name).length + ')'"></span>
                 </button>
               </template>
             </div>
@@ -1653,7 +1653,7 @@
                 :title="'Goal: ' + (activeTeamData?.north_star || '')"
                 x-text="'🎯 ' + (activeTeamData?.north_star || '')"></span>
               <!-- Tab pills — desktop only, click stops propagation to header toggle -->
-              <div class="project-hub-desktop-tabs seg-group hidden lg:flex ml-auto flex-shrink-0" @click.stop role="tablist" aria-label="Team sections">
+              <div class="team-hub-desktop-tabs seg-group hidden lg:flex ml-auto flex-shrink-0" @click.stop role="tablist" aria-label="Team sections">
                 <button @click="teamHubExpanded = true; teamHubTab = 'work'; _ensureWorkplaceTasks()"
                   class="seg-tab seg-tab-sm"
                   :class="teamHubExpanded && teamHubTab === 'work' ? 'seg-tab-active' : ''"
@@ -1692,7 +1692,7 @@
                 </button>
               </div>
               <!-- Team options kebab menu -->
-              <div class="project-hub-kebab relative flex-shrink-0 ml-auto lg:ml-0" x-data="{ open: false }" @click.stop @keydown.escape.window="open = false">
+              <div class="team-hub-kebab relative flex-shrink-0 ml-auto lg:ml-0" x-data="{ open: false }" @click.stop @keydown.escape.window="open = false">
                 <button @click="open = !open"
                   class="p-1.5 rounded-md text-gray-500 hover:text-gray-300 hover:bg-gray-800 transition-colors"
                   aria-label="Team options">
@@ -1714,7 +1714,7 @@
             <!-- Hub body — collapsible -->
             <div x-show="teamHubExpanded" x-transition class="border-t border-gray-800/60">
               <!-- Mobile tab strip (shown below lg; desktop pills take over at lg) -->
-              <div class="project-hub-tabs project-hub-mobile-tabs lg:hidden" role="tablist" aria-label="Team sections">
+              <div class="team-hub-tabs team-hub-mobile-tabs lg:hidden" role="tablist" aria-label="Team sections">
                 <button @click="teamHubTab = 'work'; _ensureWorkplaceTasks()"
                   class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
                   :class="teamHubTab === 'work' ? 'text-white border-indigo-500' : 'text-gray-400 border-transparent hover:text-gray-300'"
@@ -2299,9 +2299,9 @@
                   </div>
                   <div class="text-xs text-gray-400 truncate mt-0.5" x-show="agent.model"
                     x-text="formatModelName(agent.model)"></div>
-                  <div class="flex items-center gap-1.5 flex-wrap mt-1" x-show="agent.project && !activeTeam">
+                  <div class="flex items-center gap-1.5 flex-wrap mt-1" x-show="agent.team && !activeTeam">
                     <span class="text-[11px] px-1.5 py-0.5 rounded bg-gray-800/80 text-gray-400 border border-gray-700/40"
-                      x-text="agent.project"></span>
+                      x-text="agent.team"></span>
                   </div>
                 </div>
                 <div class="flex items-center gap-1.5 shrink-0">
@@ -4411,8 +4411,8 @@
                       x-text="truncateTitle(s.title, 80)"></div>
                     <div class="text-[11px] text-amber-200/80 mt-0.5">
                       <span x-text="s.assignee || '(unassigned)'"></span>
-                      <span x-show="s.project_id" class="text-gray-400"
-                        x-text="'· ' + (s.project_id || '')"></span>
+                      <span x-show="s.team_id" class="text-gray-400"
+                        x-text="'· ' + (s.team_id || '')"></span>
                       <span class="ml-1 text-amber-300" x-text="'· ' + s.stuck_label"></span>
                     </div>
                   </button>
@@ -4501,7 +4501,7 @@
                   <template x-if="!drillInLoading && drillInData?.task">
                     <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-gray-400">
                       <span><span class="text-gray-400">assignee:</span> <span class="text-gray-200" x-text="drillInData.task.assignee || '—'"></span></span>
-                      <span x-show="drillInData.task.project_id"><span class="text-gray-400">project:</span> <span class="text-gray-200" x-text="drillInData.task.project_id"></span></span>
+                      <span x-show="drillInData.task.team_id"><span class="text-gray-400">team:</span> <span class="text-gray-200" x-text="drillInData.task.team_id"></span></span>
                       <span><span class="text-gray-400">status:</span> <span class="text-gray-200" x-text="drillInData.task.status"></span></span>
                       <span x-show="drillInData.task.created_at"><span class="text-gray-400">created:</span> <span class="text-gray-200" x-text="drillInFormatTimestamp(drillInData.task.created_at)"></span></span>
                       <span x-show="drillInData.task.completed_at"><span class="text-gray-400">completed:</span> <span class="text-gray-200" x-text="drillInFormatTimestamp(drillInData.task.completed_at)"></span></span>

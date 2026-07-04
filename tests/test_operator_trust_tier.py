@@ -71,8 +71,8 @@ def mesh_setup(tmp_path, monkeypatch):
         "trend-scout": AgentPermissions(
             agent_id="trend-scout",
             can_message=["seo-strategist"],  # narrow but valid
-            blackboard_read=["projects/x/*"],
-            blackboard_write=["projects/x/*"],
+            blackboard_read=["teams/x/*"],
+            blackboard_write=["teams/x/*"],
         ),
         "seo-strategist": AgentPermissions(
             agent_id="seo-strategist",
@@ -330,13 +330,13 @@ async def test_operator_blackboard_read_bypasses_grant(mesh_setup):
     """Operator with empty blackboard_read still reads."""
     app = mesh_setup["app"]
     # Seed a key.
-    mesh_setup["bb"].write("projects/x/k1", {"v": 1}, written_by="trend-scout")
+    mesh_setup["bb"].write("teams/x/k1", {"v": 1}, written_by="trend-scout")
 
     async with AsyncClient(
         transport=ASGITransport(app=app), base_url="http://test",
     ) as client:
         resp = await client.get(
-            "/mesh/blackboard/projects/x/k1",
+            "/mesh/blackboard/teams/x/k1",
             params={"agent_id": "operator"},
             headers=_hdr(mesh_setup["tokens"]["operator"]),
         )
@@ -351,7 +351,7 @@ async def test_operator_blackboard_write_bypasses_grant(mesh_setup):
         transport=ASGITransport(app=app), base_url="http://test",
     ) as client:
         resp = await client.put(
-            "/mesh/blackboard/projects/x/k2",
+            "/mesh/blackboard/teams/x/k2",
             params={"agent_id": "operator"},
             json={"v": 2},
             headers=_hdr(mesh_setup["tokens"]["operator"]),
@@ -368,7 +368,7 @@ async def test_worker_blackboard_write_still_gated(mesh_setup):
     ) as client:
         # seo-strategist has empty blackboard_write.
         resp = await client.put(
-            "/mesh/blackboard/projects/x/k3",
+            "/mesh/blackboard/teams/x/k3",
             params={"agent_id": "seo-strategist"},
             json={"v": 3},
             headers=_hdr(mesh_setup["tokens"]["seo-strategist"]),
@@ -668,7 +668,7 @@ def test_record_denial_emits_structured_log_fields(caplog):
     server = _reload_server()
     caplog.set_level(logging.WARNING, logger="host.server")
     server._record_denial(
-        "permission", caller="trend-scout", target="projects/x/k",
+        "permission", caller="trend-scout", target="teams/x/k",
         gate="blackboard.write:can_write_blackboard",
     )
 
@@ -687,7 +687,7 @@ def test_record_denial_emits_structured_log_fields(caplog):
     record = matched[0]
     assert record.denial_category == "permission"
     assert record.denial_caller == "trend-scout"
-    assert record.denial_target == "projects/x/k"
+    assert record.denial_target == "teams/x/k"
     assert record.denial_gate == "blackboard.write:can_write_blackboard"
 
 

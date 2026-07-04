@@ -27,7 +27,7 @@ def _raise_with_body(response: httpx.Response) -> None:
 
     The mesh server wraps every denial in a descriptive ``HTTPException``
     detail (e.g. ``"Agent X cannot wake Y"``, ``"Caller Z is not a
-    member of project 'foo'"``). Plain ``raise_for_status`` discards
+    member of team 'foo'"``). Plain ``raise_for_status`` discards
     that body — the exception string is just ``"Client error '403
     Forbidden' for url ..."``, leaving the caller to guess which gate
     fired. Wrapping it here means every coordination tool's failure
@@ -75,28 +75,13 @@ class MeshClient:
         mesh_url: str,
         agent_id: str,
         team_name: str | None = None,
-        *,
-        project_name: str | None = None,
     ):
-        # ``team_name`` is the canonical kwarg; ``project_name`` is kept
-        # as a back-compat alias through PR 3. If both are passed,
-        # ``team_name`` wins.
         self.mesh_url = mesh_url
         self.agent_id = agent_id
-        self.team_name = team_name if team_name is not None else project_name
+        self.team_name = team_name
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
         self._auth_token: str = os.environ.get("MESH_AUTH_TOKEN", "")
-
-    # Back-compat alias — kept until PR 3.
-    @property
-    def project_name(self) -> str | None:
-        """DEPRECATED: alias for :attr:`team_name`."""
-        return self.team_name
-
-    @project_name.setter
-    def project_name(self, value: str | None) -> None:
-        self.team_name = value
 
     @property
     def is_standalone(self) -> bool:
@@ -106,27 +91,23 @@ class MeshClient:
     def _scope_key(self, key: str) -> str:
         """Prefix a blackboard key with the team namespace.
 
-        Team agents transparently read/write under ``projects/{name}/``
-        (the blackboard key prefix is left as ``projects/`` for back-
-        compat with existing blackboard data; PR 3 may revisit). Solo
-        agents (no team) pass keys through unchanged — but they are
+        Team agents transparently read/write under ``teams/{name}/``.
+        Solo agents (no team) pass keys through unchanged — but they are
         blocked from the blackboard at both the tool and permission
         layers.
         """
         if self.team_name:
-            return f"projects/{self.team_name}/{key}"
+            return f"teams/{self.team_name}/{key}"
         return key
 
     def _scope_topic(self, topic: str) -> str:
         """Prefix a pub/sub topic with the team namespace.
 
         Team agents transparently publish/subscribe under
-        ``projects/{name}/`` (prefix retained for back-compat with
-        existing pub/sub topics; PR 3 may revisit). Solo agents (no
-        team) use raw topic names.
+        ``teams/{name}/``. Solo agents (no team) use raw topic names.
         """
         if self.team_name:
-            return f"projects/{self.team_name}/{topic}"
+            return f"teams/{self.team_name}/{topic}"
         return topic
 
     async def _get_client(self) -> httpx.AsyncClient:
@@ -206,7 +187,7 @@ class MeshClient:
         """Read a value from the shared blackboard.
 
         If *global_scope* is True, the key is sent as-is, bypassing the
-        per-agent project scoping. Used to read fleet-global keys such as
+        per-agent team scoping. Used to read fleet-global keys such as
         the operator inbox under ``global/tasks/operator/``.
         """
         scoped = key if global_scope else self._scope_key(key)
@@ -221,22 +202,22 @@ class MeshClient:
 
     async def write_blackboard(
         self, key: str, value: dict, ttl: int | None = None,
-        *, project: str | None = None, global_scope: bool = False,
+        *, team: str | None = None, global_scope: bool = False,
     ) -> dict:
         """Write a value to the shared blackboard.
 
-        If *project* is given, scope the key to that project instead of
-        this agent's own project.  Used by cross-project coordination
-        (e.g. operator handing off work to a project-scoped agent).
+        If *team* is given, scope the key to that team instead of
+        this agent's own team.  Used by cross-team coordination
+        (e.g. operator handing off work to a team-scoped agent).
 
         If *global_scope* is True, the key is sent as-is — bypassing both
-        the explicit ``project=`` override and the auto project prefix.
+        the explicit ``team=`` override and the auto team prefix.
         Used for fleet-global namespaces such as the operator inbox.
         """
         if global_scope:
             scoped = key
-        elif project is not None:
-            scoped = f"projects/{project}/{key}"
+        elif team is not None:
+            scoped = f"teams/{team}/{key}"
         else:
             scoped = self._scope_key(key)
         client = await self._get_client()
@@ -253,22 +234,22 @@ class MeshClient:
         return response.json()
 
     async def delete_blackboard(
-        self, key: str, *, project: str | None = None, global_scope: bool = False,
+        self, key: str, *, team: str | None = None, global_scope: bool = False,
     ) -> dict:
         """Delete an entry from the shared blackboard.
 
-        If *project* is given, scope the key to that project instead of
-        this agent's own project.  Used by cross-project coordination
-        (e.g. operator clearing a project-scoped agent's goals key).
+        If *team* is given, scope the key to that team instead of
+        this agent's own team.  Used by cross-team coordination
+        (e.g. operator clearing a team-scoped agent's goals key).
 
         If *global_scope* is True, the key is sent as-is — bypassing both
-        the explicit ``project=`` override and the auto project prefix.
+        the explicit ``team=`` override and the auto team prefix.
         Used for keys in the fleet-global namespace.
         """
         if global_scope:
             scoped = key
-        elif project is not None:
-            scoped = f"projects/{project}/{key}"
+        elif team is not None:
+            scoped = f"teams/{team}/{key}"
         else:
             scoped = self._scope_key(key)
         client = await self._get_client()
@@ -307,7 +288,7 @@ class MeshClient:
         """List blackboard entries by key prefix.
 
         If *global_scope* is True, the prefix is sent as-is, bypassing the
-        per-agent project scoping. Used for fleet-global namespaces such
+        per-agent team scoping. Used for fleet-global namespaces such
         as the operator inbox at ``global/tasks/operator/``.
         """
         scoped = prefix if global_scope else self._scope_key(prefix)
@@ -317,9 +298,9 @@ class MeshClient:
         )
         _raise_with_body(response)
         entries = response.json()
-        # Strip project prefix only when we used project scoping
-        if not global_scope and self.project_name:
-            scope = f"projects/{self.project_name}/"
+        # Strip the team prefix only when we used team scoping
+        if not global_scope and self.team_name:
+            scope = f"teams/{self.team_name}/"
             for entry in entries:
                 k = entry.get("key", "")
                 if k.startswith(scope):
@@ -456,13 +437,13 @@ class MeshClient:
     async def list_agents(self) -> dict:
         """List agents visible to this agent.
 
-        Project-scoped agents see only their project's members.
+        Team-scoped agents see only their team's members.
         Standalone agents see all registered agents so they can
-        coordinate cross-project (e.g. operator handing off work).
+        coordinate cross-team (e.g. operator handing off work).
         """
         params: dict[str, str] = {}
-        if self.project_name:
-            params["project"] = self.project_name
+        if self.team_name:
+            params["team"] = self.team_name
         response = await self._get_with_retry(
             f"{self.mesh_url}/mesh/agents",
             params=params,
@@ -1190,7 +1171,6 @@ class MeshClient:
     # === Team management (mesh proxy endpoints) ===
     #
     # Every method hits the ``/mesh/teams/*`` route — PR 3 removed the
-    # legacy ``/mesh/projects/*`` mirror endpoints.
 
     async def list_teams(self) -> dict:
         """List all teams via mesh proxy."""
@@ -1420,7 +1400,7 @@ class MeshClient:
         assignee: str,
         title: str,
         description: str | None = None,
-        project: str | None = None,
+        team_id: str | None = None,
         parent_task_id: str | None = None,
         priority: int = 0,
         dependencies: list[str] | None = None,
@@ -1445,8 +1425,8 @@ class MeshClient:
         }
         if description is not None:
             body["description"] = description
-        if project is not None:
-            body["project"] = project
+        if team_id is not None:
+            body["team_id"] = team_id
         if parent_task_id is not None:
             body["parent_task_id"] = parent_task_id
         if dependencies is not None:

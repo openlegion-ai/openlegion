@@ -85,7 +85,7 @@ The mesh host runs on the user's machine as a single FastAPI process. It is the 
 | `wallet.py` | Wallet signing service for Ethereum + Solana. Master seed only on the mesh. |
 | `api_keys.py` | Named API key management — salted SHA-256 hashes (`sha256(key_id + raw_key)`) stored in `config/api_keys.json`, `X-API-Key` header auth with legacy `OPENLEGION_API_KEY` env fallback. Raw key shown once at creation. |
 | `pending_actions.py`, `change_history.py` | Soft-edit / hard-edit pending-action store with TTL split (5 min soft, 30 min hard) and 5-min undo receipts. |
-| `orchestration.py`, `orchestration_migration.py` | Durable task records (V2 coordination path) and v1→v2 migration helpers. |
+| `orchestration.py` | Durable task records (V2 coordination path). |
 
 ### Agent (`src/agent/`)
 
@@ -98,13 +98,13 @@ Each agent runs in an isolated Docker container with its own FastAPI server (29 
 | `tools.py` | Tool discovery and registry; `@tool` decorator system. |
 | `mcp_client.py` | MCP server lifecycle management and tool routing. |
 | `memory.py` | SQLite + sqlite-vec + FTS5 hierarchical memory (`EMBEDDING_DIM=1536`, weighted 0.7 vector / 0.3 keyword with salience decay). |
-| `workspace.py` | Persistent markdown workspace. Scaffold files (`_SCAFFOLD_FILES`): `INSTRUCTIONS.md`, `SOUL.md`, `USER.md`, `MEMORY.md`, `INTERFACE.md`. `HEARTBEAT.md` is intentionally NOT bootstrapped — it is created lazily on first write. `TEAM.md` / `SYSTEM.md` are read-only bootstrap inclusions, not writable scaffolds. (Pre-rename `PROJECT.md` files are migrated to `TEAM.md` once at startup by `team_migration.py`; the bootstrap loader itself reads only `TEAM.md`/`team.md`.) |
+| `workspace.py` | Persistent markdown workspace. Scaffold files (`_SCAFFOLD_FILES`): `INSTRUCTIONS.md`, `SOUL.md`, `USER.md`, `MEMORY.md`, `INTERFACE.md`. `HEARTBEAT.md` is intentionally NOT bootstrapped — it is created lazily on first write. `TEAM.md` / `SYSTEM.md` are read-only bootstrap inclusions, not writable scaffolds. |
 | `context.py` | Context window management. Flush facts at 60%, summarize-and-replace at 70%, warn at 80%. Empty summary falls back to hard prune. Write-then-compact flushes facts to `MEMORY.md` before discarding context. |
 | `llm.py` | LLM client (`chat_stream()` and `chat()`) — routes through mesh proxy, never holds keys. |
 | `mesh_client.py` | HTTP client for agent-to-mesh communication; merges `origin_header()` into `wake_agent` / `create_task`. |
 | `loop_detector.py` | Stuck tool-call detection. Warn at 2 repeats, block at 4, terminate at 9. `memory_search` exempt from warn/block. |
 | `attachments.py` | Multimodal attachment enrichment (images → base64 vision blocks, PDFs → text extraction). |
-| `server.py` | Agent-side FastAPI server: `/task`, `/chat`, `/chat/stream`, `/chat/steer`, `/heartbeat`, `/status`, `/cancel`, `/result`, `/capabilities`, `/invoke`, `/workspace`, `/workspace/{filename}`, `/history`, `/activity`, `/heartbeat-context`, `/artifacts`, `/files`, `/team` (the legacy `/project` alias was removed in PR 3 of the project→team rename), `/config`, and others. |
+| `server.py` | Agent-side FastAPI server: `/task`, `/chat`, `/chat/stream`, `/chat/steer`, `/heartbeat`, `/status`, `/cancel`, `/result`, `/capabilities`, `/invoke`, `/workspace`, `/workspace/{filename}`, `/history`, `/activity`, `/heartbeat-context`, `/artifacts`, `/files`, `/team`, `/config`, and others. |
 
 ### Built-in Tools (`src/agent/builtins/`)
 
@@ -124,7 +124,7 @@ Each agent runs in an isolated Docker container with its own FastAPI server (29 
 | `introspect_tool.py` | Runtime state query — permissions, budget, fleet, cron, health. |
 | `tool_authoring.py` | Self-authoring with AST validation. Forbidden imports/calls/attrs prevent `eval`, `exec`, `open`, `__subclasses__`, etc. |
 | `fleet_tool.py` | Operator-only fleet management — `list_templates`, `apply_template` (per-slot creation, not atomic across slots). |
-| `operator_tools.py` | Operator-only orchestration — `edit_agent` (single tool; all fields apply immediately and emit an undo receipt: 5-min for soft fields, 30-min for hard fields), `undo_change`, `inspect_agents`, `inspect_teams`, team/agent CRUD via `create_team` / `add_agents_to_team` / … (legacy `*_project` names still callable). |
+| `operator_tools.py` | Operator-only orchestration — `edit_agent` (single tool; all fields apply immediately and emit an undo receipt: 5-min for soft fields, 30-min for hard fields), `undo_change`, `inspect_agents`, `inspect_teams`, team/agent CRUD via `create_team` / `add_agents_to_team` / …. |
 | `wallet_tool.py` | Wallet operations — get address, get balance, read contract, transfer, execute (Ethereum + Solana). |
 
 ### Browser Service (`src/browser/`)
@@ -230,7 +230,7 @@ All persistent state is SQLite (WAL mode, `busy_timeout=30000` except `traces` w
 | `config/cron.json` | Cron + heartbeat job definitions (atomic temp+rename) | `src/host/cron.py` |
 | `config/api_keys.json` | Named API key hashes — `sha256(key_id + raw_key)` | `src/host/api_keys.py` |
 | `config/mesh.yaml` | Mesh + LLM default config | `src/cli/config.py` |
-| `config/teams/{name}/` | Team metadata + `team.md` (read-only mount into member containers). The startup migrator creates a `config/projects` symlink at the legacy path so pre-rename code paths still resolve. | `src/cli/config.py` |
+| `config/teams/{name}/` | Team metadata + `team.md` (read-only mount into member containers). | `src/cli/config.py` |
 | `config/settings.json` | Dashboard / browser flag overrides (CAPTCHA solver creds STRIPPED here at load) | `src/browser/flags.py` |
 | `.env` | API keys and config — written atomically with `chmod(0o600)` | `src/host/credentials.py` |
 
@@ -238,24 +238,23 @@ All persistent state is SQLite (WAL mode, `busy_timeout=30000` except `traces` w
 
 Agents can be organized into **teams** — isolated namespaces that scope
 blackboard access, agent visibility, and shared context. (Internally
-the storage prefix and config directory are still `projects/...`
-through PR 2 of the project→team rename.)
+the storage prefix is `teams/...`.)
 
 ### How It Works
 
-- **Blackboard scoping**: The `MeshClient` auto-prefixes all blackboard keys with `projects/{name}/`. An agent writing to `tasks/research_01` on the "sales" team actually writes to `projects/sales/tasks/research_01`. Agents see natural keys — the prefix is stripped on read. This is enforced at both the client (auto-namespacing) and server (permission matrix) layers.
+- **Blackboard scoping**: The `MeshClient` auto-prefixes all blackboard keys with `teams/{name}/`. An agent writing to `tasks/research_01` on the "sales" team actually writes to `teams/sales/tasks/research_01`. Agents see natural keys — the prefix is stripped on read. This is enforced at both the client (auto-namespacing) and server (permission matrix) layers.
 - **Agent visibility**: `list_agents` returns only team peers for team agents, or only the agent itself for solo agents.
-- **TEAM.md**: Only team members receive a `TEAM.md` mounted read-only into their container at `/app/TEAM.md`. Solo agents get none. (Pre-rename `PROJECT.md` files are migrated to `TEAM.md` once at startup by `team_migration.py`; the bootstrap loader reads only `TEAM.md`/`team.md`.)
+- **TEAM.md**: Only team members receive a `TEAM.md` mounted read-only into their container at `/app/TEAM.md`. Solo agents get none.
 - **Permission management on agent create**: `POST /mesh/agents/create` writes defaults of `blackboard_read=["*"]`, `blackboard_write=["tasks/*","context/*","status/*","output/*","artifacts/*"]`, `can_publish=["*"]`, `can_subscribe=["*"]` (`src/host/server.py:4020-4021`). The effective per-team scope comes from the MeshClient's auto-prefix at runtime, not from the on-disk permission file.
 - **Remove from team**: When an agent is removed from a team, `blackboard_read` and `blackboard_write` are cleared to `[]`.
 - **Solo agents**: Agents not assigned to any team have no scoped blackboard prefix, see only themselves in `list_agents`, and receive no `TEAM.md`.
-- **Cross-team blackboard counter**: `_blackboard_xteam_count` is a process-lifetime observability counter (no enforcement) surfaced on `/mesh/system/metrics` as `blackboard_cross_project_total`.
+- **Cross-team blackboard counter**: `_blackboard_xteam_count` is a process-lifetime observability counter (no enforcement) surfaced on `/mesh/system/metrics` as `blackboard_cross_team_total`.
 
 ### Team Data
 
-Team configuration is stored in `config/projects/{name}/`. Each team
+Team configuration is stored in `config/teams/{name}/`. Each team
 directory contains `metadata.yaml` (name, description, created_at,
-members list) and `team.md` / legacy `project.md` (shared context
+members list) and `team.md` (shared context
 mounted read-only into member containers).
 
 ## Data Flow
@@ -306,5 +305,5 @@ Dockerfiles live at the repo root: `Dockerfile.agent` (python:3.12-slim, non-roo
 6. **Write-then-compact** — facts are flushed to `MEMORY.md` before discarding context.
 7. **Tool-call message grouping** — `assistant(tool_calls)` and `tool(results)` are never separated in context trimming.
 8. **Unicode sanitization** — all untrusted text passes through `sanitize_for_prompt()` before reaching LLM context (user input, tool results, system prompt context).
-9. **Team isolation** — blackboard keys are auto-namespaced under `projects/{name}/`, agent visibility is scoped to team peers, and solo agents have no scoped blackboard prefix.
+9. **Team isolation** — blackboard keys are auto-namespaced under `teams/{name}/`, agent visibility is scoped to team peers, and solo agents have no scoped blackboard prefix.
 10. **MessageOrigin propagation** — every cross-agent path that produces work reads `current_origin` once and forwards it to both `wake_agent` and `create_task` so completion notifications reach the originating channel/user.

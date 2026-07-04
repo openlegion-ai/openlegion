@@ -292,8 +292,7 @@ class TestPerAgentXStack:
         inst = CamoufoxInstance("a", MagicMock(), AsyncMock(), AsyncMock())
         assert inst.display_slot is None
         # None means "inherit os.environ" — same shape as omitting env=
-        # to subprocess.run.  Critical for the legacy code path where
-        # __main__.py sets DISPLAY=:99 process-globally.
+        # to subprocess.run.
         assert inst.subprocess_env() is None
 
     @pytest.mark.asyncio
@@ -434,10 +433,8 @@ class TestPerAgentXStack:
 
         monkeypatch.setattr("src.browser.service.subprocess.run", fake_run)
         await mgr._get_firefox_wids()  # no inst
-        # env=None means inherit; the legacy __main__.py path sets
-        # DISPLAY=:99 in os.environ, so xdotool still finds the right
-        # X server.  Verifying the kwarg is None (not the literal
-        # string ``"MISSING"``) is what matters.
+        # env=None means inherit os.environ.  Verifying the kwarg is
+        # None (not the literal string ``"MISSING"``) is what matters.
         assert observed["env"] is None
 
     @pytest.mark.asyncio

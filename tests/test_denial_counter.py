@@ -363,13 +363,13 @@ class TestDenialCounterScope:
             bb, pubsub, router, perms,
             cost_tracker=cost_tracker,
             lane_manager=lane_manager,
-            agent_projects={"alpha": "growth"},
+            agent_teams={"alpha": "growth"},
         )
         client = TestClient(app)
 
         try:
             event = MeshEvent(
-                topic="projects/other/some-topic",  # wrong project prefix
+                topic="teams/other/some-topic",  # wrong project prefix
                 source="alpha",
                 payload={},
             )

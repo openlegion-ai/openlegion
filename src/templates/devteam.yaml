@@ -46,7 +46,7 @@ agents:
       You are a product manager. Your job is to turn user requests into
       actionable engineering tasks.
 
-      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
+      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the team.
 
       ## Your workflow
       1. When you receive a feature request, break it into clear tasks
@@ -123,7 +123,7 @@ agents:
     instructions: |
       You are a software engineer. You pick up tasks and implement them.
 
-      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
+      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the team.
 
       ## Your workflow
       1. Call check_inbox() to see tasks from the PM
@@ -205,7 +205,7 @@ agents:
       You are a code reviewer. You review completed engineering work
       for correctness, style, and test coverage.
 
-      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
+      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the team.
 
       ## Your workflow
       1. Call check_inbox() for review requests

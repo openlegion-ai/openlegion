@@ -410,7 +410,7 @@ class TestOperatorAutoCreation:
             patch("src.cli.config.PERMISSIONS_FILE", perms_file),
             patch("src.cli.config.AGENTS_FILE", agents_file),
             patch("src.cli.config.CONFIG_FILE", mesh_file),
-            patch("src.cli.config.PROJECTS_DIR", tmp_path / "config" / "projects"),
+            patch("src.cli.config.TEAMS_DIR", tmp_path / "config" / "projects"),
         ):
             _add_agent_permissions("operator")
 
@@ -864,7 +864,7 @@ class TestPermissionBackfill:
             patch("src.cli.config.AGENTS_FILE", agents_file),
             patch("src.cli.config.CONFIG_FILE", mesh_file),
             patch("src.cli.config.PERMISSIONS_FILE", perms_file),
-            patch("src.cli.config.PROJECTS_DIR", tmp_path / "config" / "projects"),
+            patch("src.cli.config.TEAMS_DIR", tmp_path / "config" / "projects"),
         ):
             _ensure_all_agent_permissions()
 

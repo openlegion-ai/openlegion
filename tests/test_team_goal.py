@@ -6,7 +6,7 @@ goal as a first-class artifact.
 These exercise:
 - The tool's happy path + validation gates (length limits, types).
 - The mesh endpoint's persistence into ``metadata.yaml`` (round-trip
-  through ``_load_projects`` so the dashboard sees the new fields).
+  through ``_load_teams`` so the dashboard sees the new fields).
 - Backwards compat — teams predating the new fields load with
   ``north_star=None`` / ``success_criteria=None``.
 """
@@ -77,13 +77,13 @@ class TestTeamMetadataSchema:
 
 
 @pytest.mark.asyncio
-async def test_set_project_goal_happy_path():
+async def test_set_team_goal_happy_path():
     from src.agent.builtins.operator_tools import set_team_goal
 
     mc = MagicMock()
     mc.set_team_goal = AsyncMock(return_value={
         "success": True,
-        "project_name": "growth",
+        "team_name": "growth",
         "north_star": "Ship $10k MRR",
         "success_criteria": ["100 visits/day"],
     })
@@ -93,7 +93,7 @@ async def test_set_project_goal_happy_path():
         mesh_client=mc,
     )
     assert result["success"] is True
-    assert result["project_name"] == "growth"
+    assert result["team_name"] == "growth"
     mc.set_team_goal.assert_awaited_once_with(
         "growth", "Ship $10k MRR", ["100 visits/day"],
     )
@@ -197,7 +197,7 @@ async def test_set_project_goal_mesh_error_surfaces():
     assert "boom" in result["error"]
 
 
-# ── Endpoint integration: POST /mesh/projects/{name}/goal ────────────
+# ── Endpoint integration: POST /mesh/teams/{name}/goal ───────────────
 
 
 def _reload_server(monkeypatch):
@@ -243,10 +243,10 @@ def goal_app(tmp_path, monkeypatch):
     pdir = _projects_layout(tmp_path)
     monkeypatch.chdir(tmp_path)
     import src.cli.config as cli_cfg
-    monkeypatch.setattr(cli_cfg, "PROJECTS_DIR", pdir)
+    monkeypatch.setattr(cli_cfg, "TEAMS_DIR", pdir)
     server_module = _reload_server(monkeypatch)
     perms_map = {
-        "operator": {"can_route_tasks": True, "can_manage_projects": True},
+        "operator": {"can_route_tasks": True, "can_manage_teams": True},
         "writer": {"can_route_tasks": False, "can_message": []},
     }
     app, bb = _build_app(tmp_path, server_module, perms_map)
@@ -270,13 +270,13 @@ async def test_endpoint_set_goal_persists(goal_app):
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["success"] is True
-    assert body["project_name"] == "growth"
+    assert body["team_name"] == "growth"
     assert body["north_star"] == "Ship $10k MRR landing page in 2 weeks"
     assert body["success_criteria"] == ["100 visits/day", "5 demo bookings/wk"]
 
-    # Round-trip via _load_projects so the dashboard would see the same.
-    from src.cli.config import _load_projects
-    projects = _load_projects()
+    # Round-trip via _load_teams so the dashboard would see the same.
+    from src.cli.config import _load_teams
+    projects = _load_teams()
     assert projects["growth"]["north_star"] == (
         "Ship $10k MRR landing page in 2 weeks"
     )

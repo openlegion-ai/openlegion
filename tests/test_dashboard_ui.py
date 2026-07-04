@@ -1984,7 +1984,6 @@ _VERB_FOR_TOOL_FALLBACK_OK = frozenset({
     "read_blackboard",
     "read_file",
     "write_file",
-    "summarize_project_progress",
     # Coordination wrappers — covered by hand_off / update_status / etc.
     "claim_task",
     "complete_task",
@@ -2002,20 +2001,13 @@ _VERB_FOR_TOOL_FALLBACK_OK = frozenset({
     "undo_change",
     "manage_agent",
     "manage_goals",
-    "manage_project",
     "manage_team",
     "manage_task",
-    "create_project",
     "create_team",
-    "add_agents_to_project",
     "add_agents_to_team",
-    "remove_agents_from_project",
     "remove_agents_from_team",
-    "set_project_goal",
     "set_team_goal",
-    "update_project_context",
     "update_team_context",
-    "inspect_projects",
     "inspect_teams",
     "summarize_team_progress",
     # Vault / credentials.
@@ -2451,8 +2443,8 @@ class TestOnWsEventHandlersForLiveCoverage:
     def test_agent_config_updated_handler_present(self):
         assert "evt.type === 'agent_config_updated'" in _APP_JS_TEXT
 
-    def test_project_crud_handlers_present(self):
-        # All five project events route to a single fetchProjects path.
+    def test_team_crud_handlers_present(self):
+        # All five team events route to a single fetch path.
         for ev in (
             "team_created", "team_updated", "team_deleted",
             "team_archived", "team_unarchived",

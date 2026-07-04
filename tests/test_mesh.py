@@ -955,13 +955,13 @@ async def test_router_blocks_cross_project_messaging():
     router = MessageRouter(
         permissions=perms,
         agent_registry={"alice": "http://a:8400", "bob": "http://b:8400"},
-        agent_projects={"alice": "sales", "bob": "engineering"},
+        agent_teams={"alice": "sales", "bob": "engineering"},
     )
     from src.shared.types import AgentMessage
     msg = AgentMessage(from_agent="alice", to="bob", type="query", payload={})
     result = await router.route(msg)
     assert "error" in result
-    assert "Cross-project" in result["error"]
+    assert "Cross-team" in result["error"]
 
 
 @pytest.mark.asyncio
@@ -976,13 +976,13 @@ async def test_router_allows_same_project_messaging():
     router = MessageRouter(
         permissions=perms,
         agent_registry={},
-        agent_projects={"alice": "sales", "bob": "sales"},
+        agent_teams={"alice": "sales", "bob": "sales"},
     )
     from src.shared.types import AgentMessage
     msg = AgentMessage(from_agent="alice", to="bob", type="query", payload={})
     result = await router.route(msg)
     # Should fail with "no agent" error, NOT cross-project error
-    assert "Cross-project" not in result.get("error", "")
+    assert "Cross-team" not in result.get("error", "")
     assert "No agent found" in result.get("error", "")
 
 
@@ -998,12 +998,12 @@ async def test_router_allows_standalone_to_project_messaging():
     router = MessageRouter(
         permissions=perms,
         agent_registry={},
-        agent_projects={"bob": "engineering"},  # standalone is NOT in agent_projects
+        agent_teams={"bob": "engineering"},  # standalone is NOT in agent_teams
     )
     from src.shared.types import AgentMessage
     msg = AgentMessage(from_agent="standalone", to="bob", type="query", payload={})
     result = await router.route(msg)
-    assert "Cross-project" not in result.get("error", "")
+    assert "Cross-team" not in result.get("error", "")
     assert "No agent found" in result.get("error", "")
 
 
@@ -1072,12 +1072,12 @@ def test_registration_creates_inbox_watch(tmp_path):
     project = "testproject"
 
     # Simulate what /mesh/register does after auto-subscription
-    inbox_pattern = f"projects/{project}/tasks/{agent_id}/*"
+    inbox_pattern = f"teams/{project}/tasks/{agent_id}/*"
     bb.add_watch(agent_id, inbox_pattern)
 
     # Verify the agent is watching its inbox
     watchers = bb.get_watchers_for_key(
-        f"projects/{project}/tasks/{agent_id}/some_task"
+        f"teams/{project}/tasks/{agent_id}/some_task"
     )
     assert agent_id in watchers
     bb.close()
@@ -1109,11 +1109,11 @@ def test_inbox_watch_fires_on_handoff_write(tmp_path):
     project = "testproject"
 
     # Register watcher (simulates /mesh/register auto-watch)
-    inbox_pattern = f"projects/{project}/tasks/{agent_id}/*"
+    inbox_pattern = f"teams/{project}/tasks/{agent_id}/*"
     bb.add_watch(agent_id, inbox_pattern)
 
     # Simulate a hand_off write to the agent's inbox
-    task_key = f"projects/{project}/tasks/{agent_id}/ho_123"
+    task_key = f"teams/{project}/tasks/{agent_id}/ho_123"
     bb.write(task_key, {"task": "do something"}, written_by=writer_id)
 
     # get_watchers_for_key should return the agent (excluding the writer)
@@ -1195,7 +1195,7 @@ async def test_list_agents_endpoint_includes_capabilities(tmp_path, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_list_agents_project_scope_always_includes_operator(tmp_path, monkeypatch):
-    """`/mesh/agents?project=X` must include the operator entry alongside
+    """`/mesh/agents?team=X` must include the operator entry alongside
     project members. The operator is fleet-global by design — project agents
     have to discover it to hand off back. Without this, project_agent →
     operator handoff fails at the lookup with 'Agent operator not found'.
@@ -1247,11 +1247,11 @@ async def test_list_agents_project_scope_always_includes_operator(tmp_path, monk
     )
 
     try:
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
             ) as client:
-                resp = await client.get("/mesh/agents", params={"project": "growth"})
+                resp = await client.get("/mesh/agents", params={"team": "growth"})
         assert resp.status_code == 200
         data = resp.json()
         # Project member is present.
@@ -1329,7 +1329,7 @@ async def test_list_agents_unscoped_marks_operator_global(tmp_path, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_list_agents_project_scope_excludes_other_project_members(tmp_path, monkeypatch):
-    """When ``/mesh/agents?project=X`` is called, members of project Y must
+    """When ``/mesh/agents?team=X`` is called, members of project Y must
     NOT appear in the response. The endpoint reads members from the project
     metadata on disk and only includes registered agents whose id is a
     member, plus the operator (which is fleet-global). This pins the
@@ -1392,11 +1392,11 @@ async def test_list_agents_project_scope_excludes_other_project_members(tmp_path
     )
 
     try:
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
             ) as client:
-                resp = await client.get("/mesh/agents", params={"project": "alpha"})
+                resp = await client.get("/mesh/agents", params={"team": "alpha"})
         assert resp.status_code == 200
         data = resp.json()
         # Project member present.
@@ -1475,7 +1475,7 @@ async def test_list_agents_internal_caller_sees_full_fleet(tmp_path, monkeypatch
 
 @pytest.mark.asyncio
 async def test_list_agents_unknown_project_returns_empty(tmp_path):
-    """``/mesh/agents?project=X`` for an unknown project name returns an
+    """``/mesh/agents?team=X`` for an unknown project name returns an
     empty mapping — the endpoint logs a warning but does not 404. This
     pins the 'silent empty' contract that callers (mesh_client) rely on
     when an agent's project metadata is stale.
@@ -1507,11 +1507,11 @@ async def test_list_agents_unknown_project_returns_empty(tmp_path):
     )
 
     try:
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
             ) as client:
-                resp = await client.get("/mesh/agents", params={"project": "ghost"})
+                resp = await client.get("/mesh/agents", params={"team": "ghost"})
         assert resp.status_code == 200
         # Empty body (no project members + no operator carve-out — the
         # operator carve-out only fires on an existing project).
@@ -1531,7 +1531,7 @@ def _build_scope_test_app(tmp_path, suffix: str = ""):
     Lays out two projects (alpha with scout, beta with analyst) plus a
     standalone ``loner`` and an ``operator``. Returns (app, projects_dir,
     cleanup_fns) — caller wraps the projects_dir with the
-    ``PROJECTS_DIR`` patch and runs requests through ASGITransport.
+    ``TEAMS_DIR`` patch and runs requests through ASGITransport.
 
     ``suffix`` lets a single test build multiple isolated apps off the
     same ``tmp_path`` (for tests that loop over modes).
@@ -1609,7 +1609,7 @@ async def test_list_agents_worker_caller_warn_mode_logs_but_returns_legacy(
     app, projects_dir, cleanup = _build_scope_test_app(tmp_path)
 
     try:
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
             with caplog.at_level(logging.WARNING, logger="host.server"):
                 async with AsyncClient(
                     transport=ASGITransport(app=app), base_url="http://test",
@@ -1653,7 +1653,7 @@ async def test_list_agents_worker_caller_enforce_mode_filters(
     app, projects_dir, cleanup = _build_scope_test_app(tmp_path)
 
     try:
-        with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+        with patch("src.cli.config.TEAMS_DIR", projects_dir):
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
             ) as client:
@@ -1694,7 +1694,7 @@ async def test_list_agents_operator_caller_unaffected(
         app, projects_dir, cleanup = _build_scope_test_app(tmp_path, suffix=f"-op-{mode}")
 
         try:
-            with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            with patch("src.cli.config.TEAMS_DIR", projects_dir):
                 async with AsyncClient(
                     transport=ASGITransport(app=app), base_url="http://test",
                 ) as client:
@@ -1735,7 +1735,7 @@ async def test_list_agents_internal_caller_unaffected(
         app, projects_dir, cleanup = _build_scope_test_app(tmp_path, suffix=f"-int-{mode}")
 
         try:
-            with patch("src.cli.config.PROJECTS_DIR", projects_dir):
+            with patch("src.cli.config.TEAMS_DIR", projects_dir):
                 async with AsyncClient(
                     transport=ASGITransport(app=app), base_url="http://test",
                 ) as client:
@@ -1815,7 +1815,7 @@ async def test_list_agents_carries_structured_routing_fields(tmp_path, monkeypat
     try:
         with patch("src.cli.config.AGENTS_FILE", agents_path), \
              patch("src.cli.config.CONFIG_FILE", cfg_dir / "mesh.yaml"), \
-             patch("src.cli.config.PROJECTS_DIR", projects_dir):
+             patch("src.cli.config.TEAMS_DIR", projects_dir):
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
             ) as client:
@@ -1891,7 +1891,7 @@ async def test_get_agent_profile_carries_structured_routing_fields(tmp_path):
     try:
         with patch("src.cli.config.AGENTS_FILE", agents_path), \
              patch("src.cli.config.CONFIG_FILE", cfg_dir / "mesh.yaml"), \
-             patch("src.cli.config.PROJECTS_DIR", projects_dir):
+             patch("src.cli.config.TEAMS_DIR", projects_dir):
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
             ) as client:
@@ -1961,7 +1961,7 @@ async def test_get_agent_profile_carries_runtime_debug_fields(tmp_path):
     try:
         with patch("src.cli.config.AGENTS_FILE", agents_path), \
              patch("src.cli.config.CONFIG_FILE", cfg_dir / "mesh.yaml"), \
-             patch("src.cli.config.PROJECTS_DIR", projects_dir):
+             patch("src.cli.config.TEAMS_DIR", projects_dir):
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
             ) as client:
@@ -2035,7 +2035,7 @@ async def test_get_agent_profile_hides_runtime_fields_from_peer_agents(tmp_path)
     try:
         with patch("src.cli.config.AGENTS_FILE", agents_path), \
              patch("src.cli.config.CONFIG_FILE", cfg_dir / "mesh.yaml"), \
-             patch("src.cli.config.PROJECTS_DIR", projects_dir):
+             patch("src.cli.config.TEAMS_DIR", projects_dir):
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
             ) as client:
@@ -2118,7 +2118,7 @@ async def test_profile_denied_to_worker_omitting_requesting_agent(tmp_path):
     try:
         with patch("src.cli.config.AGENTS_FILE", agents_path), \
              patch("src.cli.config.CONFIG_FILE", cfg_dir / "mesh.yaml"), \
-             patch("src.cli.config.PROJECTS_DIR", projects_dir):
+             patch("src.cli.config.TEAMS_DIR", projects_dir):
             async with AsyncClient(
                 transport=ASGITransport(app=app), base_url="http://test",
             ) as client:

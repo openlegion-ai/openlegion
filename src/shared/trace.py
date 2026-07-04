@@ -31,6 +31,35 @@ logger = setup_logging("shared.trace")
 TRACE_HEADER = "X-Trace-Id"
 ORIGIN_HEADER = "X-Origin"
 
+# Wire-protocol version for the mesh↔agent HTTP contract. Bumped only on a
+# BREAKING change to the Pydantic contracts or endpoint semantics (additive
+# fields do not bump it). Sent by the mesh on every mesh→agent hop; the agent
+# server rejects a request whose major version is incompatible so a rolling
+# upgrade that leaves a stale container talking to a new mesh fails loudly
+# instead of silently mis-decoding JSON. A request with NO version header is
+# always accepted (agent self-calls, reachability probes, first-party callers),
+# so introducing the header never locks out an existing caller.
+PROTOCOL_VERSION_HEADER = "X-Protocol-Version"
+PROTOCOL_VERSION = "1"
+
+
+def protocol_compatible(raw: str | None) -> bool:
+    """True if a peer's advertised protocol version is compatible with ours.
+
+    Compatibility is major-version equality (``"1"`` ≡ ``"1.4"``). A missing,
+    empty, or whitespace-only value is treated as compatible (fail-open) so the
+    header's introduction is non-breaking and unversioned first-party callers
+    are never rejected. A present, non-empty value whose major differs — a real
+    version we don't speak, or an unparseable one — is rejected.
+    """
+    if not raw:
+        return True
+    ours = PROTOCOL_VERSION.split(".", 1)[0]
+    theirs = raw.split(".", 1)[0].strip()
+    if not theirs:
+        return True
+    return theirs == ours
+
 current_trace_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "current_trace_id", default=None,
 )
@@ -104,6 +133,9 @@ def parse_origin_header(raw: str | None) -> "MessageOrigin | None":
 __all__ = [
     "TRACE_HEADER",
     "ORIGIN_HEADER",
+    "PROTOCOL_VERSION_HEADER",
+    "PROTOCOL_VERSION",
+    "protocol_compatible",
     "current_trace_id",
     "current_origin",
     "current_task_id",

@@ -68,9 +68,9 @@ async def notify_user(message: str, *, mesh_client=None, workspace_manager=None)
 @tool(
     name="list_agents",
     description=(
-        "List agents in your project (or just yourself if standalone). Returns "
+        "List agents in your team (or just yourself if standalone). Returns "
         "each agent's name, role, and capabilities. Use this to discover who "
-        "else is working in your project. For detailed collaboration info "
+        "else is working in your team. For detailed collaboration info "
         "(what they accept/produce, their status, INTERFACE.md contract), "
         "follow up with get_agent_profile(agent_id)."
     ),
@@ -94,7 +94,7 @@ async def list_agents(*, mesh_client=None) -> dict:
 
 
 _STANDALONE_ERROR = (
-    "Not available — this agent is not assigned to a project. "
+    "Not available — this agent is not assigned to a team. "
     "Use memory_save/memory_search for private storage."
 )
 
@@ -107,7 +107,7 @@ def _is_operator(mesh_client) -> bool:
     blackboard op on the mesh (``_caller_is_operator`` bypass host-side +
     ``blackboard_read/write: ["*"]``; CLAUDE.md Constraint #12). Its
     agent-side tools must mirror that, or the operator hits a misleading
-    "not assigned to a project" error — and can loop — when reading or
+    "not assigned to a team" error — and can loop — when reading or
     listing team data it is entitled to monitor. Operator reads/lists run
     in global scope (raw keys, every team visible); its other blackboard
     ops pass through unscoped and the mesh applies the real ACL. Workers
@@ -394,7 +394,7 @@ async def claim_task(key: str, claim_value: str, *, mesh_client=None) -> dict:
     description=(
         "Save a deliverable file (report, export, code) to your workspace "
         "artifacts. Artifacts are visible to the user and shared with teammates "
-        "in multi-agent projects. Use this for finished output you want to "
+        "in multi-agent teams. Use this for finished output you want to "
         "deliver — NOT for intermediate working files (use write_file for those)."
     ),
     parameters={
@@ -708,7 +708,7 @@ async def get_agent_profile(agent_id: str, *, mesh_client=None) -> dict:
         "shape your future behavior.\n"
         "- SOUL.md: identity, communication style, behavioral principles\n"
         "- INSTRUCTIONS.md: procedures, workflow rules, domain knowledge\n"
-        "- USER.md: user preferences, corrections, project context\n"
+        "- USER.md: user preferences, corrections, team context\n"
         "- HEARTBEAT.md: autonomous wakeup rules and checks\n"
         "- INTERFACE.md: public collaboration contract for other agents\n"
         "Update when you discover something lasting, not every turn. "

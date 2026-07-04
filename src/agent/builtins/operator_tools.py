@@ -1017,14 +1017,14 @@ async def list_agent_queue(
     name="get_team_outputs",
     operator_only=True,
     description=(
-        "Completed task artifacts for a project in a time window. "
+        "Completed task artifacts for a team in a time window. "
         "`since` accepts ISO timestamps or duration strings ('24h', '7d'); "
         "default is the last 7 days."
     ),
     parameters={
-        "project_id": {
+        "team_id": {
             "type": "string",
-            "description": "Project ID",
+            "description": "Team ID",
         },
         "since": {
             "type": "string",
@@ -1034,21 +1034,21 @@ async def list_agent_queue(
     },
 )
 async def get_team_outputs(
-    project_id: str,
+    team_id: str,
     since: str = "",
     *,
     mesh_client=None,
     **_kw,
 ) -> dict:
-    """Completed task artifacts for a project."""
+    """Completed task artifacts for a team."""
     if not _is_operator():
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
     try:
-        return await mesh_client.team_outputs(project_id, since=since)
+        return await mesh_client.team_outputs(team_id, since=since)
     except Exception as e:
-        return {"error": f"Failed to read outputs for {project_id}: {e}"}
+        return {"error": f"Failed to read outputs for {team_id}: {e}"}
 
 
 @tool(
@@ -1871,12 +1871,7 @@ async def archive_audit_before(
     }
 
 
-# ── Team-named canonical aliases (PR 2 of the project→team rename) ────
-#
-# Canonical ``*_team`` tools. Each accepts BOTH ``team_name`` and
-# (legacy) ``project_name`` kwargs so in-flight LLM conversations that
-# still emit the old kwarg name keep working — the function body
-# coalesces them.
+# ── Team tools ────────────────────────────────────────────────────────
 
 
 @tool(
@@ -1905,7 +1900,6 @@ async def inspect_teams(
     detail: str = "names",
     team_name: str = "",
     *,
-    project_name: str = "",
     mesh_client=None,
     **_kw,
 ) -> dict:
@@ -1915,13 +1909,13 @@ async def inspect_teams(
     if mesh_client is None:
         return {"error": "No mesh_client available"}
 
-    target = team_name or project_name
+    target = team_name
     if target:
         try:
             result = await mesh_client.list_teams()
         except Exception as e:
             return {"error": f"Failed to inspect team: {e}"}
-        for p in result.get("teams", result.get("projects", [])):
+        for p in result.get("teams", []):
             if p.get("name") == target:
                 return p
         return {"error": f"Team '{target}' not found"}
@@ -1995,7 +1989,6 @@ async def add_agents_to_team(
     team_name: str = "",
     agent_ids: list[str] | None = None,
     *,
-    project_name: str = "",
     mesh_client=None,
     _messages=None,
     **_kw,
@@ -2005,7 +1998,7 @@ async def add_agents_to_team(
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    target = team_name or project_name
+    target = team_name
     results = []
     for aid in (agent_ids or []):
         try:
@@ -2033,7 +2026,6 @@ async def remove_agents_from_team(
     team_name: str = "",
     agent_ids: list[str] | None = None,
     *,
-    project_name: str = "",
     mesh_client=None,
     _messages=None,
     **_kw,
@@ -2043,7 +2035,7 @@ async def remove_agents_from_team(
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    target = team_name or project_name
+    target = team_name
     results = []
     for aid in (agent_ids or []):
         try:
@@ -2067,7 +2059,6 @@ async def update_team_context(
     team_name: str = "",
     context: str = "",
     *,
-    project_name: str = "",
     mesh_client=None,
     _messages=None,
     **_kw,
@@ -2077,7 +2068,7 @@ async def update_team_context(
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    target = team_name or project_name
+    target = team_name
     try:
         return await mesh_client.update_team_context(target, context)
     except Exception as e:
@@ -2158,7 +2149,6 @@ async def set_team_goal(
     north_star: str = "",
     success_criteria: list[str] | None = None,
     *,
-    project_name: str = "",
     mesh_client=None,
     **_kw,
 ) -> dict:
@@ -2167,7 +2157,7 @@ async def set_team_goal(
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    target = team_name or project_name
+    target = team_name
     if not isinstance(target, str) or not target.strip():
         return {"error": "team_name is required"}
     if not isinstance(north_star, str):
@@ -2216,7 +2206,6 @@ async def set_team_goal(
 async def summarize_team_progress(
     team_id: str = "",
     *,
-    project_id: str = "",
     mesh_client=None,
     **_kw,
 ) -> dict:
@@ -2225,7 +2214,7 @@ async def summarize_team_progress(
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    target = team_id or project_id
+    target = team_id
     try:
         return await mesh_client.team_summary(target)
     except Exception as e:
@@ -2449,7 +2438,6 @@ async def manage_team(
     action: str,
     team_name: str = "",
     *,
-    project_name: str = "",
     mesh_client=None,
     _messages=None,
     **_kw,
@@ -2460,7 +2448,7 @@ async def manage_team(
     if mesh_client is None:
         return {"error": "No mesh_client available"}
 
-    name = team_name or project_name
+    name = team_name
     if not name:
         return {"error": "team_name is required"}
 
@@ -3074,7 +3062,7 @@ async def manage_goals(
 # ``goals/`` namespace is hardened in ``host/permissions.py`` so a
 # worker's blackboard-write wildcard can never cover a peer's goals
 # key (prompt-injection channel). Scope resolution mirrors hand_off:
-# team agents read ``projects/{team}/goals/{id}``, solo/global agents
+# team agents read ``teams/{team}/goals/{id}``, solo/global agents
 # read the raw key.
 
 _MAX_AGENT_GOALS = 5
@@ -3153,7 +3141,7 @@ async def set_agent_goals(
         cleaned.append(s)
 
     # Resolve the target's blackboard scope — mirrors hand_off: team
-    # agents read goals under projects/{team}/, solo and fleet-global
+    # agents read goals under teams/{team}/, solo and fleet-global
     # agents (scope == "global") read the raw key.
     try:
         registry = await mesh_client.list_agents()
@@ -3163,12 +3151,12 @@ async def set_agent_goals(
         available = ", ".join(sorted(registry.keys()))
         return {"error": f"Agent '{agent_id}' not found. Available: {available}"}
     info = registry.get(agent_id, {})
-    project = info.get("project") if isinstance(info, dict) else None
+    team = info.get("team") if isinstance(info, dict) else None
 
     if not cleaned:
         try:
             await mesh_client.delete_blackboard(
-                f"goals/{agent_id}", project=project,
+                f"goals/{agent_id}", team=team,
             )
         except Exception as e:
             return {"error": f"Failed to clear goals for {agent_id}: {e}"}
@@ -3182,7 +3170,7 @@ async def set_agent_goals(
                 "set_by": "operator",
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             },
-            project=project,
+            team=team,
         )
     except Exception as e:
         return {"error": f"Failed to set goals for {agent_id}: {e}"}

@@ -48,7 +48,7 @@ agents:
       experiencing pain with a competitor, looking for alternatives, or asking
       questions your product directly answers.
 
-      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
+      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the team.
 
       ## Competitors to monitor
       Read HEARTBEAT.md for your competitor list. It contains the specific
@@ -204,7 +204,7 @@ agents:
       You receive qualified signals from the monitor and draft responses that
       a human can review, refine, and choose to post.
 
-      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the project.
+      Read TEAM.md for shared context about the business, audience, and goals. Adapt your work to fit the team.
 
       ## Your workflow
       1. Call check_inbox() for signals from the monitor
