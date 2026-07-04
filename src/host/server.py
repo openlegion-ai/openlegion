@@ -79,6 +79,14 @@ _MAX_SYSTEM_PROMPT = 10_000  # chars — caps agent-supplied system prompt to li
 _MAX_BB_KEY_LEN = 512  # chars — prevents abusive key lengths in blackboard
 _MAX_BB_VALUE_BYTES = 262_144  # 256 KB — bounds per-key storage to keep SQLite WAL manageable
 
+# Grace period before lane rehydration re-dispatches restart-stranded tasks,
+# giving agent containers (started just before the mesh) time to become
+# reachable. Env-overridable for tests / fast local boots.
+try:
+    _LANE_REHYDRATE_SETTLE_S = float(os.environ.get("OPENLEGION_LANE_REHYDRATE_SETTLE_S", "5"))
+except ValueError:
+    _LANE_REHYDRATE_SETTLE_S = 5.0
+
 
 def _max_body_bytes() -> int:
     """Resolve the request body-size cap (env-configurable, default 8 MiB).
@@ -10190,6 +10198,24 @@ def create_mesh_app(
     @app.on_event("startup")
     async def _start_upload_stage_gc() -> None:
         asyncio.create_task(_upload_stage_gc_loop())
+
+    async def _rehydrate_lanes_after_boot() -> None:
+        # Recover tasks stranded in the (in-memory) lane queues by a restart.
+        # Runs as a detached task after a short settle so agent containers —
+        # started just before the mesh server — have a chance to become
+        # reachable; anything still not ready leaves its task ``pending``, so
+        # it is recovered on a later restart (at-least-once). Best-effort: a
+        # failure here must never break mesh startup.
+        try:
+            await asyncio.sleep(_LANE_REHYDRATE_SETTLE_S)
+            await lane_manager.rehydrate_pending()
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("lane rehydration after boot failed: %s", e)
+
+    @app.on_event("startup")
+    async def _start_lane_rehydration() -> None:
+        if lane_manager is not None:
+            asyncio.create_task(_rehydrate_lanes_after_boot())
 
     _ARTIFACT_NAME_SAFE_RE = re.compile(r"[^\w.\-]+")
 

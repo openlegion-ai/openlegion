@@ -135,6 +135,9 @@ class LaneManager:
         # ``create_task(_forward())`` can be garbage-collected mid-flight
         # per the Python docs warning.
         self._forward_tasks: set[asyncio.Task] = set()
+        # Detached enqueue tasks spawned by ``rehydrate_pending`` — held so
+        # they aren't garbage-collected mid-flight (same reason as above).
+        self._rehydrate_tasks: set[asyncio.Task] = set()
         # Dashboard EventBus, wired post-construction (the bus is created
         # inside ``create_mesh_app``). When set, lane state transitions emit
         # ``queue_changed`` so the dashboard refreshes queue badges live
@@ -175,6 +178,88 @@ class LaneManager:
         ``None`` to clear.
         """
         self._tasks_store = store
+
+    async def rehydrate_pending(self) -> int:
+        """Re-enqueue durable PENDING tasks stranded by a mesh restart.
+
+        The lane queues are in-memory, so a restart drops every queued wake
+        while the durable ``tasks`` rows survive — the task sits ``pending``
+        with nothing left to dispatch it (previously an operator had to
+        re-dispatch by hand). This reads the pending rows once at boot and
+        re-enqueues a followup for each. Returns the count re-enqueued.
+
+        Safety:
+          * Only ``pending`` tasks are touched (``Tasks.list_pending``); a
+            ``working`` task is never re-dispatched, so no double execution.
+          * A re-enqueued task stays ``pending`` until the agent picks it up
+            and transitions it, so a second restart before pickup simply
+            re-enqueues it again — at-least-once, never lost.
+          * Best-effort per row: one bad task must not abort the sweep, and a
+            missing/failed store is a no-op (returns 0).
+        """
+        store = self._tasks_store
+        if store is None or not hasattr(store, "list_pending"):
+            return 0
+        try:
+            pending = store.list_pending()
+        except Exception as e:
+            logger.warning("lane rehydrate: list_pending failed: %s", e)
+            return 0
+
+        count = 0
+        for task in pending:
+            task_id = task.get("id")
+            assignee = task.get("assignee") or ""
+            if not assignee:
+                continue
+            message = (task.get("description") or task.get("title") or "").strip()
+            if not message:
+                message = f"Resume assigned task {task_id}."
+            origin = None
+            raw_origin = task.get("origin")
+            if isinstance(raw_origin, dict) and raw_origin.get("kind"):
+                try:
+                    origin = MessageOrigin(
+                        kind=raw_origin["kind"],
+                        channel=raw_origin.get("channel", ""),
+                        user=raw_origin.get("user", ""),
+                    )
+                except Exception:
+                    origin = None
+            # ``enqueue`` does a fast ``put_nowait`` then AWAITS the dispatch to
+            # completion. Rehydration only wants the put (in created_at order) —
+            # blocking on each task's execution would serialize recovery. Spawn
+            # a detached, tracked task per row: the synchronous put happens in
+            # creation order (preserving per-agent FIFO), and completion runs in
+            # the background exactly like a live wake would.
+            bg = asyncio.create_task(
+                self.enqueue(
+                    assignee,
+                    message,
+                    trace_id=task.get("trace_id") or None,
+                    origin=origin,
+                    auto_notify=origin is not None,
+                    task_id=task_id,
+                    system_note=True,
+                )
+            )
+            self._rehydrate_tasks.add(bg)
+            bg.add_done_callback(self._on_rehydrate_done)
+            count += 1
+        if count:
+            logger.info(
+                "lane rehydrate: re-enqueued %d pending task(s) after restart", count,
+            )
+        return count
+
+    def _on_rehydrate_done(self, bg: asyncio.Task) -> None:
+        """Discard a finished rehydrate enqueue and surface any error."""
+        self._rehydrate_tasks.discard(bg)
+        if bg.cancelled():
+            return
+        exc = bg.exception()
+        if exc is not None:
+            logger.warning("lane rehydrate: background enqueue failed: %s", exc)
 
     def set_back_edge_fn(
         self, fn: Callable[..., None] | None,
@@ -705,3 +790,6 @@ class LaneManager:
         for fwd in list(self._forward_tasks):
             fwd.cancel()
         self._forward_tasks.clear()
+        for reh in list(self._rehydrate_tasks):
+            reh.cancel()
+        self._rehydrate_tasks.clear()

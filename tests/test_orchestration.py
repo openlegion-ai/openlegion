@@ -2447,3 +2447,52 @@ class TestTaskThinking:
             store.create(
                 creator="op", assignee="a", title="t", thinking="ultra",
             )
+
+
+# ── list_pending (lane rehydration source) ──────────────────
+
+
+def test_list_pending_returns_only_pending_across_assignees(tmp_path):
+    """Only ``pending`` tasks are returned — never working/accepted/done — so
+    lane rehydration cannot re-dispatch a mid-flight task. Ordered by
+    created_at ASC, across all assignees."""
+    t = _make_store(tmp_path)
+    p1 = t.create(creator="op", assignee="alpha", title="A")
+    p2 = t.create(creator="op", assignee="beta", title="B")
+
+    # working — excluded (may be mid-flight; re-dispatch would double-run it)
+    w = t.create(creator="op", assignee="alpha", title="C")
+    t.update_status(w["id"], "working", actor="alpha")
+
+    # accepted — excluded
+    a = t.create(creator="op", assignee="beta", title="D")
+    t.update_status(a["id"], "accepted", actor="beta")
+
+    # done — excluded
+    d = t.create(creator="op", assignee="alpha", title="E")
+    t.update_status(d["id"], "working", actor="alpha")
+    t.update_status(d["id"], "done", actor="alpha")
+
+    pending = t.list_pending()
+    assert [r["id"] for r in pending] == [p1["id"], p2["id"]]
+    assert all(r["status"] == "pending" for r in pending)
+
+
+def test_list_pending_empty_when_none_pending(tmp_path):
+    t = _make_store(tmp_path)
+    w = t.create(creator="op", assignee="alpha", title="A")
+    t.update_status(w["id"], "working", actor="alpha")
+    assert t.list_pending() == []
+
+
+def test_list_pending_preserves_origin_and_trace(tmp_path):
+    """The recovered row carries the origin + trace_id rehydration forwards."""
+    t = _make_store(tmp_path)
+    rec = t.create(
+        creator="op", assignee="alpha", title="A", description="do the thing",
+        origin={"kind": "human", "channel": "cli", "user": "u1"},
+    )
+    [row] = t.list_pending()
+    assert row["id"] == rec["id"]
+    assert row["description"] == "do the thing"
+    assert row["origin"] == {"kind": "human", "channel": "cli", "user": "u1"}
