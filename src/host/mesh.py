@@ -57,6 +57,11 @@ class Blackboard:
         self._init_schema()
 
     def _init_schema(self) -> None:
+        # Read BEFORE the executescript stamps ``user_version = 1``: a DB
+        # from before the project→team rename reports 0 here, which gates
+        # the one-shot re-key below. Post-rename ``projects/…`` is an
+        # ordinary user-choosable prefix, so the re-key must never re-run.
+        pre_rename_db = self.db.execute("PRAGMA user_version").fetchone()[0] == 0
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS entries (
                 key TEXT PRIMARY KEY,
@@ -113,17 +118,20 @@ class Blackboard:
         # One-shot re-key for the project→team rename: live entries and
         # persisted watcher patterns written under the pre-rename
         # ``projects/{team}/`` namespace move to ``teams/{team}/``.
-        # Idempotent (LIKE-guarded); OR REPLACE resolves the pathological
-        # both-spellings-exist collision in favour of the old row's value
-        # landing on the new key.
-        self.db.execute(
-            "UPDATE OR REPLACE entries SET key = 'teams/' || substr(key, 10) "
-            "WHERE key LIKE 'projects/%'"
-        )
-        self.db.execute(
-            "UPDATE OR REPLACE watchers SET pattern = 'teams/' || substr(pattern, 10) "
-            "WHERE pattern LIKE 'projects/%'"
-        )
+        # Runs ONLY when the DB pre-dates the canonical v1 schema
+        # (``user_version`` was 0 before this boot) — on a v1 DB a
+        # ``projects/…`` key is legitimate user data, not a leftover.
+        # OR REPLACE resolves the pathological both-spellings-exist
+        # collision in favour of the old row's value landing on the new key.
+        if pre_rename_db:
+            self.db.execute(
+                "UPDATE OR REPLACE entries SET key = 'teams/' || substr(key, 10) "
+                "WHERE key LIKE 'projects/%'"
+            )
+            self.db.execute(
+                "UPDATE OR REPLACE watchers SET pattern = 'teams/' || substr(pattern, 10) "
+                "WHERE pattern LIKE 'projects/%'"
+            )
         self.db.commit()
         self._load_watchers()
 

@@ -1594,3 +1594,50 @@ class TestWorkplaceCLICommands:
         # And X-Origin so the human-confirmation gate accepts it
         assert "kind=human" in headers.get("X-Origin", "")
         assert "channel=cli" in headers.get("X-Origin", "")
+
+
+class TestRestartHealthReregistration:
+    """Archive deregisters an agent from the health monitor; a manual
+    ``/restart`` must re-register it (same guard as the dashboard restart
+    endpoint) or the revived agent runs permanently unmonitored."""
+
+    def _restart(self, health_monitor, monkeypatch):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from src.cli import repl as repl_mod
+        from src.cli.repl import REPLSession
+
+        ctx = _MockCtx(agent_urls={"bot": "http://bot:8400"})
+        ctx.runtime = MagicMock()
+        ctx.runtime.start_agent.return_value = "http://bot:8400"
+        ctx.runtime.wait_for_agent = AsyncMock(return_value=True)
+        ctx.router = MagicMock()
+        ctx.transport = MagicMock()
+        ctx.health_monitor = health_monitor
+        monkeypatch.setattr(
+            repl_mod, "_load_config",
+            lambda: {"agents": {"bot": {}}, "llm": {"default_model": "m"}},
+        )
+        repl = REPLSession(ctx)
+        repl._restart_agent("bot")
+        return ctx
+
+    def test_restart_reregisters_deregistered_agent(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        health = MagicMock()
+        health.agents = {}  # archived → deregistered
+        self._restart(health, monkeypatch)
+        health.register.assert_called_once_with("bot")
+
+    def test_restart_leaves_registered_agent_alone(self, monkeypatch):
+        from unittest.mock import MagicMock
+
+        health = MagicMock()
+        health.agents = {"bot": object()}  # still monitored
+        self._restart(health, monkeypatch)
+        health.register.assert_not_called()
+
+    def test_restart_tolerates_missing_health_monitor(self, monkeypatch):
+        # ctx.health_monitor is None in embedded/test setups — no crash.
+        self._restart(None, monkeypatch)

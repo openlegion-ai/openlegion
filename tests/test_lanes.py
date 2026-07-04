@@ -1218,3 +1218,96 @@ async def test_rehydrate_pending_survives_store_failure():
     lm.set_tasks_store(store)
     assert await lm.rehydrate_pending() == 0
     await lm.stop()
+
+
+@pytest.mark.asyncio
+async def test_rehydrate_pending_skips_rows_created_after_boot():
+    """Rows created during THIS process's lifetime already got a live wake —
+    the sweep runs post-settle with the mesh serving, so re-enqueueing them
+    would dispatch the same task twice (settle-window double dispatch)."""
+    dispatched = []
+
+    async def dispatch(agent, message, **kwargs):
+        dispatched.append(kwargs.get("task_id"))
+        return "ok"
+
+    lm = LaneManager(dispatch_fn=dispatch)
+    store = MagicMock()
+    store.list_pending.return_value = [
+        {"id": "task_stranded", "assignee": "alpha", "description": "old work",
+         "title": "T", "origin": None, "trace_id": None,
+         "created_at": lm._boot_ts - 60},
+        {"id": "task_live_woken", "assignee": "alpha", "description": "new work",
+         "title": "T", "origin": None, "trace_id": None,
+         "created_at": lm._boot_ts + 60},
+    ]
+    lm.set_tasks_store(store)
+
+    n = await lm.rehydrate_pending()
+    assert n == 1
+    await asyncio.gather(*list(lm._rehydrate_tasks), return_exceptions=True)
+    assert dispatched == ["task_stranded"]
+    await lm.stop()
+
+
+def test_rehydrate_boot_hook_runs_on_dispatch_loop(tmp_path, monkeypatch):
+    """The startup hook must hop rehydration onto ``dispatch_loop``: the lane
+    queues/workers live there, and every live enqueue reaches them via
+    ``run_coroutine_threadsafe``. Rehydrating on uvicorn's loop instead would
+    create the assignee's queue/worker on the wrong loop and later live wakes
+    would mutate that queue cross-thread without thread safety."""
+    import threading
+    import time as _t
+
+    from fastapi.testclient import TestClient
+
+    import src.host.server as server_mod
+    from src.host.mesh import Blackboard, MessageRouter, PubSub
+    from src.host.permissions import PermissionMatrix
+    from src.host.server import create_mesh_app
+
+    monkeypatch.setattr(server_mod, "_LANE_REHYDRATE_SETTLE_S", 0)
+    monkeypatch.setenv(
+        "OPENLEGION_ORCHESTRATION_TASKS_DB", str(tmp_path / "tasks.db"),
+    )
+
+    dispatch_loop = asyncio.new_event_loop()
+    threading.Thread(target=dispatch_loop.run_forever, daemon=True).start()
+
+    seen_loops = []
+
+    async def dispatch(agent, message, **kwargs):
+        seen_loops.append(asyncio.get_running_loop())
+        return "ok"
+
+    lm = LaneManager(dispatch_fn=dispatch)
+    store = MagicMock()
+    store.list_pending.return_value = [
+        {"id": "task_old", "assignee": "alpha", "description": "stranded",
+         "title": "T", "origin": None, "trace_id": None,
+         "created_at": lm._boot_ts - 60},
+    ]
+    lm.set_tasks_store(store)
+
+    perms = PermissionMatrix()
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    app = create_mesh_app(
+        blackboard=bb,
+        pubsub=PubSub(),
+        router=MessageRouter(perms, {}),
+        permissions=perms,
+        auth_tokens={"operator": "tok"},
+        lane_manager=lm,
+        dispatch_loop=dispatch_loop,
+    )
+    try:
+        with TestClient(app):
+            deadline = _t.time() + 10
+            while not seen_loops and _t.time() < deadline:
+                _t.sleep(0.05)
+        assert seen_loops, "rehydrated task never dispatched"
+        assert seen_loops[0] is dispatch_loop
+    finally:
+        asyncio.run_coroutine_threadsafe(lm.stop(), dispatch_loop).result(timeout=5)
+        dispatch_loop.call_soon_threadsafe(dispatch_loop.stop)
+        bb.close()

@@ -80,6 +80,11 @@ class LaneManager:
         queue_maxsize: int | None = None,
     ):
         self._dispatch_fn = dispatch_fn
+        # Rehydration cutoff: only tasks created BEFORE this process's
+        # LaneManager existed can be restart-stranded. Anything newer was
+        # created through this process's live endpoints and already got its
+        # live wake — re-enqueueing it would double-dispatch.
+        self._boot_ts = time.time()
         # H7 — per-lane queue depth cap. Resolved once: kwarg wins, else
         # env default. ``<= 0`` means unbounded (asyncio.Queue(maxsize=0)).
         self._queue_maxsize = (
@@ -194,6 +199,10 @@ class LaneManager:
           * A re-enqueued task stays ``pending`` until the agent picks it up
             and transitions it, so a second restart before pickup simply
             re-enqueues it again — at-least-once, never lost.
+          * Rows created after this LaneManager was constructed are skipped —
+            they were created via this process's live endpoints and already
+            have a live wake in flight (the sweep runs post-settle, with the
+            mesh already serving), so re-enqueueing would double-dispatch.
           * Best-effort per row: one bad task must not abort the sweep, and a
             missing/failed store is a no-op (returns 0).
         """
@@ -211,6 +220,13 @@ class LaneManager:
             task_id = task.get("id")
             assignee = task.get("assignee") or ""
             if not assignee:
+                continue
+            # Skip rows created during THIS process's lifetime: their live
+            # wake is already in (or through) the lane, and the sweep runs
+            # after a settle delay with the mesh already serving requests —
+            # re-enqueueing them here would dispatch the same task twice.
+            created_at = task.get("created_at")
+            if isinstance(created_at, (int, float)) and created_at >= self._boot_ts:
                 continue
             message = (task.get("description") or task.get("title") or "").strip()
             if not message:

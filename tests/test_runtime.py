@@ -3037,3 +3037,50 @@ class TestMeshBindFailFast:
         # We bailed before any app construction — so the "Started" banner can
         # never be printed on a failed bind.
         ctx.async_dispatch.assert_not_called()
+
+
+class TestDispatchTransportErrorSurfacing:
+    """A transport-level failure (unreachable container, HTTP error, 426
+    protocol skew) comes back from ``HttpTransport.request`` as an error dict,
+    not an exception. ``_direct_dispatch`` must not convert that into a
+    successful ``"(no response)"`` turn — that recorded an ``ok`` trace and
+    auto-notified the literal junk string to the originating human channel
+    (worst on the rehydration path: repeated on every restart)."""
+
+    @pytest.mark.asyncio
+    async def test_error_dict_returns_silent_token(self, monkeypatch):
+        from src.shared.types import SILENT_REPLY_TOKEN
+
+        dispatch_fn, ctx, transport = _capture_dispatch_fn(monkeypatch)
+        transport.request.return_value = {"error": "HTTP 426", "status_code": 426}
+
+        result = await dispatch_fn("agent-x", "resume task")
+
+        assert result == SILENT_REPLY_TOKEN
+
+    @pytest.mark.asyncio
+    async def test_error_dict_records_error_trace_not_ok(self, monkeypatch):
+        dispatch_fn, ctx, transport = _capture_dispatch_fn(monkeypatch)
+        ctx.trace_store = MagicMock()
+        transport.request.return_value = {"error": "Connection failed: boom"}
+
+        await dispatch_fn("agent-x", "resume task")
+
+        statuses = [
+            kwargs.get("status")
+            for _args, kwargs in ctx.trace_store.record.call_args_list
+            if kwargs.get("event_type") == "chat_response"
+        ]
+        assert statuses == ["error"]
+
+    @pytest.mark.asyncio
+    async def test_missing_response_key_without_error_is_unchanged(self, monkeypatch):
+        """A successful call that just lacks ``response`` keeps the legacy
+        ``"(no response)"`` placeholder — only genuine transport errors go
+        silent."""
+        dispatch_fn, ctx, transport = _capture_dispatch_fn(monkeypatch)
+        transport.request.return_value = {}
+
+        result = await dispatch_fn("agent-x", "resume task")
+
+        assert result == "(no response)"

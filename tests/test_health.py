@@ -731,3 +731,57 @@ class TestFailedSelfHeal:
         # status is preserved — only clear_quarantine flips it back to healthy.
         assert h.quarantined is True
         assert h.status == "failed"
+
+
+class TestArchiveDuringInflightRestart:
+    @pytest.mark.asyncio
+    async def test_deregistered_mid_restart_is_stopped_not_registered(self):
+        """Archive/delete can deregister an agent while ``_try_restart`` is
+        inside its executor ``start_agent`` call — ``unregister`` can't reach
+        the in-flight coroutine. The restart must notice post-start and undo
+        itself instead of resurrecting an intentionally-stopped agent."""
+        monitor = _make_monitor({
+            "scout": {"role": "r", "tools_dir": "", "model": "m", "thinking": ""},
+        })
+        monitor.register("scout")
+        health = monitor.agents["scout"]
+        health.consecutive_failures = 3
+        health.status = "unhealthy"
+
+        def _start_agent(**kwargs):
+            # Simulate the concurrent archive landing while start_agent runs.
+            monitor.unregister("scout")
+            return "http://localhost:8401"
+
+        monitor.runtime.start_agent.side_effect = _start_agent
+        monitor.runtime.wait_for_agent = AsyncMock(return_value=True)
+
+        with patch("src.host.health._load_config", return_value={}):
+            await monitor._try_restart("scout")
+
+        # Undone, not resurrected: container stopped again (once before the
+        # restart, once to roll it back) and never re-registered for routing.
+        assert monitor.runtime.stop_agent.call_count == 2
+        monitor.router.register_agent.assert_not_called()
+        assert "scout" not in monitor.agents
+
+    @pytest.mark.asyncio
+    async def test_normal_restart_still_registers(self):
+        """Sanity: without a concurrent deregistration the restart proceeds
+        exactly as before (router re-registered, health state updated)."""
+        monitor = _make_monitor({
+            "scout": {"role": "r", "tools_dir": "", "model": "m", "thinking": ""},
+        })
+        monitor.register("scout")
+        health = monitor.agents["scout"]
+        health.consecutive_failures = 3
+        health.status = "unhealthy"
+        monitor.runtime.start_agent.return_value = "http://localhost:8401"
+        monitor.runtime.wait_for_agent = AsyncMock(return_value=True)
+
+        with patch("src.host.health._load_config", return_value={}):
+            await monitor._try_restart("scout")
+
+        monitor.router.register_agent.assert_called_once()
+        assert health.status == "healthy"
+        assert health.restart_count == 1

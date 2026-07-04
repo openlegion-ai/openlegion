@@ -1442,6 +1442,14 @@ class REPLSession:
         self.ctx.router.register_agent(name, url)
         if isinstance(self.ctx.transport, HttpTransport):
             self.ctx.transport.register(name, url)
+        # Archive deregisters from the health monitor; a manual restart is
+        # one of the paths that must re-register (same guard as the
+        # dashboard restart endpoint) or the agent runs unmonitored.
+        if (
+            self.ctx.health_monitor is not None
+            and name not in getattr(self.ctx.health_monitor, "agents", {})
+        ):
+            self.ctx.health_monitor.register(name)
 
         # Wait for readiness
         ready = asyncio.run(self.ctx.runtime.wait_for_agent(name, timeout=60))

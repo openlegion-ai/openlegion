@@ -10278,7 +10278,22 @@ def create_mesh_app(
         # failure here must never break mesh startup.
         try:
             await asyncio.sleep(_LANE_REHYDRATE_SETTLE_S)
-            await lane_manager.rehydrate_pending()
+            # The lane queues/workers live on ``dispatch_loop`` (every live
+            # enqueue hops there via ``run_coroutine_threadsafe``). Running
+            # the rehydrate here on uvicorn's loop would create each
+            # assignee's lane — queue, lock, worker task — on the WRONG
+            # loop, and later live wakes would then mutate that queue from
+            # the dispatch thread without thread safety. Hop like every
+            # other enqueue call site; same-loop fallback covers
+            # tests/embedded setups that pass no dispatch loop.
+            if dispatch_loop is not None:
+                await asyncio.wrap_future(
+                    asyncio.run_coroutine_threadsafe(
+                        lane_manager.rehydrate_pending(), dispatch_loop,
+                    )
+                )
+            else:
+                await lane_manager.rehydrate_pending()
         except Exception as e:  # pragma: no cover - defensive
             logger.warning("lane rehydration after boot failed: %s", e)
 
