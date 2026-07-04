@@ -375,6 +375,30 @@ as code lands.
   markdown. Memory DB (embeddings) + import deferred to follow-ups. Tests in
   `test_agent_export.py`.
 
+- **✅ Landed — atomic project→team rename (PR #1185, the linchpin).** One name, one
+  namespace, exactly per A.1/A.2/B5/C.2: `can_manage_projects` + alias validator deleted;
+  `tasks.team_id` everywhere (dict key, kwargs, event payloads — no dual emission);
+  blackboard `teams/{name}/` prefix (client scoping, host enforcement, ACL patterns, REPL);
+  `target_kind="team"`; `TEAM_NAME`/`TEAM_MD_PATH` container envs; `config/teams/` +
+  `team.md` scaffold; all `_*_project` CLI helpers renamed; SPA reads `team_id`/`a.team`
+  (frozen tab IDs untouched); schema collapse to canonical v1 (`PRAGMA user_version = 1`)
+  in `orchestration.py` + `memory.py` (**`_reconcile_embedding_dim` kept** per A.0 #8);
+  both migrators deleted with their tests; ~35 test files updated in lockstep; CLAUDE.md
+  constraint #9 rewritten as COMPLETE. Full suite green (7716+), ruff clean.
+  **Implementation corrections discovered:**
+  1. `mesh.py`'s audit-log `undoable`/`archived` ALTER chain was the same archaeology —
+     collapsed in the same PR (beyond A.1's manifest).
+  2. A second `_PROJECT_TO_TEAM_EVENT` shim lived in `dashboard/server.py` (A.1 implied
+     only the host-side one) — both deleted.
+  3. The blackboard re-key must cover the persisted **`watchers` table patterns**, not just
+     `entries` — registration auto-watch patterns were `projects/{team}/tasks/{id}/*`.
+  4. Container-env aliases `PROJECT_NAME` / `PROJECT_MD_PATH` existed and were removed
+     (not in A.1's manifest).
+  5. The re-key UPDATE in `Blackboard._init_schema` is itself a small one-shot shim —
+     delete it in a follow-up once dev instances have cycled (no users, so soon).
+  6. Dev-container-only test failures exist (root user + forced HTTPS_PROXY break
+     `test_builtins.py` chmod/http_tool tests locally); they pass in CI — don't chase them.
+
 ### PR ledger (as of 2026-07-04)
 | PR | Unit | CI |
 |---|---|---|
@@ -382,22 +406,30 @@ as code lands.
 | #1181 | mesh↔agent protocol version handshake | green |
 | #1182 | this plan doc | — |
 | #1183 | lane rehydration | green |
-| #1184 | personnel-file export v1 | pending |
+| #1184 | personnel-file export v1 | green |
+| #1185 | atomic project→team rename + schema collapse (the linchpin) | green |
 
 All five branch off `main`; a local integration merge of all four code branches is **conflict-free
 and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes recorded above).
 
 ### YOU ARE HERE → next phase
-1. **Merge the foundation to `main`** (#1180/#1181/#1183, then #1184 when green; #1182 anytime).
-   Blocked only on the CLA (human signs). Merge incrementally — do NOT big-bang.
-2. **Then the atomic project→team rename** off freshly-merged `main` — the linchpin. Follow
-   Appendix A.1 (removal manifest), A.2 (attach points), **B5** (pinned tests + frozen tab IDs —
-   do NOT touch `chat`/`fleet`/`workplace`/`system`), and **C.2** (rename-completion: no
-   `projects/` prefix or `project_id` alias left behind). Ships as ONE PR: backend + SPA
-   (`app.js`/`index.html`) + updated pinned tests + blackboard re-key.
-3. **Then Phases 1–5** (team-first store → collaboration substrate → agenda-loop workday →
-   leads → earned autonomy + hibernation). §8 decisions #2/#3/#5/#6 are RATIFIED and unblock
-   Phases 3–4; #1 (scratch volume) and #4 (destructive cleanup) stand at safe defaults.
+Foundation (#1180/#1181/#1183/#1184) and the rename (#1185) are merged. Phase 0's removal
+column is fully done. Next, in order:
+1. **Phase-0 residuals** (two small independent PRs):
+   (a) **per-call model tiering hook** — widen `_enforce_model_pin` + thread `model=`
+   through agent-side heartbeat/summary call sites (A.C4). Together with the
+   **coordination-vs-work spend split** this GATES Phase 3 (B2 / ratified #3).
+   (b) **agent-server bearer auth** (§4 closed-regardless / B7) — wire the mesh→agent
+   token through `transport._resolve_headers` + every direct caller in the same change;
+   keep `GET /status` exempt.
+2. **Phase 1 — team as first-class**: real Team store (delete the `_load_teams()` YAML
+   glob per C.1 row 1), durable pre-flight team budget envelope (B4 semantics: unset/0 =
+   unlimited), solo = team-of-one (ratified #5: self-scoped blackboard). Decide C.3-b
+   (goals home) first. Fold in: cap TEAM.md via `BOOTSTRAP_CAPS` (A.2 hazard) and the
+   B-pre #3 explicit budget default. Personnel-file *import* needs B-pre #2's config
+   file-lock first.
+3. **Then Phases 2–5** as sequenced in §6 (decide C.3-a and C.3-e before Phase 2;
+   B1 reframe for Phase 3's "dual lanes"; B3 scope for Phase 5 hibernation).
 
 **Handoff note:** this doc is the source of truth — a fresh session can continue from here without
 this session's chat history. Read §5 (keep/refactor/remove), Appendices A–C (surgical manifest +
