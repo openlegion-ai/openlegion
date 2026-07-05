@@ -40,6 +40,21 @@ class LLMContextOverflowError(RuntimeError):
     pass
 
 
+def utility_model_kwargs(llm: object) -> dict[str, str]:
+    """``chat()`` kwargs that route a coordination/utility LLM call
+    (context summarization, memory extraction, heartbeat) to the
+    deployment's cheap utility model.
+
+    Returns ``{"model": <utility model>}`` when the client carries a
+    configured ``utility_model``, else ``{}`` — so with the feature off
+    the call shape stays byte-for-byte identical to today. ``getattr`` +
+    ``isinstance`` keep this safe for mocked clients in tests (a
+    ``MagicMock`` attribute is not a ``str`` → ``{}``).
+    """
+    model = getattr(llm, "utility_model", "")
+    return {"model": model} if isinstance(model, str) and model else {}
+
+
 class LLMClient:
     """LLM interface that routes all calls through the mesh API proxy."""
 
@@ -54,6 +69,7 @@ class LLMClient:
         embedding_model: str = "",
         thinking: str = "off",
         max_output_tokens: int = 16384,
+        utility_model: str | None = None,
     ):
         if thinking and thinking not in self.VALID_THINKING_LEVELS:
             logger.warning(
@@ -109,6 +125,17 @@ class LLMClient:
         self._client: httpx.AsyncClient | None = None
         self._client_lock = asyncio.Lock()
         self._auth_token: str = os.environ.get("MESH_AUTH_TOKEN", "")
+        # Per-call model tiering hook (Phase-0 residual a): the deployment's
+        # cheap model for coordination/utility LLM traffic (context
+        # summarization, memory extraction, heartbeat). Injected by the mesh
+        # as the LLM_UTILITY_MODEL container env (mirrors MESH_AUTH_TOKEN's
+        # env pickup); an explicit ctor kwarg wins for tests. Empty string =
+        # feature off — utility call sites then send exactly what they send
+        # today.
+        self.utility_model: str = (
+            utility_model if utility_model is not None
+            else os.environ.get("LLM_UTILITY_MODEL", "")
+        )
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is not None and not self._client.is_closed:

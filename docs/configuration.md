@@ -108,6 +108,7 @@ mesh:
 
 llm:
   default_model: anthropic/claude-haiku-4-5-20251001
+  utility_model: anthropic/claude-haiku-4-5-20251001
   embedding_model: text-embedding-3-small
   failover:
     anthropic/claude-sonnet-4-6:
@@ -134,6 +135,7 @@ collaboration: true
 | `mesh.host` | string | `0.0.0.0` | Bind address for mesh server |
 | `mesh.port` | integer | `8420` | Mesh server port |
 | `llm.default_model` | string | -- | Default model for agents without explicit model |
+| `llm.utility_model` | string | *unset* | Optional cheap model for coordination/utility LLM traffic (context summarization, memory extraction/consolidation, heartbeats); deep task/chat reasoning stays on the agent's model. Injected into containers as `LLM_UTILITY_MODEL` and always accepted by the mesh model pin. Unset/empty = off (behavior identical to an untiered deployment). |
 | `llm.embedding_model` | string | *auto* | Model for memory embeddings. Auto-detected from the default LLM provider via `_PROVIDER_EMBEDDING_DEFAULTS` in `src/cli/runtime.py`: only the prefixes `openai/`, `gpt-`, `o1`, `o3`, `o4` resolve to `text-embedding-3-small`; everything else (Anthropic, Google, DeepSeek, xAI, Groq, …) falls through to `"none"`. Must produce 1536-dim vectors. Set to `"none"` to disable vector search (FTS5 keyword search still works). |
 | `llm.failover` | dict[string, list[string]] | -- | Per-model failover chains, typed as `dict[str, list[str]]` in `src/host/credentials.py`. Map each primary `provider/model` to an ordered fallback list. The legacy `{primary: ..., fallback: ...}` single-pair shape is **not** recognized and is silently ignored. |
 | `collaboration` | boolean | `true` | Allow inter-agent messaging |

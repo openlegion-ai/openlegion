@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from src.agent.attachments import enrich_message_with_attachments
+from src.agent.llm import utility_model_kwargs
 from src.agent.loop_detector import ToolLoopDetector
 from src.agent.tool_groups import (
     GroupedPlan,
@@ -2558,6 +2559,10 @@ class AgentLoop:
                         system=system_prompt,
                         messages=messages,
                         tools=iter_tools,
+                        # Heartbeats are coordination traffic, not deep work —
+                        # route to the cheap utility model when configured
+                        # (per-call model tiering hook). No-op when unset.
+                        **utility_model_kwargs(self.llm),
                     )
                     # Bug 1 (codex P2 r2): tick after the LLM call returns —
                     # a single deep-research call can run >5 min, and bumping

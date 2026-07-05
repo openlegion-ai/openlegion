@@ -481,3 +481,69 @@ def test_thinking_override_on_openai_reasoning_models():
     )
     llm.thinking_override = "high"
     assert llm._get_thinking_params() == {"reasoning_effort": "high"}
+
+
+# ── Per-call model tiering: utility_model pickup + kwargs helper ──────────
+
+
+def test_utility_model_env_pickup(monkeypatch):
+    """LLM_UTILITY_MODEL container env populates utility_model (mirrors
+    the MESH_AUTH_TOKEN ctor pattern)."""
+    monkeypatch.setenv("LLM_UTILITY_MODEL", "openai/gpt-4.1-nano")
+    llm = LLMClient(mesh_url="http://mesh:8420", agent_id="a1")
+    assert llm.utility_model == "openai/gpt-4.1-nano"
+
+
+def test_utility_model_defaults_empty(monkeypatch):
+    """No env, no kwarg → feature off (empty string)."""
+    monkeypatch.delenv("LLM_UTILITY_MODEL", raising=False)
+    llm = LLMClient(mesh_url="http://mesh:8420", agent_id="a1")
+    assert llm.utility_model == ""
+
+
+def test_utility_model_ctor_kwarg_overrides_env(monkeypatch):
+    """Explicit ctor kwarg wins over the env var (test seam)."""
+    monkeypatch.setenv("LLM_UTILITY_MODEL", "env/model")
+    llm = LLMClient(
+        mesh_url="http://mesh:8420", agent_id="a1",
+        utility_model="kwarg/model",
+    )
+    assert llm.utility_model == "kwarg/model"
+
+
+def test_utility_model_ctor_empty_string_disables(monkeypatch):
+    """An explicit empty-string kwarg means OFF even when the env is set."""
+    monkeypatch.setenv("LLM_UTILITY_MODEL", "env/model")
+    llm = LLMClient(
+        mesh_url="http://mesh:8420", agent_id="a1", utility_model="",
+    )
+    assert llm.utility_model == ""
+
+
+def test_utility_model_kwargs_configured():
+    from src.agent.llm import utility_model_kwargs
+
+    llm = LLMClient(
+        mesh_url="http://mesh:8420", agent_id="a1",
+        utility_model="openai/gpt-4.1-nano",
+    )
+    assert utility_model_kwargs(llm) == {"model": "openai/gpt-4.1-nano"}
+
+
+def test_utility_model_kwargs_off_is_empty():
+    """Unset → {} so utility call sites keep today's exact call shape."""
+    from src.agent.llm import utility_model_kwargs
+
+    llm = LLMClient(
+        mesh_url="http://mesh:8420", agent_id="a1", utility_model="",
+    )
+    assert utility_model_kwargs(llm) == {}
+
+
+def test_utility_model_kwargs_tolerates_mocked_client():
+    """A MagicMock llm (the standard test double) has a non-str
+    utility_model attribute — the helper must treat that as OFF."""
+    from src.agent.llm import utility_model_kwargs
+
+    assert utility_model_kwargs(MagicMock()) == {}
+    assert utility_model_kwargs(object()) == {}

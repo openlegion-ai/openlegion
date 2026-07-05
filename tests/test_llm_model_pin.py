@@ -400,3 +400,107 @@ async def test_prefix_insensitive_does_not_allow_different_bare_name(pin_setup):
     )
     assert resp.status_code == 403, resp.text
     assert "not authorized to use model" in resp.text
+
+
+# ── Per-call model tiering: the deployment utility model always passes ──
+#
+# ``llm.utility_model`` is operator/deployment-controlled config (the same
+# value injected into containers as LLM_UTILITY_MODEL), so the pin accepts
+# it for every agent — an agent cannot pick an arbitrary model through it.
+# The is_model_compatible credential gate still applies.
+
+
+@pytest.mark.asyncio
+async def test_utility_model_accepted_for_pinned_worker(pin_setup):
+    app = pin_setup["app"]
+    pin_setup["cfg_holder"]["cfg"]["llm"]["utility_model"] = (
+        "openai/gpt-4.1-nano"
+    )
+    resp = await _post(
+        app, _req("openai/gpt-4.1-nano"), "writer-secret", "writer",
+    )
+    assert resp.status_code == 200, resp.text
+    assert pin_setup["vault"].calls[-1]["model"] == "openai/gpt-4.1-nano"
+
+
+@pytest.mark.asyncio
+async def test_utility_model_accepted_bare_request_spelling(pin_setup):
+    """Configured prefixed, requested bare — the same _bare() compare the
+    allowlist uses must apply to the utility model."""
+    app = pin_setup["app"]
+    pin_setup["cfg_holder"]["cfg"]["llm"]["utility_model"] = (
+        "openai/gpt-4.1-nano"
+    )
+    resp = await _post(
+        app, _req("gpt-4.1-nano"), "writer-secret", "writer",
+    )
+    assert resp.status_code == 200, resp.text
+    assert pin_setup["vault"].calls[-1]["model"] == "gpt-4.1-nano"
+
+
+@pytest.mark.asyncio
+async def test_utility_model_accepted_prefixed_request_spelling(pin_setup):
+    """Configured bare, requested prefixed."""
+    app = pin_setup["app"]
+    pin_setup["cfg_holder"]["cfg"]["llm"]["utility_model"] = "gpt-4.1-nano"
+    resp = await _post(
+        app, _req("openai/gpt-4.1-nano"), "writer-secret", "writer",
+    )
+    assert resp.status_code == 200, resp.text
+
+
+@pytest.mark.asyncio
+async def test_third_model_still_403_when_utility_model_set(pin_setup):
+    """The utility carve-out widens the pin by exactly one model — an
+    arbitrary third model is still rejected."""
+    app = pin_setup["app"]
+    pin_setup["cfg_holder"]["cfg"]["llm"]["utility_model"] = (
+        "openai/gpt-4.1-nano"
+    )
+    resp = await _post(
+        app, _req("anthropic/claude-opus-4"), "writer-secret", "writer",
+    )
+    assert resp.status_code == 403, resp.text
+    assert "not authorized to use model" in resp.text
+    assert pin_setup["vault"].calls == []
+
+
+@pytest.mark.asyncio
+async def test_utility_model_still_subject_to_compatibility_gate(pin_setup):
+    """Passing the pin is not a credential bypass: is_model_compatible
+    still runs for the utility model."""
+    app = pin_setup["app"]
+    pin_setup["cfg_holder"]["cfg"]["llm"]["utility_model"] = (
+        "openai/gpt-4.1-nano"
+    )
+    pin_setup["vault"]._compatible = False
+    resp = await _post(
+        app, _req("openai/gpt-4.1-nano"), "writer-secret", "writer",
+    )
+    assert resp.status_code == 403, resp.text
+    assert "not compatible" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_no_utility_model_pin_unchanged(pin_setup):
+    """Feature off (llm.utility_model absent) → the pin behaves exactly
+    as before: the would-be utility model is just another off-allowlist
+    model and 403s."""
+    app = pin_setup["app"]
+    assert "utility_model" not in pin_setup["cfg_holder"]["cfg"]["llm"]
+    resp = await _post(
+        app, _req("openai/gpt-4.1-nano"), "writer-secret", "writer",
+    )
+    assert resp.status_code == 403, resp.text
+    assert "not authorized to use model" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_empty_utility_model_pin_unchanged(pin_setup):
+    """Explicit empty string is OFF, not a wildcard."""
+    app = pin_setup["app"]
+    pin_setup["cfg_holder"]["cfg"]["llm"]["utility_model"] = ""
+    resp = await _post(
+        app, _req("openai/gpt-4.1-nano"), "writer-secret", "writer",
+    )
+    assert resp.status_code == 403, resp.text
