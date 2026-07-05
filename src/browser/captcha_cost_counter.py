@@ -108,14 +108,14 @@ def _state_path() -> Path:
 # v2-checkbox at $1.00 / 1000 solves = $0.001/solve = 100 millicents.  ✓
 PRICING_MILLICENTS: dict[str, int] = {
     # 2Captcha — published https://2captcha.com/2captcha-api#solving_recaptchav2_new
-    "2captcha-recaptcha-v2-checkbox": 100,        # $1.00 / 1000 = 0.1¢ each → 100 millicents
+    "2captcha-recaptcha-v2-checkbox": 100,  # $1.00 / 1000 = 0.1¢ each → 100 millicents
     "2captcha-recaptcha-v2-invisible": 100,
     "2captcha-recaptcha-v3": 100,
     # §11.1 splits ``recaptcha-enterprise`` into v2/v3 enterprise variants;
     # both keep the same Enterprise rate. ``recaptcha-enterprise`` is
     # retained as a back-compat alias for any callers still emitting the
     # coarse kind from a hint override.
-    "2captcha-recaptcha-enterprise": 200,         # $2.00 / 1000 = 0.2¢ each → 200 millicents
+    "2captcha-recaptcha-enterprise": 200,  # $2.00 / 1000 = 0.2¢ each → 200 millicents
     "2captcha-recaptcha-enterprise-v2": 200,
     "2captcha-recaptcha-enterprise-v3": 200,
     "2captcha-hcaptcha": 100,
@@ -127,7 +127,7 @@ PRICING_MILLICENTS: dict[str, int] = {
     # warning.
     "2captcha-cf-interstitial-turnstile": 200,
     # CapSolver — published https://docs.capsolver.com/guide/captcha/
-    "capsolver-recaptcha-v2-checkbox": 80,        # $0.80 / 1000 = 0.08¢ each → 80 millicents
+    "capsolver-recaptcha-v2-checkbox": 80,  # $0.80 / 1000 = 0.08¢ each → 80 millicents
     "capsolver-recaptcha-v2-invisible": 80,
     "capsolver-recaptcha-v3": 80,
     "capsolver-recaptcha-enterprise": 200,
@@ -167,22 +167,22 @@ PRICING_MILLICENTS: dict[str, int] = {
 # the provider sees).
 PRICING_MILLICENTS_PROXY_AWARE: dict[tuple[str, str], int] = {
     # 2captcha — 3× the proxyless rate
-    ("2captcha", "recaptcha-v2-checkbox"):    300,
-    ("2captcha", "recaptcha-v2-invisible"):   300,
-    ("2captcha", "recaptcha-enterprise-v2"):  600,
-    ("2captcha", "hcaptcha"):                 300,
-    ("2captcha", "turnstile"):                600,
+    ("2captcha", "recaptcha-v2-checkbox"): 300,
+    ("2captcha", "recaptcha-v2-invisible"): 300,
+    ("2captcha", "recaptcha-enterprise-v2"): 600,
+    ("2captcha", "hcaptcha"): 300,
+    ("2captcha", "turnstile"): 600,
     # CF-bound Turnstile takes the same proxy-aware tier as standalone
     # Turnstile — the solver task is identical (§11.3).
     ("2captcha", "cf-interstitial-turnstile"): 600,
     # CapSolver — 3× the proxyless rate
-    ("capsolver", "recaptcha-v2-checkbox"):   240,
-    ("capsolver", "recaptcha-v2-invisible"):  240,
-    ("capsolver", "recaptcha-v3"):            240,
+    ("capsolver", "recaptcha-v2-checkbox"): 240,
+    ("capsolver", "recaptcha-v2-invisible"): 240,
+    ("capsolver", "recaptcha-v3"): 240,
     ("capsolver", "recaptcha-enterprise-v2"): 600,
     ("capsolver", "recaptcha-enterprise-v3"): 600,
-    ("capsolver", "hcaptcha"):                300,
-    ("capsolver", "turnstile"):               180,
+    ("capsolver", "hcaptcha"): 300,
+    ("capsolver", "turnstile"): 180,
     ("capsolver", "cf-interstitial-turnstile"): 180,
     # §22 — anti-bot platform task types are proxy-aware ONLY (no
     # proxyless variant published). Pricing matches the proxyless table
@@ -191,10 +191,10 @@ PRICING_MILLICENTS_PROXY_AWARE: dict[tuple[str, str], int] = {
     # itself (the operator's bring-your-own proxy, not CapSolver's
     # pool). 300 millicents = $0.003/solve; see comment block on the
     # proxyless table for the source.
-    ("capsolver", "js-challenge-akamai"):     300,
-    ("capsolver", "js-challenge-imperva"):    300,
-    ("capsolver", "js-challenge-kasada"):     300,
-    ("capsolver", "datadome-behavioral"):     300,
+    ("capsolver", "js-challenge-akamai"): 300,
+    ("capsolver", "js-challenge-imperva"): 300,
+    ("capsolver", "js-challenge-kasada"): 300,
+    ("capsolver", "datadome-behavioral"): 300,
 }
 
 # Back-compat aliases — third-party subclasses or future callers that
@@ -207,7 +207,10 @@ PRICING_CENTS_PROXY_AWARE = PRICING_MILLICENTS_PROXY_AWARE
 
 
 def estimate_millicents(
-    provider: str, kind: str, *, proxy_aware: bool = False,
+    provider: str,
+    kind: str,
+    *,
+    proxy_aware: bool = False,
 ) -> int | None:
     """Return published cost (millicents) for one successful solve, or ``None``.
 
@@ -353,7 +356,9 @@ async def get_millicents(agent_id: str) -> int:
 
 
 async def check_and_charge(
-    agent_id: str, cap_millicents: int, millicents: int,
+    agent_id: str,
+    cap_millicents: int,
+    millicents: int,
 ) -> tuple[bool, int]:
     """Atomically gate ``millicents`` against ``cap_millicents``.
 
@@ -467,7 +472,8 @@ async def snapshot(path: Path | str | None = None) -> bool:
         return False
     logger.info(
         "captcha_cost snapshot wrote %d agent bucket(s) to %s",
-        len(payload["buckets"]), target,
+        len(payload["buckets"]),
+        target,
     )
     return True
 
@@ -534,13 +540,15 @@ async def restore(path: Path | str | None = None) -> int:
             loaded += 1
     if migrated:
         logger.info(
-            "captcha_cost restore: migrated %d legacy cents bucket(s) "
-            "to millicents (×1000) from %s",
-            migrated, target,
+            "captcha_cost restore: migrated %d legacy cents bucket(s) to millicents (×1000) from %s",
+            migrated,
+            target,
         )
     logger.info(
         "captcha_cost restore loaded %d/%d agent bucket(s) from %s",
-        loaded, len(buckets), target,
+        loaded,
+        len(buckets),
+        target,
     )
     return loaded
 
@@ -578,8 +586,8 @@ def _tenant_for(agent_id: str) -> str | None:
     """Resolve an agent ID to its tenant ID (team name).
 
     Reads the TeamStore SQLite DB (``OPENLEGION_TEAMS_DB``, default
-    ``data/teams.db``) in pure-DB mode. Returns the team name for
-    ``agent_id``, or ``None`` when the agent isn't in any team — and
+    ``data/teams.db``) via a read-only connection. Returns the team name
+    for ``agent_id``, or ``None`` when the agent isn't in any team — and
     ``None`` when the DB file doesn't exist at all, which preserves the
     in-container no-op: the browser container mounts neither ``config/``
     nor the mesh ``data/``, so tenant rollups stay per-agent there.
@@ -601,17 +609,31 @@ def _tenant_for(agent_id: str) -> str | None:
     if not os.path.exists(db):
         return None
     try:
-        # Lazy import — the host store pulls in file IO / logging setup
-        # that we don't want at browser-service import time. Pure-DB
-        # mode (no teams_dir): this is a read-only membership lookup.
-        from src.host.teams import TeamStore
-        team = TeamStore(db_path=db).team_of(agent_id)
+        team = _read_team_of(db, agent_id)
     except Exception as e:
-        logger.debug("tenant lookup: TeamStore read failed: %s", e)
+        logger.debug("tenant lookup: teams DB read failed: %s", e)
         return None
     if not isinstance(team, str) or not team:
         return None
     return team
+
+
+def _read_team_of(db: str, agent_id: str) -> str | None:
+    """Read-only membership lookup against the TeamStore DB.
+
+    Deliberately NOT TeamStore: instantiating it runs schema DDL on a
+    writable connection, and this module can execute in the semi-trusted
+    browser zone. A read-only URI + plain SELECT keeps the team-authority
+    DB write-inaccessible from here.
+    """
+    import sqlite3
+
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        row = conn.execute("SELECT team_id FROM team_members WHERE agent_id = ?", (agent_id,)).fetchone()
+    finally:
+        conn.close()
+    return row[0] if row else None
 
 
 def reset_tenant_cache() -> None:
@@ -625,7 +647,9 @@ def reset_tenant_cache() -> None:
 
 
 async def get_tenant_total(
-    tenant_id: str, *, since: datetime | None = None,
+    tenant_id: str,
+    *,
+    since: datetime | None = None,
 ) -> int:
     """Sum current-month millicents across every agent in ``tenant_id``.
 
@@ -809,7 +833,9 @@ async def record_tenant_threshold_alerts(
         except Exception as e:  # noqa: BLE001 — defensive; alert path
             logger.warning(
                 "tenant_spend_threshold emit failed for tenant=%s pct=%d: %s",
-                tenant_id, pct, e,
+                tenant_id,
+                pct,
+                e,
             )
     return fired_now
 

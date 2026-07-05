@@ -39,7 +39,8 @@ from src.browser import captcha_cost_counter as cost
 async def _isolate_state(tmp_path, monkeypatch):
     """Each test starts with fresh state + a tmp snapshot path."""
     monkeypatch.setenv(
-        "CAPTCHA_COST_COUNTER_PATH", str(tmp_path / "captcha_costs.json"),
+        "CAPTCHA_COST_COUNTER_PATH",
+        str(tmp_path / "captcha_costs.json"),
     )
     await cost.reset()
     cost.reset_threshold_state()
@@ -97,17 +98,15 @@ class TestTenantFor:
 
     def test_lru_cache_in_use(self):
         """Successive calls with the same agent_id hit the cache."""
-        from src.host.teams import TeamStore
-
         call_count = {"n": 0}
-        real_team_of = TeamStore.team_of
+        real_read = cost._read_team_of
 
-        def counting_team_of(self, agent_id):
+        def counting_read(db, agent_id):
             call_count["n"] += 1
-            return real_team_of(self, agent_id)
+            return real_read(db, agent_id)
 
         with _patch_projects({"alpha": "tenant-a"}):
-            with patch.object(TeamStore, "team_of", counting_team_of):
+            with patch.object(cost, "_read_team_of", counting_read):
                 cost._tenant_for("alpha")
                 cost._tenant_for("alpha")
                 cost._tenant_for("alpha")
@@ -123,12 +122,11 @@ class TestTenantFor:
             assert cost._tenant_for("alpha") == "tenant-b"
 
     def test_loader_failure_returns_none(self):
-        """If the store read raises (corrupt DB), tenant=None."""
-        from src.host.teams import TeamStore
-
+        """If the DB read raises (corrupt DB), tenant=None."""
         with _patch_projects({"alpha": "tenant-a"}):
             with patch.object(
-                TeamStore, "team_of",
+                cost,
+                "_read_team_of",
                 side_effect=RuntimeError("boom"),
             ):
                 assert cost._tenant_for("alpha") is None
@@ -149,11 +147,13 @@ class TestTenantFor:
 class TestGetTenantTotal:
     @pytest.mark.asyncio
     async def test_sums_across_multiple_agents(self):
-        with _patch_projects({
-            "alpha": "tenant-a",
-            "beta": "tenant-a",
-            "gamma": "tenant-a",
-        }):
+        with _patch_projects(
+            {
+                "alpha": "tenant-a",
+                "beta": "tenant-a",
+                "gamma": "tenant-a",
+            }
+        ):
             cost.reset_tenant_cache()
             await cost.add_cost("alpha", 100)
             await cost.add_cost("beta", 50)
@@ -163,11 +163,13 @@ class TestGetTenantTotal:
     @pytest.mark.asyncio
     async def test_cross_tenant_isolation(self):
         """Tenant A's agents do NOT contribute to tenant B's total."""
-        with _patch_projects({
-            "alpha": "tenant-a",
-            "beta": "tenant-b",
-            "gamma": "tenant-a",
-        }):
+        with _patch_projects(
+            {
+                "alpha": "tenant-a",
+                "beta": "tenant-b",
+                "gamma": "tenant-a",
+            }
+        ):
             cost.reset_tenant_cache()
             await cost.add_cost("alpha", 100)
             await cost.add_cost("beta", 999)
@@ -204,11 +206,19 @@ class TestGetTenantTotal:
             # (which only stores current-month state in memory)
             # correctly returned 0 — the assertion was the bug.
             month_start = now.replace(
-                day=1, hour=0, minute=0, second=0, microsecond=0,
+                day=1,
+                hour=0,
+                minute=0,
+                second=0,
+                microsecond=0,
             )
-            assert await cost.get_tenant_total(
-                "tenant-a", since=month_start,
-            ) == 150
+            assert (
+                await cost.get_tenant_total(
+                    "tenant-a",
+                    since=month_start,
+                )
+                == 150
+            )
 
     @pytest.mark.asyncio
     async def test_since_filter_past_month_returns_zero(self):
@@ -219,12 +229,14 @@ class TestGetTenantTotal:
             await cost.add_cost("alpha", 100)
             now = datetime.now(timezone.utc)
             # Step back at least one full month.
-            two_months_ago = (
-                now.replace(day=1) - timedelta(days=45)
+            two_months_ago = now.replace(day=1) - timedelta(days=45)
+            assert (
+                await cost.get_tenant_total(
+                    "tenant-a",
+                    since=two_months_ago,
+                )
+                == 0
             )
-            assert await cost.get_tenant_total(
-                "tenant-a", since=two_months_ago,
-            ) == 0
 
     @pytest.mark.asyncio
     async def test_empty_tenant_id_returns_zero(self):
@@ -240,11 +252,13 @@ class TestGetTenantTotal:
 class TestGetTenantBreakdown:
     @pytest.mark.asyncio
     async def test_returns_per_agent_dict(self):
-        with _patch_projects({
-            "alpha": "tenant-a",
-            "beta": "tenant-a",
-            "gamma": "tenant-b",
-        }):
+        with _patch_projects(
+            {
+                "alpha": "tenant-a",
+                "beta": "tenant-a",
+                "gamma": "tenant-b",
+            }
+        ):
             cost.reset_tenant_cache()
             await cost.add_cost("alpha", 100)
             await cost.add_cost("beta", 50)
@@ -279,29 +293,33 @@ class TestThresholdAlerts:
             # 50% crossing
             await cost.add_cost("alpha", 500)
             fired = await cost.record_tenant_threshold_alerts(
-                "tenant-a", cap_millicents, emit,
+                "tenant-a",
+                cap_millicents,
+                emit,
             )
             assert fired == [50]
 
             # 80% crossing
             await cost.add_cost("alpha", 300)
             fired = await cost.record_tenant_threshold_alerts(
-                "tenant-a", cap_millicents, emit,
+                "tenant-a",
+                cap_millicents,
+                emit,
             )
             assert fired == [80]
 
             # 100% crossing
             await cost.add_cost("alpha", 200)
             fired = await cost.record_tenant_threshold_alerts(
-                "tenant-a", cap_millicents, emit,
+                "tenant-a",
+                cap_millicents,
+                emit,
             )
             assert fired == [100]
 
             assert [p["pct"] for p in captured] == [50, 80, 100]
             assert all(p["tenant_id"] == "tenant-a" for p in captured)
-            assert all(
-                p["cap_millicents"] == cap_millicents for p in captured
-            )
+            assert all(p["cap_millicents"] == cap_millicents for p in captured)
 
     @pytest.mark.asyncio
     async def test_single_fire_per_crossing(self):
@@ -313,10 +331,14 @@ class TestThresholdAlerts:
 
             await cost.add_cost("alpha", 500)
             fired_first = await cost.record_tenant_threshold_alerts(
-                "tenant-a", cap_millicents, lambda p: captured.append(p),
+                "tenant-a",
+                cap_millicents,
+                lambda p: captured.append(p),
             )
             fired_second = await cost.record_tenant_threshold_alerts(
-                "tenant-a", cap_millicents, lambda p: captured.append(p),
+                "tenant-a",
+                cap_millicents,
+                lambda p: captured.append(p),
             )
             assert fired_first == [50]
             assert fired_second == []  # no re-fire
@@ -332,7 +354,9 @@ class TestThresholdAlerts:
 
             await cost.add_cost("alpha", 850)  # 85% — crosses 50 + 80
             fired = await cost.record_tenant_threshold_alerts(
-                "tenant-a", cap_millicents, lambda p: captured.append(p),
+                "tenant-a",
+                cap_millicents,
+                lambda p: captured.append(p),
             )
             assert fired == [50, 80]
             assert {p["pct"] for p in captured} == {50, 80}
@@ -344,7 +368,9 @@ class TestThresholdAlerts:
             captured: list[dict] = []
             await cost.add_cost("alpha", 9999)
             fired = await cost.record_tenant_threshold_alerts(
-                "tenant-a", 0, lambda p: captured.append(p),
+                "tenant-a",
+                0,
+                lambda p: captured.append(p),
             )
             assert fired == []
             assert captured == []
@@ -359,7 +385,9 @@ class TestThresholdAlerts:
 
             await cost.add_cost("alpha", 600)
             await cost.record_tenant_threshold_alerts(
-                "tenant-a", cap_millicents, lambda p: captured.append(p),
+                "tenant-a",
+                cap_millicents,
+                lambda p: captured.append(p),
             )
             assert len(captured) == 1
             # Simulate month rollover by reaching into the threshold state
@@ -372,7 +400,9 @@ class TestThresholdAlerts:
             await cost.add_cost("alpha", 600)
 
             fired = await cost.record_tenant_threshold_alerts(
-                "tenant-a", cap_millicents, lambda p: captured.append(p),
+                "tenant-a",
+                cap_millicents,
+                lambda p: captured.append(p),
             )
             assert fired == [50]  # re-fired in the new month
 
@@ -388,7 +418,9 @@ class TestThresholdAlerts:
 
             await cost.add_cost("alpha", 500)
             await cost.record_tenant_threshold_alerts(
-                "tenant-a", 1000, aemit,
+                "tenant-a",
+                1000,
+                aemit,
             )
             assert len(captured) == 1
             assert captured[0]["pct"] == 50
@@ -425,7 +457,9 @@ def _make_dashboard_client(tmp_path: str) -> TestClient:
     transport_mock = MagicMock()
     router_mock = MagicMock()
     health_monitor = HealthMonitor(
-        runtime=runtime_mock, transport=transport_mock, router=router_mock,
+        runtime=runtime_mock,
+        transport=transport_mock,
+        router=router_mock,
     )
     health_monitor.register("alpha")
     health_monitor.register("beta")
@@ -465,6 +499,7 @@ class TestCSVExportEndpoint:
         )
         self._auth_patch.start()
         from src.dashboard.auth import reset_cache
+
         reset_cache()
         self.client, self.components = _make_dashboard_client(self._tmpdir)
 
@@ -472,6 +507,7 @@ class TestCSVExportEndpoint:
         _teardown(self.components)
         self._auth_patch.stop()
         from src.dashboard.auth import reset_cache
+
         reset_cache()
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
@@ -479,10 +515,12 @@ class TestCSVExportEndpoint:
         """Endpoint returns CSV with header + per-agent rows + total row."""
         import asyncio
 
-        with _patch_projects({
-            "alpha": "tenant-a",
-            "beta": "tenant-a",
-        }):
+        with _patch_projects(
+            {
+                "alpha": "tenant-a",
+                "beta": "tenant-a",
+            }
+        ):
             cost.reset_tenant_cache()
             asyncio.run(cost.add_cost("alpha", 100))
             asyncio.run(cost.add_cost("beta", 50))
@@ -494,13 +532,9 @@ class TestCSVExportEndpoint:
 
         assert resp.status_code == 200
         assert "text/csv" in resp.headers["content-type"]
-        assert "captcha-rollup-tenant-a-monthly.csv" in (
-            resp.headers.get("content-disposition", "")
-        )
+        assert "captcha-rollup-tenant-a-monthly.csv" in (resp.headers.get("content-disposition", ""))
         lines = resp.text.strip().split("\n")
-        assert lines[0] == (
-            "period_start,agent_id,millicents,dollars,data_scope"
-        )
+        assert lines[0] == ("period_start,agent_id,millicents,dollars,data_scope")
         # Sorted agent rows then the synthetic total. ``data_scope`` is
         # ``monthly_actual`` for monthly because the in-memory state
         # IS the current month — the number is correct for the period.
@@ -581,10 +615,12 @@ class TestCSVExportEndpoint:
         token_file = Path(self._tmpdir) / "real_token"
         token_file.write_text("real-secret-token")
         production_patch = patch(
-            "src.dashboard.auth._ACCESS_TOKEN_PATH", str(token_file),
+            "src.dashboard.auth._ACCESS_TOKEN_PATH",
+            str(token_file),
         )
         production_patch.start()
         from src.dashboard.auth import reset_cache
+
         reset_cache()
         try:
             resp = self.client.get(
@@ -608,9 +644,7 @@ class TestCSVExportEndpoint:
             )
         assert resp.status_code == 200
         lines = resp.text.strip().split("\n")
-        assert lines[0] == (
-            "period_start,agent_id,millicents,dollars,data_scope"
-        )
+        assert lines[0] == ("period_start,agent_id,millicents,dollars,data_scope")
         # No agent rows, just header + total.
         assert len(lines) == 2
         assert "__tenant_total__,0,0.00000,monthly_actual" in lines[1]

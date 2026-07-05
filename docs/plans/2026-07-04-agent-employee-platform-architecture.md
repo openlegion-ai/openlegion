@@ -498,6 +498,40 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
 
 
 
+- **✅ Landed — Phase-1 unit 1: TeamStore + full consumer repoint (C.1 row 1 complete).**
+  Ratified §8 #7 (C.3-b: goals live in the Team store) FIRST, then built the store around
+  it. `src/host/teams.py`: SQLite `data/teams.db` (env `OPENLEGION_TEAMS_DB`), canonical
+  v1 (`PRAGMA user_version = 1`, per-op WAL conns, `:memory:` shared-conn for tests) —
+  teams (metadata + north_star/success_criteria + settings + B4 budget-envelope columns +
+  Phase-2 drive/thread pointers), `team_members` (one-team-per-agent via `agent_id`
+  PRIMARY KEY), `agent_goals` (keyed by agent alone; populated by the goals-repoint
+  follow-up). The store owns the `config/teams/{id}/` scaffold (team.md + workflows/);
+  `metadata.yaml` is GONE — `_load_teams()`, all `_*_team` CLI helpers, `cfg["teams"]`/
+  `cfg["_agent_teams"]`, and the `TeamMetadata` model deleted; every consumer repointed
+  (server.py ~67 sites, dashboard ~35, runtime/repl/cli, `MessageRouter` takes a
+  `team_resolver` callable, captcha `_tenant_for` reads the DB read-only via
+  `file:...?mode=ro`). Endpoint semantics preserved exactly (status codes, response
+  shapes, archived counting, ACL rewiring order, cron summary-job lifecycle).
+  **Adversarial review (4 finder dimensions + 3 test-diff subreviews) — 6 findings
+  confirmed and fixed pre-PR:** (1) reserved ids (`operator`/`mesh`/`default`/
+  `canary-probe`) were creatable as team ids — validator regressed vs main's
+  `_validate_agent_name` delegation [medium]; (2) `re.match` accepted trailing newline →
+  `fullmatch`; (3) multi-statement mutators (add_member/delete_team/remove_agent) were
+  non-atomic across the mesh + CLI's second process handle → `BEGIN IMMEDIATE` `_txn`;
+  (4) delete→recreate silently adopted a stale `team.md` into new members' prompts →
+  scaffold always overwrites; (5) browser-zone `_tenant_for` instantiated the store
+  (writable conn + DDL) → read-only URI + plain SELECT seam; (6) team.md brief/context
+  writes could 500 after a failed scaffold (DB row now the existence truth) → store
+  `team_md_path` + parent mkdir. Plus one coverage gap closed (create-with-existing-
+  member ACL strip was untested). **Accepted with documentation:** `MessageRouter`
+  team lookups now cost two short-lived SQLite reads per routed message (sub-ms,
+  operator-rate traffic; Phase-2 Threads reworks messaging anyway); membership gates
+  read LIVE state — members created-with-team are prefix-restricted immediately
+  (tightening) and team-delete un-gates ex-members immediately instead of at restart
+  (matches intended solo semantics). **Explicit call-out per ratified #4 (no-compat
+  mandate):** there is NO YAML→SQLite import — pre-existing `config/teams/*/
+  metadata.yaml` teams do not carry over; clean-slate deploys only.
+
 ### YOU ARE HERE → next phase
 Foundation (#1180/#1181/#1183/#1184) and the rename (#1185) are merged. Phase 0's removal
 column is fully done. Next, in order:

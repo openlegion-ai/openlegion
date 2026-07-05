@@ -5538,7 +5538,12 @@ def create_mesh_app(
             )
         if not teams_store.team_exists(team_name):
             raise HTTPException(404, f"Team '{team_name}' not found")
-        team_md_path = TEAMS_DIR / team_name / "team.md"
+        # Prefer the store's teams_dir (single owner of the scaffold); the
+        # in-memory fallback store has none, so fall back to TEAMS_DIR. The
+        # mkdir guards against a create whose scaffold failed (the DB row is
+        # the source of truth for existence, not the dir).
+        team_md_path = teams_store.team_md_path(team_name) or (TEAMS_DIR / team_name / "team.md")
+        team_md_path.parent.mkdir(parents=True, exist_ok=True)
         existing = (
             team_md_path.read_text(errors="replace")
             if team_md_path.exists() else f"# {team_name}\n"
@@ -5576,8 +5581,10 @@ def create_mesh_app(
         except TeamNotFound:
             raise HTTPException(404, f"Team '{team_name}' not found")
 
-        # Update team.md in place
-        team_md_path = TEAMS_DIR / team_name / "team.md"
+        # Update team.md in place (store teams_dir first — see the brief
+        # endpoint's path note; mkdir covers a failed create scaffold).
+        team_md_path = teams_store.team_md_path(team_name) or (TEAMS_DIR / team_name / "team.md")
+        team_md_path.parent.mkdir(parents=True, exist_ok=True)
         new_content = f"# {team_name}\n\n{context}\n"
         team_md_path.write_text(new_content)
         # P2 gap fix: this writer previously never pushed to running

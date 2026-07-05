@@ -63,6 +63,18 @@ class TestValidateTeamId:
         with pytest.raises(ValueError, match="Invalid team name"):
             validate_team_id("_underscore")
 
+    def test_reserved_ids_rejected(self):
+        # Teams and agents share downstream namespaces (blackboard
+        # prefixes, TEAM_NAME env, _caller_teams sentinels) — a team named
+        # after a system identity would shadow it.
+        for name in ("operator", "mesh", "default", "canary-probe"):
+            with pytest.raises(ValueError, match="reserved"):
+                validate_team_id(name)
+
+    def test_trailing_newline_rejected(self):
+        with pytest.raises(ValueError, match="Invalid team name"):
+            validate_team_id("myteam\n")
+
 
 # ── Mesh endpoints: store ops + permissions.json wiring ────────────
 
@@ -167,6 +179,26 @@ class TestMeshTeamEndpoints:
         for agent in ("agent1", "agent2"):
             assert perms["permissions"][agent]["blackboard_read"] == ["teams/my-proj/*"]
             assert perms["permissions"][agent]["blackboard_write"] == ["teams/my-proj/*"]
+
+    @pytest.mark.asyncio
+    async def test_create_with_member_from_other_team_strips_old_acl(self, team_app):
+        """Creating a team whose initial members include an agent already
+        on another team must evict the membership AND swap the blackboard
+        patterns — the moved agent must not keep teams/old/* reach."""
+        app, store, perms_file, _ = team_app
+        store.create_team("old-proj")
+        await _post(app, "/mesh/teams/old-proj/members", {"agent": "agent1"})
+        r = await _post(
+            app,
+            "/mesh/teams",
+            {"name": "new-proj", "members": ["agent1"]},
+        )
+        assert r.status_code == 200, r.text
+        assert store.members("old-proj") == []
+        assert store.team_of("agent1") == "new-proj"
+        perms = json.loads(perms_file.read_text())
+        assert perms["permissions"]["agent1"]["blackboard_read"] == ["teams/new-proj/*"]
+        assert perms["permissions"]["agent1"]["blackboard_write"] == ["teams/new-proj/*"]
 
     @pytest.mark.asyncio
     async def test_create_duplicate_400(self, team_app):

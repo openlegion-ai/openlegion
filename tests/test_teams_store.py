@@ -150,6 +150,21 @@ class TestFilesScaffold:
         s.create_team("alpha")
         assert s.team_md_path("alpha") is None
 
+    def test_recreate_overwrites_stale_team_md(self, store, tmp_path):
+        """A leftover team.md from a deleted team of the same name must
+        NOT carry into the new team's member prompts."""
+        store.create_team("alpha", "old desc")
+        team_md = tmp_path / "teams" / "alpha" / "team.md"
+        team_md.write_text("# alpha\n\nSECRET OLD CONTEXT\n")
+        store.delete_team("alpha")
+        # Simulate a failed rmtree / pre-existing dir left behind.
+        team_md.parent.mkdir(parents=True, exist_ok=True)
+        team_md.write_text("# alpha\n\nSECRET OLD CONTEXT\n")
+        store.create_team("alpha", "fresh desc")
+        content = team_md.read_text()
+        assert "SECRET OLD CONTEXT" not in content
+        assert "fresh desc" in content
+
 
 class TestMetadata:
     def test_set_description(self, store):

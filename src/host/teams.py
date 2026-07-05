@@ -39,6 +39,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+from src.shared.types import RESERVED_AGENT_IDS
 from src.shared.utils import setup_logging
 
 logger = setup_logging("host.teams")
@@ -47,7 +48,7 @@ logger = setup_logging("host.teams")
 # 1-64 chars, alphanumeric/hyphen/underscore, starts with a letter or digit.
 # Teams and agents share namespaces downstream (blackboard prefixes, envs),
 # so the identifier grammar must stay aligned.
-_TEAM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_TEAM_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}")
 
 VALID_TEAM_STATUSES = ("active", "archived")
 
@@ -61,12 +62,20 @@ class TeamExists(ValueError):
 
 
 def validate_team_id(team_id: str) -> str:
-    """Validate and return a safe team id (same rules as agent names)."""
-    if not isinstance(team_id, str) or not _TEAM_ID_RE.match(team_id):
+    """Validate and return a safe team id (same rules as agent names).
+
+    Reserved internal agent ids double as reserved team ids: teams and
+    agents share downstream namespaces (blackboard prefixes, ``TEAM_NAME``
+    env, ``_caller_teams`` sentinels for operator/mesh), so a team named
+    ``mesh`` or ``operator`` would shadow system identities.
+    """
+    if not isinstance(team_id, str) or not _TEAM_ID_RE.fullmatch(team_id):
         raise ValueError(
             f"Invalid team name '{team_id}': must be 1–64 alphanumeric chars, "
             "hyphens, or underscores (must start with a letter or digit)."
         )
+    if team_id in RESERVED_AGENT_IDS:
+        raise ValueError(f"Team name '{team_id}' is reserved for internal use")
     return team_id
 
 
@@ -114,6 +123,24 @@ class TeamStore:
             yield conn
         finally:
             conn.close()
+
+    @contextmanager
+    def _txn(self):
+        """A connection wrapped in an immediate transaction.
+
+        Multi-statement mutators (read-then-write) go through this so a
+        concurrent writer — including another process via the CLI's
+        on-demand store — can't interleave between the read and the
+        write (e.g. add_member's old-team read vs delete_team's sweep).
+        """
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield conn
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+            conn.execute("COMMIT")
 
     def _init_schema(self) -> None:
         # Canonical schema v1 — exactly one shape, no lazy ALTER chains,
@@ -221,11 +248,13 @@ class TeamStore:
         try:
             team_dir.mkdir(parents=True, exist_ok=True)
             (team_dir / "workflows").mkdir(exist_ok=True)
-            team_md = team_dir / "team.md"
-            if not team_md.exists():
-                team_md.write_text(
-                    f"# {team_id}\n\n{description}\n\n<!-- Shared context for all agents in this team -->\n"
-                )
+            # Always overwrite: create_team only runs for a NEW team row, so
+            # any team.md already on disk is a stale leftover from a deleted
+            # team of the same name — carrying it into member prompts would
+            # leak the old team's context.
+            (team_dir / "team.md").write_text(
+                f"# {team_id}\n\n{description}\n\n<!-- Shared context for all agents in this team -->\n"
+            )
         except OSError:
             logger.exception("Failed to scaffold files for team %s", team_id)
 
@@ -290,7 +319,7 @@ class TeamStore:
         team blackboard permissions — permissions.json wiring stays with
         the permission layer, not the store.
         """
-        with self._conn() as conn:
+        with self._txn() as conn:
             members = self._members_unlocked(conn, team_id)
             cur = conn.execute("DELETE FROM teams WHERE id = ?", (team_id,))
             if cur.rowcount == 0:
@@ -368,7 +397,7 @@ class TeamStore:
         """
         if agent_id == "operator":
             raise ValueError("Operator is a system agent and cannot be assigned to teams")
-        with self._conn() as conn:
+        with self._txn() as conn:
             exists = conn.execute("SELECT 1 FROM teams WHERE id = ?", (team_id,)).fetchone()
             if exists is None:
                 raise TeamNotFound(f"Team '{team_id}' not found")
@@ -396,7 +425,7 @@ class TeamStore:
 
         Returns the team it was removed from, if any.
         """
-        with self._conn() as conn:
+        with self._txn() as conn:
             row = conn.execute("SELECT team_id FROM team_members WHERE agent_id = ?", (agent_id,)).fetchone()
             conn.execute("DELETE FROM team_members WHERE agent_id = ?", (agent_id,))
             conn.execute("DELETE FROM agent_goals WHERE agent_id = ?", (agent_id,))
