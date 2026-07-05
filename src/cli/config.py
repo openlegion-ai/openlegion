@@ -206,15 +206,6 @@ def _load_config(mesh_path: Path | None = None) -> dict:
             agents_data = yaml.safe_load(f) or {}
             cfg.setdefault("agents", {}).update(agents_data.get("agents", {}))
 
-    # Load teams and build reverse map (agent → team)
-    teams = _load_teams()
-    cfg["teams"] = teams
-    agent_teams: dict[str, str] = {}
-    for pname, pdata in teams.items():
-        for member in pdata.get("members", []):
-            agent_teams[member] = pname
-    cfg["_agent_teams"] = agent_teams
-
     # Load network config
     network_cfg = {}
     if NETWORK_FILE.exists():
@@ -742,132 +733,29 @@ def _get_default_model() -> str:
 
 
 # ── Team management ──────────────────────────────────────
+#
+# Team identity, metadata, and membership live in the SQLite-backed
+# ``TeamStore`` (src/host/teams.py) — THE single authority since the
+# Phase-1 "team as first-class" repoint. The helpers kept here are the
+# permissions.json wiring invoked by the endpoint layer around store
+# membership ops (``_add_team_blackboard_permissions`` /
+# ``_remove_team_blackboard_permissions``) plus ``_open_teams_store``
+# for CLI paths that run without a Runtime object in scope.
 
 
-def _validate_team_name(name: str) -> str:
-    """Validate and return a safe team name (same rules as agent names)."""
-    try:
-        return _validate_agent_name(name)
-    except ValueError:
-        raise ValueError(
-            f"Invalid team name '{name}': must be 1–64 alphanumeric chars, "
-            "hyphens, or underscores (must start with a letter or digit)."
-        )
+def _open_teams_store():
+    """Construct a TeamStore handle on demand (no module-level singleton).
 
-
-def _load_teams() -> dict[str, dict]:
-    """Scan config/teams/*/metadata.yaml and return {name: metadata}."""
-    from src.shared.types import TeamMetadata
-
-    teams: dict[str, dict] = {}
-    if not TEAMS_DIR.exists():
-        return teams
-    for meta_file in sorted(TEAMS_DIR.glob("*/metadata.yaml")):
-        try:
-            dir_name = meta_file.parent.name
-            with open(meta_file) as f:
-                data = yaml.safe_load(f) or {}
-            pm = TeamMetadata(**data)
-            teams[dir_name] = pm.model_dump()
-        except Exception as e:
-            logger.warning("Failed to load team %s: %s", meta_file, e)
-    return teams
-
-
-def _get_agent_team(agent_name: str) -> str | None:
-    """Return the team name an agent belongs to, or None if standalone."""
-    teams = _load_teams()
-    for pname, pdata in teams.items():
-        if agent_name in pdata.get("members", []):
-            return pname
-    return None
-
-
-def _create_team(
-    name: str, description: str = "", members: list[str] | None = None,
-) -> None:
-    """Create a new team: directory, metadata.yaml, scaffold team.md."""
-    name = _validate_team_name(name)
-    # Validate members upfront before any filesystem writes — prevents partial team creation.
-    members = list(members or [])
-    if "operator" in members:
-        raise ValueError("Operator is a system agent and cannot be assigned to teams")
-    team_dir = TEAMS_DIR / name
-    if team_dir.exists():
-        raise ValueError(f"Team '{name}' already exists")
-
-    team_dir.mkdir(parents=True, exist_ok=True)
-    (team_dir / "workflows").mkdir(exist_ok=True)
-
-    from datetime import datetime, timezone
-
-    from src.shared.types import TeamMetadata
-
-    pm = TeamMetadata(
-        name=name,
-        description=description,
-        created_at=datetime.now(timezone.utc).isoformat(),
-        members=[],  # members added via _add_agent_to_team below
-    )
-    with open(team_dir / "metadata.yaml", "w") as f:
-        yaml.dump(pm.model_dump(), f, default_flow_style=False, sort_keys=False)
-
-    # Scaffold team.md
-    (team_dir / "team.md").write_text(
-        f"# {name}\n\n{description}\n\n"
-        "<!-- Shared context for all agents in this team -->\n"
-    )
-
-    # Add initial members (handles removing from old teams + permissions)
-    for agent in members:
-        _add_agent_to_team(name, agent)
-
-
-def _delete_team(name: str) -> None:
-    """Delete a team directory and clean up agent permissions.
-
-    Operator product tools (Task 7) require this be preceded by
-    ``_archive_team`` and a human-confirmed pending action; the
-    raw helper retained here is the storage primitive — callers above
-    enforce the propose-then-confirm flow.
+    SQLite WAL makes cross-process access safe, so detached CLI paths
+    (``_remove_agent``, repl listings) open their own handle instead of
+    threading the runtime's instance through every call chain.
     """
-    import shutil
+    from src.host.teams import TeamStore
 
-    team_dir = TEAMS_DIR / name
-    if not team_dir.exists():
-        raise ValueError(f"Team '{name}' not found")
-
-    # Read members before deleting
-    meta_file = team_dir / "metadata.yaml"
-    members: list[str] = []
-    if meta_file.exists():
-        with open(meta_file) as f:
-            data = yaml.safe_load(f) or {}
-        members = data.get("members", [])
-
-    # Remove team blackboard permissions from all members
-    for agent in members:
-        _remove_team_blackboard_permissions(agent, name)
-
-    shutil.rmtree(team_dir)
-
-
-def _set_team_status(name: str, status: str) -> None:
-    """Update the ``status`` field on a team's metadata.yaml.
-
-    Used by archive/unarchive flows. Status is a free-string at the
-    storage layer; operator tools restrict valid values to
-    ``{"active", "archived"}``.
-    """
-    team_dir = TEAMS_DIR / name
-    meta_file = team_dir / "metadata.yaml"
-    if not meta_file.exists():
-        raise ValueError(f"Team '{name}' not found")
-    with open(meta_file) as f:
-        data = yaml.safe_load(f) or {}
-    data["status"] = status
-    with open(meta_file, "w") as f:
-        yaml.dump(data, f, default_flow_style=False, sort_keys=False)
+    return TeamStore(
+        db_path=os.environ.get("OPENLEGION_TEAMS_DB", "data/teams.db"),
+        teams_dir=TEAMS_DIR,
+    )
 
 
 def _backfill_capabilities_for_existing_agents() -> None:
@@ -943,27 +831,6 @@ def _backfill_capabilities_for_existing_agents() -> None:
             logger.exception("Failed to persist back-filled agent capabilities")
 
 
-def _archive_team(name: str) -> None:
-    """Mark a team as archived without deleting its data."""
-    _set_team_status(name, "archived")
-
-
-def _unarchive_team(name: str) -> None:
-    """Re-activate an archived team."""
-    _set_team_status(name, "active")
-
-
-def _team_status(name: str) -> str:
-    """Read a team's status. Returns ``"active"`` for legacy rows missing the field."""
-    team_dir = TEAMS_DIR / name
-    meta_file = team_dir / "metadata.yaml"
-    if not meta_file.exists():
-        raise ValueError(f"Team '{name}' not found")
-    with open(meta_file) as f:
-        data = yaml.safe_load(f) or {}
-    return data.get("status", "active") or "active"
-
-
 def _set_agent_status(name: str, status: str) -> None:
     """Persist a per-agent ``status`` flag in agents.yaml.
 
@@ -1004,52 +871,6 @@ def _agent_status(name: str) -> str:
     if name not in agents:
         raise ValueError(f"Agent '{name}' not found")
     return agents[name].get("status", "active") or "active"
-
-
-def _add_agent_to_team(team: str, agent: str) -> None:
-    """Assign an agent to a team. Removes from old team if any."""
-    if agent == "operator":
-        raise ValueError("Operator is a system agent and cannot be assigned to teams")
-    team_dir = TEAMS_DIR / team
-    meta_file = team_dir / "metadata.yaml"
-    if not meta_file.exists():
-        raise ValueError(f"Team '{team}' not found")
-
-    # Remove from old team first
-    old_team = _get_agent_team(agent)
-    if old_team and old_team != team:
-        _remove_agent_from_team(old_team, agent)
-
-    # Add to new team
-    with open(meta_file) as f:
-        data = yaml.safe_load(f) or {}
-    members = data.get("members", [])
-    if agent not in members:
-        members.append(agent)
-        data["members"] = members
-        with open(meta_file, "w") as f:
-            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
-
-    _add_team_blackboard_permissions(agent, team)
-
-
-def _remove_agent_from_team(team: str, agent: str) -> None:
-    """Remove an agent from a team (becomes standalone)."""
-    team_dir = TEAMS_DIR / team
-    meta_file = team_dir / "metadata.yaml"
-    if not meta_file.exists():
-        raise ValueError(f"Team '{team}' not found")
-
-    with open(meta_file) as f:
-        data = yaml.safe_load(f) or {}
-    members = data.get("members", [])
-    if agent in members:
-        members.remove(agent)
-        data["members"] = members
-        with open(meta_file, "w") as f:
-            yaml.dump(data, f, default_flow_style=False, sort_keys=False)
-
-    _remove_team_blackboard_permissions(agent, team)
 
 
 def _add_team_blackboard_permissions(agent: str, team: str) -> None:
@@ -1132,11 +953,11 @@ def _remove_agent(name: str, stop_container: bool = False) -> None:
         except Exception as e:
             logger.warning("Failed to stop/remove container for '%s': %s", name, e)
 
-    # Remove from team if member
-    team = _get_agent_team(name)
-    if team:
-        with contextlib.suppress(ValueError):
-            _remove_agent_from_team(team, name)
+    # Remove from team if member (also clears standing goals)
+    with contextlib.suppress(Exception):
+        team = _open_teams_store().remove_agent(name)
+        if team:
+            _remove_team_blackboard_permissions(name, team)
 
     # Remove from agents.yaml
     if AGENTS_FILE.exists():

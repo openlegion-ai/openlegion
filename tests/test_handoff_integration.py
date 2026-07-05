@@ -20,7 +20,6 @@ import importlib
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-import yaml
 from httpx import ASGITransport, AsyncClient
 
 from src.host.mesh import Blackboard, MessageRouter, PubSub
@@ -131,16 +130,6 @@ def asgi_mesh(tmp_path, monkeypatch):
     server_module = _reload_mesh_server(
         monkeypatch, tasks_db=str(tmp_path / "tasks.db"),
     )
-    pdir = tmp_path / "projects" / "research"
-    pdir.mkdir(parents=True)
-    (pdir / "metadata.yaml").write_text(yaml.dump({
-        "name": "research",
-        "members": ["scout", "analyst"],
-        "created_at": "2026-05-21T00:00:00+00:00",
-    }))
-    monkeypatch.setenv(
-        "OPENLEGION_CONFIG_TEAMS_DIR", str(tmp_path / "projects"),
-    )
     blackboard = Blackboard(str(tmp_path / "bb.db"))
     pubsub = PubSub()
     permissions = PermissionMatrix()
@@ -157,6 +146,9 @@ def asgi_mesh(tmp_path, monkeypatch):
         blackboard=blackboard, pubsub=pubsub,
         router=router, permissions=permissions,
     )
+    app.teams_store.create_team("research")
+    app.teams_store.add_member("research", "scout")
+    app.teams_store.add_member("research", "analyst")
     yield app
     blackboard.close()
     monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)

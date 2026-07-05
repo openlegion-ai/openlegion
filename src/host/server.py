@@ -40,6 +40,7 @@ from src.host.orchestration import (
     Tasks,
 )
 from src.host.pending_actions import PendingActions
+from src.host.teams import TeamNotFound, TeamStore
 from src.shared.limits import (
     MAX_OUTPUT_TOKENS_MAX,
     MAX_OUTPUT_TOKENS_MIN,
@@ -685,61 +686,6 @@ def _record_denial(
     )
 
 
-def _caller_teams(agent_id: str) -> set[str]:
-    """Return the team memberships visible to ``agent_id``.
-
-    Workers see only teams whose ``metadata.yaml`` lists them as
-    members. The operator and trusted internal callers (``mesh``) are
-    fleet-global by design — they get a sentinel meaning "all teams",
-    represented here as an empty set with the caller_is_global flag the
-    caller computes separately. Use the helper purely as a lookup of
-    *worker* memberships and branch on operator/internal in the caller.
-    """
-    if agent_id in {"operator", "mesh"}:
-        # Operator and the mesh-internal pseudo-id are global; the caller
-        # branches on those identities directly. Returning an empty set
-        # here forces callers to think about the global path and not
-        # silently include "every team" in a worker-style filter.
-        return set()
-    from src.cli.config import _load_teams
-
-    teams_cfg = _load_teams()
-    return {
-        name
-        for name, meta in teams_cfg.items()
-        if agent_id in meta.get("members", [])
-    }
-
-
-def _is_blackboard_cross_team(
-    caller: str, writer: str | None
-) -> bool:
-    """Return True when caller and writer are workers in disjoint team sets.
-
-    Best-effort detection used purely for telemetry — never gates access.
-    Returns False (so the counter is NOT incremented) when:
-
-    - ``writer`` is missing (e.g. unknown / deleted agent or no prior entry)
-    - either party is operator / ``mesh`` (fleet-global by design)
-    - caller and writer share at least one team membership
-    - either party has an empty membership set (standalone agent — not
-      meaningfully "cross-team" without two team anchors)
-
-    The intent is to count the case where two distinct *team-bound*
-    workers touch the same key, since that is what Phase 3 enforcement
-    will gate.
-    """
-    if not writer or writer == caller:
-        return False
-    if caller in {"operator", "mesh"} or writer in {"operator", "mesh"}:
-        return False
-    caller_set = _caller_teams(caller)
-    writer_set = _caller_teams(writer)
-    if not caller_set or not writer_set:
-        return False
-    return caller_set.isdisjoint(writer_set)
-
-
 def create_mesh_app(
     blackboard: Blackboard,
     pubsub: PubSub,
@@ -757,7 +703,7 @@ def create_mesh_app(
     health_monitor: HealthMonitor | None = None,
     cost_tracker: CostTracker | None = None,
     notify_fn: Callable[[str, str], Coroutine] | None = None,
-    agent_teams: dict[str, str] | None = None,
+    teams_store: TeamStore | None = None,
     lane_manager: LaneManager | None = None,
     dispatch_loop: asyncio.AbstractEventLoop | None = None,
     wallet_service_ref: list | None = None,
@@ -915,7 +861,61 @@ def create_mesh_app(
         return help_requests_store.record(kind, agent_id, payload)
 
     _auth_tokens = auth_tokens if auth_tokens is not None else {}
-    _agent_teams = agent_teams if agent_teams is not None else {}
+
+    # THE team authority (src/host/teams.py). The runtime passes its
+    # disk-backed instance; standalone constructions (tests) fall back
+    # to a pure-DB in-memory store so team lookups just return None.
+    if teams_store is None:
+        teams_store = TeamStore(db_path=":memory:")
+    app.teams_store = teams_store  # exposed for tests/dashboard
+
+    def _caller_teams(agent_id: str) -> set[str]:
+        """Return the team memberships visible to ``agent_id``.
+
+        Workers see only the team the TeamStore assigns them to. The
+        operator and trusted internal callers (``mesh``) are
+        fleet-global by design — they get a sentinel meaning "all
+        teams", represented here as an empty set with the
+        caller_is_global flag the caller computes separately. Use the
+        helper purely as a lookup of *worker* memberships and branch on
+        operator/internal in the caller.
+        """
+        if agent_id in {"operator", "mesh"}:
+            # Operator and the mesh-internal pseudo-id are global; the caller
+            # branches on those identities directly. Returning an empty set
+            # here forces callers to think about the global path and not
+            # silently include "every team" in a worker-style filter.
+            return set()
+        t = teams_store.team_of(agent_id)
+        return {t} if t else set()
+
+    def _is_blackboard_cross_team(
+        caller: str, writer: str | None
+    ) -> bool:
+        """Return True when caller and writer are workers in disjoint team sets.
+
+        Best-effort detection used purely for telemetry — never gates access.
+        Returns False (so the counter is NOT incremented) when:
+
+        - ``writer`` is missing (e.g. unknown / deleted agent or no prior entry)
+        - either party is operator / ``mesh`` (fleet-global by design)
+        - caller and writer share at least one team membership
+        - either party has an empty membership set (standalone agent — not
+          meaningfully "cross-team" without two team anchors)
+
+        The intent is to count the case where two distinct *team-bound*
+        workers touch the same key, since that is what Phase 3 enforcement
+        will gate.
+        """
+        if not writer or writer == caller:
+            return False
+        if caller in {"operator", "mesh"} or writer in {"operator", "mesh"}:
+            return False
+        caller_set = _caller_teams(caller)
+        writer_set = _caller_teams(writer)
+        if not caller_set or not writer_set:
+            return False
+        return caller_set.isdisjoint(writer_set)
 
     def _agent_bearer_headers(agent_id: str) -> dict[str, str]:
         """Mesh→agent bearer auth header for direct (non-Transport) agent calls.
@@ -1909,7 +1909,7 @@ def create_mesh_app(
         await _check_rate_limit("publish", event.source)
 
         # Enforce team isolation: topic must match the publisher's team prefix
-        source_team = _agent_teams.get(event.source)
+        source_team = teams_store.team_of(event.source)
         if source_team:
             expected_prefix = f"teams/{source_team}/"
             if not event.topic.startswith(expected_prefix):
@@ -1964,7 +1964,7 @@ def create_mesh_app(
         agent_id = _resolve_agent_id(agent_id, request)
 
         # Enforce team isolation: topic must match the subscriber's team prefix
-        sub_team = _agent_teams.get(agent_id)
+        sub_team = teams_store.team_of(agent_id)
         if sub_team:
             expected_prefix = f"teams/{sub_team}/"
             if not topic.startswith(expected_prefix):
@@ -2680,7 +2680,7 @@ def create_mesh_app(
 
         router.register_agent(agent_id, url, capabilities)
         agent_perms = permissions.get_permissions(agent_id)
-        reg_team = _agent_teams.get(agent_id)
+        reg_team = teams_store.team_of(agent_id)
         for topic in agent_perms.can_subscribe:
             scoped = f"teams/{reg_team}/{topic}" if reg_team else topic
             pubsub.subscribe(scoped, agent_id)
@@ -3246,6 +3246,10 @@ def create_mesh_app(
             _cfg_for_listing = {"agents": {}}
         _agents_cfg_listing = _cfg_for_listing.get("agents", {}) or {}
 
+        # One membership snapshot per request — ``_agent_entry`` runs per
+        # listed agent, so per-entry ``team_of`` calls would be N queries.
+        _team_map = teams_store.agent_team_map()
+
         def _agent_entry(aid: str, url: str) -> dict:
             entry: dict = {"url": url, "role": router.agent_roles.get(aid, "")}
             entry["capabilities"] = router.get_capabilities(aid)
@@ -3260,7 +3264,7 @@ def create_mesh_app(
             entry["expected_outputs"] = list(acfg.get("expected_outputs") or [])
             entry["escalation_to"] = acfg.get("escalation_to")
             entry["forbidden"] = list(acfg.get("forbidden") or [])
-            team_of = _agent_teams.get(aid)
+            team_of = _team_map.get(aid)
             if team_of:
                 entry["team"] = team_of
             if aid == "operator":
@@ -3268,13 +3272,10 @@ def create_mesh_app(
             return entry
 
         if team:
-            from src.cli.config import _load_teams
-            teams_cfg = _load_teams()
-            pdata = teams_cfg.get(team)
-            if pdata is None:
+            if not teams_store.team_exists(team):
                 logger.warning("list_agents: unknown team %r", team)
                 return {}
-            members = set(pdata.get("members", []))
+            members = {a for a, t in _team_map.items() if t == team}
 
             # Task 5: only members of the requested team (or global
             # callers) may scope by it. Under warn mode, log but allow;
@@ -3322,10 +3323,9 @@ def create_mesh_app(
         # standalone agents who belong to no team).
         visible_members: set[str] = {caller}
         if own_teams:
-            from src.cli.config import _load_teams
-            teams_cfg = _load_teams()
-            for pname in own_teams:
-                visible_members.update(teams_cfg.get(pname, {}).get("members", []))
+            visible_members.update(
+                a for a, t in _team_map.items() if t in own_teams
+            )
         if "operator" in router.agent_registry:
             visible_members.add("operator")
 
@@ -3400,7 +3400,7 @@ def create_mesh_app(
         if section in ("budget", "all") and cost_tracker:
             result["budget"] = cost_tracker.check_budget(agent_id)
             # Include team budget if the agent belongs to a team
-            agent_proj = _agent_teams.get(agent_id)
+            agent_proj = teams_store.team_of(agent_id)
             if agent_proj:
                 team_spend_row = cost_tracker.get_team_spend(agent_proj, "today")
                 if "error" not in team_spend_row:
@@ -3441,13 +3441,11 @@ def create_mesh_app(
                     _fleet_entry(aid) for aid in router.agent_registry
                 ]
             else:
-                from src.cli.config import _load_teams
-                _teams_cfg = _load_teams()
-                _agent_team_members: set[str] | None = None
-                for _pdata in _teams_cfg.values():
-                    if agent_id in _pdata.get("members", []):
-                        _agent_team_members = set(_pdata["members"])
-                        break
+                _agent_team = teams_store.team_of(agent_id)
+                _agent_team_members: set[str] | None = (
+                    set(teams_store.members(_agent_team))
+                    if _agent_team else None
+                )
 
                 if _agent_team_members is not None:
                     result["fleet"] = [
@@ -3471,7 +3469,7 @@ def create_mesh_app(
             )
 
         if section in ("team", "all"):
-            result["team"] = _agent_teams.get(agent_id)
+            result["team"] = teams_store.team_of(agent_id)
 
         if section in ("llm", "all"):
             # BYOK visibility: surface the set of providers that actually
@@ -4530,7 +4528,7 @@ def create_mesh_app(
 
         # Subscriptions (strip team prefix for readability)
         raw_subs = pubsub.get_agent_subscriptions(agent_id) if pubsub else []
-        team_of = _agent_teams.get(agent_id)
+        team_of = teams_store.team_of(agent_id)
         prefix = f"teams/{team_of}/" if team_of else ""
         subscriptions = [
             t[len(prefix):] if prefix and t.startswith(prefix) else t
@@ -5035,9 +5033,9 @@ def create_mesh_app(
         max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
         max_teams = int(os.environ.get("OPENLEGION_MAX_TEAMS", "0"))
 
-        # Count actual teams
-        from src.cli.config import _load_teams
-        current_teams = len(_load_teams())
+        # Count actual teams (archived included — mirrors the old
+        # metadata.yaml glob, which never filtered by status)
+        current_teams = teams_store.count_teams()
 
         # -- BYOK visibility (Bug 5) --
         # Operators (and the operator agent's heartbeat playbook) need
@@ -5287,20 +5285,16 @@ def create_mesh_app(
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can manage teams")
-        from src.cli.config import _load_teams
-        teams_cfg = _load_teams()
+        teams_cfg = teams_store.list_teams(include_archived=include_archived)
         result = []
         for pname, pdata in sorted(teams_cfg.items(), key=lambda x: x[1].get("created_at") or ""):
-            status = pdata.get("status", "active") or "active"
-            if not include_archived and status == "archived":
-                continue
             result.append({
                 "name": pname,
                 "team_name": pname,
                 "description": pdata.get("description", ""),
                 "members": pdata.get("members", []),
                 "created_at": pdata.get("created_at", ""),
-                "status": status,
+                "status": pdata.get("status", "active") or "active",
             })
         return {"teams": result}
 
@@ -5312,7 +5306,12 @@ def create_mesh_app(
             raise HTTPException(403, "Only the operator can manage teams")
         import os as _os
 
-        from src.cli.config import _create_team, _load_config, _load_teams
+        from src.cli.config import (
+            _add_team_blackboard_permissions,
+            _load_config,
+            _remove_team_blackboard_permissions,
+        )
+        from src.host.teams import TeamExists
 
         # Plan-limit cap read here; the "teams disabled" (==0) gate fires
         # immediately, but the count-vs-cap check is ENFORCED inside the
@@ -5341,12 +5340,19 @@ def create_mesh_app(
         unknown = [m for m in members if m not in known_agents]
         if unknown:
             raise HTTPException(400, f"Unknown agents: {', '.join(unknown)}")
+        # Validate members upfront before any store writes — prevents
+        # partial team creation (mirrors the old ``_create_team``).
+        if "operator" in members:
+            raise HTTPException(
+                400,
+                "Operator is a system agent and cannot be assigned to teams",
+            )
         # M15 — atomic count re-check + create. Hold the shared creation
         # lock so two concurrent team creates can't both pass the cap and
         # overshoot ``OPENLEGION_MAX_TEAMS``.
         async with _creation_lock:
             if _max_teams is not None and _max_teams > 0:
-                current_count = len(_load_teams())
+                current_count = teams_store.count_teams()
                 if current_count >= _max_teams:
                     raise HTTPException(
                         403,
@@ -5354,23 +5360,28 @@ def create_mesh_app(
                         "Upgrade your plan for more teams.",
                     )
             try:
-                _create_team(name, description=description, members=members)
-            except ValueError as e:
+                teams_store.create_team(name, description=description)
+            except (TeamExists, ValueError) as e:
                 raise HTTPException(400, str(e))
+            for agent in members:
+                old = teams_store.add_member(name, agent)
+                if old and old != name:
+                    _remove_team_blackboard_permissions(agent, old)
+                _add_team_blackboard_permissions(agent, name)
         # Real-time cron lifecycle: schedule the daily work-summary
         # fire on team creation so the operator doesn't have to wait
         # for the next mesh restart for the reconcile to pick it up.
         # Best-effort — a missing cron_scheduler or a failure here
         # mustn't fail the team-create response.
         #
-        # Reads the persisted metadata back (``_create_team`` wrote
-        # the file with default ``settings={}``; the read is for
-        # forward-compatibility with a future create endpoint that
-        # accepts initial settings, and to keep behavior consistent
-        # with the unarchive path which also reads metadata).
+        # Reads the persisted row back (``create_team`` wrote it with
+        # default ``settings={}``; the read is for forward-compatibility
+        # with a future create endpoint that accepts initial settings,
+        # and to keep behavior consistent with the unarchive path which
+        # also reads the stored settings).
         if cron_scheduler is not None:
             try:
-                persisted = _load_teams().get(name) or {}
+                persisted = teams_store.get_team(name) or {}
                 _custom_schedule = (
                     (persisted.get("settings") or {}).get("summary_schedule")
                 )
@@ -5394,17 +5405,21 @@ def create_mesh_app(
         _require_any_auth(request)
         if _resolve_agent_id("", request) != "operator":
             raise HTTPException(403, "Only the operator can manage teams")
-        from src.cli.config import _add_agent_to_team
+        from src.cli.config import (
+            _add_team_blackboard_permissions,
+            _remove_team_blackboard_permissions,
+        )
         body = await request.json()
         agent = body.get("agent", "").strip()
         if not agent:
             raise HTTPException(400, "agent is required")
         try:
-            _add_agent_to_team(team_name, agent)
-        except ValueError as e:
+            old = teams_store.add_member(team_name, agent)
+        except (TeamNotFound, ValueError) as e:
             raise HTTPException(400, str(e))
-        # Update the in-memory team mapping so scoping takes effect immediately
-        _agent_teams[agent] = team_name
+        if old and old != team_name:
+            _remove_team_blackboard_permissions(agent, old)
+        _add_team_blackboard_permissions(agent, team_name)
         return {"added": True, "team_id": team_name, "team_name": team_name, "agent": agent}
 
     @app.delete("/mesh/teams/{team_name}/members/{agent}")
@@ -5413,12 +5428,11 @@ def create_mesh_app(
         _require_any_auth(request)
         if _resolve_agent_id("", request) != "operator":
             raise HTTPException(403, "Only the operator can manage teams")
-        from src.cli.config import _remove_agent_from_team
-        try:
-            _remove_agent_from_team(team_name, agent)
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-        _agent_teams.pop(agent, None)
+        from src.cli.config import _remove_team_blackboard_permissions
+        if not teams_store.team_exists(team_name):
+            raise HTTPException(400, f"Team '{team_name}' not found")
+        teams_store.remove_member(team_name, agent)
+        _remove_team_blackboard_permissions(agent, team_name)
         return {"removed": True, "team_id": team_name, "team_name": team_name, "agent": agent}
 
     @app.delete("/mesh/teams/{team_name}")
@@ -5427,11 +5441,13 @@ def create_mesh_app(
         _require_any_auth(request)
         if _resolve_agent_id("", request) != "operator":
             raise HTTPException(403, "Only the operator can manage teams")
-        from src.cli.config import _delete_team
+        from src.cli.config import _remove_team_blackboard_permissions
         try:
-            _delete_team(team_name)
-        except ValueError as e:
+            former_members = teams_store.delete_team(team_name)
+        except TeamNotFound as e:
             raise HTTPException(404, str(e))
+        for agent in former_members:
+            _remove_team_blackboard_permissions(agent, team_name)
         # Real-time cron lifecycle: drop the daily work-summary cron
         # for the deleted team. This is the mesh DIRECT-delete path
         # (distinct from the propose/confirm flow, which also cleans
@@ -5469,10 +5485,7 @@ def create_mesh_app(
         results: dict[str, bool] = {}
         if transport is None:
             return results
-        from src.cli.config import _load_teams
-        members = set(
-            (_load_teams().get(team_name) or {}).get("members", []),
-        )
+        members = set(teams_store.members(team_name))
         targets = [a for a in router.agent_registry.keys() if a in members]
         if not targets:
             return results
@@ -5506,7 +5519,7 @@ def create_mesh_app(
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can manage teams")
-        from src.cli.config import TEAMS_DIR, _load_teams
+        from src.cli.config import TEAMS_DIR
         body = await request.json()
         section = str(body.get("section", "")).strip()
         content = sanitize_for_prompt(str(body.get("content", ""))).strip()
@@ -5523,9 +5536,14 @@ def create_mesh_app(
                 "content exceeds 2000 chars — TEAM.md is in every "
                 "member's prompt; keep sections tight",
             )
-        if team_name not in _load_teams():
+        if not teams_store.team_exists(team_name):
             raise HTTPException(404, f"Team '{team_name}' not found")
-        team_md_path = TEAMS_DIR / team_name / "team.md"
+        # Prefer the store's teams_dir (single owner of the scaffold); the
+        # in-memory fallback store has none, so fall back to TEAMS_DIR. The
+        # mkdir guards against a create whose scaffold failed (the DB row is
+        # the source of truth for existence, not the dir).
+        team_md_path = teams_store.team_md_path(team_name) or (TEAMS_DIR / team_name / "team.md")
+        team_md_path.parent.mkdir(parents=True, exist_ok=True)
         existing = (
             team_md_path.read_text(errors="replace")
             if team_md_path.exists() else f"# {team_name}\n"
@@ -5553,26 +5571,20 @@ def create_mesh_app(
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can manage teams")
-        from src.cli.config import TEAMS_DIR, _load_teams
+        from src.cli.config import TEAMS_DIR
         body = await request.json()
         context = sanitize_for_prompt(body.get("context", "")).strip()
 
-        teams_cfg = _load_teams()
-        if team_name not in teams_cfg:
+        # Update the stored description in place (never delete the team)
+        try:
+            teams_store.set_description(team_name, context)
+        except TeamNotFound:
             raise HTTPException(404, f"Team '{team_name}' not found")
 
-        # Update metadata.yaml description in place (never delete the team)
-        import yaml
-        meta_file = TEAMS_DIR / team_name / "metadata.yaml"
-        if meta_file.exists():
-            with open(meta_file) as f:
-                meta = yaml.safe_load(f) or {}
-            meta["description"] = context
-            with open(meta_file, "w") as f:
-                yaml.dump(meta, f, default_flow_style=False, sort_keys=False)
-
-        # Update team.md in place
-        team_md_path = TEAMS_DIR / team_name / "team.md"
+        # Update team.md in place (store teams_dir first — see the brief
+        # endpoint's path note; mkdir covers a failed create scaffold).
+        team_md_path = teams_store.team_md_path(team_name) or (TEAMS_DIR / team_name / "team.md")
+        team_md_path.parent.mkdir(parents=True, exist_ok=True)
         new_content = f"# {team_name}\n\n{context}\n"
         team_md_path.write_text(new_content)
         # P2 gap fix: this writer previously never pushed to running
@@ -5597,14 +5609,13 @@ def create_mesh_app(
         """Set a team's north star + success criteria (mesh-authed proxy).
 
         Operator-only (or internal localhost callers). Validates length
-        limits then persists to ``metadata.yaml`` in place. No confirmation
+        limits then persists to the team store in place. No confirmation
         gate — this is meta-config the user explicitly asked for.
         """
         _require_any_auth(request)
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can manage teams")
-        from src.cli.config import TEAMS_DIR, _load_teams
 
         body = await request.json()
         north_star_raw = body.get("north_star")
@@ -5647,20 +5658,10 @@ def create_mesh_app(
                 cleaned.append(sc)
             success_criteria = cleaned or None
 
-        teams_cfg = _load_teams()
-        if team_name not in teams_cfg:
+        try:
+            teams_store.set_goal(team_name, north_star, success_criteria)
+        except TeamNotFound:
             raise HTTPException(404, f"Team '{team_name}' not found")
-
-        import yaml
-        meta_file = TEAMS_DIR / team_name / "metadata.yaml"
-        if not meta_file.exists():
-            raise HTTPException(404, f"Team '{team_name}' has no metadata file")
-        with open(meta_file) as f:
-            meta = yaml.safe_load(f) or {}
-        meta["north_star"] = north_star
-        meta["success_criteria"] = success_criteria
-        with open(meta_file, "w") as f:
-            yaml.dump(meta, f, default_flow_style=False, sort_keys=False)
 
         _emit_team_event(
             event_bus, "team_updated", agent="operator", name=team_name,
@@ -7060,11 +7061,9 @@ def create_mesh_app(
                 403,
                 f"Caller {caller} is not a member of team {team_id!r}",
             )
-        from src.cli.config import _load_teams
-        teams_cfg = _load_teams()
-        if team_id not in teams_cfg:
+        meta = teams_store.get_team(team_id)
+        if meta is None:
             raise HTTPException(404, f"Team '{team_id}' not found")
-        meta = teams_cfg[team_id]
         _reap_tasks_opportunistically()
         rows = store.list_team(team_id)
         result = _summarize_tasks(rows)
@@ -7088,8 +7087,7 @@ def create_mesh_app(
         """
         store = tasks_store
         caller = _extract_verified_agent_id(request)
-        from src.cli.config import _load_teams
-        teams_cfg = _load_teams()
+        teams_cfg = teams_store.list_teams()
         visible: list[str]
         if _caller_is_operator(caller, request) or _is_internal_caller(request):
             visible = list(teams_cfg.keys())
@@ -7129,7 +7127,7 @@ def create_mesh_app(
             or _caller_is_operator(caller, request)
             or _is_internal_caller(request)
         ):
-            agent_proj = _agent_teams.get(agent_id)
+            agent_proj = teams_store.team_of(agent_id)
             if agent_proj is None or not _is_team_member(caller, agent_proj):
                 raise HTTPException(
                     403,
@@ -7252,11 +7250,9 @@ def create_mesh_app(
                 403,
                 f"Caller {caller} is not a member of team {team_id!r}",
             )
-        from src.cli.config import _load_teams
-        teams_cfg = _load_teams()
-        if team_id not in teams_cfg:
+        meta = teams_store.get_team(team_id)
+        if meta is None:
             raise HTTPException(404, f"Team '{team_id}' not found")
-        meta = teams_cfg[team_id]
         _reap_tasks_opportunistically()
         rows = store.list_team(team_id)
         s = _summarize_tasks(rows)
@@ -7317,13 +7313,10 @@ def create_mesh_app(
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can archive teams")
-        from src.cli.config import _archive_team, _load_teams
-        if team_name not in _load_teams():
-            raise HTTPException(404, f"Team '{team_name}' not found")
         try:
-            _archive_team(team_name)
-        except ValueError as e:
-            raise HTTPException(404, str(e))
+            teams_store.set_status(team_name, "archived")
+        except TeamNotFound:
+            raise HTTPException(404, f"Team '{team_name}' not found")
         # Real-time cron lifecycle (codex r1 P2): remove the daily
         # work-summary cron so an archived team doesn't keep firing
         # empty-state summaries until the next mesh restart. Operator
@@ -7350,13 +7343,10 @@ def create_mesh_app(
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can unarchive teams")
-        from src.cli.config import _load_teams, _unarchive_team
-        if team_name not in _load_teams():
-            raise HTTPException(404, f"Team '{team_name}' not found")
         try:
-            _unarchive_team(team_name)
-        except ValueError as e:
-            raise HTTPException(404, str(e))
+            teams_store.set_status(team_name, "active")
+        except TeamNotFound:
+            raise HTTPException(404, f"Team '{team_name}' not found")
         # Re-attach the daily work-summary cron when a team is
         # unarchived. Symmetric to the archive path above. Read the
         # team's persisted ``settings.summary_schedule`` so a custom
@@ -7365,7 +7355,7 @@ def create_mesh_app(
         # the schedule to default (codex r2 P2).
         if cron_scheduler is not None:
             try:
-                team_meta = _load_teams().get(team_name) or {}
+                team_meta = teams_store.get_team(team_name) or {}
                 _custom_schedule = (
                     (team_meta.get("settings") or {}).get("summary_schedule")
                 )
@@ -7550,11 +7540,10 @@ def create_mesh_app(
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can delete teams")
-        from src.cli.config import _load_teams, _team_status
-        teams_cfg = _load_teams()
-        if team_name not in teams_cfg:
+        team_meta = teams_store.get_team(team_name)
+        if team_meta is None:
             raise HTTPException(404, f"Team '{team_name}' not found")
-        status = _team_status(team_name)
+        status = team_meta.get("status", "active") or "active"
         if status != "archived":
             raise HTTPException(
                 400,
@@ -7574,7 +7563,7 @@ def create_mesh_app(
                     (oldest["nonce"],),
                 )
         nonce = str(_uuid.uuid4())
-        members = teams_cfg[team_name].get("members", []) or []
+        members = team_meta.get("members", []) or []
         # Short headline shown in the inline chat card (max ~80 chars
         # so it doesn't wrap awkwardly). The longer policy explanation
         # is kept in the payload for the legacy CLI surface.
@@ -7675,21 +7664,21 @@ def create_mesh_app(
     async def _apply_pending_delete(record: dict) -> dict:
         """Apply a consumed delete pending-action.
 
-        Dispatches on ``target_kind``. Team deletes call
-        ``_delete_team``; agent deletes stop the container, remove
+        Dispatches on ``target_kind``. Team deletes go through
+        ``teams_store.delete_team``; agent deletes stop the container, remove
         the agent from config + permissions, and tear down per-agent
         runtime state via ``app.cleanup_agent``.
         """
         kind = record["target_kind"]
         target_id = record["target_id"]
         if kind == "team":
-            from src.cli.config import _delete_team, _load_teams
-            if target_id not in _load_teams():
-                raise HTTPException(404, f"Team '{target_id}' no longer exists")
+            from src.cli.config import _remove_team_blackboard_permissions
             try:
-                _delete_team(target_id)
-            except ValueError as e:
-                raise HTTPException(404, str(e))
+                former_members = teams_store.delete_team(target_id)
+            except TeamNotFound:
+                raise HTTPException(404, f"Team '{target_id}' no longer exists")
+            for agent in former_members:
+                _remove_team_blackboard_permissions(agent, target_id)
             # Real-time cron lifecycle (codex r1 P2): delete the
             # daily work-summary cron when the team itself is
             # deleted. Symmetric to the archive path; archive already

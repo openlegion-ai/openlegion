@@ -117,31 +117,30 @@ def test_ensure_summary_job_dispatches_to_operator_by_default(scheduler):
 
 
 # ----------------------------------------- reconcile (bootstrap path in runtime)
-def _seed_team(projects_dir: Path, name: str, *, status: str = "active",
+def _seed_team(store, name: str, *, status: str = "active",
                schedule: str | None = None):
-    """Seed a team's metadata.yaml. Per-team cadence overrides live in
-    ``settings.summary_schedule`` (TeamMetadata.settings is the
-    extension dict; top-level fields are schema-pinned)."""
-    import yaml as _yaml
-    team_dir = projects_dir / name
-    team_dir.mkdir(parents=True, exist_ok=True)
-    meta = {"name": name, "description": "", "members": [], "status": status}
+    """Seed a team row on the TeamStore. Per-team cadence overrides live
+    in ``settings.summary_schedule`` (the store's settings dict is the
+    extension point; top-level fields are schema-pinned)."""
+    if not store.team_exists(name):
+        store.create_team(name)
+    store.set_status(name, status)
     if schedule is not None:
-        meta["settings"] = {"summary_schedule": schedule}
-    (team_dir / "metadata.yaml").write_text(_yaml.dump(meta))
+        store.set_settings(name, {"summary_schedule": schedule})
+
+
+def _team_store(tmp_path):
+    from src.host.teams import TeamStore
+    return TeamStore(db_path=str(tmp_path / "teams.db"))
 
 
 def test_reconcile_creates_one_job_per_active_team(tmp_path, monkeypatch):
     """The reconcile path should iterate active teams and ensure each
     has a summary cron job. Archived teams are skipped."""
-    projects_dir = tmp_path / "config" / "projects"
-    projects_dir.mkdir(parents=True)
-    _seed_team(projects_dir, "alpha")
-    _seed_team(projects_dir, "beta")
-    _seed_team(projects_dir, "archived-team", status="archived")
-    import src.cli.config as _cli_config
-    monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
-    monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
+    store = _team_store(tmp_path)
+    _seed_team(store, "alpha")
+    _seed_team(store, "beta")
+    _seed_team(store, "archived-team", status="archived")
 
     # Drive the reconcile through a minimal RuntimeContext stand-in
     # using just the bits the method touches.
@@ -150,6 +149,7 @@ def test_reconcile_creates_one_job_per_active_team(tmp_path, monkeypatch):
 
     class _Stub:
         cron_scheduler = scheduler
+        teams_store = store
 
     from src.cli.runtime import RuntimeContext
     RuntimeContext._reconcile_work_summary_jobs(_Stub())
@@ -165,18 +165,15 @@ def test_reconcile_creates_one_job_per_active_team(tmp_path, monkeypatch):
 
 
 def test_reconcile_honors_per_team_schedule_override(tmp_path, monkeypatch):
-    projects_dir = tmp_path / "config" / "projects"
-    projects_dir.mkdir(parents=True)
-    _seed_team(projects_dir, "weekly-team", schedule="0 9 * * 1")  # Mondays
-    import src.cli.config as _cli_config
-    monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
-    monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
+    store = _team_store(tmp_path)
+    _seed_team(store, "weekly-team", schedule="0 9 * * 1")  # Mondays
 
     from src.host.cron import CronScheduler
     scheduler = CronScheduler()
 
     class _Stub:
         cron_scheduler = scheduler
+        teams_store = store
     from src.cli.runtime import RuntimeContext
     RuntimeContext._reconcile_work_summary_jobs(_Stub())
 
@@ -186,12 +183,8 @@ def test_reconcile_honors_per_team_schedule_override(tmp_path, monkeypatch):
 
 
 def test_reconcile_prunes_summary_jobs_for_deleted_teams(tmp_path, monkeypatch):
-    projects_dir = tmp_path / "config" / "projects"
-    projects_dir.mkdir(parents=True)
-    _seed_team(projects_dir, "alpha")
-    import src.cli.config as _cli_config
-    monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
-    monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
+    store = _team_store(tmp_path)
+    _seed_team(store, "alpha")
 
     from src.host.cron import CronScheduler
     scheduler = CronScheduler()
@@ -201,6 +194,7 @@ def test_reconcile_prunes_summary_jobs_for_deleted_teams(tmp_path, monkeypatch):
 
     class _Stub:
         cron_scheduler = scheduler
+        teams_store = store
     from src.cli.runtime import RuntimeContext
     RuntimeContext._reconcile_work_summary_jobs(_Stub())
 
@@ -216,13 +210,9 @@ def test_reconcile_prunes_summary_jobs_for_deleted_teams(tmp_path, monkeypatch):
 
 
 def test_reconcile_prunes_summary_jobs_for_archived_teams(tmp_path, monkeypatch):
-    projects_dir = tmp_path / "config" / "projects"
-    projects_dir.mkdir(parents=True)
-    _seed_team(projects_dir, "alpha")
-    _seed_team(projects_dir, "old-team", status="archived")
-    import src.cli.config as _cli_config
-    monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
-    monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
+    store = _team_store(tmp_path)
+    _seed_team(store, "alpha")
+    _seed_team(store, "old-team", status="archived")
 
     from src.host.cron import CronScheduler
     scheduler = CronScheduler()
@@ -231,6 +221,7 @@ def test_reconcile_prunes_summary_jobs_for_archived_teams(tmp_path, monkeypatch)
 
     class _Stub:
         cron_scheduler = scheduler
+        teams_store = store
     from src.cli.runtime import RuntimeContext
     RuntimeContext._reconcile_work_summary_jobs(_Stub())
 
@@ -249,26 +240,23 @@ def test_reconcile_reschedules_drift_to_new_cadence(tmp_path, monkeypatch):
     the reconcile path must update the existing job's schedule —
     ensure_summary_job alone returns the existing job unchanged
     (codex r1 P2)."""
-    projects_dir = tmp_path / "config" / "projects"
-    projects_dir.mkdir(parents=True)
-    _seed_team(projects_dir, "alpha", schedule="0 9 * * *")
-    import src.cli.config as _cli_config
-    monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
-    monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
+    store = _team_store(tmp_path)
+    _seed_team(store, "alpha", schedule="0 9 * * *")
 
     from src.host.cron import CronScheduler
     scheduler = CronScheduler()
 
     class _Stub:
         cron_scheduler = scheduler
+        teams_store = store
     from src.cli.runtime import RuntimeContext
 
     # First boot — daily.
     RuntimeContext._reconcile_work_summary_jobs(_Stub())
     job_id_before = scheduler.find_summary_job("team", "alpha").id
 
-    # Operator edits the metadata to weekly cadence between boots.
-    _seed_team(projects_dir, "alpha", schedule="0 9 * * 1")
+    # Operator edits the settings to weekly cadence between boots.
+    _seed_team(store, "alpha", schedule="0 9 * * 1")
 
     # Second boot — should reschedule the SAME job, not create a new one.
     RuntimeContext._reconcile_work_summary_jobs(_Stub())
@@ -283,26 +271,23 @@ def test_reconcile_logs_warning_on_invalid_schedule_metadata(
 ):
     """Bad team metadata (invalid cron expr) must NOT crash reconcile
     or apply the bad schedule — log a warning and keep the existing."""
-    projects_dir = tmp_path / "config" / "projects"
-    projects_dir.mkdir(parents=True)
-    _seed_team(projects_dir, "alpha", schedule="0 9 * * *")
-    import src.cli.config as _cli_config
-    monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
-    monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
+    store = _team_store(tmp_path)
+    _seed_team(store, "alpha", schedule="0 9 * * *")
 
     from src.host.cron import CronScheduler
     scheduler = CronScheduler()
 
     class _Stub:
         cron_scheduler = scheduler
+        teams_store = store
     from src.cli.runtime import RuntimeContext
 
     RuntimeContext._reconcile_work_summary_jobs(_Stub())
     job_before = scheduler.find_summary_job("team", "alpha")
     schedule_before = job_before.schedule
 
-    # Corrupt the metadata.
-    _seed_team(projects_dir, "alpha", schedule="this is not cron")
+    # Corrupt the stored schedule.
+    _seed_team(store, "alpha", schedule="this is not cron")
 
     # Must not raise.
     RuntimeContext._reconcile_work_summary_jobs(_Stub())
@@ -313,12 +298,8 @@ def test_reconcile_logs_warning_on_invalid_schedule_metadata(
 def test_reconcile_leaves_non_summary_tool_jobs_alone(tmp_path, monkeypatch):
     """An unrelated tool-cron must not be pruned by the summary
     reconcile, even when its tool_params can't be parsed."""
-    projects_dir = tmp_path / "config" / "projects"
-    projects_dir.mkdir(parents=True)
-    _seed_team(projects_dir, "alpha")
-    import src.cli.config as _cli_config
-    monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
-    monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
+    store = _team_store(tmp_path)
+    _seed_team(store, "alpha")
 
     from src.host.cron import CronScheduler
     scheduler = CronScheduler()
@@ -331,6 +312,7 @@ def test_reconcile_leaves_non_summary_tool_jobs_alone(tmp_path, monkeypatch):
 
     class _Stub:
         cron_scheduler = scheduler
+        teams_store = store
     from src.cli.runtime import RuntimeContext
     RuntimeContext._reconcile_work_summary_jobs(_Stub())
 

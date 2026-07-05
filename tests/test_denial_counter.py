@@ -358,13 +358,14 @@ class TestDenialCounterScope:
         lane_manager = MagicMock()
         lane_manager.get_status.return_value = {}
 
-        # Bind alpha to project "growth" so the topic-prefix check fires.
         app = create_mesh_app(
             bb, pubsub, router, perms,
             cost_tracker=cost_tracker,
             lane_manager=lane_manager,
-            agent_teams={"alpha": "growth"},
         )
+        # Bind alpha to team "growth" so the topic-prefix check fires.
+        app.teams_store.create_team("growth")
+        app.teams_store.add_member("growth", "alpha")
         client = TestClient(app)
 
         try:

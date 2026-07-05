@@ -388,25 +388,19 @@ def _build_app(tmp_path, server_module, *, perms_map, agents=None,
 
 
 def _projects_layout(tmp_path):
-    """Two projects: research with [scout, analyst]; ops with [tracker]."""
+    """On-disk teams dir (team.md scaffolds land here via the store)."""
     pdir = tmp_path / "projects"
-    research = pdir / "research"
-    research.mkdir(parents=True)
-    (research / "metadata.yaml").write_text(yaml.dump({
-        "name": "research",
-        "members": ["scout", "analyst"],
-        "created_at": "2026-05-02T00:00:00+00:00",
-        "status": "active",
-    }))
-    ops = pdir / "ops"
-    ops.mkdir(parents=True)
-    (ops / "metadata.yaml").write_text(yaml.dump({
-        "name": "ops",
-        "members": ["tracker"],
-        "created_at": "2026-05-02T00:00:00+00:00",
-        "status": "active",
-    }))
+    pdir.mkdir(parents=True, exist_ok=True)
     return pdir
+
+
+def _seed_teams(app):
+    """Two teams: research with [scout, analyst]; ops with [tracker]."""
+    app.teams_store.create_team("research")
+    app.teams_store.add_member("research", "scout")
+    app.teams_store.add_member("research", "analyst")
+    app.teams_store.create_team("ops")
+    app.teams_store.add_member("ops", "tracker")
 
 
 def _agents_yaml(tmp_path, names: list[str]) -> Path:
@@ -465,6 +459,7 @@ def v2_app(tmp_path, monkeypatch):
         cost_tracker=cost_tracker,
         container_manager=container_manager,
     )
+    _seed_teams(app)
     yield app, server_module, tmp_path
     bb.close()
     monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
@@ -787,6 +782,7 @@ def v2_app_cm(tmp_path, monkeypatch):
         },
         container_manager=container_manager,
     )
+    _seed_teams(app)
     yield app, container_manager
     bb.close()
     monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
@@ -924,6 +920,7 @@ def v2_app_with_bus(tmp_path, monkeypatch):
         container_manager=container_manager,
         event_bus=bus,
     )
+    _seed_teams(app)
     yield app, server_module, tmp_path, bus
     bb.close()
     monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
@@ -1225,6 +1222,7 @@ def v2_app_with_lanes(tmp_path, monkeypatch):
         cost_tracker=cost_tracker,
         container_manager=container_manager,
     )
+    _seed_teams(app)
     try:
         yield app, lane_calls
     finally:

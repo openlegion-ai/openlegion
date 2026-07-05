@@ -10,7 +10,6 @@ from __future__ import annotations
 import importlib
 
 import pytest
-import yaml
 from httpx import ASGITransport, AsyncClient
 
 from src.host.mesh import Blackboard, MessageRouter, PubSub
@@ -47,24 +46,13 @@ def _build_app(tmp_path, server_module, *, perms_map, agents=None):
     return app, blackboard
 
 
-def _projects_layout(tmp_path):
-    """Two projects: research with [scout, analyst]; ops with [tracker]."""
-    pdir = tmp_path / "projects"
-    research = pdir / "research"
-    research.mkdir(parents=True)
-    (research / "metadata.yaml").write_text(yaml.dump({
-        "name": "research",
-        "members": ["scout", "analyst"],
-        "created_at": "2026-05-02T00:00:00+00:00",
-    }))
-    ops = pdir / "ops"
-    ops.mkdir(parents=True)
-    (ops / "metadata.yaml").write_text(yaml.dump({
-        "name": "ops",
-        "members": ["tracker"],
-        "created_at": "2026-05-02T00:00:00+00:00",
-    }))
-    return pdir
+def _seed_teams(app):
+    """Two teams: research with [scout, analyst]; ops with [tracker]."""
+    app.teams_store.create_team("research")
+    app.teams_store.add_member("research", "scout")
+    app.teams_store.add_member("research", "analyst")
+    app.teams_store.create_team("ops")
+    app.teams_store.add_member("ops", "tracker")
 
 
 @pytest.fixture
@@ -315,8 +303,7 @@ async def test_inbox_visibility_assignee_only(v2_app):
 @pytest.mark.asyncio
 async def test_project_list_requires_membership(v2_app, monkeypatch):
     app, _, tmp_path = v2_app
-    pdir = _projects_layout(tmp_path)
-    monkeypatch.setattr("src.cli.config.TEAMS_DIR", pdir)
+    _seed_teams(app)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         # Scout (member of research) creates a task in research.

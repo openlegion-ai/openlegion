@@ -270,6 +270,7 @@ class RuntimeContext:
         self.trace_store = None
         self.intent_store = None
         self.lifecycle_store = None
+        self.teams_store = None
         self.agent_urls: dict[str, str] = {}
         self._dispatch_loop = None
         # Post-completion verification wakes (success path) — sliding
@@ -564,10 +565,19 @@ class RuntimeContext:
         from src.host.connectors import ConnectorStore
         self.connector_store = ConnectorStore()
         self.runtime.set_connector_store(self.connector_store)
+        # THE team authority (identity, metadata, membership, standing
+        # goals). Disk-backed SQLite (WAL) + the config/teams/{id}/
+        # scaffold; every consumer — mesh app, dashboard, router,
+        # agent-start env — reads through this instance.
+        from src.host.teams import TeamStore
+        self.teams_store = TeamStore(
+            db_path=os.environ.get("OPENLEGION_TEAMS_DB", "data/teams.db"),
+            teams_dir=TEAMS_DIR,
+        )
         self.router = MessageRouter(
             self.permissions, self.agent_urls,
             trace_store=self.trace_store,
-            agent_teams=self.cfg.get("_agent_teams", {}),
+            team_resolver=self.teams_store.team_of,
         )
         # Create HealthMonitor early so the dashboard router can reference it.
         # Only register() is called here; start() happens in _start_background().
@@ -652,7 +662,7 @@ class RuntimeContext:
             _embedding_providers_with_keys(),
         )
         mesh_port = self.cfg["mesh"]["port"]
-        agent_teams = self.cfg.get("_agent_teams", {})
+        agent_teams = self.teams_store.agent_team_map()
 
         # Respect plan limits on startup — only start up to max_agents.
         # Prevents OOM on downsized servers after a plan downgrade.
@@ -1644,7 +1654,7 @@ class RuntimeContext:
             health_monitor=self.health_monitor,
             cost_tracker=self.cost_tracker,
             notify_fn=self._handle_notify,
-            agent_teams=self.cfg.get("_agent_teams", {}),
+            teams_store=self.teams_store,
             lane_manager=self.lane_manager,
             dispatch_loop=self._dispatch_loop,
             wallet_service_ref=wallet_ref,
@@ -1739,6 +1749,7 @@ class RuntimeContext:
             connector_store=self.connector_store,
             mcp_gateway=self.mcp_gateway,
             intent_store=self.intent_store,
+            teams_store=self.teams_store,
         )
         app.include_router(dashboard_router)
         app.include_router(create_spa_catchall_router())  # Must be last — SPA deep linking
@@ -1901,17 +1912,16 @@ class RuntimeContext:
         set converges with the on-disk team metadata.
 
         Per-team cadence override: ``settings.summary_schedule`` on
-        the team's ``metadata.yaml`` (the canonical extension dict on
-        ``TeamMetadata``). Defaults to ``DEFAULT_SUMMARY_SCHEDULE``
-        (daily at 9am) when absent.
+        the team's stored ``settings`` dict (TeamStore). Defaults to
+        ``DEFAULT_SUMMARY_SCHEDULE`` (daily at 9am) when absent.
 
-        IMPORTANT — runtime metadata-edit contract: the mesh team
+        IMPORTANT — runtime settings-edit contract: the mesh team
         endpoints only mutate the team's *description* (PUT
         ``/mesh/teams/{name}/context``) and *goal* (POST
         ``/mesh/teams/{name}/goal``) at runtime; there is no live
         endpoint for editing ``settings.summary_schedule``. Operators
-        who need to change a cron cadence today edit the metadata
-        file on disk + restart the mesh — this reconcile catches the
+        who need to change a cron cadence today edit the stored
+        settings + restart the mesh — this reconcile catches the
         drift and reschedules via ``_validate_schedule`` +
         ``_compute_next_run`` below. If a future PR adds a live
         settings-edit endpoint, it MUST also call
@@ -1920,9 +1930,8 @@ class RuntimeContext:
         """
         if not self.cron_scheduler:
             return
-        from src.cli.config import _load_teams
         try:
-            teams = _load_teams()
+            teams = self.teams_store.list_teams()
         except Exception as e:
             logger.warning("work-summary cron bootstrap failed to load teams: %s", e)
             return
@@ -2143,8 +2152,11 @@ class RuntimeContext:
     def _print_ready(self) -> None:
         agents_cfg = self.cfg.get("agents", {})
         active_agents = list(agents_cfg.keys())
-        agent_teams = self.cfg.get("_agent_teams", {})
-        teams_cfg = self.cfg.get("teams", {})
+        try:
+            agent_teams = self.teams_store.agent_team_map()
+            teams_cfg = self.teams_store.list_teams()
+        except Exception:
+            agent_teams, teams_cfg = {}, {}
         mesh_port = self.cfg["mesh"]["port"]
 
         # ── Services ──

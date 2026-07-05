@@ -21,7 +21,6 @@ import importlib
 from unittest.mock import patch
 
 import pytest
-import yaml
 from httpx import ASGITransport, AsyncClient
 
 
@@ -50,22 +49,7 @@ def _build_mesh(tmp_path, monkeypatch, *, auth_tokens=None):
     from src.shared.types import AgentPermissions
 
     projects_dir = tmp_path / "projects"
-    (projects_dir / "proj-a").mkdir(parents=True)
-    (projects_dir / "proj-b").mkdir(parents=True)
-    (projects_dir / "proj-a" / "metadata.yaml").write_text(
-        yaml.dump({
-            "name": "proj-a",
-            "members": ["agent-a"],
-            "created_at": "2026-05-08T00:00:00+00:00",
-        }),
-    )
-    (projects_dir / "proj-b" / "metadata.yaml").write_text(
-        yaml.dump({
-            "name": "proj-b",
-            "members": ["agent-b"],
-            "created_at": "2026-05-08T00:00:00+00:00",
-        }),
-    )
+    projects_dir.mkdir(parents=True)
 
     perms = PermissionMatrix()
     # Permissive — the enforcement layer is NOT under test here.
@@ -91,6 +75,12 @@ def _build_mesh(tmp_path, monkeypatch, *, auth_tokens=None):
         blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
         cost_tracker=costs, trace_store=traces, auth_tokens=auth_tokens,
     )
+    # Team layout on the app's store: proj-a=[agent-a], proj-b=[agent-b],
+    # agent-c standalone.
+    app.teams_store.create_team("proj-a")
+    app.teams_store.add_member("proj-a", "agent-a")
+    app.teams_store.create_team("proj-b")
+    app.teams_store.add_member("proj-b", "agent-b")
     # Reset the module-level counter so each test starts at zero.
     server_module._blackboard_xteam_count["read"] = 0
     server_module._blackboard_xteam_count["write"] = 0
@@ -158,13 +148,7 @@ async def test_same_project_does_not_increment(tmp_path, monkeypatch):
     app, bb, projects_dir, server_module = _build_mesh(tmp_path, monkeypatch)
     try:
         # Add a second member to proj-a so two callers share one project.
-        (projects_dir / "proj-a" / "metadata.yaml").write_text(
-            yaml.dump({
-                "name": "proj-a",
-                "members": ["agent-a", "agent-c"],
-                "created_at": "2026-05-08T00:00:00+00:00",
-            }),
-        )
+        app.teams_store.add_member("proj-a", "agent-c")
         bb.write("scratch/note", {"hello": "world"}, written_by="agent-a")
         with patch("src.cli.config.TEAMS_DIR", projects_dir):
             async with AsyncClient(

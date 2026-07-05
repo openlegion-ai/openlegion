@@ -334,6 +334,28 @@ Status: **RATIFIED** except items 1 and 4, which stand at their safe defaults pe
 6. ✅ **Delivery: separate PR per unit.** Each logical unit lands as its own GitHub PR off `main`
    (green + regression-tested + lint-clean), reviewed incrementally, rather than one accumulating
    branch.
+7. ✅ **RATIFIED (2026-07-05) — C.3-b: goals live in the Team store.** The Phase-1 `TeamStore`
+   (SQLite, `data/teams.db`) is the canonical home for BOTH goal kinds: team-level goals
+   (`north_star` / `success_criteria` — absorbed from `metadata.yaml` as columns on the `teams`
+   row) and per-agent standing goals (an `agent_goals` table **keyed by `agent_id` alone**,
+   since membership is strictly one-team-per-agent — goals follow the agent across team moves,
+   fixing today's orphaning where `teams/{old}/goals/{agent}` strands on reassignment). The
+   blackboard `goals/{agent_id}` key path is DELETED (writer `set_agent_goals`, reader
+   `loop._fetch_goals`, dashboard reader, and the `permissions.py` goals carve-outs — the
+   anti-injection `goals/` write-block and the self-read exception become dead policy once no
+   prompt-injected surface is named "goals," so they go too). Read path becomes
+   `GET /mesh/agents/{id}/goals` (self-or-operator); write stays operator-only.
+   *Rationale:* (a) Layer-3 placement — goals are accumulated state; the blackboard is slated
+   for demotion to ephemeral signals (Phase 2) and `metadata.yaml` is absorbed by the store
+   anyway, so the store is the only home consistent with the roadmap; (b) solo = team-of-one
+   (ratified #5, same phase) makes store-held goals total — every agent has a governance home;
+   (c) Phase-3 agenda loop (per-agent read) and Phase-4 wizard/lead (team goals → job
+   descriptions) become plain queries on one DB; Personnel-File export picks up agent goals by
+   id. *Declined sub-option:* "field on the agent record" (`agents.yaml`) — goals are written
+   by LLM tools at runtime and `agents.yaml` carries the documented B-pre #2 lost-update race;
+   config is not accumulated state. *Out of scope:* the operator's business-goals document
+   (`GOALS.json`/`GOALS.md` via `manage_goals`) is a human-facing org-outcomes doc owned by the
+   operator workflow — a different layer, kept as-is (boundary documented like C.3-d).
 
 ---
 
@@ -475,6 +497,40 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   `tests/test_agent_bearer_auth.py` (20); touched suites green.
 
 
+
+- **✅ Landed — Phase-1 unit 1: TeamStore + full consumer repoint (C.1 row 1 complete).**
+  Ratified §8 #7 (C.3-b: goals live in the Team store) FIRST, then built the store around
+  it. `src/host/teams.py`: SQLite `data/teams.db` (env `OPENLEGION_TEAMS_DB`), canonical
+  v1 (`PRAGMA user_version = 1`, per-op WAL conns, `:memory:` shared-conn for tests) —
+  teams (metadata + north_star/success_criteria + settings + B4 budget-envelope columns +
+  Phase-2 drive/thread pointers), `team_members` (one-team-per-agent via `agent_id`
+  PRIMARY KEY), `agent_goals` (keyed by agent alone; populated by the goals-repoint
+  follow-up). The store owns the `config/teams/{id}/` scaffold (team.md + workflows/);
+  `metadata.yaml` is GONE — `_load_teams()`, all `_*_team` CLI helpers, `cfg["teams"]`/
+  `cfg["_agent_teams"]`, and the `TeamMetadata` model deleted; every consumer repointed
+  (server.py ~67 sites, dashboard ~35, runtime/repl/cli, `MessageRouter` takes a
+  `team_resolver` callable, captcha `_tenant_for` reads the DB read-only via
+  `file:...?mode=ro`). Endpoint semantics preserved exactly (status codes, response
+  shapes, archived counting, ACL rewiring order, cron summary-job lifecycle).
+  **Adversarial review (4 finder dimensions + 3 test-diff subreviews) — 6 findings
+  confirmed and fixed pre-PR:** (1) reserved ids (`operator`/`mesh`/`default`/
+  `canary-probe`) were creatable as team ids — validator regressed vs main's
+  `_validate_agent_name` delegation [medium]; (2) `re.match` accepted trailing newline →
+  `fullmatch`; (3) multi-statement mutators (add_member/delete_team/remove_agent) were
+  non-atomic across the mesh + CLI's second process handle → `BEGIN IMMEDIATE` `_txn`;
+  (4) delete→recreate silently adopted a stale `team.md` into new members' prompts →
+  scaffold always overwrites; (5) browser-zone `_tenant_for` instantiated the store
+  (writable conn + DDL) → read-only URI + plain SELECT seam; (6) team.md brief/context
+  writes could 500 after a failed scaffold (DB row now the existence truth) → store
+  `team_md_path` + parent mkdir. Plus one coverage gap closed (create-with-existing-
+  member ACL strip was untested). **Accepted with documentation:** `MessageRouter`
+  team lookups now cost two short-lived SQLite reads per routed message (sub-ms,
+  operator-rate traffic; Phase-2 Threads reworks messaging anyway); membership gates
+  read LIVE state — members created-with-team are prefix-restricted immediately
+  (tightening) and team-delete un-gates ex-members immediately instead of at restart
+  (matches intended solo semantics). **Explicit call-out per ratified #4 (no-compat
+  mandate):** there is NO YAML→SQLite import — pre-existing `config/teams/*/
+  metadata.yaml` teams do not carry over; clean-slate deploys only.
 
 ### YOU ARE HERE → next phase
 Foundation (#1180/#1181/#1183/#1184) and the rename (#1185) are merged. Phase 0's removal

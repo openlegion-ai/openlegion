@@ -252,10 +252,11 @@ the storage prefix is `teams/...`.)
 
 ### Team Data
 
-Team configuration is stored in `config/teams/{name}/`. Each team
-directory contains `metadata.yaml` (name, description, created_at,
-members list) and `team.md` (shared context
-mounted read-only into member containers).
+Team identity, metadata, and membership live in the SQLite-backed
+`TeamStore` (`data/teams.db`, `src/host/teams.py`). Each team also
+owns an on-disk scaffold at `config/teams/{name}/` containing
+`team.md` (shared context mounted read-only into member containers)
+and `workflows/`.
 
 ## Data Flow
 

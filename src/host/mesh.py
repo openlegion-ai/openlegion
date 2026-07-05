@@ -14,6 +14,7 @@ import sqlite3
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -747,14 +748,17 @@ class MessageRouter:
         permissions: PermissionMatrix,
         agent_registry: dict[str, str],
         trace_store: Any = None,
-        agent_teams: dict[str, str] | None = None,
+        team_resolver: Callable[[str], str | None] | None = None,
     ):
         self.permissions = permissions
         self.agent_registry: dict[str, str] = agent_registry
         self.agent_roles: dict[str, str] = {}
         self.message_log: deque[dict] = deque(maxlen=10_000)
         self._capabilities_cache: dict[str, list[str]] = {}
-        self._agent_teams: dict[str, str] = agent_teams or {}
+        # Resolves agent_id → team_id (None for solo agents). Wired to
+        # ``TeamStore.team_of`` by the runtime; None disables the
+        # cross-team block entirely (standalone test constructions).
+        self.team_resolver: Callable[[str], str | None] | None = team_resolver
         self._registry_lock = threading.Lock()
         self._client: httpx.AsyncClient | None = None
         self._client_lock: asyncio.Lock | None = None
@@ -784,9 +788,9 @@ class MessageRouter:
     async def route(self, message: AgentMessage) -> dict:
         """Route a message. Resolves capability-based addressing. Enforces permissions."""
         # Cross-team message blocking
-        if self._agent_teams:
-            from_team = self._agent_teams.get(message.from_agent)
-            to_team = self._agent_teams.get(message.to)
+        if self.team_resolver is not None:
+            from_team = self.team_resolver(message.from_agent)
+            to_team = self.team_resolver(message.to)
             system_agents = {"mesh"}
             if (
                 from_team and to_team

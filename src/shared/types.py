@@ -730,33 +730,6 @@ class AgentConfig(BaseModel):
     model_config = {"extra": "allow"}
 
 
-# === Teams ===
-
-
-class TeamMetadata(BaseModel):
-    """Team definition loaded from config/teams/<name>/metadata.yaml.
-
-    ``status`` defaults to ``"active"``; operator product tools use
-    ``"archived"`` to stop scheduling and hide the team from default
-    list views without deleting its data. Archive is reversible; delete
-    requires archive first plus a separate human-confirmed step.
-
-    ``north_star`` and ``success_criteria`` capture the team's goal as
-    first-class fields. Both are nullable for backwards compatibility —
-    teams that predate this schema simply have ``None`` and the UI
-    renders an empty-state placeholder.
-    """
-
-    name: str
-    description: str = ""
-    members: list[str] = []
-    created_at: str | None = None
-    status: str = "active"
-    settings: dict[str, Any] = {}
-    north_star: str | None = None
-    success_criteria: list[str] | None = None
-
-
 # === Coordination Requests ===
 
 
