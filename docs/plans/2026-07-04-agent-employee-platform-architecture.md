@@ -334,6 +334,28 @@ Status: **RATIFIED** except items 1 and 4, which stand at their safe defaults pe
 6. ✅ **Delivery: separate PR per unit.** Each logical unit lands as its own GitHub PR off `main`
    (green + regression-tested + lint-clean), reviewed incrementally, rather than one accumulating
    branch.
+7. ✅ **RATIFIED (2026-07-05) — C.3-b: goals live in the Team store.** The Phase-1 `TeamStore`
+   (SQLite, `data/teams.db`) is the canonical home for BOTH goal kinds: team-level goals
+   (`north_star` / `success_criteria` — absorbed from `metadata.yaml` as columns on the `teams`
+   row) and per-agent standing goals (an `agent_goals` table **keyed by `agent_id` alone**,
+   since membership is strictly one-team-per-agent — goals follow the agent across team moves,
+   fixing today's orphaning where `teams/{old}/goals/{agent}` strands on reassignment). The
+   blackboard `goals/{agent_id}` key path is DELETED (writer `set_agent_goals`, reader
+   `loop._fetch_goals`, dashboard reader, and the `permissions.py` goals carve-outs — the
+   anti-injection `goals/` write-block and the self-read exception become dead policy once no
+   prompt-injected surface is named "goals," so they go too). Read path becomes
+   `GET /mesh/agents/{id}/goals` (self-or-operator); write stays operator-only.
+   *Rationale:* (a) Layer-3 placement — goals are accumulated state; the blackboard is slated
+   for demotion to ephemeral signals (Phase 2) and `metadata.yaml` is absorbed by the store
+   anyway, so the store is the only home consistent with the roadmap; (b) solo = team-of-one
+   (ratified #5, same phase) makes store-held goals total — every agent has a governance home;
+   (c) Phase-3 agenda loop (per-agent read) and Phase-4 wizard/lead (team goals → job
+   descriptions) become plain queries on one DB; Personnel-File export picks up agent goals by
+   id. *Declined sub-option:* "field on the agent record" (`agents.yaml`) — goals are written
+   by LLM tools at runtime and `agents.yaml` carries the documented B-pre #2 lost-update race;
+   config is not accumulated state. *Out of scope:* the operator's business-goals document
+   (`GOALS.json`/`GOALS.md` via `manage_goals`) is a human-facing org-outcomes doc owned by the
+   operator workflow — a different layer, kept as-is (boundary documented like C.3-d).
 
 ---
 
