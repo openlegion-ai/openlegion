@@ -224,6 +224,82 @@ def _install_protocol_version_guard(app: FastAPI) -> None:
         return await call_next(request)
 
 
+def _install_mesh_auth_guard(app: FastAPI, agent_id: str) -> None:
+    """Require the mesh→agent bearer token on every request (audit C1, B7).
+
+    The mesh mints a per-agent token at container start (``runtime.py
+    start_agent``) and injects it into the container as ``MESH_AUTH_TOKEN``.
+    That token already authenticates the agent→mesh direction; this guard
+    closes the loop by verifying the *same* token on the mesh→agent
+    direction, so a peer container (flat bridge) or a host-network caller
+    can no longer drive this agent by forging the ``x-mesh-internal``
+    header. Defense-in-depth: the ICC-off bridge + loopback port publish
+    remain the primary network boundary.
+
+    Behavior:
+      * ``MESH_AUTH_TOKEN`` unset/empty → fail-open (no enforcement). Dev
+        harnesses, tests, and tokenless deployments keep working; tokenless
+        *production* is already prevented upstream by the mesh's boot
+        fail-closed check (Constraint #12).
+      * Token set → every request must carry ``Authorization: Bearer
+        <token>`` (constant-time compare via ``hmac.compare_digest``).
+      * Sole exemption: ``GET /status``. It is the reachability probe used
+        by ``Transport.is_reachable``, ``DockerBackend.wait_for_agent``,
+        the health monitor, and the detached CLI — all must be able to
+        answer "is this container up?" without holding the token (B7).
+        No other endpoint is probe-shaped: everything else either mutates
+        state or returns agent-private data, so nothing else is exempt.
+
+    The token is captured at install time (env pickup in the app factory,
+    mirroring ``mesh_client.py``/``llm.py`` ctor pickup — Constraint #8:
+    no module-level globals). The container env never changes after boot;
+    a restart re-mints the token and rebuilds the app anyway.
+
+    Ordering: registered LAST in ``create_agent_app`` so it is the
+    OUTERMOST middleware (Starlette runs middlewares in reverse
+    registration order). Auth therefore runs before the protocol-version
+    guard and the body-size drain: an unauthenticated caller learns
+    nothing (not even the protocol version) and never causes the body
+    buffer work — 401 short-circuits before ``call_next``.
+    """
+    import hmac
+
+    expected = os.environ.get("MESH_AUTH_TOKEN", "")
+
+    if not expected:
+        return
+
+    from starlette.responses import JSONResponse as _StarletteJSONResponse
+
+    expected_bytes = expected.encode()
+
+    @app.middleware("http")
+    async def _enforce_mesh_auth(request: Request, call_next):
+        if request.method == "GET" and request.url.path == "/status":
+            return await call_next(request)
+        auth = request.headers.get("authorization", "")
+        scheme, _, presented = auth.partition(" ")
+        token = presented.strip() if scheme.lower() == "bearer" else ""
+        if not hmac.compare_digest(token.encode(), expected_bytes):
+            return _StarletteJSONResponse(
+                {
+                    "detail": (
+                        f"mesh→agent bearer token missing or wrong for agent "
+                        f"'{agent_id}': this agent server requires "
+                        "'Authorization: Bearer <MESH_AUTH_TOKEN>' on every "
+                        "request except GET /status. The mesh transport sends "
+                        "it automatically; a 401 here usually means a stale "
+                        "caller that predates this container's restart "
+                        "(tokens rotate on every agent start)."
+                    ),
+                    "agent": agent_id,
+                },
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return await call_next(request)
+
+
 def create_agent_app(loop: AgentLoop) -> FastAPI:
     """Create the FastAPI application for an agent container."""
     # M19: disable interactive API docs / OpenAPI schema by default; gate dev
@@ -236,6 +312,8 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
     app = FastAPI(title=f"OpenLegion Agent: {loop.agent_id}", **_docs_kwargs)
     _install_body_size_limit(app)
     _install_protocol_version_guard(app)
+    # Registered last → outermost middleware → auth runs first (see docstring).
+    _install_mesh_auth_guard(app, loop.agent_id)
     _task_accept_lock = asyncio.Lock()
 
     @app.post("/task")

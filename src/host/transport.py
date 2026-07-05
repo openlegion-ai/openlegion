@@ -26,11 +26,40 @@ logger = setup_logging("host.transport")
 class Transport(abc.ABC):
     """Abstract transport for reaching an agent's HTTP API."""
 
-    def _resolve_headers(self, headers: dict[str, str] | None) -> dict[str, str]:
-        """Return *headers* with mesh-internal marker and trace context.
+    def __init__(self) -> None:
+        # agent_id -> mesh→agent bearer token. The agent server (B7) requires
+        # ``Authorization: Bearer <MESH_AUTH_TOKEN>`` on every request except
+        # ``GET /status``; this mapping supplies the per-agent token. Wired
+        # via ``bind_tokens`` (production: the runtime's LIVE ``auth_tokens``
+        # dict, so restart-rotated tokens are picked up automatically) or
+        # ``register_token`` (granular, mirrors ``register(agent_id, url)``).
+        self._agent_tokens: dict[str, str] = {}
+
+    def register_token(self, agent_id: str, token: str) -> None:
+        """Record the mesh→agent bearer token for *agent_id*."""
+        self._agent_tokens[agent_id] = token
+
+    def bind_tokens(self, tokens: dict[str, str]) -> None:
+        """Bind a LIVE agent_id→token mapping (kept by reference, not copied).
+
+        Production wiring passes ``runtime.auth_tokens`` — the same dict the
+        backend mutates on every ``start_agent``/``remove_agent`` — so every
+        registration path (initial start, REPL /restart, health-monitor
+        restart, dashboard restart, /mesh/register) is covered by a single
+        bind at transport construction, and token rotation on container
+        restart needs no per-call-site re-sync.
+        """
+        self._agent_tokens = tokens
+
+    def _resolve_headers(
+        self, headers: dict[str, str] | None, agent_id: str | None = None,
+    ) -> dict[str, str]:
+        """Return *headers* with mesh-internal marker, trace context, and auth.
 
         Always injects X-Mesh-Internal so agent endpoints can distinguish
         mesh/dashboard requests from agent self-calls (http_request tool).
+        When the target agent's mesh→agent bearer token is known, attaches
+        it as ``Authorization`` (the agent server enforces it — audit C1/B7).
         """
         if headers is None:
             from src.shared.trace import trace_headers
@@ -40,6 +69,9 @@ class Transport(abc.ABC):
         # version-skewed mesh (rolling upgrade) instead of mis-decoding JSON.
         from src.shared.trace import PROTOCOL_VERSION, PROTOCOL_VERSION_HEADER
         headers.setdefault(PROTOCOL_VERSION_HEADER, PROTOCOL_VERSION)
+        token = self._agent_tokens.get(agent_id) if agent_id else None
+        if token:
+            headers.setdefault("Authorization", f"Bearer {token}")
         return headers
 
     @abc.abstractmethod
@@ -91,6 +123,7 @@ class HttpTransport(Transport):
     """Direct HTTP transport -- for agents running in Docker containers."""
 
     def __init__(self) -> None:
+        super().__init__()
         self._urls: dict[str, str] = {}
         # One httpx.AsyncClient per event loop — each loop's client has
         # asyncio internals bound to that loop.  Keyed by id(loop).
@@ -134,7 +167,7 @@ class HttpTransport(Transport):
             client = await self._get_client()
             resp = await client.request(
                 method, f"{url}{path}", json=json, timeout=timeout,
-                headers=self._resolve_headers(headers),
+                headers=self._resolve_headers(headers, agent_id=agent_id),
             )
             resp.raise_for_status()
             return resp.json()
@@ -178,7 +211,7 @@ class HttpTransport(Transport):
             client = await self._get_client()
             async with client.stream(
                 method, f"{url}{path}", json=json, timeout=timeout,
-                headers=self._resolve_headers(headers),
+                headers=self._resolve_headers(headers, agent_id=agent_id),
             ) as resp:
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():
@@ -222,7 +255,7 @@ class HttpTransport(Transport):
         try:
             resp = httpx.request(
                 method, f"{url}{path}", json=json, timeout=timeout,
-                headers=self._resolve_headers(headers),
+                headers=self._resolve_headers(headers, agent_id=agent_id),
             )
             resp.raise_for_status()
             return resp.json()
@@ -267,7 +300,7 @@ class SandboxTransport(Transport):
             "curl", "-s", "-X", method, url,
             "-H", "Content-Type: application/json",
         ]
-        for hk, hv in self._resolve_headers(headers).items():
+        for hk, hv in self._resolve_headers(headers, agent_id=agent_id).items():
             cmd.extend(["-H", f"{hk}: {hv}"])
         if json is not None:
             cmd.extend(["-d", json_module.dumps(json)])
@@ -329,7 +362,7 @@ class SandboxTransport(Transport):
             "curl", "-s", "-X", method, url,
             "-H", "Content-Type: application/json",
         ]
-        for hk, hv in self._resolve_headers(headers).items():
+        for hk, hv in self._resolve_headers(headers, agent_id=agent_id).items():
             cmd.extend(["-H", f"{hk}: {hv}"])
         if json is not None:
             cmd.extend(["-d", json_module.dumps(json)])

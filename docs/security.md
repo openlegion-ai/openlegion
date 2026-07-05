@@ -369,6 +369,15 @@ Each agent receives a unique auth token at startup (`MESH_AUTH_TOKEN`). All requ
 - Container-to-container communication bypassing the mesh
 - Unauthorized access to mesh endpoints
 
+### Mesh→Agent Bearer Auth (agent server)
+
+The same per-agent token authenticates the **reverse direction**. The agent's FastAPI server (:8400) requires `Authorization: Bearer <MESH_AUTH_TOKEN>` on every request (constant-time compare, `src/agent/server.py:_install_mesh_auth_guard`); previously it trusted the forgeable `x-mesh-internal` header alone (audit C1 second leg). Defense-in-depth for host-network-mode / published-port exposure — the ICC-off bridge and loopback port publish remain the primary network boundary.
+
+- **Sole exemption: `GET /status`** — the reachability probe (`Transport.is_reachable`, health monitor, `wait_for_agent`, detached CLI) must work tokenless. Everything else mutates state or returns agent-private data.
+- **Token unset → fail-open** (dev harnesses, tests). Tokenless *production* is already prevented by the mesh's boot fail-closed gate (empty `auth_tokens` under enforce mode → `SystemExit`).
+- **Callers**: the mesh `Transport` attaches the token automatically (bound to the runtime's live `auth_tokens` dict, so restart-rotated tokens need no re-wiring); the mesh's few raw-httpx agent calls use `_agent_bearer_headers`; the detached CLI (`openlegion chat`) fetches the token via `GET /mesh/agents/{id}/token`, which is disclosed **only** to loopback + `x-mesh-internal` callers (a leg agent containers can never satisfy — their traffic arrives from the Docker bridge).
+- A 401 from an agent server names the agent and the missing/wrong mesh→agent bearer, so operators can diagnose stale callers (tokens rotate on every container start).
+
 ### `BROWSER_AUTH_TOKEN` is a fleet-wide superuser credential
 
 `BROWSER_AUTH_TOKEN` is a **single, fleet-wide** bearer token. The browser service has **no per-agent identity**: `_verify_auth` (`src/browser/server.py`) compares the request's `Authorization: Bearer <token>` against the one shared token via `hmac.compare_digest` and nothing else. The service trusts the `agent_id` in the URL path (`/browser/{agent_id}/...`) entirely — it never cross-checks that the caller "is" that agent. **Any holder of `BROWSER_AUTH_TOKEN` can therefore drive ANY agent's browser** (navigate, screenshot, fill forms, read the accessibility tree, import session state, etc.).
