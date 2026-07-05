@@ -306,16 +306,52 @@ def chat(name: str | None, port: int):
     click.echo("Type a message to chat. /help for commands.\n")
 
     try:
-        _single_agent_repl(agent_name=name, agent_url=agent_url, mesh_port=port)
+        _single_agent_repl(
+            agent_name=name, agent_url=agent_url, mesh_port=port,
+            headers=_agent_auth_headers(name, port),
+        )
     except KeyboardInterrupt:
         click.echo("\nDisconnected.")
 
 
-def _single_agent_repl(agent_name: str, agent_url: str, mesh_port: int = 8420) -> None:
+def _agent_auth_headers(agent_name: str, mesh_port: int) -> dict[str, str]:
+    """Fetch the mesh→agent bearer token for direct agent :8400 calls (B7).
+
+    The agent server requires ``Authorization: Bearer <MESH_AUTH_TOKEN>`` on
+    everything except ``GET /status``. The detached CLI runs in a separate
+    process from the mesh, so it can't read ``runtime.auth_tokens`` directly;
+    it asks the mesh's loopback-internal ``/mesh/agents/{id}/token`` endpoint
+    instead. Best-effort: a tokenless deployment (agent fails open) or an
+    older mesh without the endpoint yields empty headers and everything
+    keeps working as before.
+    """
+    import httpx
+
+    try:
+        resp = httpx.get(
+            f"http://localhost:{mesh_port}/mesh/agents/{agent_name}/token",
+            headers={"x-mesh-internal": "1"},
+            timeout=5,
+        )
+        if resp.status_code == 200:
+            token = resp.json().get("token", "")
+            if token:
+                return {"Authorization": f"Bearer {token}"}
+    except Exception:
+        pass
+    return {}
+
+
+def _single_agent_repl(
+    agent_name: str, agent_url: str, mesh_port: int = 8420,
+    headers: dict[str, str] | None = None,
+) -> None:
     """Interactive chat REPL with a single agent (for detached mode)."""
     import httpx
 
     from src.cli.formatting import user_prompt
+
+    headers = headers or {}
 
     while True:
         try:
@@ -332,7 +368,7 @@ def _single_agent_repl(agent_name: str, agent_url: str, mesh_port: int = 8420) -
                 break
             elif cmd == "/reset":
                 try:
-                    httpx.post(f"{agent_url}/chat/reset", timeout=5)
+                    httpx.post(f"{agent_url}/chat/reset", headers=headers, timeout=5)
                     click.echo("Conversation reset.")
                 except Exception as e:
                     click.echo(f"Error: {e}", err=True)
@@ -412,12 +448,15 @@ def _single_agent_repl(agent_name: str, agent_url: str, mesh_port: int = 8420) -
 
         # Try streaming first, fall back to sync
         try:
-            _stream_detached_chat(agent_name, agent_url, user_input)
+            _stream_detached_chat(agent_name, agent_url, user_input, headers=headers)
         except (httpx.HTTPError, httpx.StreamError, OSError):
-            _sync_detached_chat(agent_name, agent_url, user_input)
+            _sync_detached_chat(agent_name, agent_url, user_input, headers=headers)
 
 
-def _stream_detached_chat(agent_name: str, agent_url: str, message: str) -> None:
+def _stream_detached_chat(
+    agent_name: str, agent_url: str, message: str,
+    headers: dict[str, str] | None = None,
+) -> None:
     """Stream a chat response via SSE."""
     import httpx
 
@@ -432,7 +471,7 @@ def _stream_detached_chat(agent_name: str, agent_url: str, message: str) -> None
     tool_count = 0
     with httpx.stream(
         "POST", f"{agent_url}/chat/stream",
-        json={"message": message}, timeout=120,
+        json={"message": message}, headers=headers or {}, timeout=120,
     ) as resp:
         resp.raise_for_status()
         for line in resp.iter_lines():
@@ -468,14 +507,18 @@ def _stream_detached_chat(agent_name: str, agent_url: str, message: str) -> None
         click.echo("")
 
 
-def _sync_detached_chat(agent_name: str, agent_url: str, message: str) -> None:
+def _sync_detached_chat(
+    agent_name: str, agent_url: str, message: str,
+    headers: dict[str, str] | None = None,
+) -> None:
     """Synchronous chat fallback."""
     import httpx
 
     from src.cli.formatting import display_response
 
     resp = httpx.post(
-        f"{agent_url}/chat", json={"message": message}, timeout=120,
+        f"{agent_url}/chat", json={"message": message},
+        headers=headers or {}, timeout=120,
     )
     if resp.status_code != 200:
         click.echo(f"Error: HTTP {resp.status_code}: {resp.text}", err=True)

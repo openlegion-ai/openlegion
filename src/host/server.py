@@ -917,6 +917,19 @@ def create_mesh_app(
     _auth_tokens = auth_tokens if auth_tokens is not None else {}
     _agent_teams = agent_teams if agent_teams is not None else {}
 
+    def _agent_bearer_headers(agent_id: str) -> dict[str, str]:
+        """Mesh→agent bearer auth header for direct (non-Transport) agent calls.
+
+        The agent server (B7) requires ``Authorization: Bearer
+        <MESH_AUTH_TOKEN>`` on every request except ``GET /status``. The
+        Transport layer attaches this automatically; the few endpoints below
+        that hit an agent URL with a raw httpx client must attach it
+        themselves. Empty dict when no token is known (tokenless dev mode —
+        the agent side fails open then too).
+        """
+        token = _auth_tokens.get(agent_id, "")
+        return {"Authorization": f"Bearer {token}"} if token else {}
+
     # Fail-closed startup gate for the operator trust tier.
     #
     # Threat model: under ``_TEAM_SCOPE_MODE=enforce`` the mesh derives
@@ -3334,6 +3347,32 @@ def create_mesh_app(
                 return filtered
         return full_fleet
 
+    @app.get("/mesh/agents/{agent_id}/token")
+    async def get_agent_mesh_token(agent_id: str, request: Request) -> dict:
+        """Disclose an agent's mesh→agent bearer token to loopback callers.
+
+        The agent server enforces ``Authorization: Bearer <MESH_AUTH_TOKEN>``
+        on every request except ``GET /status`` (B7). The mesh transport and
+        the in-process dashboard hold the token dict directly, but the
+        detached CLI (``openlegion chat`` / ``openlegion status`` in a
+        separate process) calls the agent's :8400 directly and needs the
+        token from somewhere. This endpoint hands it out ONLY to loopback +
+        ``x-mesh-internal`` callers (:func:`_is_internal_caller`) — the same
+        trust leg that already grants operator-tier access to a local human
+        process, and one an agent container can never satisfy (its requests
+        arrive from the Docker bridge, not loopback). 404 when the agent is
+        unknown or no token exists (tokenless dev mode — the agent side
+        fails open then, so the CLI simply sends no header).
+        """
+        if not _is_internal_caller(request):
+            _record_denial("permission", caller="external", gate="agents.token:internal-only")
+            raise HTTPException(403, "Agent token disclosure is loopback-internal only")
+        agent_id = _validate_agent_id(agent_id)
+        token = _auth_tokens.get(agent_id, "")
+        if not token:
+            raise HTTPException(404, f"No mesh auth token for agent: {agent_id}")
+        return {"agent_id": agent_id, "token": token}
+
     # === Agent Introspection ===
 
     @app.get("/mesh/introspect")
@@ -4400,7 +4439,10 @@ def create_mesh_app(
         import httpx
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(f"{agent_url}/history", params={"days": days})
+                resp = await client.get(
+                    f"{agent_url}/history", params={"days": days},
+                    headers=_agent_bearer_headers(agent_id),
+                )
                 resp.raise_for_status()
                 return resp.json()
         except Exception as e:
@@ -4526,7 +4568,10 @@ def create_mesh_app(
             import httpx
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
-                    resp = await client.get(f"{agent_url}/workspace/INTERFACE.md")
+                    resp = await client.get(
+                        f"{agent_url}/workspace/INTERFACE.md",
+                        headers=_agent_bearer_headers(agent_id),
+                    )
                     if resp.status_code == 200:
                         content = resp.json().get("content", "")
                         if content and content.strip() not in ("", "# Interface"):
@@ -10454,6 +10499,9 @@ def create_mesh_app(
                 ingest_headers: dict = {
                     "X-Mesh-Internal": "1",
                     "Content-Type": "application/octet-stream",
+                    # Mesh→agent bearer auth (B7): the ingest POST streams
+                    # raw bytes with a plain httpx client, not the Transport.
+                    **_agent_bearer_headers(req_agent_id),
                 }
                 if incoming_trace:
                     ingest_headers["X-Trace-Id"] = incoming_trace

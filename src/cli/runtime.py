@@ -480,6 +480,11 @@ class RuntimeContext:
         else:
             self.transport = HttpTransport()
             _ensure_docker_image()
+        # Mesh→agent bearer auth (B7): bind the runtime's LIVE token dict so
+        # every URL-registration path (initial start, /restart, health-monitor
+        # restart, dashboard restart, /mesh/register) automatically sends the
+        # current per-agent token — including tokens re-minted on restart.
+        self.transport.bind_tokens(self.runtime.auth_tokens)
 
     def _create_components(self) -> None:
         from src.cli.config import (
@@ -820,6 +825,9 @@ class RuntimeContext:
                     )
                     self.runtime.set_connector_store(self.connector_store)
                     self.transport = HttpTransport()
+                    # Fresh backend → fresh auth_tokens dict; re-bind so the
+                    # replacement transport keeps sending mesh→agent bearers.
+                    self.transport.bind_tokens(self.runtime.auth_tokens)
                     _ensure_docker_image()
                     url = self.runtime.start_agent(
                         agent_id=agent_id,

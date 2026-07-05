@@ -457,6 +457,23 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   mirroring the `MESH_AUTH_TOKEN` ctor pattern. Spend split + broader tiering policy
   deliberately NOT included (this is the hook only). Tests in `test_llm_model_pin.py`,
   `test_llm.py`, `test_context.py`, `test_loop.py`, `test_runtime.py`.
+- **✅ Landed — mesh→agent bearer auth on the agent server (Phase-0 residual (b), §4
+  closed-regardless / audit C1 second leg).** The agent server (:8400) now verifies
+  `Authorization: Bearer <MESH_AUTH_TOKEN>` on every request via an outermost middleware
+  (`_install_mesh_auth_guard`, constant-time compare; env unset = fail-open for dev/tests —
+  tokenless production is already blocked by the trust-tier boot gate). **B7 honored:
+  enforcement and caller wiring landed in the SAME change** — `Transport._resolve_headers`
+  attaches the per-agent token (the transport binds the runtime's LIVE `auth_tokens` dict
+  via `bind_tokens`, so every register path — initial start, /restart, health-monitor and
+  dashboard restarts, /mesh/register — plus restart token rotation is covered by one bind;
+  `register_token` exists for granular use); the mesh's three raw-httpx agent calls
+  (/history fallback, INTERFACE.md fallback, artifacts/ingest stream) attach it via
+  `_agent_bearer_headers`; the detached CLI (`openlegion chat`) fetches it from the new
+  loopback-internal-only `GET /mesh/agents/{id}/token`. **`GET /status` stays exempt**
+  (sole exemption — reachability probes: `is_reachable`, `wait_for_agent`, health poller,
+  CLI status). No in-container self-callers of :8400 exist (verified). Tests in
+  `tests/test_agent_bearer_auth.py` (20); touched suites green.
+
 
 
 ### YOU ARE HERE → next phase
