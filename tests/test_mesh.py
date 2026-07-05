@@ -2489,3 +2489,61 @@ async def test_proxy_api_stream_sequential_trace_attribution(tmp_path):
         assert _usage_trace_ids(tracker) == ["tr_first0000001", None]
     finally:
         cleanup()
+
+
+# ── project→team re-key gating (post-merge review fix) ─────
+
+
+def test_rekey_migrates_legacy_projects_rows_once(tmp_path):
+    """A pre-rename DB (``user_version`` 0) gets its ``projects/…`` entries
+    and watcher patterns re-keyed to ``teams/…`` on open."""
+    import sqlite3
+
+    db_path = str(tmp_path / "bb.db")
+    bb = Blackboard(db_path=db_path)
+    bb.close()
+
+    # Simulate a pre-rename DB: legacy rows + version stamp rolled back.
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO entries (key, value, written_by) VALUES (?, ?, ?)",
+        ("projects/alpha/tasks/t1", json.dumps({"note": "legacy"}), "agent1"),
+    )
+    conn.execute(
+        "INSERT INTO watchers (agent_id, pattern) VALUES (?, ?)",
+        ("agent1", "projects/alpha/tasks/agent1/*"),
+    )
+    conn.execute("PRAGMA user_version = 0")
+    conn.commit()
+    conn.close()
+
+    bb = Blackboard(db_path=db_path)
+    try:
+        assert bb.read("projects/alpha/tasks/t1") is None
+        entry = bb.read("teams/alpha/tasks/t1")
+        assert entry is not None and entry.value == {"note": "legacy"}
+        assert bb.get_agent_watches("agent1") == ["teams/alpha/tasks/agent1/*"]
+    finally:
+        bb.close()
+
+
+def test_rekey_never_reruns_on_canonical_v1_db(tmp_path):
+    """On a canonical-v1 DB, ``projects/…`` is ordinary user data: it must
+    survive a reopen untouched, and never clobber a ``teams/…`` sibling."""
+    db_path = str(tmp_path / "bb.db")
+    bb = Blackboard(db_path=db_path)
+    bb.write("teams/roadmap", {"state": "team-coordination"}, "agent1")
+    bb.write("projects/roadmap", {"note": "user-project"}, "agent1")
+    bb.add_watch("agent1", "projects/*")
+    bb.close()
+
+    bb = Blackboard(db_path=db_path)
+    try:
+        entry = bb.read("projects/roadmap")
+        assert entry is not None and entry.value == {"note": "user-project"}
+        team_entry = bb.read("teams/roadmap")
+        assert team_entry is not None
+        assert team_entry.value == {"state": "team-coordination"}
+        assert bb.get_agent_watches("agent1") == ["projects/*"]
+    finally:
+        bb.close()

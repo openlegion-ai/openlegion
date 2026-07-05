@@ -1041,6 +1041,31 @@ class RuntimeContext:
                     headers=extra_headers or None,
                     timeout=effective_cap + 60,
                 )
+                # ``HttpTransport.request`` reports failures (unreachable
+                # container, HTTP error, 426 protocol skew) as an error dict
+                # instead of raising. Treating that as a successful turn
+                # would record an "ok" trace and auto-notify the literal
+                # string "(no response)" to the originating human channel.
+                # Return the silent token instead: the worker skips the
+                # notify, and a task-carrying wake stays ``pending`` for the
+                # at-least-once recovery paths.
+                if isinstance(result, dict) and result.get("error"):
+                    err = str(result.get("error"))
+                    duration_ms = int((_time.time() - t0) * 1000)
+                    logger.warning(
+                        "Dispatch to '%s' failed: %s (status_code=%s)",
+                        agent_name, err, result.get("status_code"),
+                    )
+                    if tid and self.trace_store:
+                        self.trace_store.record(
+                            trace_id=tid, source="dispatch", agent=agent_name,
+                            event_type="chat_response", duration_ms=duration_ms,
+                            status="error",
+                            meta={"error": err[:200],
+                                  "status_code": result.get("status_code")},
+                        )
+                    from src.shared.types import SILENT_REPLY_TOKEN
+                    return SILENT_REPLY_TOKEN
                 response = result.get("response", "(no response)")
                 duration_ms = int((_time.time() - t0) * 1000)
                 if tid and self.trace_store:

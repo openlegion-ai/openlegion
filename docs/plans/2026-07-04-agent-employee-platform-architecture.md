@@ -412,6 +412,37 @@ as code lands.
 All five branch off `main`; a local integration merge of all four code branches is **conflict-free
 and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes recorded above).
 
+- **✅ Landed — post-merge adversarial review of the merged stack (2b08fdd..main).**
+  Independent multi-agent review (6 finder dimensions, 3-lens adversarial verification per
+  finding) of #1180/#1181/#1183/#1184/#1185. Six findings confirmed 3/3, one 2/3; all fixed
+  in one follow-up PR:
+  1. The blackboard project→team re-key ran ungated on EVERY boot — a post-rename
+     `projects/…` key (now ordinary user data) would be silently re-keyed at next restart,
+     and via `UPDATE OR REPLACE` could destroy a newer `teams/…` sibling. Now gated on the
+     pre-executescript `PRAGMA user_version` (0 = pre-rename DB → migrate once).
+  2. CLI `/restart` never re-registered the health monitor after an archive deregistration
+     (#1180's follow-up fixed only the dashboard restart path) — mirrored the same guard.
+  3. Archive racing an in-flight `_try_restart`: `unregister` can't reach the coroutine
+     mid-`start_agent`; the restarted container survived archive. `_try_restart` now
+     re-checks `self.agents` post-start and rolls the container back.
+  4. The lane-rehydration startup hook ran `rehydrate_pending` on uvicorn's loop, creating
+     lane queues/workers on the WRONG loop (live wakes hop to `dispatch_loop`, mutating the
+     queue cross-thread). The hook now hops via `run_coroutine_threadsafe` like every other
+     enqueue call site.
+  5. `_direct_dispatch` converted transport error dicts (unreachable agent, 426 skew) into a
+     successful `"(no response)"` turn — ok-status trace + junk auto-notify to the
+     originating human channel, repeated per restart for rehydrated tasks of
+     unreachable/deleted assignees. Error dicts now record an `error` trace and return
+     `SILENT_REPLY_TOKEN` (task stays `pending` for at-least-once recovery). This also
+     closes the 2/3 finding: a protocol-skew 426 no longer masquerades as a completed turn.
+  6. Settle-window double dispatch: a task created+live-woken while the rehydrate sweep was
+     pending was still `pending` in SQLite → enqueued twice. `rehydrate_pending` now skips
+     rows with `created_at >= ` LaneManager construction time.
+  Everything else survived adversarial verification — notably the rename's auth/scoping
+  hunks (`_caller_teams` / `_is_team_member` / publish-subscribe prefix gates), the schema
+  collapse, the re-key's collision semantics on genuinely pre-rename DBs, and the protocol
+  handshake emit/check pair are clean.
+
 ### YOU ARE HERE → next phase
 Foundation (#1180/#1181/#1183/#1184) and the rename (#1185) are merged. Phase 0's removal
 column is fully done. Next, in order:

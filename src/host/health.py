@@ -609,6 +609,19 @@ class HealthMonitor:
                 self.runtime.extra_env.pop("HTTPS_PROXY", None)
                 self.runtime.extra_env.pop("NO_PROXY", None)
 
+            # An archive/delete may have deregistered this agent while
+            # ``start_agent`` was running in the executor (its
+            # ``unregister`` can't reach this in-flight coroutine). Don't
+            # resurrect an intentionally-stopped agent: undo the start
+            # and bail before re-registering it with the router.
+            if agent_id not in self.agents:
+                logger.info(
+                    "Agent '%s' was deregistered during restart "
+                    "(archived/deleted) — stopping the restarted container.",
+                    agent_id,
+                )
+                await loop.run_in_executor(None, self.runtime.stop_agent, agent_id)
+                return
             self.router.register_agent(agent_id, url)
             health.consecutive_failures = 0
             health.restart_count += 1
