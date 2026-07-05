@@ -51,6 +51,14 @@ def _make_components(tmp_path: str, *, include_v2: bool = False) -> dict:
         db_path=os.path.join(tmp_path, "dashboard_conversations.db"),
     )
 
+    # Team authority — tmp-dir backed TeamStore with a scaffold dir so
+    # team CRUD tests exercise the on-disk team.md lifecycle too.
+    from src.host.teams import TeamStore
+    teams_store = TeamStore(
+        db_path=os.path.join(tmp_path, "teams.db"),
+        teams_dir=os.path.join(tmp_path, "teams"),
+    )
+
     result = {
         "blackboard": bb,
         "health_monitor": health_monitor,
@@ -59,6 +67,7 @@ def _make_components(tmp_path: str, *, include_v2: bool = False) -> dict:
         "event_bus": event_bus,
         "agent_registry": agent_registry,
         "opened_conversations_store": opened_conversations_store,
+        "teams_store": teams_store,
     }
 
     if include_v2:
@@ -1619,7 +1628,6 @@ class TestHeartbeatInAgentsAPI:
         mock_load.return_value = {
             "llm": {"default_model": "openai/gpt-4o-mini"},
             "agents": {},
-            "_agent_teams": {},
         }
         hb_job = CronJob(
             id="hb_alpha", agent="alpha", schedule="every 15m",
@@ -1643,7 +1651,6 @@ class TestHeartbeatInAgentsAPI:
         mock_load.return_value = {
             "llm": {"default_model": "openai/gpt-4o-mini"},
             "agents": {},
-            "_agent_teams": {},
         }
         self.components["cron_scheduler"].find_heartbeat_job.return_value = None
         resp = self.client.get("/dashboard/api/agents")
@@ -3042,7 +3049,6 @@ class TestDashboardProjectAPI:
     """Tests for /api/projects and /api/project endpoints."""
 
     def setup_method(self):
-        import yaml
         self._tmpdir = tempfile.mkdtemp()
         self.components = _make_components(self._tmpdir, include_v2=True)
         # Set up runtime mock with project_root
@@ -3052,12 +3058,12 @@ class TestDashboardProjectAPI:
         )
         self.client = _make_client(self.components)
 
-        # Create a project directory for tests
+        # Create a team directory for tests (team.md read/write goes
+        # through TEAMS_DIR; membership lives on the components store)
         self._projects_dir = os.path.join(self._tmpdir, "projects")
         proj_dir = os.path.join(self._projects_dir, "alpha")
         os.makedirs(proj_dir)
-        with open(os.path.join(proj_dir, "metadata.yaml"), "w") as f:
-            yaml.dump({"name": "alpha", "description": "Test", "members": ["bot1"]}, f)
+        self.components["teams_store"].create_team("alpha", description="Test")
         with open(os.path.join(proj_dir, "team.md"), "w") as f:
             f.write("# Alpha Project\nShared context here.")
 
@@ -3141,10 +3147,9 @@ class TestDashboardProjectCRUD:
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_create_team(self):
-        """POST /api/projects creates a project directory."""
+        """POST /api/teams creates the team row + on-disk scaffold."""
         from pathlib import Path
-        with patch("src.cli.config.TEAMS_DIR", Path(self._projects_dir)), \
-             patch("src.cli.config.CONFIG_FILE", Path(self._config_file)), \
+        with patch("src.cli.config.CONFIG_FILE", Path(self._config_file)), \
              patch("src.cli.config.AGENTS_FILE", Path(self._agents_file)), \
              patch("src.cli.config.PERMISSIONS_FILE", Path(self._tmpdir) / "perms.json"):
             resp = self.client.post("/dashboard/api/teams", json={
@@ -3156,7 +3161,8 @@ class TestDashboardProjectCRUD:
         data = resp.json()
         assert data["created"] is True
         assert data["name"] == "myproject"
-        assert os.path.isdir(os.path.join(self._projects_dir, "myproject"))
+        assert self.components["teams_store"].team_exists("myproject")
+        assert os.path.isdir(os.path.join(self._tmpdir, "teams", "myproject"))
 
     def test_create_team_empty_name(self):
         """POST /api/projects with empty name returns 400."""
@@ -3179,47 +3185,39 @@ class TestDashboardProjectCRUD:
         assert "Unknown agents" in resp.json()["detail"]
 
     def test_delete_team(self):
-        """DELETE /api/teams/{name} removes the project."""
+        """DELETE /api/teams/{name} removes the team row + scaffold dir."""
         from pathlib import Path
 
-        import yaml
-        # Create a project first
-        proj_dir = os.path.join(self._projects_dir, "doomed")
-        os.makedirs(proj_dir)
-        with open(os.path.join(proj_dir, "metadata.yaml"), "w") as f:
-            yaml.dump({"name": "doomed", "members": []}, f)
+        # Create a team first
+        self.components["teams_store"].create_team("doomed")
+        proj_dir = os.path.join(self._tmpdir, "teams", "doomed")
+        assert os.path.isdir(proj_dir)
 
-        with patch("src.cli.config.TEAMS_DIR", Path(self._projects_dir)), \
-             patch("src.cli.config.PERMISSIONS_FILE", Path(self._tmpdir) / "perms.json"):
+        with patch("src.cli.config.PERMISSIONS_FILE", Path(self._tmpdir) / "perms.json"):
             resp = self.client.delete("/dashboard/api/teams/doomed")
         assert resp.status_code == 200
         assert resp.json()["deleted"] is True
+        assert not self.components["teams_store"].team_exists("doomed")
         assert not os.path.exists(proj_dir)
 
     def test_delete_team_not_found(self):
-        """DELETE /api/teams/{name} for nonexistent project returns 404."""
-        from pathlib import Path
-        with patch("src.cli.config.TEAMS_DIR", Path(self._projects_dir)):
-            resp = self.client.delete("/dashboard/api/teams/ghost")
+        """DELETE /api/teams/{name} for nonexistent team returns 404."""
+        resp = self.client.delete("/dashboard/api/teams/ghost")
         assert resp.status_code == 404
 
     def test_add_member(self):
-        """POST /api/teams/{name}/members adds an agent to the project."""
+        """POST /api/teams/{name}/members adds an agent to the team."""
         from pathlib import Path
 
-        import yaml
-        proj_dir = os.path.join(self._projects_dir, "team")
-        os.makedirs(proj_dir)
-        with open(os.path.join(proj_dir, "metadata.yaml"), "w") as f:
-            yaml.dump({"name": "team", "members": []}, f)
+        self.components["teams_store"].create_team("team")
 
-        with patch("src.cli.config.TEAMS_DIR", Path(self._projects_dir)), \
-             patch("src.cli.config.PERMISSIONS_FILE", Path(self._tmpdir) / "perms.json"):
+        with patch("src.cli.config.PERMISSIONS_FILE", Path(self._tmpdir) / "perms.json"):
             resp = self.client.post("/dashboard/api/teams/team/members", json={"agent": "alpha"})
         assert resp.status_code == 200
         data = resp.json()
         assert data["added"] is True
         assert data["agent"] == "alpha"
+        assert self.components["teams_store"].team_of("alpha") == "team"
         assert "restarted" in data
         assert isinstance(data["restarted"], bool)
 
@@ -3232,26 +3230,21 @@ class TestDashboardProjectCRUD:
         """DELETE /api/teams/{name}/members/{agent} removes the agent."""
         from pathlib import Path
 
-        import yaml
-        proj_dir = os.path.join(self._projects_dir, "team")
-        os.makedirs(proj_dir, exist_ok=True)
-        with open(os.path.join(proj_dir, "metadata.yaml"), "w") as f:
-            yaml.dump({"name": "team", "members": ["alpha"]}, f)
+        self.components["teams_store"].create_team("team")
+        self.components["teams_store"].add_member("team", "alpha")
 
-        with patch("src.cli.config.TEAMS_DIR", Path(self._projects_dir)), \
-             patch("src.cli.config.PERMISSIONS_FILE", Path(self._tmpdir) / "perms.json"):
+        with patch("src.cli.config.PERMISSIONS_FILE", Path(self._tmpdir) / "perms.json"):
             resp = self.client.delete("/dashboard/api/teams/team/members/alpha")
         assert resp.status_code == 200
         data = resp.json()
         assert data["removed"] is True
+        assert self.components["teams_store"].team_of("alpha") is None
         assert "restarted" in data
         assert isinstance(data["restarted"], bool)
 
     def test_remove_member_not_found(self):
-        """DELETE /api/teams/{name}/members/{agent} for nonexistent project returns 400."""
-        from pathlib import Path
-        with patch("src.cli.config.TEAMS_DIR", Path(self._projects_dir)):
-            resp = self.client.delete("/dashboard/api/teams/ghost/members/alpha")
+        """DELETE /api/teams/{name}/members/{agent} for nonexistent team returns 400."""
+        resp = self.client.delete("/dashboard/api/teams/ghost/members/alpha")
         assert resp.status_code == 400
 
 
@@ -3268,11 +3261,12 @@ class TestDashboardAgentProjectField:
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_agents_include_project_field(self):
-        """Agent entries include a project field (None when no project assigned)."""
+        """Agent entries include a team field (None when no team assigned)."""
+        self.components["teams_store"].create_team("myproject")
+        self.components["teams_store"].add_member("myproject", "alpha")
         with patch("src.cli.config._load_config", return_value={
             "agents": {"alpha": {"role": "coder"}, "beta": {"role": "writer"}},
             "llm": {"default_model": "openai/gpt-4o-mini"},
-            "_agent_teams": {"alpha": "myproject"},
         }):
             resp = self.client.get("/dashboard/api/agents")
         assert resp.status_code == 200
@@ -3283,11 +3277,10 @@ class TestDashboardAgentProjectField:
         assert beta["team"] is None
 
     def test_agents_project_field_absent_when_no_projects(self):
-        """When no projects configured, project field is None for all agents."""
+        """When no teams configured, team field is None for all agents."""
         with patch("src.cli.config._load_config", return_value={
             "agents": {"alpha": {}, "beta": {}},
             "llm": {"default_model": "openai/gpt-4o-mini"},
-            "_agent_teams": {},
         }):
             resp = self.client.get("/dashboard/api/agents")
         assert resp.status_code == 200
@@ -3295,8 +3288,8 @@ class TestDashboardAgentProjectField:
         for agent in data["agents"]:
             assert agent["team"] is None
 
-    def test_agents_project_field_when_agent_teams_key_missing(self):
-        """When _agent_teams key is absent from config, project is None."""
+    def test_agents_project_field_when_no_memberships(self):
+        """With no membership rows in the store, team is None."""
         with patch("src.cli.config._load_config", return_value={
             "agents": {"alpha": {}, "beta": {}},
             "llm": {"default_model": "openai/gpt-4o-mini"},
@@ -3332,13 +3325,13 @@ class TestDashboardBroadcastProjectScoping:
 
         self.components["transport"].stream_request = _mock_stream
 
-        with patch("src.cli.config._load_teams", return_value={
-            "myproject": {"members": ["alpha", "gamma"]},
-        }):
-            resp = self.client.post(
-                "/dashboard/api/broadcast/stream",
-                json={"message": "Hello project", "team": "myproject"},
-            )
+        self.components["teams_store"].create_team("myproject")
+        self.components["teams_store"].add_member("myproject", "alpha")
+        self.components["teams_store"].add_member("myproject", "gamma")
+        resp = self.client.post(
+            "/dashboard/api/broadcast/stream",
+            json={"message": "Hello project", "team": "myproject"},
+        )
         assert resp.status_code == 200
         events = _parse_sse(resp.text)
 
@@ -3374,13 +3367,12 @@ class TestDashboardBroadcastProjectScoping:
 
         self.components["transport"].request = AsyncMock(side_effect=_mock_request)
 
-        with patch("src.cli.config._load_teams", return_value={
-            "proj1": {"members": ["beta"]},
-        }):
-            resp = self.client.post(
-                "/dashboard/api/broadcast",
-                json={"message": "Hello project", "team": "proj1"},
-            )
+        self.components["teams_store"].create_team("proj1")
+        self.components["teams_store"].add_member("proj1", "beta")
+        resp = self.client.post(
+            "/dashboard/api/broadcast",
+            json={"message": "Hello project", "team": "proj1"},
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert "beta" in data["responses"]
@@ -3404,13 +3396,12 @@ class TestDashboardBroadcastProjectScoping:
 
     def test_broadcast_stream_project_no_matching_agents(self):
         """Streaming broadcast with project that has no running members."""
-        with patch("src.cli.config._load_teams", return_value={
-            "empty_proj": {"members": ["nonexistent"]},
-        }):
-            resp = self.client.post(
-                "/dashboard/api/broadcast/stream",
-                json={"message": "Hello", "team": "empty_proj"},
-            )
+        self.components["teams_store"].create_team("empty_proj")
+        self.components["teams_store"].add_member("empty_proj", "nonexistent")
+        resp = self.client.post(
+            "/dashboard/api/broadcast/stream",
+            json={"message": "Hello", "team": "empty_proj"},
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["responses"] == {}
@@ -3418,13 +3409,12 @@ class TestDashboardBroadcastProjectScoping:
 
     def test_broadcast_non_stream_project_no_matching_agents(self):
         """Non-streaming broadcast with project that has no running members."""
-        with patch("src.cli.config._load_teams", return_value={
-            "empty_proj": {"members": ["nonexistent"]},
-        }):
-            resp = self.client.post(
-                "/dashboard/api/broadcast",
-                json={"message": "Hello", "team": "empty_proj"},
-            )
+        self.components["teams_store"].create_team("empty_proj")
+        self.components["teams_store"].add_member("empty_proj", "nonexistent")
+        resp = self.client.post(
+            "/dashboard/api/broadcast",
+            json={"message": "Hello", "team": "empty_proj"},
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert data["responses"] == {}
@@ -3453,13 +3443,13 @@ class TestDashboardBroadcastProjectScoping:
 
         self.components["transport"].stream_request = _mock_stream
 
-        with patch("src.cli.config._load_teams", return_value={
-            "full_proj": {"members": ["alpha", "beta", "gamma"]},
-        }):
-            resp = self.client.post(
-                "/dashboard/api/broadcast/stream",
-                json={"message": "Hello", "team": "full_proj"},
-            )
+        self.components["teams_store"].create_team("full_proj")
+        for aid in ("alpha", "beta", "gamma"):
+            self.components["teams_store"].add_member("full_proj", aid)
+        resp = self.client.post(
+            "/dashboard/api/broadcast/stream",
+            json={"message": "Hello", "team": "full_proj"},
+        )
         assert resp.status_code == 200
         events = _parse_sse(resp.text)
         agent_starts = [e["agent"] for e in events if e["type"] == "agent_start"]
@@ -3483,13 +3473,13 @@ class TestDashboardBroadcastProjectScoping:
 
     def test_broadcast_stream_standalone_only(self):
         """Streaming broadcast with standalone=true targets only unassigned agents."""
-        with patch("src.cli.config._load_teams", return_value={
-            "proj1": {"members": ["alpha", "beta"]},
-        }):
-            resp = self.client.post(
-                "/dashboard/api/broadcast/stream",
-                json={"message": "Hello standalone", "standalone": True},
-            )
+        self.components["teams_store"].create_team("proj1")
+        self.components["teams_store"].add_member("proj1", "alpha")
+        self.components["teams_store"].add_member("proj1", "beta")
+        resp = self.client.post(
+            "/dashboard/api/broadcast/stream",
+            json={"message": "Hello standalone", "standalone": True},
+        )
         assert resp.status_code == 200
         lines = resp.text.strip().split("\n")
         agent_starts = [line for line in lines if "agent_start" in line]
@@ -3504,13 +3494,13 @@ class TestDashboardBroadcastProjectScoping:
 
         self.components["transport"].request = AsyncMock(side_effect=_mock_request)
 
-        with patch("src.cli.config._load_teams", return_value={
-            "proj1": {"members": ["alpha", "beta"]},
-        }):
-            resp = self.client.post(
-                "/dashboard/api/broadcast",
-                json={"message": "Hello standalone", "standalone": True},
-            )
+        self.components["teams_store"].create_team("proj1")
+        self.components["teams_store"].add_member("proj1", "alpha")
+        self.components["teams_store"].add_member("proj1", "beta")
+        resp = self.client.post(
+            "/dashboard/api/broadcast",
+            json={"message": "Hello standalone", "standalone": True},
+        )
         assert resp.status_code == 200
         data = resp.json()
         # Only gamma is unassigned
@@ -5610,9 +5600,7 @@ class TestDashboardEventBusCoverage:
         assert len(failed) == 1
         assert "boom" in failed[0]["data"]["error"]
 
-    @patch("src.cli.config._create_team")
-    def test_create_team_emits_project_created(self, mock_create):
-        mock_create.return_value = None
+    def test_create_team_emits_project_created(self):
         resp = self.client.post(
             "/dashboard/api/teams",
             json={"name": "alpha-proj", "description": "hi", "members": []},
@@ -5622,9 +5610,8 @@ class TestDashboardEventBusCoverage:
         assert len(created) == 1
         assert created[0]["data"]["team_id"] == "alpha-proj"
 
-    @patch("src.cli.config._delete_team")
-    def test_delete_team_emits_project_deleted(self, mock_del):
-        mock_del.return_value = None
+    def test_delete_team_emits_project_deleted(self):
+        self.components["teams_store"].create_team("alpha-proj")
         resp = self.client.delete("/dashboard/api/teams/alpha-proj")
         assert resp.status_code == 200
         deleted = [e for e in self.captured if e["type"] == "team_deleted"]
@@ -5977,22 +5964,20 @@ class TestAgentGoalsEndpoints:
         assert resp.status_code == 404
 
     def test_get_empty_when_nothing_set(self):
-        with patch("src.cli.config._load_teams", return_value={}):
-            resp = self.client.get("/dashboard/api/agents/alpha/goals")
+        resp = self.client.get("/dashboard/api/agents/alpha/goals")
         assert resp.status_code == 200
         assert resp.json() == {"goals": [], "updated_at": None}
 
     def test_put_and_get_roundtrip_solo_key(self):
-        with patch("src.cli.config._load_teams", return_value={}):
-            resp = self.client.put(
-                "/dashboard/api/agents/alpha/goals",
-                json={"goals": ["Ship the weekly report."]},
-            )
-            assert resp.status_code == 200
-            data = resp.json()
-            assert data["set"] is True
-            assert data["count"] == 1
-            get_resp = self.client.get("/dashboard/api/agents/alpha/goals")
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/goals",
+            json={"goals": ["Ship the weekly report."]},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["set"] is True
+        assert data["count"] == 1
+        get_resp = self.client.get("/dashboard/api/agents/alpha/goals")
         body = get_resp.json()
         assert body["goals"] == ["Ship the weekly report."]
         assert body["set_by"] == "user"
@@ -6004,59 +5989,56 @@ class TestAgentGoalsEndpoints:
         assert entry.ttl is None
 
     def test_team_agent_writes_scoped_key(self):
-        with patch("src.cli.config._load_teams", return_value={
-            "team-a": {"members": ["alpha"]},
-        }):
-            resp = self.client.put(
-                "/dashboard/api/agents/alpha/goals",
-                json={"goals": ["Watch the inbox."]},
-            )
-            assert resp.status_code == 200
-            # Team agents read via _scope_key → teams/{team}/goals/{id}.
-            entry = self.components["blackboard"].read("teams/team-a/goals/alpha")
-            assert entry is not None
-            assert entry.value["goals"] == ["Watch the inbox."]
-            get_resp = self.client.get("/dashboard/api/agents/alpha/goals")
-            assert get_resp.json()["goals"] == ["Watch the inbox."]
+        self.components["teams_store"].create_team("team-a")
+        self.components["teams_store"].add_member("team-a", "alpha")
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/goals",
+            json={"goals": ["Watch the inbox."]},
+        )
+        assert resp.status_code == 200
+        # Team agents read via _scope_key → teams/{team}/goals/{id}.
+        entry = self.components["blackboard"].read("teams/team-a/goals/alpha")
+        assert entry is not None
+        assert entry.value["goals"] == ["Watch the inbox."]
+        get_resp = self.client.get("/dashboard/api/agents/alpha/goals")
+        assert get_resp.json()["goals"] == ["Watch the inbox."]
         # Nothing leaked to the unscoped key.
         assert self.components["blackboard"].read("goals/alpha") is None
 
     def test_put_validation_rejects_bad_payloads(self):
-        with patch("src.cli.config._load_teams", return_value={}):
-            # Not a list.
-            resp = self.client.put(
-                "/dashboard/api/agents/alpha/goals", json={"goals": "do it"},
-            )
-            assert resp.status_code == 400
-            # Too many entries (max 5).
-            resp = self.client.put(
-                "/dashboard/api/agents/alpha/goals",
-                json={"goals": [f"goal {i}" for i in range(6)]},
-            )
-            assert resp.status_code == 400
-            # A single goal over 300 chars.
-            resp = self.client.put(
-                "/dashboard/api/agents/alpha/goals", json={"goals": ["a" * 301]},
-            )
-            assert resp.status_code == 400
-            # Blank after strip.
-            resp = self.client.put(
-                "/dashboard/api/agents/alpha/goals", json={"goals": [" "]},
-            )
-            assert resp.status_code == 400
+        # Not a list.
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/goals", json={"goals": "do it"},
+        )
+        assert resp.status_code == 400
+        # Too many entries (max 5).
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/goals",
+            json={"goals": [f"goal {i}" for i in range(6)]},
+        )
+        assert resp.status_code == 400
+        # A single goal over 300 chars.
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/goals", json={"goals": ["a" * 301]},
+        )
+        assert resp.status_code == 400
+        # Blank after strip.
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/goals", json={"goals": [" "]},
+        )
+        assert resp.status_code == 400
 
     def test_put_empty_clears(self):
-        with patch("src.cli.config._load_teams", return_value={}):
-            resp = self.client.put(
-                "/dashboard/api/agents/alpha/goals", json={"goals": ["Keep going."]},
-            )
-            assert resp.status_code == 200
-            resp = self.client.put(
-                "/dashboard/api/agents/alpha/goals", json={"goals": []},
-            )
-            assert resp.status_code == 200
-            assert resp.json() == {"cleared": True, "agent_id": "alpha"}
-            get_resp = self.client.get("/dashboard/api/agents/alpha/goals")
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/goals", json={"goals": ["Keep going."]},
+        )
+        assert resp.status_code == 200
+        resp = self.client.put(
+            "/dashboard/api/agents/alpha/goals", json={"goals": []},
+        )
+        assert resp.status_code == 200
+        assert resp.json() == {"cleared": True, "agent_id": "alpha"}
+        get_resp = self.client.get("/dashboard/api/agents/alpha/goals")
         assert get_resp.json()["goals"] == []
         assert self.components["blackboard"].read("goals/alpha") is None
 

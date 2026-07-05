@@ -955,7 +955,7 @@ async def test_router_blocks_cross_project_messaging():
     router = MessageRouter(
         permissions=perms,
         agent_registry={"alice": "http://a:8400", "bob": "http://b:8400"},
-        agent_teams={"alice": "sales", "bob": "engineering"},
+        team_resolver={"alice": "sales", "bob": "engineering"}.get,
     )
     from src.shared.types import AgentMessage
     msg = AgentMessage(from_agent="alice", to="bob", type="query", payload={})
@@ -976,7 +976,7 @@ async def test_router_allows_same_project_messaging():
     router = MessageRouter(
         permissions=perms,
         agent_registry={},
-        agent_teams={"alice": "sales", "bob": "sales"},
+        team_resolver={"alice": "sales", "bob": "sales"}.get,
     )
     from src.shared.types import AgentMessage
     msg = AgentMessage(from_agent="alice", to="bob", type="query", payload={})
@@ -998,7 +998,7 @@ async def test_router_allows_standalone_to_project_messaging():
     router = MessageRouter(
         permissions=perms,
         agent_registry={},
-        agent_teams={"bob": "engineering"},  # standalone is NOT in agent_teams
+        team_resolver={"bob": "engineering"}.get,  # standalone resolves to None
     )
     from src.shared.types import AgentMessage
     msg = AgentMessage(from_agent="standalone", to="bob", type="query", payload={})
@@ -1209,9 +1209,7 @@ async def test_list_agents_project_scope_always_includes_operator(tmp_path, monk
     be empty.
     """
     import importlib
-    from unittest.mock import patch
 
-    import yaml
     from httpx import ASGITransport, AsyncClient
 
     from src.host.costs import CostTracker
@@ -1221,14 +1219,6 @@ async def test_list_agents_project_scope_always_includes_operator(tmp_path, monk
     import src.host.server as server_module
     importlib.reload(server_module)
     create_mesh_app = server_module.create_mesh_app
-
-    # Minimal project on disk with one member.
-    projects_dir = tmp_path / "projects"
-    proj_dir = projects_dir / "growth"
-    proj_dir.mkdir(parents=True)
-    (proj_dir / "metadata.yaml").write_text(
-        yaml.dump({"name": "growth", "members": ["scout"], "created_at": "2026-05-02T00:00:00+00:00"}),
-    )
 
     bb = Blackboard(db_path=str(tmp_path / "bb.db"))
     pubsub = PubSub()
@@ -1245,13 +1235,15 @@ async def test_list_agents_project_scope_always_includes_operator(tmp_path, monk
         blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
         cost_tracker=costs, trace_store=traces,
     )
+    # Minimal team with one member, seeded on the app's store.
+    app.teams_store.create_team("growth")
+    app.teams_store.add_member("growth", "scout")
 
     try:
-        with patch("src.cli.config.TEAMS_DIR", projects_dir):
-            async with AsyncClient(
-                transport=ASGITransport(app=app), base_url="http://test",
-            ) as client:
-                resp = await client.get("/mesh/agents", params={"team": "growth"})
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.get("/mesh/agents", params={"team": "growth"})
         assert resp.status_code == 200
         data = resp.json()
         # Project member is present.
@@ -1340,9 +1332,7 @@ async def test_list_agents_project_scope_excludes_other_project_members(tmp_path
     enforce, the response would be empty rather than scoped-to-members.
     """
     import importlib
-    from unittest.mock import patch
 
-    import yaml
     from httpx import ASGITransport, AsyncClient
 
     from src.host.costs import CostTracker
@@ -1352,26 +1342,6 @@ async def test_list_agents_project_scope_excludes_other_project_members(tmp_path
     import src.host.server as server_module
     importlib.reload(server_module)
     create_mesh_app = server_module.create_mesh_app
-
-    projects_dir = tmp_path / "projects"
-    # Project alpha has scout.
-    alpha_dir = projects_dir / "alpha"
-    alpha_dir.mkdir(parents=True)
-    (alpha_dir / "metadata.yaml").write_text(
-        yaml.dump({
-            "name": "alpha", "members": ["scout"],
-            "created_at": "2026-05-02T00:00:00+00:00",
-        }),
-    )
-    # Project beta has analyst.
-    beta_dir = projects_dir / "beta"
-    beta_dir.mkdir(parents=True)
-    (beta_dir / "metadata.yaml").write_text(
-        yaml.dump({
-            "name": "beta", "members": ["analyst"],
-            "created_at": "2026-05-02T00:00:00+00:00",
-        }),
-    )
 
     bb = Blackboard(db_path=str(tmp_path / "bb.db"))
     pubsub = PubSub()
@@ -1390,13 +1360,17 @@ async def test_list_agents_project_scope_excludes_other_project_members(tmp_path
         blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
         cost_tracker=costs, trace_store=traces,
     )
+    # Team alpha has scout; team beta has analyst.
+    app.teams_store.create_team("alpha")
+    app.teams_store.add_member("alpha", "scout")
+    app.teams_store.create_team("beta")
+    app.teams_store.add_member("beta", "analyst")
 
     try:
-        with patch("src.cli.config.TEAMS_DIR", projects_dir):
-            async with AsyncClient(
-                transport=ASGITransport(app=app), base_url="http://test",
-            ) as client:
-                resp = await client.get("/mesh/agents", params={"team": "alpha"})
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.get("/mesh/agents", params={"team": "alpha"})
         assert resp.status_code == 200
         data = resp.json()
         # Project member present.
@@ -1526,18 +1500,16 @@ async def test_list_agents_unknown_project_returns_empty(tmp_path):
 
 
 def _build_scope_test_app(tmp_path, suffix: str = ""):
-    """Helper: build a mesh app + projects layout for Task 5 scope tests.
+    """Helper: build a mesh app + team layout for Task 5 scope tests.
 
-    Lays out two projects (alpha with scout, beta with analyst) plus a
-    standalone ``loner`` and an ``operator``. Returns (app, projects_dir,
-    cleanup_fns) — caller wraps the projects_dir with the
-    ``TEAMS_DIR`` patch and runs requests through ASGITransport.
+    Seeds two teams on the app's store (alpha with scout, beta with
+    analyst) plus a standalone ``loner`` and an ``operator``. Returns
+    (app, projects_dir, cleanup_fns) — requests run through
+    ASGITransport.
 
     ``suffix`` lets a single test build multiple isolated apps off the
     same ``tmp_path`` (for tests that loop over modes).
     """
-    import yaml
-
     from src.host.costs import CostTracker
     from src.host.server import create_mesh_app
     from src.host.traces import TraceStore
@@ -1545,22 +1517,7 @@ def _build_scope_test_app(tmp_path, suffix: str = ""):
     base = tmp_path / f"scope{suffix}"
     base.mkdir(parents=True, exist_ok=True)
     projects_dir = base / "projects"
-    alpha_dir = projects_dir / "alpha"
-    alpha_dir.mkdir(parents=True)
-    (alpha_dir / "metadata.yaml").write_text(
-        yaml.dump({
-            "name": "alpha", "members": ["scout"],
-            "created_at": "2026-05-02T00:00:00+00:00",
-        }),
-    )
-    beta_dir = projects_dir / "beta"
-    beta_dir.mkdir(parents=True)
-    (beta_dir / "metadata.yaml").write_text(
-        yaml.dump({
-            "name": "beta", "members": ["analyst"],
-            "created_at": "2026-05-02T00:00:00+00:00",
-        }),
-    )
+    projects_dir.mkdir(parents=True)
 
     bb = Blackboard(db_path=str(base / "bb.db"))
     pubsub = PubSub()
@@ -1578,6 +1535,10 @@ def _build_scope_test_app(tmp_path, suffix: str = ""):
         blackboard=bb, pubsub=pubsub, router=router, permissions=perms,
         cost_tracker=costs, trace_store=traces,
     )
+    app.teams_store.create_team("alpha")
+    app.teams_store.add_member("alpha", "scout")
+    app.teams_store.create_team("beta")
+    app.teams_store.add_member("beta", "analyst")
 
     def _cleanup():
         bb.close()

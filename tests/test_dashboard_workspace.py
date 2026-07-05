@@ -15,7 +15,8 @@ from src.dashboard.server import create_dashboard_router
 _CSRF_HEADERS = {"X-Requested-With": "XMLHttpRequest"}
 
 
-def _make_dashboard_app(transport=None, agent_registry=None, runtime=None):
+def _make_dashboard_app(transport=None, agent_registry=None, runtime=None,
+                        teams_store=None):
     """Create a FastAPI app with dashboard router for testing."""
     from fastapi import FastAPI
 
@@ -40,6 +41,7 @@ def _make_dashboard_app(transport=None, agent_registry=None, runtime=None):
         agent_registry=agent_registry,
         transport=transport,
         runtime=runtime,
+        teams_store=teams_store,
     )
     app = FastAPI()
     app.include_router(router)
@@ -405,16 +407,20 @@ class TestProjectProxy:
         return runtime
 
     def _setup_project(self, projects_dir: Path, name: str = "testproj", *, with_md: bool = False):
-        """Create a project directory with metadata for testing."""
-        import yaml
+        """Create a team dir + a seeded TeamStore for testing.
+
+        Returns ``(proj_dir, teams_store)`` — pass the store into
+        ``_make_dashboard_app`` so member resolution sees test_agent.
+        """
+        from src.host.teams import TeamStore
         proj_dir = projects_dir / name
         proj_dir.mkdir(parents=True, exist_ok=True)
-        (proj_dir / "metadata.yaml").write_text(
-            yaml.dump({"name": name, "members": ["test_agent"]})
-        )
+        store = TeamStore(db_path=":memory:")
+        store.create_team(name)
+        store.add_member(name, "test_agent")
         if with_md:
             (proj_dir / "team.md").write_text("# My Project")
-        return proj_dir
+        return proj_dir, store
 
     @pytest.mark.asyncio
     async def test_read_project_requires_param(self):
@@ -493,12 +499,12 @@ class TestProjectProxy:
         """PUT /api/team?team=X saves to the team dir and pushes to members."""
         from unittest.mock import patch
         projects_dir = tmp_project_dir / "projects"
-        proj_dir = self._setup_project(projects_dir)
+        proj_dir, store = self._setup_project(projects_dir)
         runtime = self._make_runtime(tmp_project_dir)
         transport_mock = AsyncMock()
         transport_mock.request = AsyncMock(return_value={"updated": True, "size": 20})
         app = _make_dashboard_app(
-            transport=transport_mock, runtime=runtime,
+            transport=transport_mock, runtime=runtime, teams_store=store,
         )
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",

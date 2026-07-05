@@ -553,12 +553,12 @@ async def restore(path: Path | str | None = None) -> int:
 # tenant-aware READ helpers that walk the same ``_state`` dict and group
 # agents by their resolved tenant.
 #
-# **Tenant resolution.** The engine groups agents into teams via
-# ``config/teams/<name>/metadata.yaml``; each team's ``members``
-# list IS the tenant boundary for billing rollup. ``_tenant_for(agent_id)``
+# **Tenant resolution.** The engine groups agents into teams via the
+# SQLite-backed TeamStore (``data/teams.db``); a team's membership IS
+# the tenant boundary for billing rollup. ``_tenant_for(agent_id)``
 # resolves an agent → team name (or ``None`` for teamless agents).
 # Cached LRU(256) — teams rarely change at runtime, and the cache cuts
-# ~256 YAML reads per CSV export down to one. Operators who reshape
+# ~256 DB opens per CSV export down to one. Operators who reshape
 # teams must call :func:`reset_tenant_cache` (or restart the service)
 # to invalidate.
 #
@@ -577,34 +577,38 @@ async def restore(path: Path | str | None = None) -> int:
 def _tenant_for(agent_id: str) -> str | None:
     """Resolve an agent ID to its tenant ID (team name).
 
-    Reads ``config/teams/`` via :func:`src.cli.config._load_config`,
-    which builds the reverse ``agent → team`` map at load time. Returns
-    the team name for ``agent_id``, or ``None`` when the agent isn't in
-    any team.
+    Reads the TeamStore SQLite DB (``OPENLEGION_TEAMS_DB``, default
+    ``data/teams.db``) in pure-DB mode. Returns the team name for
+    ``agent_id``, or ``None`` when the agent isn't in any team — and
+    ``None`` when the DB file doesn't exist at all, which preserves the
+    in-container no-op: the browser container mounts neither ``config/``
+    nor the mesh ``data/``, so tenant rollups stay per-agent there.
 
     LRU(256) cached because the CSV export and threshold-alert paths can
     each call it once per agent in the tenant's fleet — a 50-agent tenant
-    on a 60s metrics tick would be 3000 YAML reads/min without the cache.
+    on a 60s metrics tick would be 3000 DB opens/min without the cache.
     Agents are added to / removed from teams rarely (operator action),
     and the cache invalidation hook is :func:`reset_tenant_cache`.
 
-    The lookup is intentionally read-only and does NOT mutate config —
+    The lookup is intentionally read-only and does NOT mutate the store —
     misconfigured / partial state returns ``None`` and the caller treats
     the agent as untracked for tenant rollups (its per-agent bucket is
     still observable via :func:`get_millicents`).
     """
     if not agent_id:
         return None
-    try:
-        # Lazy import — ``cli.config`` imports YAML / file IO that we
-        # don't want pulled in at the browser-service import time.
-        from src.cli.config import _load_config
-        cfg = _load_config()
-    except Exception as e:
-        logger.debug("tenant lookup: _load_config failed: %s", e)
+    db = os.environ.get("OPENLEGION_TEAMS_DB", "data/teams.db")
+    if not os.path.exists(db):
         return None
-    agent_teams = cfg.get("_agent_teams") or {}
-    team = agent_teams.get(agent_id)
+    try:
+        # Lazy import — the host store pulls in file IO / logging setup
+        # that we don't want at browser-service import time. Pure-DB
+        # mode (no teams_dir): this is a read-only membership lookup.
+        from src.host.teams import TeamStore
+        team = TeamStore(db_path=db).team_of(agent_id)
+    except Exception as e:
+        logger.debug("tenant lookup: TeamStore read failed: %s", e)
+        return None
     if not isinstance(team, str) or not team:
         return None
     return team

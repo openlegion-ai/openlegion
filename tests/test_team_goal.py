@@ -1,29 +1,26 @@
 """Tests for the north-star path on the team-domain entity: the
-``set_team_goal`` operator tool, the ``POST /mesh/teams/{name}/goal``
-endpoint, and the ``TeamMetadata`` schema that lets a team carry its
-goal as a first-class artifact.
+``set_team_goal`` operator tool and the ``POST /mesh/teams/{name}/goal``
+endpoint, persisting through the TeamStore (the first-class team row).
 
 These exercise:
 - The tool's happy path + validation gates (length limits, types).
-- The mesh endpoint's persistence into ``metadata.yaml`` (round-trip
-  through ``_load_teams`` so the dashboard sees the new fields).
-- Backwards compat — teams predating the new fields load with
-  ``north_star=None`` / ``success_criteria=None``.
+- The mesh endpoint's persistence into the TeamStore (round-trip
+  through ``teams_store.get_team`` so the dashboard sees the new fields).
+- Teams created without a goal read back ``north_star=None`` /
+  ``success_criteria=None``.
 """
 
 from __future__ import annotations
 
 import importlib
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-import yaml
 from httpx import ASGITransport, AsyncClient
 
 from src.host.mesh import Blackboard, MessageRouter, PubSub
 from src.host.permissions import PermissionMatrix
-from src.shared.types import AgentPermissions, TeamMetadata
+from src.shared.types import AgentPermissions
 
 
 @pytest.fixture(autouse=True)
@@ -32,45 +29,17 @@ def _set_operator_env(monkeypatch):
     monkeypatch.setenv("ALLOWED_TOOLS", "set_team_goal")
 
 
-# ── Schema: TeamMetadata accepts north_star + success_criteria ─────
+# ── Store: teams default to no goal until one is set ───────────────
 
 
-class TestTeamMetadataSchema:
+class TestTeamGoalDefaults:
     def test_defaults_are_none(self):
-        pm = TeamMetadata(name="x")
-        assert pm.north_star is None
-        assert pm.success_criteria is None
-
-    def test_round_trip_with_goal(self):
-        pm = TeamMetadata(
-            name="x",
-            north_star="Ship $10k MRR landing page in 2 weeks",
-            success_criteria=["100 daily uniques", "5 demo bookings/wk"],
-        )
-        dumped = pm.model_dump()
-        assert dumped["north_star"] == "Ship $10k MRR landing page in 2 weeks"
-        assert dumped["success_criteria"] == [
-            "100 daily uniques", "5 demo bookings/wk",
-        ]
-        # Round-trip back through the model so the YAML on-disk shape works.
-        pm2 = TeamMetadata(**dumped)
-        assert pm2.north_star == pm.north_star
-        assert pm2.success_criteria == pm.success_criteria
-
-    def test_legacy_metadata_without_goal_loads(self):
-        """A team written before this PR has no north_star / success_criteria
-        and must still load cleanly (defaulting to ``None``)."""
-        legacy = {
-            "name": "legacy",
-            "description": "old team",
-            "members": ["a"],
-            "created_at": "2025-12-01T00:00:00+00:00",
-            "status": "active",
-            "settings": {},
-        }
-        pm = TeamMetadata(**legacy)
-        assert pm.north_star is None
-        assert pm.success_criteria is None
+        from src.host.teams import TeamStore
+        store = TeamStore(db_path=":memory:")
+        store.create_team("x")
+        team = store.get_team("x")
+        assert team["north_star"] is None
+        assert team["success_criteria"] is None
 
 
 # ── set_project_goal tool unit tests (mocked mesh client) ─────────────
@@ -207,21 +176,6 @@ def _reload_server(monkeypatch):
     return server_module
 
 
-def _projects_layout(tmp_path) -> Path:
-    """One project on disk so the goal endpoint has something to update."""
-    pdir = tmp_path / "projects"
-    growth = pdir / "growth"
-    growth.mkdir(parents=True)
-    (growth / "metadata.yaml").write_text(yaml.dump({
-        "name": "growth",
-        "description": "growth project",
-        "members": ["writer"],
-        "created_at": "2026-05-02T00:00:00+00:00",
-        "status": "active",
-    }))
-    return pdir
-
-
 def _build_app(tmp_path, server_module, perms_map):
     blackboard = Blackboard(str(tmp_path / "bb.db"))
     pubsub = PubSub()
@@ -240,24 +194,24 @@ def _build_app(tmp_path, server_module, perms_map):
 
 @pytest.fixture
 def goal_app(tmp_path, monkeypatch):
-    pdir = _projects_layout(tmp_path)
     monkeypatch.chdir(tmp_path)
-    import src.cli.config as cli_cfg
-    monkeypatch.setattr(cli_cfg, "TEAMS_DIR", pdir)
     server_module = _reload_server(monkeypatch)
     perms_map = {
         "operator": {"can_route_tasks": True, "can_manage_teams": True},
         "writer": {"can_route_tasks": False, "can_message": []},
     }
     app, bb = _build_app(tmp_path, server_module, perms_map)
-    yield app, pdir
+    # One team seeded so the goal endpoint has something to update.
+    app.teams_store.create_team("growth", description="growth project")
+    app.teams_store.add_member("growth", "writer")
+    yield app, app.teams_store
     bb.close()
     importlib.reload(server_module)
 
 
 @pytest.mark.asyncio
 async def test_endpoint_set_goal_persists(goal_app):
-    app, pdir = goal_app
+    app, teams_store = goal_app
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.post(
             "/mesh/teams/growth/goal",
@@ -274,13 +228,12 @@ async def test_endpoint_set_goal_persists(goal_app):
     assert body["north_star"] == "Ship $10k MRR landing page in 2 weeks"
     assert body["success_criteria"] == ["100 visits/day", "5 demo bookings/wk"]
 
-    # Round-trip via _load_teams so the dashboard would see the same.
-    from src.cli.config import _load_teams
-    projects = _load_teams()
-    assert projects["growth"]["north_star"] == (
+    # Round-trip via the store so the dashboard would see the same.
+    team = teams_store.get_team("growth")
+    assert team["north_star"] == (
         "Ship $10k MRR landing page in 2 weeks"
     )
-    assert projects["growth"]["success_criteria"] == [
+    assert team["success_criteria"] == [
         "100 visits/day", "5 demo bookings/wk",
     ]
 

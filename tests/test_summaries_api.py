@@ -31,26 +31,9 @@ def mesh_setup(tmp_path, monkeypatch):
 
     Permissions intentionally narrow so operator's success on the
     bypass paths is a real signal, not an accident of grant coverage.
-    Project metadata is written to ``tmp_path/config/projects/`` so the
-    server-side ``_is_project_member`` check (which reads disk via
-    ``_load_teams``) sees scout as a member of content-seo.
+    Team membership is seeded on the app's TeamStore so the server-side
+    ``_is_team_member`` check sees scout as a member of content-seo.
     """
-    import yaml as _yaml
-    # ``TEAMS_DIR`` is resolved at import time from
-    # ``PROJECT_ROOT/config/projects``, so monkeypatch.chdir doesn't
-    # redirect it. Patch the module attribute directly so
-    # ``_load_teams()`` reads from our tmp_path fixture.
-    projects_dir = tmp_path / "config" / "projects"
-    (projects_dir / "content-seo").mkdir(parents=True, exist_ok=True)
-    (projects_dir / "content-seo" / "metadata.yaml").write_text(_yaml.dump({
-        "name": "content-seo",
-        "description": "Test team",
-        "members": ["scout"],
-        "status": "active",
-    }))
-    import src.cli.config as _cli_config
-    monkeypatch.setattr(_cli_config, "TEAMS_DIR", projects_dir)
-
     monkeypatch.setenv("OPENLEGION_TEAM_SCOPE_MODE", "warn")
     monkeypatch.setenv(
         "OPENLEGION_ORCHESTRATION_TASKS_DB", str(tmp_path / "tasks.db"),
@@ -83,10 +66,6 @@ def mesh_setup(tmp_path, monkeypatch):
         "scout": "scout-secret",
         "writer": "writer-secret",
     }
-    # scout is a member of "content-seo" (per the metadata file above);
-    # writer is solo (no team membership).
-    agent_teams = {"scout": {"content-seo"}}
-
     app = server.create_mesh_app(
         blackboard=bb,
         pubsub=pubsub,
@@ -95,8 +74,10 @@ def mesh_setup(tmp_path, monkeypatch):
         cost_tracker=costs,
         trace_store=traces,
         auth_tokens=auth_tokens,
-        agent_teams=agent_teams,
     )
+    # scout is a member of "content-seo"; writer is solo (no membership).
+    app.teams_store.create_team("content-seo", description="Test team")
+    app.teams_store.add_member("content-seo", "scout")
     yield {
         "app": app,
         "store": app.summaries_store,

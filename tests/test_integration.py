@@ -78,7 +78,7 @@ def mesh_components(tmp_path, monkeypatch):
     app = fresh_create_mesh_app(bb, pubsub, router, perms, credential_vault=None)
     client = TestClient(app)
 
-    yield {"client": client, "blackboard": bb, "pubsub": pubsub, "router": router, "perms": perms}
+    yield {"client": client, "blackboard": bb, "pubsub": pubsub, "router": router, "perms": perms, "app": app}
 
     monkeypatch.delenv("OPENLEGION_TEAM_SCOPE_MODE", raising=False)
     importlib.reload(server_module)
@@ -268,33 +268,25 @@ def test_list_agents(mesh_components):
 
 
 def test_list_agents_scoped_by_project(mesh_components, tmp_path):
-    """When project param is set, only that project's members are returned."""
-    from unittest.mock import patch
-
-    import yaml
-
+    """When team param is set, only that team's members are returned."""
     client = mesh_components["client"]
     router = mesh_components["router"]
+    app = mesh_components["app"]
     router.register_agent("alice", "http://localhost:8401")
     router.register_agent("bob", "http://localhost:8402")
     router.register_agent("charlie", "http://localhost:8403")
 
-    # Set up project directory
-    projects_dir = tmp_path / "projects"
-    proj_dir = projects_dir / "teamA"
-    proj_dir.mkdir(parents=True)
-    (proj_dir / "metadata.yaml").write_text(
-        yaml.dump({"name": "teamA", "members": ["alice", "bob"]})
-    )
+    app.teams_store.create_team("teamA")
+    app.teams_store.add_member("teamA", "alice")
+    app.teams_store.add_member("teamA", "bob")
 
-    with patch("src.cli.config.TEAMS_DIR", projects_dir):
-        # Scoped by project
-        resp = client.get("/mesh/agents", params={"team": "teamA"})
-        assert resp.status_code == 200
-        agents = resp.json()
-        assert "alice" in agents
-        assert "bob" in agents
-        assert "charlie" not in agents
+    # Scoped by team
+    resp = client.get("/mesh/agents", params={"team": "teamA"})
+    assert resp.status_code == 200
+    agents = resp.json()
+    assert "alice" in agents
+    assert "bob" in agents
+    assert "charlie" not in agents
 
 
 def test_list_agents_scoped_by_agent_id(mesh_components):
@@ -778,7 +770,6 @@ def test_introspect_returns_permissions(tmp_path):
 
 def test_introspect_returns_fleet_standalone(tmp_path):
     """GET /mesh/introspect section=fleet for standalone agent shows only self."""
-    from unittest.mock import patch
 
     bb = Blackboard(db_path=str(tmp_path / "bb.db"))
     pubsub = PubSub()
@@ -793,13 +784,12 @@ def test_introspect_returns_fleet_standalone(tmp_path):
     app = create_mesh_app(bb, pubsub, router, perms)
     client = TestClient(app)
 
-    # alice is standalone (not in any project) — sees only herself
-    with patch("src.cli.config._load_teams", return_value={}):
-        response = client.get(
-            "/mesh/introspect",
-            params={"section": "fleet"},
-            headers={"X-Agent-ID": "alice"},
-        )
+    # alice is standalone (not in any team) — sees only herself
+    response = client.get(
+        "/mesh/introspect",
+        params={"section": "fleet"},
+        headers={"X-Agent-ID": "alice"},
+    )
     assert response.status_code == 200
     data = response.json()
     ids = [a["id"] for a in data["fleet"]]
@@ -809,11 +799,7 @@ def test_introspect_returns_fleet_standalone(tmp_path):
 
 
 def test_introspect_returns_fleet_project_scoped(tmp_path):
-    """GET /mesh/introspect section=fleet for project agent shows project peers."""
-    from unittest.mock import patch
-
-    import yaml
-
+    """GET /mesh/introspect section=fleet for team agent shows team peers."""
     bb = Blackboard(db_path=str(tmp_path / "bb.db"))
     pubsub = PubSub()
     perms = PermissionMatrix.__new__(PermissionMatrix)
@@ -826,19 +812,15 @@ def test_introspect_returns_fleet_project_scoped(tmp_path):
     app = create_mesh_app(bb, pubsub, router, perms)
     client = TestClient(app)
 
-    projects_dir = tmp_path / "projects"
-    proj_dir = projects_dir / "teamX"
-    proj_dir.mkdir(parents=True)
-    (proj_dir / "metadata.yaml").write_text(
-        yaml.dump({"name": "teamX", "members": ["alice", "bob"]})
-    )
+    app.teams_store.create_team("teamX")
+    app.teams_store.add_member("teamX", "alice")
+    app.teams_store.add_member("teamX", "bob")
 
-    with patch("src.cli.config.TEAMS_DIR", projects_dir):
-        response = client.get(
-            "/mesh/introspect",
-            params={"section": "fleet"},
-            headers={"X-Agent-ID": "alice"},
-        )
+    response = client.get(
+        "/mesh/introspect",
+        params={"section": "fleet"},
+        headers={"X-Agent-ID": "alice"},
+    )
     assert response.status_code == 200
     data = response.json()
     ids = [a["id"] for a in data["fleet"]]
@@ -925,7 +907,6 @@ def test_introspect_operator_fleet_model_falls_back_to_runtime_default(tmp_path)
 
 def test_introspect_non_operator_fleet_omits_model(tmp_path):
     """Non-operator agents don't see peer models — keeps their context lean."""
-    from unittest.mock import patch
 
     bb = Blackboard(db_path=str(tmp_path / "bb.db"))
     pubsub = PubSub()
@@ -937,12 +918,11 @@ def test_introspect_non_operator_fleet_omits_model(tmp_path):
     app = create_mesh_app(bb, pubsub, router, perms)
     client = TestClient(app)
 
-    with patch("src.cli.config._load_teams", return_value={}):
-        response = client.get(
-            "/mesh/introspect",
-            params={"section": "fleet"},
-            headers={"X-Agent-ID": "sales"},
-        )
+    response = client.get(
+        "/mesh/introspect",
+        params={"section": "fleet"},
+        headers={"X-Agent-ID": "sales"},
+    )
     assert response.status_code == 200
     for entry in response.json()["fleet"]:
         assert "model" not in entry
@@ -1118,10 +1098,9 @@ def test_publish_event_project_isolation(tmp_path):
         ),
     }
     router = MessageRouter(permissions=perms, agent_registry={})
-    app = create_mesh_app(
-        bb, pubsub, router, perms,
-        agent_teams={"alice": "sales"},
-    )
+    app = create_mesh_app(bb, pubsub, router, perms)
+    app.teams_store.create_team("sales")
+    app.teams_store.add_member("sales", "alice")
     client = TestClient(app)
 
     # Publishing to project-scoped topic should succeed
@@ -1165,10 +1144,9 @@ def test_subscribe_project_isolation(tmp_path):
         ),
     }
     router = MessageRouter(permissions=perms, agent_registry={})
-    app = create_mesh_app(
-        bb, pubsub, router, perms,
-        agent_teams={"bob": "engineering"},
-    )
+    app = create_mesh_app(bb, pubsub, router, perms)
+    app.teams_store.create_team("engineering")
+    app.teams_store.add_member("engineering", "bob")
     client = TestClient(app)
 
     # Subscribing to project-scoped topic should succeed
@@ -1202,10 +1180,8 @@ def test_standalone_agent_no_project_restriction(tmp_path):
         ),
     }
     router = MessageRouter(permissions=perms, agent_registry={})
-    app = create_mesh_app(
-        bb, pubsub, router, perms,
-        agent_teams={},  # solo is not in any project
-    )
+    # solo is not in any team — the app's empty store resolves None.
+    app = create_mesh_app(bb, pubsub, router, perms)
     client = TestClient(app)
 
     resp = client.post("/mesh/publish", json={
@@ -1402,10 +1378,9 @@ def test_register_scopes_subscriptions(tmp_path):
         ),
     }
     router = MessageRouter(permissions=perms, agent_registry={})
-    app = create_mesh_app(
-        bb, pubsub, router, perms,
-        agent_teams={"alice": "sales"},
-    )
+    app = create_mesh_app(bb, pubsub, router, perms)
+    app.teams_store.create_team("sales")
+    app.teams_store.add_member("sales", "alice")
     client = TestClient(app)
 
     resp = client.post("/mesh/register", json={

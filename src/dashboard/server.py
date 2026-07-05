@@ -677,8 +677,15 @@ def create_dashboard_router(
     # ("Test connection") endpoint and the discovery-cache invalidation
     # on auth-only edits (plan D12).
     mcp_gateway: Any = None,
+    # THE team authority (src/host/teams.py). The runtime passes the
+    # same disk-backed instance the mesh app holds; standalone test
+    # constructions fall back to a pure-DB in-memory store.
+    teams_store: Any = None,
 ) -> APIRouter:
     """Create the dashboard FastAPI router."""
+    if teams_store is None:
+        from src.host.teams import TeamStore
+        teams_store = TeamStore(db_path=":memory:")
     # Lazy-init telemetry sink so callers (mesh CLI, tests) can opt out by
     # passing ``telemetry=None`` after explicitly setting it. We keep the
     # explicit-None contract by only auto-creating when the kwarg is
@@ -997,7 +1004,7 @@ def create_dashboard_router(
         # "last seen". One query for the whole fleet.
         worked_map = cost_tracker.get_all_agents_last_worked()
 
-        agent_teams = cfg.get("_agent_teams", {})
+        agent_teams = teams_store.agent_team_map()
 
         # One fan-out per fleet poll. Drives ``browser_running`` so the
         # frontend can tear down the iframe when an agent's browser
@@ -2590,12 +2597,20 @@ def create_dashboard_router(
                     logger.warning("Skipping invalid team name '%s' for agent '%s'", team, name)
                     team = ""
                 else:
-                    from src.cli.config import _add_agent_to_team
+                    from src.cli.config import (
+                        _add_team_blackboard_permissions,
+                        _remove_team_blackboard_permissions,
+                    )
+                    from src.host.teams import TeamNotFound
                     try:
-                        _add_agent_to_team(team, name)
-                    except ValueError:
+                        old = teams_store.add_member(team, name)
+                    except (TeamNotFound, ValueError):
                         logger.warning("Team '%s' not found; agent '%s' created standalone", team, name)
                         team = ""
+                    else:
+                        if old and old != team:
+                            _remove_team_blackboard_permissions(name, old)
+                        _add_team_blackboard_permissions(name, team)
             if event_bus is not None:
                 event_bus.emit("agent_state", agent=name,
                     data={"state": "added", "role": role, "ready": ready})
@@ -3764,14 +3779,10 @@ def create_dashboard_router(
         if not isinstance(team, str):
             raise HTTPException(status_code=400, detail="team must be a string")
         if team:
-            from src.cli.config import _load_teams
-            members = set(_load_teams().get(team, {}).get("members", []))
+            members = set(teams_store.members(team))
             targets = [a for a in targets if a in members]
         elif body.get("standalone"):
-            from src.cli.config import _load_teams
-            assigned = set()
-            for pdata in _load_teams().values():
-                assigned.update(pdata.get("members", []))
+            assigned = set(teams_store.agent_team_map())
             targets = [a for a in targets if a not in assigned]
         if not targets:
             return {"responses": {}, "message": "No matching agents"}
@@ -3821,14 +3832,10 @@ def create_dashboard_router(
         if not isinstance(team, str):
             raise HTTPException(status_code=400, detail="team must be a string")
         if team:
-            from src.cli.config import _load_teams
-            members = set(_load_teams().get(team, {}).get("members", []))
+            members = set(teams_store.members(team))
             agents = [a for a in agents if a in members]
         elif body.get("standalone"):
-            from src.cli.config import _load_teams
-            assigned = set()
-            for pdata in _load_teams().values():
-                assigned.update(pdata.get("members", []))
+            assigned = set(teams_store.agent_team_map())
             agents = [a for a in agents if a not in assigned]
         if not agents:
             return {"responses": {}, "message": "No agents registered"}
@@ -5422,14 +5429,14 @@ def create_dashboard_router(
         )
 
     # ── Teams ─────────────────────────────────────────────────
-    # Team CRUD routes. Storage lives under ``config/teams/``
-    # left for a follow-up.
+    # Team CRUD routes. Storage is the TeamStore (data/teams.db);
+    # the on-disk ``config/teams/{id}/`` scaffold (team.md +
+    # workflows/) is owned by the store's create/delete lifecycle.
 
     @api_router.get("/api/teams")
     async def api_teams_list() -> dict:
         """List all teams with members."""
-        from src.cli.config import _load_teams
-        teams_cfg = _load_teams()
+        teams_cfg = teams_store.list_teams()
         result = []
         sorted_teams = sorted(teams_cfg.items(), key=lambda x: x[1].get("created_at") or "")
         for i, (pname, pdata) in enumerate(sorted_teams):
@@ -5456,14 +5463,17 @@ def create_dashboard_router(
                 detail="Teams are not available on your current plan. Upgrade to enable teams.",
             )
         if _max_teams > 0:
-            from src.cli.config import _load_teams
-            current_count = len(_load_teams())
+            current_count = teams_store.count_teams()
             if current_count >= _max_teams:
                 raise HTTPException(
                     status_code=403,
                     detail=f"Team limit reached ({_max_teams}). Upgrade your plan for more teams.",
                 )
-        from src.cli.config import _create_team, _load_config
+        from src.cli.config import (
+            _add_team_blackboard_permissions,
+            _load_config,
+            _remove_team_blackboard_permissions,
+        )
         body = await request.json()
         name = body.get("name", "").strip()
         description = sanitize_for_prompt(body.get("description", "")).strip()
@@ -5478,10 +5488,22 @@ def create_dashboard_router(
         unknown = [m for m in members if m not in known_agents]
         if unknown:
             raise HTTPException(status_code=400, detail=f"Unknown agents: {', '.join(unknown)}")
+        # Validate members upfront before any store writes — prevents
+        # partial team creation (mirrors the old ``_create_team``).
+        if "operator" in members:
+            raise HTTPException(
+                status_code=400,
+                detail="Operator is a system agent and cannot be assigned to teams",
+            )
         try:
-            _create_team(name, description=description, members=members)
-        except ValueError as e:
+            teams_store.create_team(name, description=description)
+        except ValueError as e:  # TeamExists / invalid name
             raise HTTPException(status_code=400, detail=str(e))
+        for agent in members:
+            old = teams_store.add_member(name, agent)
+            if old and old != name:
+                _remove_team_blackboard_permissions(agent, old)
+            _add_team_blackboard_permissions(agent, name)
         # Real-time cron lifecycle: schedule the daily work-summary
         # for the newly-created team. Without this, dashboard-created
         # teams went without a live cron until the next mesh restart
@@ -5490,8 +5512,7 @@ def create_dashboard_router(
         # initial-settings enhancement Just Works on both surfaces.
         if cron_scheduler is not None:
             try:
-                from src.cli.config import _load_teams as _load_teams_for_cron
-                persisted = _load_teams_for_cron().get(name) or {}
+                persisted = teams_store.get_team(name) or {}
                 _custom_schedule = (
                     (persisted.get("settings") or {}).get("summary_schedule")
                 )
@@ -5518,11 +5539,14 @@ def create_dashboard_router(
     @api_router.delete("/api/teams/{team_name}")
     async def api_teams_delete(team_name: str) -> dict:
         """Delete a team and release its members."""
-        from src.cli.config import _delete_team
+        from src.cli.config import _remove_team_blackboard_permissions
+        from src.host.teams import TeamNotFound
         try:
-            _delete_team(team_name)
-        except ValueError as e:
+            former_members = teams_store.delete_team(team_name)
+        except TeamNotFound as e:
             raise HTTPException(status_code=404, detail=str(e))
+        for agent in former_members:
+            _remove_team_blackboard_permissions(agent, team_name)
         # Real-time cron lifecycle: drop the daily work-summary cron
         # for the deleted team. The mesh propose/confirm delete path
         # already does this; the dashboard direct-delete had to mirror
@@ -5547,15 +5571,22 @@ def create_dashboard_router(
     @api_router.post("/api/teams/{team_name}/members")
     async def api_teams_add_member(team_name: str, request: Request) -> dict:
         """Add a member agent to a team."""
-        from src.cli.config import _add_agent_to_team
+        from src.cli.config import (
+            _add_team_blackboard_permissions,
+            _remove_team_blackboard_permissions,
+        )
+        from src.host.teams import TeamNotFound
         body = await request.json()
         agent = body.get("agent", "").strip()
         if not agent:
             raise HTTPException(status_code=400, detail="agent is required")
         try:
-            _add_agent_to_team(team_name, agent)
-        except ValueError as e:
+            old = teams_store.add_member(team_name, agent)
+        except (TeamNotFound, ValueError) as e:
             raise HTTPException(status_code=400, detail=str(e))
+        if old and old != team_name:
+            _remove_team_blackboard_permissions(agent, old)
+        _add_team_blackboard_permissions(agent, team_name)
         # Auto-restart the agent so new scope takes effect
         restarted = False
         if transport is not None and agent in agent_registry:
@@ -5583,11 +5614,11 @@ def create_dashboard_router(
     @api_router.delete("/api/teams/{team_name}/members/{agent}")
     async def api_teams_remove_member(team_name: str, agent: str) -> dict:
         """Remove a member agent from a team."""
-        from src.cli.config import _remove_agent_from_team
-        try:
-            _remove_agent_from_team(team_name, agent)
-        except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+        from src.cli.config import _remove_team_blackboard_permissions
+        if not teams_store.team_exists(team_name):
+            raise HTTPException(status_code=400, detail=f"Team '{team_name}' not found")
+        teams_store.remove_member(team_name, agent)
+        _remove_team_blackboard_permissions(agent, team_name)
         # Auto-restart the agent so new scope takes effect
         restarted = False
         if transport is not None and agent in agent_registry:
@@ -5616,9 +5647,10 @@ def create_dashboard_router(
 
     def _resolve_team_path(team: str) -> Path:
         """Validate a team name and return the path to its team.md."""
-        from src.cli.config import TEAMS_DIR, _validate_team_name
+        from src.cli.config import TEAMS_DIR
+        from src.host.teams import validate_team_id
         try:
-            _validate_team_name(team)
+            validate_team_id(team)
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid team name")
         return TEAMS_DIR / team / "team.md"
@@ -5660,10 +5692,7 @@ def create_dashboard_router(
         team_path.write_text(content)
 
         # Push to team members only
-        from src.cli.config import _load_teams
-        teams_data = _load_teams()
-        pdata = teams_data.get(team, {})
-        members = set(pdata.get("members", []))
+        members = set(teams_store.members(team))
         push_targets = [a for a in agent_registry.keys() if a in members]
 
         push_results = {}
@@ -7530,10 +7559,9 @@ def create_dashboard_router(
         ``teams/{team}/goals/{agent_id}``, solo agents read the raw
         ``goals/{agent_id}`` key.
         """
-        from src.cli.config import _load_teams
-        for pname, pdata in _load_teams().items():
-            if agent_id in pdata.get("members", []):
-                return f"teams/{pname}/goals/{agent_id}"
+        team = teams_store.team_of(agent_id)
+        if team:
+            return f"teams/{team}/goals/{agent_id}"
         return f"goals/{agent_id}"
 
     @api_router.get("/api/agents/{agent_id}/goals")
@@ -7840,8 +7868,7 @@ def create_dashboard_router(
     @api_router.get("/api/workplace/teams")
     async def api_workplace_teams() -> dict:
         """Team status rollups for the Workplace > team-status tab."""
-        from src.cli.config import _load_teams
-        teams_cfg = _load_teams()
+        teams_cfg = teams_store.list_teams()
         result = []
         for pname, pdata in teams_cfg.items():
             try:

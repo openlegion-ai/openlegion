@@ -20,6 +20,7 @@ Covers:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import tempfile
@@ -49,21 +50,29 @@ async def _isolate_state(tmp_path, monkeypatch):
     cost.reset_tenant_cache()
 
 
-# ── Helper: stub the project membership lookup ─────────────────────────────
+# ── Helper: seed the team membership lookup ────────────────────────────────
 
 
+@contextlib.contextmanager
 def _patch_projects(membership: dict[str, str]):
-    """Return a context manager that swaps ``cli.config._load_config``.
+    """Seed a real teams.db in a temp dir and point the resolver at it.
 
-    ``membership`` maps agent_id → project_name. ``_load_config`` returns
-    a dict whose ``_agent_teams`` key matches the production shape
-    (built by ``_load_config`` from ``config/projects/<name>/metadata.yaml``).
+    ``membership`` maps agent_id → team_name. ``_tenant_for`` opens the
+    TeamStore at ``OPENLEGION_TEAMS_DB`` in pure-DB mode — this seeds
+    the production shape (one team per agent, membership rows).
     """
-    fake_cfg = {"_agent_teams": dict(membership)}
-    return patch(
-        "src.cli.config._load_config",
-        return_value=fake_cfg,
-    )
+    from src.host.teams import TeamStore
+
+    with tempfile.TemporaryDirectory() as td:
+        db = os.path.join(td, "teams.db")
+        store = TeamStore(db_path=db)
+        for agent, team in membership.items():
+            if not store.team_exists(team):
+                store.create_team(team)
+            store.add_member(team, agent)
+        with patch.dict(os.environ, {"OPENLEGION_TEAMS_DB": db}):
+            cost.reset_tenant_cache()
+            yield
 
 
 # ── _tenant_for ────────────────────────────────────────────────────────────
@@ -88,18 +97,21 @@ class TestTenantFor:
 
     def test_lru_cache_in_use(self):
         """Successive calls with the same agent_id hit the cache."""
-        cost.reset_tenant_cache()
+        from src.host.teams import TeamStore
+
         call_count = {"n": 0}
+        real_team_of = TeamStore.team_of
 
-        def fake_loader():
+        def counting_team_of(self, agent_id):
             call_count["n"] += 1
-            return {"_agent_teams": {"alpha": "tenant-a"}}
+            return real_team_of(self, agent_id)
 
-        with patch("src.cli.config._load_config", side_effect=fake_loader):
-            cost._tenant_for("alpha")
-            cost._tenant_for("alpha")
-            cost._tenant_for("alpha")
-        # Exactly one underlying load — subsequent calls hit the LRU cache.
+        with _patch_projects({"alpha": "tenant-a"}):
+            with patch.object(TeamStore, "team_of", counting_team_of):
+                cost._tenant_for("alpha")
+                cost._tenant_for("alpha")
+                cost._tenant_for("alpha")
+        # Exactly one underlying lookup — subsequent calls hit the LRU cache.
         assert call_count["n"] == 1
 
     def test_cache_invalidated_by_reset_tenant_cache(self):
@@ -111,11 +123,22 @@ class TestTenantFor:
             assert cost._tenant_for("alpha") == "tenant-b"
 
     def test_loader_failure_returns_none(self):
-        """If ``_load_config`` raises (missing config dir), tenant=None."""
+        """If the store read raises (corrupt DB), tenant=None."""
+        from src.host.teams import TeamStore
+
+        with _patch_projects({"alpha": "tenant-a"}):
+            with patch.object(
+                TeamStore, "team_of",
+                side_effect=RuntimeError("boom"),
+            ):
+                assert cost._tenant_for("alpha") is None
+
+    def test_missing_db_returns_none(self, tmp_path):
+        """No teams.db on disk (browser container) → tenant=None, no error."""
         cost.reset_tenant_cache()
-        with patch(
-            "src.cli.config._load_config",
-            side_effect=RuntimeError("no config"),
+        with patch.dict(
+            os.environ,
+            {"OPENLEGION_TEAMS_DB": str(tmp_path / "nope" / "teams.db")},
         ):
             assert cost._tenant_for("alpha") is None
 

@@ -15,7 +15,6 @@ import importlib
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-import yaml
 from httpx import ASGITransport, AsyncClient
 
 from src.host.mesh import Blackboard, MessageRouter, PubSub
@@ -90,11 +89,6 @@ def brief_app(tmp_path, monkeypatch):
     projects_dir = tmp_path / "projects"
     research = projects_dir / "research"
     research.mkdir(parents=True)
-    (research / "metadata.yaml").write_text(yaml.dump({
-        "name": "research",
-        "members": ["scout", "analyst"],
-        "created_at": "2026-06-01T00:00:00+00:00",
-    }))
     (research / "team.md").write_text(
         "# research\n\nShared context.\n\n## Workflow\n\nscout -> analyst\n",
     )
@@ -115,6 +109,9 @@ def brief_app(tmp_path, monkeypatch):
         permissions=permissions,
         transport=fake_transport,  # type: ignore[arg-type]
     )
+    app.teams_store.create_team("research")
+    app.teams_store.add_member("research", "scout")
+    app.teams_store.add_member("research", "analyst")
     yield app, fake_transport, research / "team.md"
     blackboard.close()
     monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)

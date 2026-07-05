@@ -496,15 +496,21 @@ class REPLSession:
                 self.ctx.event_bus.emit("agent_state", agent=new_name,
                     data={"state": "added", "ready": False})
 
-    def _cmd_team(self, arg: str) -> None:
-        from src.cli.config import _load_teams
+    def _teams_store(self):
+        """The runtime's TeamStore handle, or a fresh one when detached."""
+        store = getattr(self.ctx, "teams_store", None)
+        if store is not None:
+            return store
+        from src.cli.config import _open_teams_store
+        return _open_teams_store()
 
+    def _cmd_team(self, arg: str) -> None:
         parts = arg.strip().split(None, 1)
         sub = parts[0] if parts else "list"
         rest = parts[1].strip() if len(parts) > 1 else ""
 
         if sub in ("list", "ls", ""):
-            teams = _load_teams()
+            teams = self._teams_store().list_teams()
             all_agents = set(self.ctx.agents.keys())
             assigned = {m for pdata in teams.values() for m in pdata.get("members", [])} & all_agents
 
@@ -532,7 +538,7 @@ class REPLSession:
                 self._active_team = None
                 click.echo("Team context cleared (global view).")
                 return
-            teams = _load_teams()
+            teams = self._teams_store().list_teams()
             if rest not in teams:
                 click.echo(f"Unknown team: '{rest}'. Available: {', '.join(teams)}")
                 return
@@ -544,11 +550,10 @@ class REPLSession:
             if not name:
                 click.echo("Usage: /team info <name>")
                 return
-            teams = _load_teams()
-            if name not in teams:
+            pdata = self._teams_store().get_team(name)
+            if pdata is None:
                 click.echo(f"Team '{name}' not found.")
                 return
-            pdata = teams[name]
             click.echo(f"\n  Team: {name}")
             click.echo(f"  Description: {pdata.get('description', '(none)')}")
             click.echo(f"  Created: {pdata.get('created_at', '?')}")
@@ -565,7 +570,7 @@ class REPLSession:
             return
         agents_cfg = self.ctx.cfg.get("agents", {})
         default_model = self.ctx.cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
-        agent_teams = self.ctx.cfg.get("_agent_teams", {})
+        agent_teams = self._teams_store().agent_team_map()
 
         for name in self.ctx.agents:
             agent_cfg = agents_cfg.get(name, {})
@@ -601,9 +606,7 @@ class REPLSession:
 
         # Determine target agents
         if self._active_team and not broadcast_all:
-            from src.cli.config import _load_teams
-            teams = _load_teams()
-            team_members = set(teams.get(self._active_team, {}).get("members", []))
+            team_members = set(self._teams_store().members(self._active_team))
             targets = [a for a in self.ctx.agents if a in team_members]
             if not targets:
                 click.echo(f"No agents in team '{self._active_team}'. Use --all to broadcast to everyone.")

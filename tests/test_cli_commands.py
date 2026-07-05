@@ -27,6 +27,10 @@ class _MockCtx:
                  cron_scheduler=None):
         self.agent_urls = agent_urls or {}
         self.cfg = {"mesh": {"port": 8420}, "agents": {}, "llm": {"default_model": "openai/gpt-4o-mini"}}
+        # In-memory team store so REPL team commands never touch the
+        # on-disk data/teams.db during tests.
+        from src.host.teams import TeamStore
+        self.teams_store = TeamStore(db_path=":memory:")
         self.blackboard = blackboard
         self.lane_manager = lane_manager
         self.cron_scheduler = cron_scheduler
@@ -767,53 +771,43 @@ class TestAddAgentToConfigInitialInstructions:
 class TestREPLProjectCommand:
     def _make_repl(self, tmp_path):
         from src.cli.repl import REPLSession
-
-        projects_dir = tmp_path / "projects"
-        d = projects_dir / "alpha"
-        d.mkdir(parents=True)
-        (d / "metadata.yaml").write_text(yaml.dump({
-            "name": "alpha", "description": "Alpha project",
-            "members": ["bot1"], "settings": {},
-        }))
+        from src.host.teams import TeamStore
 
         ctx = _MockCtx(agent_urls={"bot1": "http://bot1:8400", "bot2": "http://bot2:8400"})
         ctx.cfg["agents"] = {"bot1": {"role": "a"}, "bot2": {"role": "b"}}
-        ctx.cfg["_agent_teams"] = {"bot1": "alpha"}
+        ctx.teams_store = TeamStore(db_path=":memory:")
+        ctx.teams_store.create_team("alpha", description="Alpha project")
+        ctx.teams_store.add_member("alpha", "bot1")
 
-        with patch("src.cli.config.TEAMS_DIR", projects_dir):
-            repl = REPLSession(ctx)
-        return repl, projects_dir
+        repl = REPLSession(ctx)
+        return repl
 
     def test_project_list(self, tmp_path, capsys):
-        repl, projects_dir = self._make_repl(tmp_path)
-        with patch("src.cli.config.TEAMS_DIR", projects_dir):
-            repl._cmd_team("list")
+        repl = self._make_repl(tmp_path)
+        repl._cmd_team("list")
         out = capsys.readouterr().out
         assert "alpha" in out
         assert "bot1" in out
         assert "bot2" in out  # standalone
 
     def test_project_use_and_clear(self, tmp_path, capsys):
-        repl, projects_dir = self._make_repl(tmp_path)
-        with patch("src.cli.config.TEAMS_DIR", projects_dir):
-            repl._cmd_team("use alpha")
+        repl = self._make_repl(tmp_path)
+        repl._cmd_team("use alpha")
         assert repl._active_team == "alpha"
 
         repl._cmd_team("use none")
         assert repl._active_team is None
 
     def test_project_use_unknown(self, tmp_path, capsys):
-        repl, projects_dir = self._make_repl(tmp_path)
-        with patch("src.cli.config.TEAMS_DIR", projects_dir):
-            repl._cmd_team("use nonexistent")
+        repl = self._make_repl(tmp_path)
+        repl._cmd_team("use nonexistent")
         out = capsys.readouterr().out
         assert "Unknown team" in out
         assert repl._active_team is None
 
     def test_project_info(self, tmp_path, capsys):
-        repl, projects_dir = self._make_repl(tmp_path)
-        with patch("src.cli.config.TEAMS_DIR", projects_dir):
-            repl._cmd_team("info alpha")
+        repl = self._make_repl(tmp_path)
+        repl._cmd_team("info alpha")
         out = capsys.readouterr().out
         assert "alpha" in out
         assert "Alpha project" in out
@@ -828,7 +822,6 @@ class TestREPLBlackboardProjectScoping:
 
         bb = Blackboard(db_path=str(tmp_path / "bb.db"))
         ctx = _MockCtx(agent_urls={"bot1": "http://bot1:8400"}, blackboard=bb)
-        ctx.cfg["_agent_teams"] = {"bot1": "alpha"}
         repl = REPLSession(ctx)
         return repl, bb
 
