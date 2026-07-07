@@ -550,11 +550,11 @@ async def hand_off(
 )
 async def check_inbox(*, mesh_client=None) -> dict:
     """Read the agent's task inbox from the durable tasks table, plus
-    any back-edge events from the blackboard at
-    ``inbox/{agent_id}/task_event/`` so an originating agent learns when
-    a handed-off task reached a terminal state. The event fetch is
-    best-effort — a blackboard hiccup degrades to an empty event list
-    rather than failing the whole call (Constraint #16).
+    any back-edge events from the Team Threads store (served via
+    ``GET /mesh/agents/{id}/task-events``) so an originating agent
+    learns when a handed-off task reached a terminal state. The event
+    fetch is best-effort — a mesh hiccup degrades to an empty event
+    list rather than failing the whole call (Constraint #16).
     """
     if mesh_client is None:
         return {"error": "No mesh_client available"}
@@ -567,24 +567,24 @@ async def check_inbox(*, mesh_client=None) -> dict:
 
     events: list[dict] = []
     try:
-        prefix = f"inbox/{mesh_client.agent_id}/task_event/"
-        entries = await mesh_client.list_blackboard(prefix, global_scope=True)
-        for entry in entries:
-            value = entry.get("value") or {}
+        entries = await mesh_client.list_inbox_events()
+        for value in entries:
+            if not isinstance(value, dict):
+                continue
             # Free-text fields here re-enter THIS agent's LLM context, so
             # sanitize them at the input boundary (a failed peer's note can
             # echo arbitrary/injected content). Enum/id fields are safe.
             events.append({
-                "key": entry.get("key", ""),
+                "key": f"task_event/{value.get('task_id', '')}",
                 "kind": value.get("kind", ""),
                 "task_id": value.get("task_id", ""),
                 "recipient": value.get("recipient", ""),
-                "title": sanitize_for_prompt(value.get("title", "")),
+                "title": sanitize_for_prompt(value.get("title", "") or ""),
                 "status": value.get("status", ""),
                 "ts": value.get("ts"),
-                "summary": sanitize_for_prompt(value.get("summary", "")),
-                "error": sanitize_for_prompt(value.get("error", "")),
-                "blocker_note": sanitize_for_prompt(value.get("blocker_note", "")),
+                "summary": sanitize_for_prompt(value.get("summary", "") or ""),
+                "error": sanitize_for_prompt(value.get("error", "") or ""),
+                "blocker_note": sanitize_for_prompt(value.get("blocker_note", "") or ""),
             })
     except Exception as e:
         logger.warning(

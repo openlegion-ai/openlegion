@@ -51,27 +51,28 @@ def test_blackboard_list_by_prefix(blackboard):
 def test_blackboard_list_by_prefix_excludes_ttl_expired(blackboard):
     """TTL-expired rows must not be returned by list_by_prefix. The TTL GC is
     throttled (once/60s, write-triggered) so a reader could otherwise see
-    entries past their TTL — the root cause of the operator inbox flood."""
+    entries past their TTL. (The keys below are ordinary user keys — the
+    back-edge task-event feed moved to the ThreadStore, C.3-a.)"""
     # A live entry (no TTL) and a live TTL entry that has NOT expired.
-    blackboard.write("inbox/op/task_event/live", {"x": 1}, written_by="a1")
+    blackboard.write("signals/op/live", {"x": 1}, written_by="a1")
     blackboard.write(
-        "inbox/op/task_event/fresh", {"x": 2}, written_by="a1", ttl=3600
+        "signals/op/fresh", {"x": 2}, written_by="a1", ttl=3600
     )
     # An entry with a TTL whose updated_at we backdate so it is firmly expired.
     blackboard.write(
-        "inbox/op/task_event/stale", {"x": 3}, written_by="a1", ttl=60
+        "signals/op/stale", {"x": 3}, written_by="a1", ttl=60
     )
     blackboard.db.execute(
         "UPDATE entries SET updated_at = datetime('now', '-2 hours') "
         "WHERE key = ?",
-        ("inbox/op/task_event/stale",),
+        ("signals/op/stale",),
     )
     blackboard.db.commit()
 
-    entries = blackboard.list_by_prefix("inbox/op/task_event/")
+    entries = blackboard.list_by_prefix("signals/op/")
     keys = {e.key for e in entries}
-    assert keys == {"inbox/op/task_event/live", "inbox/op/task_event/fresh"}
-    assert "inbox/op/task_event/stale" not in keys
+    assert keys == {"signals/op/live", "signals/op/fresh"}
+    assert "signals/op/stale" not in keys
 
 
 def test_blackboard_delete(blackboard):
@@ -1005,6 +1006,124 @@ async def test_router_allows_standalone_to_project_messaging():
     result = await router.route(msg)
     assert "Cross-team" not in result.get("error", "")
     assert "No agent found" in result.get("error", "")
+
+
+# === Router → Team Threads recording (message_log deque replacement) ===
+
+
+def _dm_router(team_resolver=None, thread_store=None):
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {
+        "alice": AgentPermissions(agent_id="alice", can_message=["*"]),
+        "bob": AgentPermissions(agent_id="bob", can_message=["*"]),
+    }
+    return MessageRouter(
+        permissions=perms,
+        agent_registry={"alice": "http://a:8400", "bob": "http://b:8400"},
+        team_resolver=team_resolver,
+        thread_store=thread_store,
+    )
+
+
+class _FakeDeliveryClient:
+    """Stands in for the router's httpx client — always delivers."""
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"ok": True}
+
+    async def post(self, *a, **kw):
+        return self._Resp()
+
+
+@pytest.mark.asyncio
+async def test_router_records_dm_thread_row_with_team_scope():
+    """route() writes a dm-thread message where the old deque append was:
+    scope = sender's team, payload carries type + message id + payload."""
+    from src.host.threads import ThreadStore
+    from src.shared.types import AgentMessage
+
+    store = ThreadStore(":memory:")
+    router = _dm_router(
+        team_resolver={"alice": "sales", "bob": "sales"}.get,
+        thread_store=store,
+    )
+    router._get_client = _make_async_returner(_FakeDeliveryClient())
+
+    msg = AgentMessage(from_agent="alice", to="bob", type="query", payload={"q": "hi"})
+    result = await router.route(msg)
+    assert result == {"ok": True}
+
+    threads = store.list_threads(kind="dm")
+    assert [t["id"] for t in threads] == ["dm:alice:bob"]
+    assert threads[0]["scope_id"] == "sales"
+    (row,) = store.list_messages("dm:alice:bob")
+    assert row["sender"] == "alice"
+    assert row["recipient"] == "bob"
+    assert row["kind"] == "message"
+    assert row["body"].startswith("[query]")
+    assert row["payload"]["type"] == "query"
+    assert row["payload"]["message_id"] == msg.id
+    assert row["payload"]["payload"] == {"q": "hi"}
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_router_records_solo_sender_under_own_scope():
+    """Solo sender (no team) → scope falls back to the sender id
+    (team-of-one convention)."""
+    from src.host.threads import ThreadStore
+    from src.shared.types import AgentMessage
+
+    store = ThreadStore(":memory:")
+    router = _dm_router(team_resolver=lambda _aid: None, thread_store=store)
+    router._get_client = _make_async_returner(_FakeDeliveryClient())
+
+    await router.route(AgentMessage(from_agent="alice", to="bob", type="query", payload={}))
+    (thread,) = store.list_threads(kind="dm")
+    assert thread["scope_id"] == "alice"
+    store.close()
+
+
+@pytest.mark.asyncio
+async def test_router_thread_store_failure_does_not_block_delivery():
+    """A thread-store hiccup is best-effort — the message still routes."""
+    from unittest.mock import MagicMock
+
+    from src.shared.types import AgentMessage
+
+    broken_store = MagicMock()
+    broken_store.ensure_dm_thread.side_effect = RuntimeError("disk full")
+    router = _dm_router(thread_store=broken_store)
+    router._get_client = _make_async_returner(_FakeDeliveryClient())
+
+    result = await router.route(AgentMessage(from_agent="alice", to="bob", type="query", payload={}))
+    assert result == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_router_unresolved_target_records_nothing():
+    """No dm row for a message that never resolved to a target (mirrors
+    the old deque, which only appended after resolution)."""
+    from src.host.threads import ThreadStore
+    from src.shared.types import AgentMessage
+
+    store = ThreadStore(":memory:")
+    router = _dm_router(thread_store=store)
+
+    result = await router.route(AgentMessage(from_agent="alice", to="ghost", type="query", payload={}))
+    assert "error" in result
+    assert store.list_threads(kind="dm") == []
+    store.close()
+
+
+def _make_async_returner(value):
+    async def _return():
+        return value
+    return _return
 
 
 # === Watcher Thread Safety & Cleanup Tests ===

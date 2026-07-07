@@ -423,6 +423,20 @@ class TeamStore:
             if cur.rowcount == 0:
                 raise TeamNotFound(f"Team '{team_id}' not found")
 
+    def set_thread_ref(self, team_id: str, thread_id: str | None) -> None:
+        """Point the team at its channel thread (Phase-2 Team Threads).
+
+        Written at team create (and boot backfill) once the channel
+        thread exists in the ThreadStore.
+        """
+        with self._conn() as conn:
+            cur = conn.execute(
+                "UPDATE teams SET thread_ref = ? WHERE id = ?",
+                (thread_id, team_id),
+            )
+            if cur.rowcount == 0:
+                raise TeamNotFound(f"Team '{team_id}' not found")
+
     # ── membership ───────────────────────────────────────────────
 
     def add_member(self, team_id: str, agent_id: str) -> str | None:

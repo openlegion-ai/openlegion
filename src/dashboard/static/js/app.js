@@ -527,6 +527,11 @@ function dashboard() {
       goals: '',
       pipelines: '',
     },
+    // Team Threads observability panel (Work tab). Read-only: thread
+    // list + message pane; events render as status chips.
+    threadsList: [],
+    threadOpen: null,
+    threadMessages: [],
     // In-flight audit-log undo so we can disable the button per-row.
     auditReverting: {},
 
@@ -2651,9 +2656,34 @@ function dashboard() {
           this.loadWorkplaceSummaries(),
           this.loadWorkplaceGoals(),
           this.loadWorkplacePipelines(),
+          this.loadThreads(),
         ]);
       } finally {
         this.workplaceLoading = false;
+      }
+    },
+
+    // ── Team Threads panel (read-only observability) ──
+    async loadThreads() {
+      try {
+        const resp = await fetch('/dashboard/api/threads');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        this.threadsList = data.threads || [];
+      } catch (e) {
+        console.error('loadThreads failed', e);
+      }
+    },
+
+    async openThread(threadId) {
+      try {
+        const resp = await fetch(`/dashboard/api/threads/${encodeURIComponent(threadId)}/messages`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        this.threadOpen = data.thread || null;
+        this.threadMessages = data.messages || [];
+      } catch (e) {
+        console.error('openThread failed', e);
       }
     },
 
@@ -4600,6 +4630,21 @@ function dashboard() {
           // summaries view doesn't update live.
           evt.type === 'work_summary_created' || evt.type === 'work_summary_rated') {
         this.handleWorkplaceEvent(evt);
+      }
+
+      // Team Threads panel live refresh. No-op-safe: only re-pulls the
+      // open thread (and the list, debounced) when the panel has state.
+      if (evt.type === 'thread_message') {
+        try {
+          const tid = evt.data?.thread_id;
+          if (this.threadOpen && tid === this.threadOpen.id) {
+            this.openThread(tid);
+          }
+          if (this.activeTab === 'workplace') {
+            if (this._threadsListDebounce) clearTimeout(this._threadsListDebounce);
+            this._threadsListDebounce = setTimeout(() => this.loadThreads(), 1500);
+          }
+        } catch (_) { /* observability surface — never break event routing */ }
       }
 
       // Keep the "Needs you" help-request feed live. Any

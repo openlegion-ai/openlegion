@@ -948,6 +948,11 @@ class DashboardEvent(BaseModel):
         # silently misses the live update.
         "work_summary_created",
         "work_summary_rated",
+        # Team Threads — emitted by ``host/threads.ThreadStore`` on
+        # ``post_message`` (DM traffic recorded by the router + back-edge
+        # task events). Drives the Work tab's Threads panel live; without
+        # this literal the emit is rejected and the panel goes stale.
+        "thread_message",
         "pending_action_created",
         "pending_action_resolved",
         "pending_action_expired",

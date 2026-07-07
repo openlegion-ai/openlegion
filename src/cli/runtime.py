@@ -271,6 +271,7 @@ class RuntimeContext:
         self.intent_store = None
         self.lifecycle_store = None
         self.teams_store = None
+        self.thread_store = None
         self.agent_urls: dict[str, str] = {}
         self._dispatch_loop = None
         # Post-completion verification wakes (success path) — sliding
@@ -630,11 +631,22 @@ class RuntimeContext:
                 logger.info("Provisioned team drives at boot: %s", ", ".join(backfilled))
         except Exception:
             logger.exception("Team drive boot backfill failed (teams keep working without drives)")
+        # Durable Team Threads store (Phase-2 unit 2): channel/task/dm
+        # conversations. Replaces the router's in-memory message_log
+        # deque AND the blackboard back-edge feed — the router records
+        # DM traffic here; the mesh records task back-edge events.
+        from src.host.threads import ThreadStore
+
+        self.thread_store = ThreadStore(
+            db_path=os.environ.get("OPENLEGION_THREADS_DB", "data/threads.db"),
+            event_bus=self.event_bus,
+        )
         self.router = MessageRouter(
             self.permissions,
             self.agent_urls,
             trace_store=self.trace_store,
             team_resolver=self.teams_store.team_of,
+            thread_store=self.thread_store,
         )
         # Create HealthMonitor early so the dashboard router can reference it.
         # Only register() is called here; start() happens in _start_background().
@@ -1802,6 +1814,7 @@ class RuntimeContext:
             cost_tracker=self.cost_tracker,
             notify_fn=self._handle_notify,
             teams_store=self.teams_store,
+            thread_store=self.thread_store,
             lane_manager=self.lane_manager,
             dispatch_loop=self._dispatch_loop,
             wallet_service_ref=wallet_ref,
@@ -1900,6 +1913,7 @@ class RuntimeContext:
             mcp_gateway=self.mcp_gateway,
             intent_store=self.intent_store,
             teams_store=self.teams_store,
+            thread_store=self.thread_store,
         )
         app.include_router(dashboard_router)
         app.include_router(create_spa_catchall_router())  # Must be last — SPA deep linking

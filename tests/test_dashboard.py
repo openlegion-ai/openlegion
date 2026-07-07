@@ -59,6 +59,11 @@ def _make_components(tmp_path: str, *, include_v2: bool = False) -> dict:
         teams_dir=os.path.join(tmp_path, "teams"),
     )
 
+    # Team Threads store — backs /api/threads* and the store-backed
+    # /api/messages recent-traffic feed (message_log deque is gone).
+    from src.host.threads import ThreadStore
+    thread_store = ThreadStore(db_path=os.path.join(tmp_path, "threads.db"))
+
     result = {
         "blackboard": bb,
         "health_monitor": health_monitor,
@@ -68,6 +73,7 @@ def _make_components(tmp_path: str, *, include_v2: bool = False) -> dict:
         "agent_registry": agent_registry,
         "opened_conversations_store": opened_conversations_store,
         "teams_store": teams_store,
+        "thread_store": thread_store,
     }
 
     if include_v2:
@@ -95,7 +101,6 @@ def _make_components(tmp_path: str, *, include_v2: bool = False) -> dict:
         msg_router.agent_registry = agent_registry
         msg_router.register_agent.side_effect = lambda aid, url, **kw: agent_registry.__setitem__(aid, url)
         msg_router.unregister_agent.side_effect = lambda aid: agent_registry.pop(aid, None)
-        msg_router.message_log = []
 
         channel_manager = MagicMock()
         channel_manager.get_channel_status.return_value = [
@@ -149,6 +154,8 @@ def _teardown(components: dict) -> None:
         components["pubsub"].close()
     if components.get("opened_conversations_store") is not None:
         components["opened_conversations_store"].close()
+    if components.get("thread_store") is not None:
+        components["thread_store"].close()
 
 
 class TestDashboardIndex:
@@ -2603,20 +2610,77 @@ class TestDashboardMessages:
         _teardown(self.components)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
+    def _record_traffic(self, sender, recipient, msg_type, msg_id):
+        """Write a routed-message row the way MessageRouter.route() does."""
+        ts = self.components["thread_store"]
+        th = ts.ensure_dm_thread(sender, sender, recipient)
+        ts.post_message(
+            th["id"], sender, recipient=recipient,
+            body=f"[{msg_type}] {{}}",
+            payload={"type": msg_type, "message_id": msg_id, "payload": {}},
+        )
+
     def test_returns_log(self):
-        self.components["router"].message_log = [
-            {"id": "m1", "from": "alpha", "to": "beta", "type": "chat"},
-            {"id": "m2", "from": "beta", "to": "alpha", "type": "response"},
-        ]
+        self._record_traffic("alpha", "beta", "chat", "m1")
+        self._record_traffic("beta", "alpha", "response", "m2")
         resp = self.client.get("/dashboard/api/messages")
         assert resp.status_code == 200
         data = resp.json()
         assert len(data["messages"]) == 2
+        first = data["messages"][0]
+        assert first["from"] == "alpha"
+        assert first["to"] == "beta"
+        assert first["type"] == "chat"
+        assert first["id"] == "m1"
+        assert first["timestamp"]
 
     def test_empty_log(self):
         resp = self.client.get("/dashboard/api/messages")
         assert resp.status_code == 200
         assert resp.json()["messages"] == []
+
+
+class TestDashboardThreads:
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_threads_list_and_filters(self):
+        ts = self.components["thread_store"]
+        ts.ensure_channel("growth")
+        ts.ensure_task_thread("growth", "t1", title="do it")
+        resp = self.client.get("/dashboard/api/threads")
+        assert resp.status_code == 200
+        assert {t["kind"] for t in resp.json()["threads"]} == {"channel", "task"}
+        resp = self.client.get("/dashboard/api/threads?kind=task")
+        assert [t["id"] for t in resp.json()["threads"]] == ["task:t1"]
+        resp = self.client.get("/dashboard/api/threads?kind=bogus")
+        assert resp.status_code == 400
+
+    def test_thread_messages_pane(self):
+        ts = self.components["thread_store"]
+        th = ts.ensure_channel("growth")
+        ts.post_message(th["id"], "alpha", body="hello team")
+        ts.post_message(
+            th["id"], "mesh", recipient="alpha", kind="event",
+            payload={"kind": "task_failed", "status": "failed"},
+        )
+        resp = self.client.get(f"/dashboard/api/threads/{th['id']}/messages")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["thread"]["id"] == th["id"]
+        kinds = [m["kind"] for m in data["messages"]]
+        assert kinds == ["message", "event"]
+        assert data["messages"][1]["payload"]["kind"] == "task_failed"
+
+    def test_unknown_thread_404(self):
+        resp = self.client.get("/dashboard/api/threads/th_missing/messages")
+        assert resp.status_code == 404
 
 
 # ── V2 Tests: Streaming Broadcast ────────────────────────────

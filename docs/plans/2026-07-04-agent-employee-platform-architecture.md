@@ -865,6 +865,38 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   main ref moved server-side; quota reject → rejected commit absent from the bare repo;
   token absent from `<clone>/.git/config` after a real clone). Drive suite 53→69 tests.
 
+- **✅ Landed — Phase-2 unit 2: Team Threads (C.3-a executed; message_log + inbox back-edge
+  deleted).** `ThreadStore` (`src/host/threads.py`, `data/threads.db`, env
+  `OPENLEGION_THREADS_DB`, canonical v1) with kinds `channel` / `task` / `dm`;
+  `scope_id` = effective team scope (solo = agent id, same convention as blackboard
+  prefixes + summaries). BOTH C.1 rows completed in-unit: (row 4) the router's
+  `message_log` deque is deleted — `MessageRouter.route()` records a `dm` thread row
+  (type-tagged body + capped payload JSON) and `GET /api/messages` is store-backed;
+  (row 3) the blackboard `inbox/{agent}/task_event/` writes, the `check_inbox`
+  blackboard read, and the `permissions.py` self-inbox carve-out are deleted —
+  back-edge events are `kind='event'` rows on the lazy per-task thread, served via new
+  `GET /mesh/agents/{id}/task-events` (goals-GET auth matrix: self-or-operator-or-
+  internal, unknown agent 404 naming the roster) and consumed by
+  `mesh_client.list_inbox_events()`. Wake semantics, eligibility, L9 creator binding,
+  and the per-task + operator-storm rate limits were untouched (storage-independent by
+  construction — only the write call swapped). The former TTL split survives as
+  `list_events_for` query windows (7d actionable / 24h informational); event rows reap
+  after 90d, plain messages are durable. Team channel: created at the mesh
+  team-create endpoint + boot backfill for NULL `thread_ref` (`TeamStore.set_thread_ref`
+  is now written); both delete paths ARCHIVE the team's threads (audit trail). Human
+  visibility: minimal read-only Threads panel under the `workplace` tab
+  (`/api/threads*`), live via the new `thread_message` DashboardEvent. Implementation
+  decisions worth recording:
+  1. **✎ Naming deviation:** the spec's `MeshClient.list_task_events()` name was already
+     taken by the per-task audit-history reader (`/mesh/tasks/{id}/events`, used by
+     `await_task_event`) — the new inbox-feed reader is `list_inbox_events()` instead.
+  2. `check_inbox`'s envelope is field-identical (incl. the 25-cap and
+     actionable-retention ordering); only `key` changed value shape
+     (`task_event/{task_id}` instead of the old blackboard key) since it was
+     informational, never parsed.
+  3. Window filtering happens at read time, so observability (the task thread) keeps
+     the full 90-day event record while check_inbox stays bounded.
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|

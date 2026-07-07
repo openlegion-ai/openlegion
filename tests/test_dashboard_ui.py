@@ -2392,6 +2392,20 @@ class TestPolishFixesApplied:
             "CLAUDE.md should document src/host/drive.py (Team Drive)"
         )
 
+    def test_claudemd_documents_thread_store_and_message_log_removal(self):
+        """CLAUDE.md gains the threads.py row; the router message_log
+        deque is gone (C.1 row 4) so the mesh.py row must say so."""
+        claude_md = (_REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        assert "src/host/threads.py" in claude_md, (
+            "CLAUDE.md should document src/host/threads.py"
+        )
+        assert "ThreadStore" in claude_md
+        # The mesh.py row records that the deque was replaced, and no row
+        # documents the deque as a live surface.
+        assert "`message_log` deque is GONE" in claude_md, (
+            "mesh.py row should record the message_log deque removal"
+        )
+
     def test_claudemd_documents_tab_id_and_wizard_state_constraints(self):
         """CLAUDE.md gains the tab-ID + wizard-state Known Constraints."""
         claude_md = (_REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
@@ -2441,6 +2455,20 @@ class TestOnWsEventHandlersForLiveCoverage:
     def test_agent_restart_handlers_present(self):
         assert "evt.type === 'agent_restarting'" in _APP_JS_TEXT
         assert "evt.type === 'agent_restarted'" in _APP_JS_TEXT
+
+    def test_thread_message_handler_and_panel_present(self):
+        """Team Threads: the ``thread_message`` WS event refreshes the
+        open thread, and the Work-tab panel markup exists (frozen tab ID
+        ``workplace`` untouched — Constraint #5)."""
+        assert "evt.type === 'thread_message'" in _APP_JS_TEXT, (
+            "thread_message handler missing from onWsEvent"
+        )
+        assert 'data-testid="workplace-threads-panel"' in _INDEX_HTML, (
+            "Threads panel missing from the workplace tab"
+        )
+        assert 'data-testid="thread-event-chip"' in _INDEX_HTML, (
+            "event rows should render as status chips"
+        )
         # Map for the spinner state must be declared on Alpine state.
         assert "agentRestartingMap:" in _APP_JS_TEXT
 

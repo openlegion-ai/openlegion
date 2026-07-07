@@ -19,6 +19,9 @@ def _make_mesh_client(agent_id="scout", team_name="default"):
     mc.write_blackboard = AsyncMock(return_value={"version": 1})
     mc.read_blackboard = AsyncMock(return_value={"value": {"status": "pending"}})
     mc.list_blackboard = AsyncMock(return_value=[])
+    # Back-edge task events now come from the Team Threads store via
+    # GET /mesh/agents/{id}/task-events (C.3-a) — check_inbox reads this.
+    mc.list_inbox_events = AsyncMock(return_value=[])
     mc.delete_blackboard = AsyncMock(return_value={"deleted": True})
     mc.wake_agent = AsyncMock(return_value={"woken": True})
     mc.create_task = AsyncMock(return_value={
@@ -403,7 +406,7 @@ class TestCheckInbox:
 
         mc = _make_mesh_client(agent_id="analyst")
         mc.list_task_inbox.return_value = []
-        mc.list_blackboard.return_value = []
+        mc.list_inbox_events.return_value = []
 
         result = await check_inbox(mesh_client=mc)
 
@@ -424,23 +427,21 @@ class TestCheckInbox:
         )
 
         mc = _make_mesh_client(agent_id="operator")
-        # 40 completed events — more than the cap.
+        # 40 completed events — more than the cap. Fixture shape mirrors
+        # the /mesh/agents/{id}/task-events envelope rows (thread store).
         entries = [
             {
-                "key": f"inbox/operator/task_event/task_{i:03d}",
-                "value": {
-                    "kind": "task_completed",
-                    "task_id": f"task_{i:03d}",
-                    "recipient": "worker",
-                    "title": f"task {i}",
-                    "status": "done",
-                    "ts": i,  # ascending — higher i = newer
-                    "summary": f"summary {i}",
-                },
+                "kind": "task_completed",
+                "task_id": f"task_{i:03d}",
+                "recipient": "worker",
+                "title": f"task {i}",
+                "status": "done",
+                "ts": i,  # ascending — higher i = newer
+                "summary": f"summary {i}",
             }
             for i in range(40)
         ]
-        mc.list_blackboard.return_value = entries
+        mc.list_inbox_events.return_value = entries
 
         result = await check_inbox(mesh_client=mc)
 
@@ -462,46 +463,37 @@ class TestCheckInbox:
         mc = _make_mesh_client(agent_id="operator")
         completed = [
             {
-                "key": f"inbox/operator/task_event/done_{i:03d}",
-                "value": {
-                    "kind": "task_completed",
-                    "task_id": f"done_{i:03d}",
-                    "recipient": "worker",
-                    "title": f"done {i}",
-                    "status": "done",
-                    "ts": 1000 + i,
-                    "summary": "ok",
-                },
+                "kind": "task_completed",
+                "task_id": f"done_{i:03d}",
+                "recipient": "worker",
+                "title": f"done {i}",
+                "status": "done",
+                "ts": 1000 + i,
+                "summary": "ok",
             }
             for i in range(40)
         ]
         actionable = [
             {
-                "key": "inbox/operator/task_event/fail_1",
-                "value": {
-                    "kind": "task_failed",
-                    "task_id": "fail_1",
-                    "recipient": "worker",
-                    "title": "broken pipeline",
-                    "status": "failed",
-                    "ts": 5,  # deliberately old — must still survive
-                    "error": "boom",
-                },
+                "kind": "task_failed",
+                "task_id": "fail_1",
+                "recipient": "worker",
+                "title": "broken pipeline",
+                "status": "failed",
+                "ts": 5,  # deliberately old — must still survive
+                "error": "boom",
             },
             {
-                "key": "inbox/operator/task_event/block_1",
-                "value": {
-                    "kind": "task_blocked",
-                    "task_id": "block_1",
-                    "recipient": "worker",
-                    "title": "stuck",
-                    "status": "blocked",
-                    "ts": 6,
-                    "blocker_note": "need creds",
-                },
+                "kind": "task_blocked",
+                "task_id": "block_1",
+                "recipient": "worker",
+                "title": "stuck",
+                "status": "blocked",
+                "ts": 6,
+                "blocker_note": "need creds",
             },
         ]
-        mc.list_blackboard.return_value = completed + actionable
+        mc.list_inbox_events.return_value = completed + actionable
 
         result = await check_inbox(mesh_client=mc)
 
@@ -775,14 +767,13 @@ class TestCoordination:
         assert task["status"] == "pending"
         assert task["output_key"] == "output/scout/ho_1"
         assert task["ts"] == 1700000000.0
-        # The new endpoint was hit. (Bug 3 fix: the blackboard list IS
-        # now called once per check_inbox to surface task_event
-        # back-edges, but the dedicated task lookup is still the v2
-        # endpoint, not the legacy blackboard scan.)
+        # The new endpoint was hit. The thread-store event feed IS
+        # called once per check_inbox to surface task_event back-edges
+        # (C.3-a), but the dedicated task lookup is still the v2
+        # endpoint. The blackboard is no longer touched at all.
         mc.list_task_inbox.assert_called_once_with("analyst")
-        mc.list_blackboard.assert_called_once_with(
-            "inbox/analyst/task_event/", global_scope=True,
-        )
+        mc.list_inbox_events.assert_called_once_with()
+        mc.list_blackboard.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_complete_task_transitions_to_done(self):
@@ -1772,8 +1763,8 @@ class TestHandOffThinking:
 class TestToolDescriptions:
     """Contract tests pinning the pushback-protocol prose in the
     LLM-visible tool descriptions. The transport for blocked-task
-    back-edges (blocker_note → inbox/{creator}/task_event/ →
-    check_inbox events[]) shipped without telling workers it exists;
+    back-edges (blocker_note → task-thread event → check_inbox
+    events[]) shipped without telling workers it exists;
     these pins keep future description edits from silently dropping
     the protocol documentation.
     """

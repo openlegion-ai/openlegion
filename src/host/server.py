@@ -42,6 +42,7 @@ from src.host.orchestration import (
 )
 from src.host.pending_actions import PendingActions
 from src.host.teams import TeamNotFound, TeamStore
+from src.host.threads import ThreadStore
 from src.shared import limits as limits_mod
 from src.shared.limits import (
     MAX_OUTPUT_TOKENS_MAX,
@@ -722,6 +723,7 @@ def create_mesh_app(
     cost_tracker: CostTracker | None = None,
     notify_fn: Callable[[str, str], Coroutine] | None = None,
     teams_store: TeamStore | None = None,
+    thread_store: ThreadStore | None = None,
     lane_manager: LaneManager | None = None,
     dispatch_loop: asyncio.AbstractEventLoop | None = None,
     wallet_service_ref: list | None = None,
@@ -890,6 +892,31 @@ def create_mesh_app(
     if teams_store is None:
         teams_store = TeamStore(db_path=":memory:")
     app.teams_store = teams_store  # exposed for tests/dashboard
+
+    # Durable Team Threads store (Phase-2 unit 2, C.3-a). The runtime
+    # passes its disk-backed instance; standalone constructions (tests)
+    # fall back to in-memory. Replaces the router's message_log deque
+    # AND the blackboard inbox/{agent}/task_event/ back-edge feed.
+    if thread_store is None:
+        thread_store = ThreadStore(db_path=":memory:", event_bus=event_bus)
+    app.thread_store = thread_store  # exposed for tests/dashboard
+    # Wire the router's DM-thread recording when the runtime didn't
+    # (standalone constructions build the router before the store).
+    if getattr(router, "thread_store", None) is None:
+        router.thread_store = thread_store
+
+    # Boot backfill: every team gets a channel thread + thread_ref.
+    # Covers teams created before this unit landed and any create path
+    # that predates the endpoint-layer hook. Best-effort per team.
+    try:
+        # Archived teams excluded: their threads are archived history —
+        # a channel is created (or restored) only for live teams.
+        for _team_id, _team in teams_store.list_teams(include_archived=False).items():
+            if not _team.get("thread_ref"):
+                _ch = thread_store.ensure_channel(_team_id)
+                teams_store.set_thread_ref(_team_id, _ch["id"])
+    except Exception as e:
+        logger.warning("team channel-thread backfill failed: %s", e)
 
     def _caller_teams(agent_id: str) -> set[str]:
         """Return the team memberships visible to ``agent_id``.
@@ -5663,6 +5690,15 @@ def create_mesh_app(
                 # new members' team patterns apply to the very next
                 # blackboard/pubsub call (not at the next mesh restart).
                 permissions.reload()
+        # Team channel thread (Phase-2 Team Threads): create the durable
+        # channel and point the team row at it. Best-effort — a thread
+        # hiccup must not fail team creation; the boot backfill catches
+        # any team left with a NULL thread_ref.
+        try:
+            _channel = thread_store.ensure_channel(name)
+            teams_store.set_thread_ref(name, _channel["id"])
+        except Exception as e:
+            logger.warning("channel thread create for team %s failed: %s", name, e)
         # Real-time cron lifecycle: schedule the daily work-summary
         # fire on team creation so the operator doesn't have to wait
         # for the next mesh restart for the reconcile to pick it up.
@@ -5754,6 +5790,12 @@ def create_mesh_app(
             _remove_team_blackboard_permissions(agent, team_name)
         if former_members:
             permissions.reload()
+        # Archive (never delete — audit trail) the team's threads. The
+        # channel/task/dm history stays queryable via include_archived.
+        try:
+            thread_store.archive_scope(team_name)
+        except Exception as e:
+            logger.warning("thread archive on team delete %s failed: %s", team_name, e)
         # Real-time cron lifecycle: drop the daily work-summary cron
         # for the deleted team. This is the mesh DIRECT-delete path
         # (distinct from the propose/confirm flow, which also cleans
@@ -6391,11 +6433,17 @@ def create_mesh_app(
     # ── Back-edge events ─────────────────────────────────────────
     #
     # When a task reaches a terminal status (or a lane-timeout flips it
-    # to ``failed``), the originating agent learns via a back-edge entry
-    # written to ``inbox/{origin_user}/task_event/{task_id}``. Actionable
+    # to ``failed``), the originating agent learns via a back-edge event
+    # recorded on the task's thread (ThreadStore, ``kind='event'``,
+    # ``recipient=origin_user``) and served through
+    # ``GET /mesh/agents/{id}/task-events`` → ``check_inbox``. Actionable
     # events also wake the originator so workflow recovery is event-
     # driven instead of heartbeat-paced. Closure-local rate-limit state
     # coalesces bursts (e.g. lane timeout + sweep retry).
+    #
+    # The former TTL split (7-day actionable / 24h informational) is now
+    # a pair of query windows in ``ThreadStore.list_events_for`` — same
+    # effect on what check_inbox sees, durable rows underneath.
     _BACK_EDGE_KIND_FOR_STATUS = {
         "done": "task_completed",
         "failed": "task_failed",
@@ -6403,14 +6451,6 @@ def create_mesh_app(
         "cancelled": "task_cancelled",
     }
     _BACK_EDGE_WAKE_KINDS = frozenset({"task_failed", "task_blocked"})
-    # TTL split for back-edge events. Actionable kinds (task_failed /
-    # task_blocked) keep the 7-day window so the originator can recover even
-    # after a long gap. Informational kinds (task_completed / task_cancelled)
-    # get a much shorter window: the operator originates almost every workflow,
-    # so without this split completed-task events accumulate for a week and
-    # flood check_inbox / the operator's LLM context on every heartbeat.
-    _BACK_EDGE_TTL_ACTIONABLE = 604800  # 7 days
-    _BACK_EDGE_TTL_INFORMATIONAL = 86400  # 24 hours
     _BACK_EDGE_WAKE_WINDOW_SECONDS = 60.0
     _back_edge_wake_state: dict[str, float] = {}
     # A2 hardening — GLOBAL throttle for operator recovery wakes. The
@@ -6425,6 +6465,46 @@ def create_mesh_app(
     _OPERATOR_RECOVERY_WAKE_WINDOW_S = 600.0
     _operator_recovery_wake_times: deque[float] = deque()
 
+    def _task_thread_scope(task_record: dict) -> str:
+        """Effective team scope for a task's thread (Team Threads).
+
+        The task's ``team_id`` when set; otherwise the assignee's real
+        team, falling back to the assignee id itself (solo = team-of-one,
+        same convention as ``teams/{scope}/`` blackboard prefixes).
+        """
+        team = task_record.get("team_id")
+        if team:
+            return str(team)
+        assignee = task_record.get("assignee")
+        if assignee:
+            try:
+                real_team = teams_store.team_of(str(assignee))
+            except Exception:
+                real_team = None
+            return real_team or str(assignee)
+        return "mesh"
+
+    def _record_task_event(task_record: dict, recipient: str, payload: dict) -> None:
+        """Write a back-edge event row on the task's thread.
+
+        The single replacement for the old
+        ``blackboard.write("inbox/{recipient}/task_event/{id}", ...)``
+        call — raises on failure so callers keep their existing
+        log-and-return error handling.
+        """
+        th = thread_store.ensure_task_thread(
+            _task_thread_scope(task_record),
+            str(task_record.get("id")),
+            title=task_record.get("title"),
+        )
+        thread_store.post_message(
+            th["id"],
+            "mesh",
+            recipient=recipient,
+            kind="event",
+            payload=payload,
+        )
+
     def _wake_operator_for_human_chain(
         task_record: dict,
         event_kind: str,
@@ -6433,8 +6513,8 @@ def create_mesh_app(
         """A2 — recovery wake to the operator for a failed/blocked task
         on a HUMAN-originated chain.
 
-        Mirrors the agent-origin back-edge: event written to
-        ``inbox/operator/task_event/{id}`` (actionable 7-day TTL,
+        Mirrors the agent-origin back-edge: event recorded on the task's
+        thread for the operator (actionable 7-day serving window,
         surfaced via check_inbox) + a rate-limited lane wake. The wake
         deliberately does NOT thread ``task_id`` into the lane — the
         operator's turn is a recovery turn ABOUT the task, not an
@@ -6461,12 +6541,7 @@ def create_mesh_app(
                 if k not in payload:
                     payload[k] = v
         try:
-            blackboard.write(
-                f"inbox/operator/task_event/{task_id}",
-                payload,
-                written_by="mesh",
-                ttl=_BACK_EDGE_TTL_ACTIONABLE,
-            )
+            _record_task_event(task_record, "operator", payload)
         except Exception as e:
             logger.warning(
                 "Operator back-edge write failed for task %s: %s",
@@ -6618,16 +6693,8 @@ def create_mesh_app(
                 for k, v in payload_extras.items():
                     if k not in payload:
                         payload[k] = v
-            back_edge_ttl = (
-                _BACK_EDGE_TTL_ACTIONABLE if event_kind in _BACK_EDGE_WAKE_KINDS else _BACK_EDGE_TTL_INFORMATIONAL
-            )
             try:
-                blackboard.write(
-                    f"inbox/{origin_user}/task_event/{task_id}",
-                    payload,
-                    written_by="mesh",
-                    ttl=back_edge_ttl,
-                )
+                _record_task_event(task_record, str(origin_user), payload)
             except Exception as e:
                 logger.warning(
                     "Back-edge write failed for task %s: %s",
@@ -6641,8 +6708,8 @@ def create_mesh_app(
                 return
             if lane_manager is None or dispatch_loop is None:
                 return
-            # Finding L9 (binding): the back-edge EVENT above is written to
-            # ``inbox/{origin_user}/`` unconditionally so the originator's
+            # Finding L9 (binding): the back-edge EVENT above is recorded
+            # for ``origin_user`` unconditionally so the originator's
             # ``check_inbox`` always sees the outcome (and picks it up on
             # heartbeat even when we skip the wake below). But the wake is
             # a privileged action — it enqueues a lane message to
@@ -7180,12 +7247,13 @@ def create_mesh_app(
 
         Bug 3 fix: on terminal transitions (``done`` / ``failed`` /
         ``cancelled`` / ``blocked``) where the originating ``origin_kind``
-        is ``agent`` or ``operator``, write a back-edge to the
-        originator's blackboard at ``inbox/{origin_user}/task_event/{id}``
-        with a 7-day TTL. Humans are excluded (they get auto-notified via
-        the lane worker forward path) and self-handoffs are dropped to
-        keep an originator's inbox clean. Failures are logged, never
-        raised — the status update itself stays authoritative.
+        is ``agent`` or ``operator``, record a back-edge event for the
+        originator on the task's thread (served for 7 days when
+        actionable, 24h when informational — the ThreadStore query
+        windows). Humans are excluded (they get auto-notified via the
+        lane worker forward path) and self-handoffs are dropped to keep
+        an originator's inbox clean. Failures are logged, never raised —
+        the status update itself stays authoritative.
         """
         store = tasks_store
         caller = _extract_verified_agent_id(request)
@@ -8515,6 +8583,46 @@ def create_mesh_app(
             )
         return {"agent_id": agent_id, "cleared": True, "existed": existed}
 
+    # ── Back-edge task events (Team Threads read surface) ────────
+
+    @app.get("/mesh/agents/{agent_id}/task-events")
+    async def list_agent_task_events(agent_id: str, request: Request) -> dict:
+        """Read the back-edge task events addressed to ``agent_id``.
+
+        The thread-store replacement for the old blackboard
+        ``inbox/{agent}/task_event/`` read (C.3-a). Auth matrix mirrors
+        the goals GET: allowed for the agent itself (bearer-verified),
+        the operator, and internal callers; an unknown agent is a 404
+        naming the roster (goals-PUT style).
+
+        The former TTL split is applied as query windows in
+        ``ThreadStore.list_events_for``: actionable kinds
+        (``task_failed`` / ``task_blocked``) are served for 7 days,
+        informational kinds (``task_completed`` / ``task_cancelled``)
+        for 24 hours. The agent-side ``check_inbox`` cap/sanitization
+        semantics are unchanged.
+        """
+        caller = _extract_verified_agent_id(request)
+        if caller != agent_id and not _caller_is_operator(caller, request) and not _is_internal_caller(request):
+            _record_denial(
+                "permission",
+                caller=caller,
+                target=agent_id,
+                gate="task_events:read",
+            )
+            raise HTTPException(
+                403,
+                "Task events are readable by the agent itself or the operator only",
+            )
+        if agent_id != "operator" and agent_id not in router.agent_registry:
+            available = ", ".join(sorted(router.agent_registry))
+            raise HTTPException(
+                404,
+                f"Agent '{agent_id}' not found. Available: {available}",
+            )
+        events = thread_store.list_events_for(agent_id)
+        return {"agent_id": agent_id, "events": events, "count": len(events)}
+
     @app.post("/mesh/teams/{team_name}/propose-delete")
     async def propose_delete_team(team_name: str, request: Request) -> dict:
         """Propose deletion of an archived team. Returns nonce for human confirm.
@@ -8675,6 +8783,16 @@ def create_mesh_app(
                 _remove_team_blackboard_permissions(agent, target_id)
             if former_members:
                 permissions.reload()
+            # Archive the team's threads (audit trail — mirrors the
+            # mesh direct-delete path).
+            try:
+                thread_store.archive_scope(target_id)
+            except Exception as e:
+                logger.warning(
+                    "thread archive on team delete %s failed: %s",
+                    target_id,
+                    e,
+                )
             # Real-time cron lifecycle (codex r1 P2): delete the
             # daily work-summary cron when the team itself is
             # deleted. Symmetric to the archive path; archive already

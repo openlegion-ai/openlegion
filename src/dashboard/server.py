@@ -681,6 +681,11 @@ def create_dashboard_router(
     # same disk-backed instance the mesh app holds; standalone test
     # constructions fall back to a pure-DB in-memory store.
     teams_store: Any = None,
+    # Durable Team Threads store (Phase-2 unit 2). Backs the Threads
+    # panel (``/api/threads*``) and the store-backed ``/api/messages``
+    # recent-traffic feed. Optional so existing dashboard tests keep
+    # working — the endpoints return empty lists when absent.
+    thread_store: Any = None,
 ) -> APIRouter:
     """Create the dashboard FastAPI router."""
     if teams_store is None:
@@ -7447,13 +7452,62 @@ def create_dashboard_router(
         _emit_config_changed("storage", db_id=db_id)
         return result
 
-    # ── Messages log ─────────────────────────────────────────
+    # ── Messages log (Team Threads store) ────────────────────
 
     @api_router.get("/api/messages")
     async def api_messages() -> dict:
-        if router is None:
+        """Recent inter-agent traffic — store-backed (the router's
+        in-memory ``message_log`` deque is gone, C.1 row 4)."""
+        from datetime import datetime, timezone
+
+        if thread_store is None:
             return {"messages": []}
-        return {"messages": router.message_log[-100:]}
+        rows = thread_store.recent_messages(kind="message", limit=100)
+        messages = []
+        for r in rows:
+            payload = r.get("payload") if isinstance(r.get("payload"), dict) else {}
+            ts = r.get("created_at")
+            messages.append({
+                "id": payload.get("message_id"),
+                "from": r.get("sender"),
+                "to": r.get("recipient"),
+                "type": payload.get("type"),
+                "timestamp": (
+                    datetime.fromtimestamp(ts, tz=timezone.utc).isoformat() if ts else None
+                ),
+                "thread_id": r.get("thread_id"),
+            })
+        return {"messages": messages}
+
+    # ── Team Threads (read-only observability panel) ─────────
+
+    @api_router.get("/api/threads")
+    async def api_threads(scope: str = "", kind: str = "") -> dict:
+        """List threads, newest-activity first (optional scope/kind filters)."""
+        if thread_store is None:
+            return {"threads": []}
+        try:
+            threads = thread_store.list_threads(
+                scope_id=scope or None,
+                kind=kind or None,
+                limit=200,
+            )
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"threads": threads}
+
+    @api_router.get("/api/threads/{thread_id}/messages")
+    async def api_thread_messages(
+        thread_id: str, before: float | None = None, limit: int = 100,
+    ) -> dict:
+        """One thread's messages (oldest-first page; ``before`` pages back)."""
+        if thread_store is None:
+            return {"thread": None, "messages": []}
+        thread = thread_store.get_thread(thread_id)
+        if thread is None:
+            raise HTTPException(404, f"Thread '{thread_id}' not found")
+        messages = thread_store.list_messages(thread_id, before=before, limit=limit)
+        return {"thread": thread, "messages": messages}
 
     # ── Webhooks ──────────────────────────────────────────────
 

@@ -1537,6 +1537,23 @@ class MeshClient:
         _raise_with_body(response)
         return response.json()
 
+    async def list_inbox_events(self) -> list[dict]:
+        """Back-edge task events addressed to this agent (Team Threads).
+
+        Reads ``GET /mesh/agents/{self}/task-events`` — the thread-store
+        replacement for the old blackboard ``inbox/{agent}/task_event/``
+        prefix read. The serving windows (7-day actionable / 24h
+        informational) are applied mesh-side. The ``X-Agent-ID`` hint
+        mirrors :meth:`get_my_goals` for tokenless dev mode.
+        """
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/agents/{self.agent_id}/task-events",
+            headers={"X-Agent-ID": self.agent_id},
+        )
+        _raise_with_body(response)
+        data = response.json()
+        return data.get("events", []) if isinstance(data, dict) else []
+
     async def list_task_inbox(self, assignee: str | None = None) -> list[dict]:
         """List tasks assigned to ``assignee`` (defaults to self)."""
         target = assignee or self.agent_id
