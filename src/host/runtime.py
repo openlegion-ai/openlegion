@@ -260,6 +260,30 @@ class RuntimeBackend(abc.ABC):
 
         return json.dumps(resolved_servers)
 
+    # ── Team Drive storage (Phase-2 unit 1) ──────────────────────
+    #
+    # CONCRETE shared implementations, deliberately not abstract: the
+    # drive is a bare git repo on the MESH HOST filesystem (mediated
+    # over smart HTTP), so both DockerBackend and SandboxBackend share
+    # one host-dir implementation. The ABC seam is where a future
+    # backend with different storage (e.g. remote object store) would
+    # relocate it. Lifecycle is owned by the TeamStore via
+    # ``set_drive_provisioner`` — callers other than the store should
+    # not invoke these directly.
+
+    def ensure_team_volume(self, team_id: str) -> str:
+        """Create/repair the team's drive repo; returns its drive_ref
+        (the absolute bare-repo path). Idempotent."""
+        from src.host.drive import ensure_team_drive
+
+        return ensure_team_drive(team_id)
+
+    def remove_team_volume(self, team_id: str) -> None:
+        """Delete the team's drive repo (best-effort)."""
+        from src.host.drive import remove_team_drive
+
+        remove_team_drive(team_id)
+
     @abc.abstractmethod
     def start_agent(
         self,

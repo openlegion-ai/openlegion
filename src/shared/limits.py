@@ -55,6 +55,16 @@ LIMIT_SPECS: dict[str, tuple[int, int, int]] = {
     "lane_timeout_seconds": (14400, 30, 86400),
     # Host-side per-agent followup queue depth cap (0 disables).
     "lane_queue_max": (100, 0, 10000),
+    # Team Drive: per-push request-body ceiling (MB). Also written into the
+    # bare repo as ``receive.maxInputSize`` at provision time — the config
+    # copy re-syncs on every ensure, so a settings change applies on the
+    # next boot/provision, not retroactively.
+    "drive_push_max_mb": (64, 1, 512),
+    # Team Drive: on-disk repo size quota (MB). Checked BEFORE receive-pack
+    # runs, under a per-repo lock that serializes the check→push→invalidate
+    # window — so a concurrent-push overshoot is bounded to ONE push
+    # (drive_push_max_mb), not N simultaneous pushes.
+    "drive_quota_mb": (512, 1, 65536),
 }
 
 # key -> OPENLEGION_* env var name (the second-lowest precedence source).
@@ -66,6 +76,8 @@ ENV_NAMES: dict[str, str] = {
     "max_iterations": "OPENLEGION_MAX_ITERATIONS",
     "lane_timeout_seconds": "OPENLEGION_LANE_TIMEOUT_SECONDS",
     "lane_queue_max": "OPENLEGION_LANE_QUEUE_MAX",
+    "drive_push_max_mb": "OPENLEGION_DRIVE_PUSH_MAX_MB",
+    "drive_quota_mb": "OPENLEGION_DRIVE_QUOTA_MB",
 }
 
 # Per-agent config keys (agents.yaml / edit_agent) -> limits key. Only the

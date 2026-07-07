@@ -615,6 +615,21 @@ class RuntimeContext:
             return env
 
         self.runtime.set_team_env_provider(_team_env_for)
+        # Team Drive lifecycle (Phase-2 unit 1, plan A.3 #3): the store
+        # owns WHEN drives exist; the runtime backend owns WHERE (bare
+        # git repos under data/team_drives/). Backfill provisions any
+        # team created before the drive landed (or whose create-time
+        # provision failed) — mirrors the solo-ACL boot backfill.
+        self.teams_store.set_drive_provisioner(
+            self.runtime.ensure_team_volume,
+            self.runtime.remove_team_volume,
+        )
+        try:
+            backfilled = self.teams_store.backfill_drives()
+            if backfilled:
+                logger.info("Provisioned team drives at boot: %s", ", ".join(backfilled))
+        except Exception:
+            logger.exception("Team drive boot backfill failed (teams keep working without drives)")
         self.router = MessageRouter(
             self.permissions,
             self.agent_urls,

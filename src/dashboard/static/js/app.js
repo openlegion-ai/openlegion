@@ -11206,6 +11206,7 @@ function dashboard() {
         remove_skill: 'removing a skill',
         list_skill_assignments: 'reviewing skill assignments',
         assign_skill: 'assigning a skill',
+        team_drive: 'working in the team drive',
       };
       if (map[toolName]) return map[toolName];
       // Fallback: humanise the snake_case tool name.
