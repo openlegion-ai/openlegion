@@ -32,7 +32,11 @@ class TestCostTracking:
     def test_track_oauth_records_tokens_at_zero_cost(self):
         """bill=False (OAuth/subscription): tokens recorded, cost_usd=0."""
         result = self.tracker.track(
-            "agent1", "anthropic/claude-sonnet-4-6", 1000, 500, bill=False,
+            "agent1",
+            "anthropic/claude-sonnet-4-6",
+            1000,
+            500,
+            bill=False,
         )
         assert result["cost"] == 0.0
         assert result["over_budget"] is False
@@ -58,7 +62,11 @@ class TestCostTracking:
         self.tracker.set_budget("agent1", daily_usd=0.01, monthly_usd=0.01)
         for _ in range(50):
             self.tracker.track(
-                "agent1", "anthropic/claude-opus-4-1", 50_000, 10_000, bill=False,
+                "agent1",
+                "anthropic/claude-opus-4-1",
+                50_000,
+                10_000,
+                bill=False,
             )
         assert self.tracker.check_budget("agent1")["allowed"] is True
         assert self.tracker.get_spend("agent1", "today")["total_cost"] == 0.0
@@ -152,9 +160,7 @@ class TestTraceIdStamping:
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _trace_ids(self, agent: str) -> list:
-        rows = self.tracker.db.execute(
-            "SELECT trace_id FROM usage WHERE agent = ? ORDER BY id", (agent,)
-        ).fetchall()
+        rows = self.tracker.db.execute("SELECT trace_id FROM usage WHERE agent = ? ORDER BY id", (agent,)).fetchall()
         return [r[0] for r in rows]
 
     def test_track_stamps_active_trace_id(self):
@@ -222,9 +228,7 @@ class TestTraceIdStamping:
         )
         cols = {r[1] for r in t1.db.execute("PRAGMA table_info(usage)").fetchall()}
         assert "trace_id" in cols
-        old = t1.db.execute(
-            "SELECT trace_id FROM usage WHERE agent = 'legacy'"
-        ).fetchone()
+        old = t1.db.execute("SELECT trace_id FROM usage WHERE agent = 'legacy'").fetchone()
         assert old[0] is None
         t1.close()
 
@@ -264,9 +268,11 @@ class TestBudgetEnforcement:
         assert budget["allowed"] is False
 
     def test_default_budget(self):
+        # B-pre #3: the no-settings-file fallback matches the dashboard's
+        # advertised default ($50/$200) — it was a silent $10 before.
         budget = self.tracker.check_budget("unknown_agent")
         assert budget["allowed"] is True
-        assert budget["daily_limit"] == 10.0
+        assert budget["daily_limit"] == 50.0
         assert budget["monthly_limit"] == 200.0
 
     def test_no_spend_is_allowed(self):
@@ -341,14 +347,20 @@ class TestBudgetOverrunWarning:
             assert any("exceeded monthly budget" in str(c) for c in calls)
 
 
-class TestProjectCostAggregation:
-    """Project-level cost tracking and budget enforcement."""
+class TestTeamCostAggregation:
+    """Team-level cost aggregation reads membership + envelope from the
+    TeamStore (the durable home since Phase 1) — costs.py holds no team
+    state of its own."""
 
     def setup_method(self):
+        from src.host.teams import TeamStore
+
         self._tmpdir = tempfile.mkdtemp()
         self.db_path = os.path.join(self._tmpdir, "costs.db")
         self.budgets_path = os.path.join(self._tmpdir, "agent_budgets.json")
         self.tracker = CostTracker(db_path=self.db_path, budgets_path=self.budgets_path)
+        self.store = TeamStore(db_path=":memory:")
+        self.tracker.set_team_store(self.store)
 
     def teardown_method(self):
         self.tracker.close()
@@ -356,9 +368,9 @@ class TestProjectCostAggregation:
 
     def test_team_spend_aggregates_members(self):
         """get_team_spend sums spend across all member agents."""
-        self.tracker.set_team_budget(
-            "teamA", members=["alice", "bob"], daily_usd=50.0, monthly_usd=500.0,
-        )
+        self.store.create_team("teamA")
+        self.store.add_member("teamA", "alice")
+        self.store.add_member("teamA", "bob")
         self.tracker.track("alice", "openai/gpt-4o-mini", 1000, 500)
         self.tracker.track("bob", "openai/gpt-4o-mini", 2000, 1000)
 
@@ -372,19 +384,129 @@ class TestProjectCostAggregation:
         assert alice_spend["tokens"] == 1500
         assert bob_spend["tokens"] == 3000
 
-    def test_team_spend_no_budget_configured(self):
-        """get_team_spend returns error when no budget is set."""
+    def test_team_spend_unknown_team_errors(self):
+        """get_team_spend keeps the historical error-dict contract for an
+        unknown team (introspect guards on ``"error" not in``)."""
         result = self.tracker.get_team_spend("unknown", "today")
         assert "error" in result
 
-    def test_team_budget_limits(self):
-        """set_team_budget stores limits correctly."""
-        self.tracker.set_team_budget(
-            "proj", members=["a1"], daily_usd=100.0, monthly_usd=2000.0,
-        )
+    def test_team_spend_no_store_errors(self):
+        self.tracker.set_team_store(None)
+        result = self.tracker.get_team_spend("teamA", "today")
+        assert "error" in result
+
+    def test_team_envelope_limits_surface(self):
+        self.store.create_team("proj")
+        self.store.add_member("proj", "a1")
+        self.store.set_budget("proj", 100.0, 2000.0)
         result = self.tracker.get_team_spend("proj", "today")
         assert result["daily_limit"] == 100.0
         assert result["monthly_limit"] == 2000.0
+
+    def test_unset_envelope_surfaces_none(self):
+        """B4: unset envelope reads back as None (= unlimited), never 0."""
+        self.store.create_team("proj")
+        result = self.tracker.get_team_spend("proj", "today")
+        assert result["daily_limit"] is None
+        assert result["monthly_limit"] is None
+
+
+class TestTeamEnvelopeCheck:
+    """Pre-flight team envelope (plan B4). THE semantics flip pinned here:
+    an unset/NULL/0 envelope is UNLIMITED — the opposite of the per-agent
+    ledger where a 0 budget blocks everything."""
+
+    def setup_method(self):
+        from src.host.teams import TeamStore
+
+        self._tmpdir = tempfile.mkdtemp()
+        self.db_path = os.path.join(self._tmpdir, "costs.db")
+        self.budgets_path = os.path.join(self._tmpdir, "agent_budgets.json")
+        self.tracker = CostTracker(db_path=self.db_path, budgets_path=self.budgets_path)
+        self.store = TeamStore(db_path=":memory:")
+        self.tracker.set_team_store(self.store)
+        self.store.create_team("teamA")
+        self.store.add_member("teamA", "alice")
+        self.store.add_member("teamA", "bob")
+
+    def teardown_method(self):
+        self.tracker.close()
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_unset_envelope_is_unlimited(self):
+        """No envelope configured → members are never team-blocked."""
+        self.tracker.track("alice", "openai/gpt-4o", 500_000, 250_000)
+        check = self.tracker.team_envelope_check("bob", "openai/gpt-4o")
+        assert check["allowed"] is True
+        assert check["team"] == "teamA"
+
+    def test_zero_envelope_is_unlimited(self):
+        """THE B4 flip: an explicit 0 envelope means UNLIMITED, not
+        block-everything (contrast test_zero_agent_budget_still_blocks)."""
+        self.store.set_budget("teamA", 0.0, 0.0)
+        self.tracker.track("alice", "openai/gpt-4o", 500_000, 250_000)
+        check = self.tracker.team_envelope_check("bob", "openai/gpt-4o")
+        assert check["allowed"] is True
+        assert check["daily_limit"] is None
+        assert check["monthly_limit"] is None
+
+    def test_zero_agent_budget_still_blocks(self):
+        """The PER-AGENT contract is unchanged by B4: a 0 agent budget
+        still blocks — only the team envelope treats 0 as unlimited."""
+        self.tracker.set_budget("alice", daily_usd=0.0, monthly_usd=0.0)
+        preflight = self.tracker.preflight_check("alice", "openai/gpt-4o")
+        assert preflight["allowed"] is False
+
+    def test_exceeded_daily_envelope_blocks(self):
+        self.store.set_budget("teamA", 0.001, None)
+        self.tracker.track("alice", "openai/gpt-4o", 10_000, 5_000)
+        check = self.tracker.team_envelope_check("bob", "openai/gpt-4o")
+        assert check["allowed"] is False
+        assert check["team"] == "teamA"
+        assert check["daily_limit"] == 0.001
+        assert check["monthly_limit"] is None
+        assert check["daily_used"] > 0
+
+    def test_exceeded_monthly_envelope_blocks(self):
+        self.store.set_budget("teamA", None, 0.001)
+        self.tracker.track("alice", "openai/gpt-4o", 10_000, 5_000)
+        check = self.tracker.team_envelope_check("bob", "openai/gpt-4o")
+        assert check["allowed"] is False
+        assert check["monthly_limit"] == 0.001
+
+    def test_envelope_aggregates_across_members(self):
+        """One member's spend counts against every member's headroom."""
+        self.store.set_budget("teamA", 50.0, None)
+        # alice spends nothing; bob's spend alone must not block alice
+        # under a generous envelope...
+        self.tracker.track("bob", "openai/gpt-4o-mini", 1000, 500)
+        assert self.tracker.team_envelope_check("alice", "openai/gpt-4o")["allowed"] is True
+        # ...but a tight envelope consumed by bob blocks alice too.
+        self.store.set_budget("teamA", 0.001, None)
+        self.tracker.track("bob", "openai/gpt-4o", 10_000, 5_000)
+        assert self.tracker.team_envelope_check("alice", "openai/gpt-4o")["allowed"] is False
+
+    def test_solo_agent_never_team_blocked(self):
+        check = self.tracker.team_envelope_check("loner", "openai/gpt-4o")
+        assert check["allowed"] is True
+        assert check["team"] is None
+
+    def test_no_store_wired_allows(self):
+        self.tracker.set_team_store(None)
+        check = self.tracker.team_envelope_check("alice", "openai/gpt-4o")
+        assert check["allowed"] is True
+
+    def test_store_error_fails_open(self):
+        """The envelope is an additional governor — a store hiccup must
+        not take down the LLM path (the per-agent budget still applies)."""
+
+        class _Boom:
+            def team_of(self, agent):
+                raise RuntimeError("db locked")
+
+        self.tracker.set_team_store(_Boom())
+        check = self.tracker.team_envelope_check("alice", "openai/gpt-4o")
+        assert check["allowed"] is True
 
 
 class TestCostTrackerCleanup:
@@ -517,7 +639,8 @@ class TestBudgetPersistence:
         tracker = CostTracker(db_path=self.db_path, budgets_path=self.budgets_path)
         # Point the persist path at an unwritable location so the write fails.
         with patch.object(
-            tracker, "budgets_path",
+            tracker,
+            "budgets_path",
             Path("/proc/nonexistent/agent_budgets.json"),
         ):
             with patch("src.host.costs.logger") as mock_logger:
@@ -586,6 +709,7 @@ class TestCostTrackerWithVault:
         try:
             tracker = CostTracker(db_path=os.path.join(tmpdir, "costs.db"))
             from src.host.credentials import CredentialVault
+
             vault = CredentialVault(cost_tracker=tracker)
             assert vault.cost_tracker is tracker
             tracker.close()

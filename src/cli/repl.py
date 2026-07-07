@@ -1362,10 +1362,11 @@ class REPLSession:
             fresh_cfg = _load_config()
             budget = fresh_cfg.get("agents", {}).get(name, {}).get("budget", {})
             if budget and self.ctx.cost_tracker:
+                from src.host.costs import DEFAULT_DAILY_BUDGET_USD, DEFAULT_MONTHLY_BUDGET_USD
                 self.ctx.cost_tracker.set_budget(
                     name,
-                    daily_usd=budget.get("daily_usd", 10.0),
-                    monthly_usd=budget.get("monthly_usd", 200.0),
+                    daily_usd=budget.get("daily_usd", DEFAULT_DAILY_BUDGET_USD),
+                    monthly_usd=budget.get("monthly_usd", DEFAULT_MONTHLY_BUDGET_USD),
                 )
             click.echo("Applied.")
         else:

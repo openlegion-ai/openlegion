@@ -1333,6 +1333,7 @@ def test_watch_blackboard_permission_denied(tmp_path):
 def test_project_cost_endpoint(tmp_path):
     """Project cost endpoint returns aggregated spend."""
     from src.host.costs import CostTracker
+    from src.host.teams import TeamStore
 
     bb = Blackboard(db_path=str(tmp_path / "bb.db"))
     pubsub = PubSub()
@@ -1340,12 +1341,18 @@ def test_project_cost_endpoint(tmp_path):
     perms.permissions = {}
     router = MessageRouter(permissions=perms, agent_registry={})
     tracker = CostTracker(db_path=str(tmp_path / "costs.db"))
-    tracker.set_team_budget("teamA", members=["alice", "bob"],
-                            daily_usd=50.0, monthly_usd=500.0)
+    store = TeamStore(db_path=":memory:")
+    store.create_team("teamA")
+    store.add_member("teamA", "alice")
+    store.add_member("teamA", "bob")
+    store.set_budget("teamA", 50.0, 500.0)
+    tracker.set_team_store(store)
     tracker.track("alice", "openai/gpt-4o-mini", 1000, 500)
     tracker.track("bob", "openai/gpt-4o-mini", 2000, 1000)
 
-    app = create_mesh_app(bb, pubsub, router, perms, cost_tracker=tracker)
+    app = create_mesh_app(
+        bb, pubsub, router, perms, cost_tracker=tracker, teams_store=store,
+    )
     client = TestClient(app)
 
     resp = client.get("/mesh/costs/team/teamA", params={"period": "today"})
@@ -1355,6 +1362,7 @@ def test_project_cost_endpoint(tmp_path):
     assert data["total_tokens"] == 4500
     assert data["total_cost"] > 0
     assert len(data["agents"]) == 2
+    assert data["daily_limit"] == 50.0
 
     bb.close()
     tracker.close()

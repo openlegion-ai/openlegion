@@ -1797,6 +1797,19 @@ class MeshClient:
         _raise_with_body(response)
         return response.json()
 
+    async def set_team_budget(
+        self, name: str, daily_usd: float | None, monthly_usd: float | None,
+    ) -> dict:
+        """Set a team's budget envelope. None/0 = unlimited (plan B4)."""
+        client = await self._get_client()
+        response = await client.put(
+            f"{self.mesh_url}/mesh/teams/{name}/budget",
+            json={"daily_usd": daily_usd, "monthly_usd": monthly_usd},
+            headers=self._trace_headers(),
+        )
+        _raise_with_body(response)
+        return response.json()
+
     async def archive_team(self, name: str) -> dict:
         """Archive a team."""
         client = await self._get_client()

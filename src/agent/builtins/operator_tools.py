@@ -2423,26 +2423,41 @@ async def compose_work_summary(
     name="manage_team",
     operator_only=True,
     description=(
-        "Team lifecycle action (archive / unarchive / propose-delete). "
-        "Destructive actions require user confirmation."
+        "Team lifecycle action (archive / unarchive / propose-delete / "
+        "set_budget). Destructive actions require user confirmation. "
+        "set_budget REPLACES the team's whole aggregate spend envelope in "
+        "USD (enforced across all members' LLM calls): supply BOTH "
+        "daily_usd and monthly_usd on every call — an omitted or 0 field "
+        "becomes unlimited, so updating just one limit clears the other."
     ),
     parameters={
         "action": {
             "type": "string",
-            "enum": ["archive", "unarchive", "propose_delete"],
+            "enum": ["archive", "unarchive", "propose_delete", "set_budget"],
         },
         "team_name": {"type": "string", "description": "Team name"},
+        "daily_usd": {
+            "type": "number",
+            "description": "set_budget only: daily envelope in USD (0 = unlimited)",
+        },
+        "monthly_usd": {
+            "type": "number",
+            "description": "set_budget only: monthly envelope in USD (0 = unlimited)",
+        },
     },
 )
 async def manage_team(
     action: str,
     team_name: str = "",
+    daily_usd: float | None = None,
+    monthly_usd: float | None = None,
     *,
     mesh_client=None,
     _messages=None,
     **_kw,
 ) -> dict:
-    """Team lifecycle dispatcher — archive, unarchive, or propose deletion."""
+    """Team lifecycle dispatcher — archive, unarchive, propose deletion,
+    or set the budget envelope (plan B4: unset/0 = unlimited)."""
     if not _is_operator():
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
@@ -2451,6 +2466,15 @@ async def manage_team(
     name = team_name
     if not name:
         return {"error": "team_name is required"}
+
+    if action == "set_budget":
+        for label, val in (("daily_usd", daily_usd), ("monthly_usd", monthly_usd)):
+            if val is not None and (isinstance(val, bool) or not isinstance(val, (int, float))):
+                return {"error": f"{label} must be a number (USD) or omitted"}
+        try:
+            return await mesh_client.set_team_budget(name, daily_usd, monthly_usd)
+        except Exception as e:
+            return {"error": f"Failed to set team budget: {e}"}
 
     if action == "archive":
         try:
@@ -2482,7 +2506,10 @@ async def manage_team(
             return {"error": f"Failed to propose delete: {e}"}
 
     return {
-        "error": f"Unknown action {action!r}; use archive|unarchive|propose_delete"
+        "error": (
+            f"Unknown action {action!r}; use "
+            "archive|unarchive|propose_delete|set_budget"
+        )
     }
 
 
