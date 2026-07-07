@@ -316,7 +316,9 @@ Status: **RATIFIED** except items 1 and 4, which stand at their safe defaults pe
 
 1. Security tradeoff ledger (§4) — shared `/team/scratch` volume: **not yet ratified.** Default:
    proceed **git-Drive-first**; raw shared scratch stays deferred/opt-in (safer default), so Phase 2
-   is not blocked. Revisit before shipping raw scratch.
+   is not blocked. Revisit before shipping raw scratch. **Reconfirmed 2026-07-07 at Phase-2 entry:**
+   the Drive ships git-first; no raw scratch is designed or built this phase without an explicit
+   user decision.
 2. ✅ **RATIFIED — leads approved, no privilege.** Amend **Constraint #1** to "no *router* hierarchy"
    (accountability leads permitted; users still address any agent directly); **Constraint #12**
    unchanged (leads get NO permission ceiling; the operator-still-gated test stays intact).
@@ -356,10 +358,43 @@ Status: **RATIFIED** except items 1 and 4, which stand at their safe defaults pe
    config is not accumulated state. *Out of scope:* the operator's business-goals document
    (`GOALS.json`/`GOALS.md` via `manage_goals`) is a human-facing org-outcomes doc owned by the
    operator workflow — a different layer, kept as-is (boundary documented like C.3-d).
-
----
-
-## Appendix D — Implementation log (live)
+8. ✅ **RATIFIED (2026-07-07) — C.3-a: Team Threads REPLACE the inbox back-edge feed.** When the
+   durable thread store lands (Phase 2), the blackboard `inbox/{agent}/task_event/` keys, their
+   host-side producers (`_write_task_event_back_edge` / `_wake_operator_for_human_chain` blackboard
+   writes), the `check_inbox` blackboard read, and the `permissions.py` inbox self-read carve-out
+   are all DELETED (C.1 row 3 completes in-phase). The host still produces the same events at the
+   same trigger points — they are recorded in the thread store instead, and `check_inbox` serves
+   its `events[]` from there with the same envelope fields (`kind/task_id/recipient/title/status/
+   ts/summary/error/blocker_note`), the same actionable-over-informational retention (25-event cap,
+   `task_failed`/`task_blocked` never dropped), and the same sanitization. Wake semantics are
+   storage-independent and survive unchanged (actionable-kind wakes, L9 creator binding, per-task
+   and operator-storm rate limits). *Rationale:* (a) the feed is a closed loop with ONE producer
+   (host) and ONE consumer (`check_inbox`) — verified: ChainWatcher re-derives everything from the
+   durable tasks table and never touches `inbox/` — so replace is surgical, and coexist would be
+   exactly the two-event-surfaces cruft C.1 names; (b) Layer-3 placement — task events are
+   accumulated state currently trapped in TTL'd keys (7d/24h, silently lost at expiry and on any
+   blackboard GC), while a durable thread row also becomes the first human-visible surface for
+   inter-agent traffic (the §6 observability gap); (c) the tool contract is preserved — the only
+   consumer of `events[]` is the LLM via `check_inbox`'s return shape, so storage can swap without
+   disturbing prompts or the pinned envelope tests (they repoint, not rewrite). B8's rider list is
+   honored either way: `claim_task` CAS, `signals/*`, `status/*`, and template working namespaces
+   stay on the blackboard.
+9. ✅ **RATIFIED (2026-07-07) — C.3-e: KEEP the SandboxBackend; the Team Drive is transport-level,
+   not volume-level.** The Drive as built this phase is mesh-hosted git served over the existing
+   agent→mesh HTTP channel (smart-HTTP endpoints on the mesh, per-agent bearer auth), with each
+   agent's clone in its own private `/data`. It mounts NO shared volume — so B-pre #6's "no
+   shared-volume analog" gap never touches the flagship feature, and the invest-vs-delete binary
+   dissolves: nothing is half-supported. Facts this rests on (verified in-tree): both backends
+   inject `MESH_URL` + `MESH_AUTH_TOKEN` (sandbox VMs reach the host via `host.docker.internal`);
+   `git` is already in the agent image; the mesh is a host process, so bare repos live on the host
+   FS owned by the TeamStore via the new `RuntimeBackend.ensure_team_volume`/`remove_team_volume`
+   seam (shared host-dir implementation today; the ABC seam is where a future backend would place
+   storage elsewhere). This preserves §5's Keep verdict (the backend is the isolation-upgrade
+   path; opt-in, self-disabling to Docker). *Residual divergence is confined to raw shared
+   scratch* — which is deferred and unratified per #1; IF scratch is ever ratified, that decision
+   MUST resolve the sandbox story (sync layer vs Docker-only scoping) at the same time. Known
+   caveat recorded: sandbox-VM→host HTTP egress is wired but exercised by no test; the Drive lands
+   with DockerBackend as the tested path, matching the backend's existing best-effort posture.
 
 Chronological record of what has actually landed on the branch, and any plan
 corrections discovered during implementation. Keeps this doc the source of truth
@@ -713,6 +748,32 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   now fires for TEAM.md too (additive — only consumer of the mapping). Review:
   proportionate direct sweep (single consumer verified, cap+no-truncation+single-source
   pins added); no findings.
+
+- **✅ Landed — Phase-2 pre-decisions ratified (§8 #8 C.3-a replace, §8 #9 C.3-e keep, §8 #1
+  reconfirmed git-Drive-first).** Recorded BEFORE any Phase-2 storage design, per the C.3-b
+  precedent. Grounded in a four-way code recon (runtime backends, messaging/conversation stores,
+  coordination/blackboard flows, lanes/billing/provenance); load-bearing facts are cited inline in
+  the §8 entries. Recon corrections worth recording now:
+  1. **✎ Plan correction — "ask enters via the steer lane and returns inline" is not how steer
+     works.** `mode="steer"` returns only a status string — `_handle_steer` inspects
+     `result["injected"]` and discards any reply; `/chat/steer` returns `{"injected", "agent_state"}`
+     (lanes.py:438-475, agent/server.py:527-534). The ONLY reply-returning mechanism is the followup
+     dispatch future (`enqueue` → `task.future` → `/chat` response). Unit 3 must therefore pair
+     steer-style delivery with an explicit answer back-edge (an `answer_ask`-style callback resolving
+     a mesh-held future) for busy recipients, and may use the followup turn's own response for idle
+     recipients. Steer's intentional `task_id` drop (no auto-close, Constraint-#6-correct) is
+     confirmed and preserved either way.
+  2. **✎ Plan correction — there is no 256KB blackboard artifact tax.** Artifact bytes never
+     transit the blackboard: `save_artifact` writes content to the agent workspace and registers a
+     metadata POINTER at `artifacts/{agent}/{name}`; ingest cap is 50MB (env-tunable), read cap 2MB,
+     and `hand_off`'s `data` blob (the only real payload writer, `output/{agent}/ho_*`, 24h TTL) is
+     uncapped. The unit-4 move is therefore pointer-rework + payload-home change, not a
+     serialization-tax fix. §6's "256KB/6k-char serialization tax" framing survives only as the
+     6k-char brief cap, which is real (`_MAX_BRIEF_CHARS`).
+  3. **Cost attribution baseline for unit 3:** billing keys strictly on the proxy caller
+     (`CostTracker.track(agent, ...)`); no bill-to-other mechanism exists anywhere — "billed to the
+     asker" requires a mesh-authoritative attribution seam (never container-supplied headers; the
+     container is untrusted).
 
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
