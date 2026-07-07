@@ -548,7 +548,9 @@ def _add_agent_to_config(
 # wildcard because pubsub is additionally prefix-gated host-side per caller.
 _DEFAULT_AGENT_COORDINATION_PERMS: dict = {
     "blackboard_read": [],
-    "blackboard_write": ["tasks/*", "context/*", "status/*", "output/*", "artifacts/*"],
+    # ``output/*`` + ``artifacts/*`` removed in Phase-2 unit 4 — those
+    # payload flows moved to the Team Drive; the blackboard is signals-only.
+    "blackboard_write": ["tasks/*", "context/*", "status/*"],
     "can_publish": ["*"],
     "can_subscribe": ["*"],
 }

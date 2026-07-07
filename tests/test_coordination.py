@@ -17,6 +17,15 @@ def _make_mesh_client(agent_id="scout", team_name="default"):
     mc.team_name = team_name
     mc.list_agents = AsyncMock(return_value={})
     mc.write_blackboard = AsyncMock(return_value={"version": 1})
+    # Handoff data payloads commit to the sender's Team Drive (Phase-2
+    # unit 4). Default mock returns a drive:// ref; the ``{team}`` slot is
+    # filled from the call so tests can assert the scope.
+    mc.commit_drive_artifact = AsyncMock(side_effect=lambda team, *, name, content, kind="artifact", encoding="utf8": {
+        "committed": True,
+        "ref": f"drive://{team}/handoffs/{agent_id}/{name}@abcdef1234",
+        "path": f"handoffs/{agent_id}/{name}",
+        "short_sha": "abcdef1234",
+    })
     mc.read_blackboard = AsyncMock(return_value={"value": {"status": "pending"}})
     mc.list_blackboard = AsyncMock(return_value=[])
     # Back-edge task events now come from the Team Threads store via
@@ -105,11 +114,13 @@ class TestHandOff:
         mc.write_blackboard.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_hand_off_invalid_json_data_falls_back(self):
-        """Invalid JSON in data param is wrapped as {"text": ...}."""
+    async def test_hand_off_data_committed_to_drive_raw(self):
+        """A teamed sender's ``data`` payload is committed verbatim to its
+        Team Drive (Phase-2 unit 4) — no JSON parse/wrap; the file holds
+        exactly what the sender passed. The blackboard is never touched."""
         from src.agent.builtins.coordination_tool import hand_off
 
-        mc = _make_mesh_client(agent_id="scout")
+        mc = _make_mesh_client(agent_id="scout", team_name="research")
         mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
 
         result = await hand_off(
@@ -120,9 +131,12 @@ class TestHandOff:
         )
 
         assert result["handed_off"] is True
-        # Output should have been written with the fallback wrapper
-        output_call = mc.write_blackboard.call_args_list[0]
-        assert output_call[0][1] == {"text": "not valid json {{{"}
+        mc.write_blackboard.assert_not_called()
+        commit = mc.commit_drive_artifact.call_args
+        assert commit.args[0] == "research"  # sender's team drive
+        assert commit.kwargs["kind"] == "handoff"
+        assert commit.kwargs["content"] == "not valid json {{{"
+        assert result["output_key"].startswith("drive://research/handoffs/scout/")
 
     @pytest.mark.asyncio
     async def test_hand_off_to_operator_writes_with_global_scope(self):
@@ -262,17 +276,14 @@ class TestHandOff:
         )
 
     @pytest.mark.asyncio
-    async def test_hand_off_to_operator_writes_output_to_global_namespace(self):
-        """Operator-bound handoff OUTPUT lands at ``global/output/{sender}/``
-        with ``global_scope=True`` — the namespace the operator's read
-        carve-out AND the permission model both target (readable by only
-        the operator + the author) — not the sender's team scope, which the
-        team-less operator cannot read. The recorded artifact_ref is the
-        SAME key, so the operator's check_inbox → read_blackboard resolves."""
+    async def test_hand_off_to_operator_from_teamed_sender_uses_sender_drive(self):
+        """Operator-bound handoff from a TEAMED sender commits the payload to
+        the SENDER's Team Drive (Phase-2 unit 4) — the operator reads all
+        drives. The task's artifact_ref is the resulting drive:// pointer.
+        The blackboard global/output/* namespace is gone."""
         from src.agent.builtins.coordination_tool import hand_off
 
-        mc = _make_mesh_client(agent_id="social-publisher")
-        mc.team_name = "social-media"
+        mc = _make_mesh_client(agent_id="social-publisher", team_name="social-media")
         mc.list_agents.return_value = {"operator": {"team": "ops"}}
 
         result = await hand_off(
@@ -283,25 +294,22 @@ class TestHandOff:
         )
 
         assert result["handed_off"] is True
-        args, kwargs = mc.write_blackboard.call_args
-        written_key = args[0]
-        assert written_key.startswith("global/output/social-publisher/"), (
-            f"operator handoff output must land in the global namespace, "
-            f"got {written_key!r}"
-        )
-        assert kwargs.get("global_scope") is True
-        # The task points at exactly the key we wrote.
-        assert mc.create_task.call_args.kwargs["artifact_refs"] == [written_key]
+        mc.write_blackboard.assert_not_called()
+        commit = mc.commit_drive_artifact.call_args
+        assert commit.args[0] == "social-media"  # sender's team drive
+        assert commit.kwargs["kind"] == "handoff"
+        ref = result["output_key"]
+        assert ref.startswith("drive://social-media/handoffs/social-publisher/")
+        # The task points at exactly the drive ref we committed.
+        assert mc.create_task.call_args.kwargs["artifact_refs"] == [ref]
 
     @pytest.mark.asyncio
-    async def test_hand_off_to_teammate_keeps_output_team_scoped(self):
-        """Non-operator handoff output is unchanged: a bare
-        ``output/{sender}/`` key written WITHOUT global_scope (the mesh
-        client transparently prefixes it to the team namespace)."""
+    async def test_hand_off_to_teammate_commits_to_sender_drive(self):
+        """Same-team handoff data commits to the sender's Team Drive and the
+        task carries the drive:// ref."""
         from src.agent.builtins.coordination_tool import hand_off
 
-        mc = _make_mesh_client(agent_id="scout")
-        mc.team_name = "research-team"
+        mc = _make_mesh_client(agent_id="scout", team_name="research-team")
         mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
 
         result = await hand_off(
@@ -312,9 +320,59 @@ class TestHandOff:
         )
 
         assert result["handed_off"] is True
-        args, kwargs = mc.write_blackboard.call_args
-        assert args[0].startswith("output/scout/")
-        assert not kwargs.get("global_scope", False)
+        mc.write_blackboard.assert_not_called()
+        commit = mc.commit_drive_artifact.call_args
+        assert commit.args[0] == "research-team"
+        assert result["output_key"].startswith("drive://research-team/handoffs/scout/")
+
+    @pytest.mark.asyncio
+    async def test_hand_off_solo_sender_folds_data_into_brief(self):
+        """A solo (team-of-one) sender has no drive, so the ``data`` payload
+        folds inline into the task brief under a ``## Handoff Data`` section
+        and artifact_refs stays empty — the blackboard path is gone."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        # Solo: team_name == agent_id (team-of-one).
+        mc = _make_mesh_client(agent_id="scout", team_name="scout")
+        mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
+
+        result = await hand_off(
+            to="analyst",
+            summary="findings",
+            brief="Do the analysis.",
+            data='{"x": 1}',
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        mc.commit_drive_artifact.assert_not_called()
+        mc.write_blackboard.assert_not_called()
+        assert "output_key" not in result
+        # create_task got no artifact_refs and the data is inline in the brief.
+        ct = mc.create_task.call_args.kwargs
+        assert not ct.get("artifact_refs")
+        assert "## Handoff Data" in ct["description"]
+        assert '{"x": 1}' in ct["description"]
+
+    @pytest.mark.asyncio
+    async def test_hand_off_teamless_operator_folds_data_into_brief(self):
+        """The operator (team_name=None) is teamless → no drive → inline
+        fallback (same as a solo sender)."""
+        from src.agent.builtins.coordination_tool import hand_off
+
+        mc = _make_mesh_client(agent_id="operator", team_name=None)
+        mc.list_agents.return_value = {"analyst": {"team": "research", "role": "analyst"}}
+
+        result = await hand_off(
+            to="analyst",
+            summary="please analyze",
+            data='{"payload": true}',
+            mesh_client=mc,
+        )
+
+        assert result["handed_off"] is True
+        mc.commit_drive_artifact.assert_not_called()
+        assert "## Handoff Data" in mc.create_task.call_args.kwargs["description"]
 
     @pytest.mark.asyncio
     async def test_hand_off_cross_project_routes_to_target_project(self):
@@ -718,10 +776,10 @@ class TestCoordination:
         assert "operator" in result["recovery_hint"].lower()
 
     @pytest.mark.asyncio
-    async def test_hand_off_with_data_writes_artifact(self):
+    async def test_hand_off_with_data_commits_drive_artifact(self):
         from src.agent.builtins.coordination_tool import hand_off
 
-        mc = _make_mesh_client(agent_id="scout")
+        mc = _make_mesh_client(agent_id="scout", team_name="research")
         mc.list_agents.return_value = {"analyst": {"role": "analyst"}}
         mc.create_task.return_value = {
             "id": "task_xyz", "creator": "scout", "assignee": "analyst",
@@ -736,10 +794,12 @@ class TestCoordination:
         )
 
         assert result["handed_off"] is True
-        # output_key in result is the artifact ref the data was written to
-        assert "output_key" in result
-        # Blackboard.write was called for the artifact (separate from the task row)
-        mc.write_blackboard.assert_called_once()
+        # output_key in result is the drive ref the data was committed to.
+        assert result["output_key"].startswith("drive://research/")
+        # Drive commit was called for the payload (separate from the task row);
+        # the blackboard is never touched.
+        mc.commit_drive_artifact.assert_called_once()
+        mc.write_blackboard.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_check_inbox_returns_legacy_dict_shape(self):
@@ -750,7 +810,7 @@ class TestCoordination:
             {
                 "id": "task_a", "creator": "scout", "assignee": "analyst",
                 "title": "do thing", "status": "pending",
-                "artifact_refs": ["output/scout/ho_1"],
+                "artifact_refs": ["drive://research/handoffs/scout/ho_1.json@abcdef1234"],
                 "created_at": 1700000000.0,
             },
         ]
@@ -765,7 +825,7 @@ class TestCoordination:
         assert task["from"] == "scout"
         assert task["summary"] == "do thing"
         assert task["status"] == "pending"
-        assert task["output_key"] == "output/scout/ho_1"
+        assert task["output_key"] == "drive://research/handoffs/scout/ho_1.json@abcdef1234"
         assert task["ts"] == 1700000000.0
         # The new endpoint was hit. The thread-store event feed IS
         # called once per check_inbox to surface task_event back-edges
@@ -1259,12 +1319,12 @@ class TestHandOffWakeFailureSurfacing:
         assert "wake_failed" in result["error"]
 
 
-# ── Bug H: surface create_task / write_blackboard failures in hand_off ─
+# ── Bug H: surface create_task / drive-commit failures in hand_off ─
 
 
 class TestHandOffCreateFailureSurfacing:
-    """Operator-reported Bug H: when ``create_task`` or
-    ``write_blackboard`` raised inside ``hand_off``, the bare
+    """Operator-reported Bug H: when ``create_task`` or the drive
+    commit raised inside ``hand_off``, the bare
     ``{"error": "Failed to create task: ..."}`` envelope was easy for
     LLMs to gloss past — the in-prod case had seo-strategist call
     hand_off, create_task raise, and the agent reply "Brief completed"
@@ -1346,17 +1406,18 @@ class TestHandOffCreateFailureSurfacing:
         assert leaky_token not in result["recovery_hint"]
 
     @pytest.mark.asyncio
-    async def test_output_write_failure_returns_directive_envelope(self):
-        """v2 path: ``write_blackboard`` for the handoff artifact
-        raising surfaces the directive envelope too. This is the
+    async def test_drive_write_failure_returns_directive_envelope(self):
+        """Phase-2 unit 4: a Team Drive commit for the handoff payload
+        raising surfaces the directive envelope (Constraint #10, formerly
+        ``output_write_failed`` → now ``drive_write_failed``). This is the
         earliest failure point — no task row, no artifact persisted."""
         from src.agent.builtins.coordination_tool import hand_off
 
-        mc = _make_mesh_client(agent_id="trend-scout")
+        mc = _make_mesh_client(agent_id="trend-scout", team_name="growth")
         mc.list_agents.return_value = {
             "seo-strategist": {"role": "strategist"},
         }
-        mc.write_blackboard.side_effect = RuntimeError("blackboard EBUSY")
+        mc.commit_drive_artifact.side_effect = RuntimeError("drive EBUSY")
 
         result = await hand_off(
             to="seo-strategist",
@@ -1367,17 +1428,17 @@ class TestHandOffCreateFailureSurfacing:
 
         assert result["handed_off"] is False
         assert result["task_queued"] is False
-        assert result["output_write_failed"] is True
+        assert result["drive_write_failed"] is True
         assert result["to"] == "seo-strategist"
-        assert "output_write_failed" in result["error"]
+        assert "drive_write_failed" in result["error"]
         assert "MUST NOT report success" in result["error"]
         assert "DO NOT mark this work as complete" in result["recovery_hint"]
-        # ``create_task`` must NOT have been reached — the write failed
+        # ``create_task`` must NOT have been reached — the commit failed
         # first, so trying to create the task would have written into
         # a half-populated state.
         assert mc.create_task.await_count == 0
         # write_error carries the redacted exception detail.
-        assert "blackboard EBUSY" in result["write_error"]
+        assert "drive EBUSY" in result["write_error"]
 
 
     @pytest.mark.asyncio
@@ -1417,7 +1478,7 @@ class TestHandOffCreateFailureSurfacing:
 
         assert result["handed_off"] is True
         assert "create_failed" not in result
-        assert "output_write_failed" not in result
+        assert "drive_write_failed" not in result
         assert "create_error" not in result
         assert "write_error" not in result
 
@@ -1426,25 +1487,24 @@ class TestHandOffCreateFailureSurfacing:
 
 
 class TestHandOffFailureRedaction:
-    """Codex r5 finding: redaction was only asserted on the v2
-    create_task path. Cover the three remaining sites (v2 output_write,
-    legacy output_write, legacy task_write) so dropping
-    ``redact_text_with_urls`` from any of them is caught. v2
-    create_task redaction lives in ``TestHandOffCreateFailureSurfacing``
+    """Codex r5 finding: redaction was only asserted on the
+    create_task path. Cover the drive-commit failure site too so dropping
+    ``redact_text_with_urls`` from it is caught. create_task redaction
+    lives in ``TestHandOffCreateFailureSurfacing``
     (``test_create_task_failure_redacts_credentials``)."""
 
     LEAKY = "sk-" + "a" * 40
     LEAKY_URL = f"POST https://mesh.internal/x?api_key={LEAKY} failed 500"
 
     @pytest.mark.asyncio
-    async def test_output_write_redacts(self):
+    async def test_drive_write_redacts(self):
         from src.agent.builtins.coordination_tool import hand_off
 
-        mc = _make_mesh_client(agent_id="trend-scout")
+        mc = _make_mesh_client(agent_id="trend-scout", team_name="growth")
         mc.list_agents.return_value = {
             "seo-strategist": {"role": "strategist"},
         }
-        mc.write_blackboard.side_effect = RuntimeError(self.LEAKY_URL)
+        mc.commit_drive_artifact.side_effect = RuntimeError(self.LEAKY_URL)
 
         result = await hand_off(
             to="seo-strategist",
@@ -1453,7 +1513,7 @@ class TestHandOffFailureRedaction:
             mesh_client=mc,
         )
 
-        assert result["output_write_failed"] is True
+        assert result["drive_write_failed"] is True
         for f in ("error", "recovery_hint", "write_error"):
             assert self.LEAKY not in result[f]
 

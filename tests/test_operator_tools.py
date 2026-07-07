@@ -803,9 +803,12 @@ def test_clamp_to_operator_ceiling_single_source_of_truth():
     # operator may grant (no longer an escalation).
     assert clamp_to_operator_ceiling("permissions", {"can_use_browser": True}) is None
     assert clamp_to_operator_ceiling("permissions", {"can_spawn": True}) is None
+    # Signals-only blackboard (Phase-2 unit 4): output/* + artifacts/* left
+    # the write ceiling, so granting them now exceeds it.
+    assert clamp_to_operator_ceiling("permissions", {"blackboard_write": ["status/*"]}) is None
     assert (
         clamp_to_operator_ceiling("permissions", {"blackboard_write": ["artifacts/*"]})
-        is None
+        is not None
     )
     # False grants and non-permissions fields are not the ceiling's concern.
     assert clamp_to_operator_ceiling("permissions", {"can_spawn": False}) is None
@@ -852,31 +855,21 @@ async def test_edit_agent_permission_ceiling_allows_permitted():
 
 
 @pytest.mark.asyncio
-async def test_edit_agent_permission_ceiling_allows_artifacts_write():
-    """``artifacts/*`` must sit inside the blackboard_write ceiling — without
-    it the operator couldn't reproduce the save_artifact pattern via
-    edit_agent (regression guard for the ceiling list)."""
+async def test_edit_agent_permission_ceiling_rejects_artifacts_write():
+    """Phase-2 unit 4: ``artifacts/*`` LEFT the blackboard_write ceiling
+    (the blackboard is signals-only; artifacts live on the Team Drive), so
+    the operator granting it via edit_agent is now rejected before the mesh."""
     from src.agent.builtins.operator_tools import edit_agent
 
     mc = MagicMock()
-    mc.edit_soft = AsyncMock(return_value={
-        "success": True,
-        "undo_token": "tok-art",
-        "expires_at": "2026-05-13T00:30:00+00:00",
-        "ttl_seconds": 1800,
-        "field_class": "hard",
-        "summary": "Updated writer's permissions",
-    })
+    mc.edit_soft = AsyncMock()
     result = await edit_agent(
         "writer", "permissions", {"blackboard_write": ["artifacts/*"]},
         reason="user_asked", mesh_client=mc,
     )
-    assert "error" not in result
-    assert result["applied"] is True
-    assert result["undo_token"] == "tok-art"
-    mc.edit_soft.assert_awaited_once_with(
-        "writer", "permissions", {"blackboard_write": ["artifacts/*"]}, "user_asked",
-    )
+    assert "error" in result
+    assert "ceiling" in result["error"].lower()
+    mc.edit_soft.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 from src.agent.tools import tool
+from src.shared import limits
 from src.shared.paths import resolve_under_root
 from src.shared.utils import dumps_safe, sanitize_for_prompt, setup_logging
 
@@ -166,12 +167,14 @@ async def read_blackboard(key: str, *, mesh_client=None) -> dict:
         "The blackboard is persistent agent-to-agent storage — do NOT use "
         "it to report to the user (use notify_user or chat for that).\n\n"
         "For standard coordination, prefer the dedicated tools:\n"
-        "- hand_off() for sending work to a teammate (writes to tasks/ and output/)\n"
-        "- update_status() for broadcasting your state (writes to status/)\n"
+        "- hand_off() for sending work to a teammate (writes the task row; "
+        "any data payload goes to your Team Drive)\n"
+        "- update_status() to transition your current task\n"
         "- complete_task() for marking tasks done\n\n"
-        "Use write_blackboard for custom data that doesn't fit the "
-        "coordination protocol (e.g. research/, drafts/, analysis/).\n"
-        "- artifacts/ — managed by save_artifact, don't write directly\n\n"
+        "Use write_blackboard for small custom SIGNALS that don't fit the "
+        "coordination protocol (e.g. research/, drafts/, analysis/). "
+        "Deliverable files belong on the Team Drive (save_artifact / "
+        "team_drive), not the blackboard.\n\n"
         "Values must be JSON-serializable."
     ),
     parameters={
@@ -212,7 +215,7 @@ async def write_blackboard(key: str, value: str, *, mesh_client=None) -> dict:
             "type": "string",
             "description": (
                 "Key prefix to filter by (e.g. 'status/', 'research/', "
-                "'artifacts/', '' for all)"
+                "'' for all). Deliverables live on the Team Drive, not here."
             ),
             "default": "",
         },
@@ -370,8 +373,9 @@ async def claim_task(key: str, claim_value: str, *, mesh_client=None) -> dict:
     name="save_artifact",
     description=(
         "Save a deliverable file (report, export, code) to your workspace "
-        "artifacts. Artifacts are visible to the user and shared with teammates "
-        "in multi-agent teams. Use this for finished output you want to "
+        "artifacts. Artifacts are visible to the user and, if you are on a "
+        "team, registered on your Team Drive so teammates can discover them "
+        "(browse via team_drive). Use this for finished output you want to "
         "deliver — NOT for intermediate working files (use write_file for those)."
     ),
     parameters={
@@ -410,36 +414,63 @@ async def save_artifact(
     except Exception as e:
         return {"error": f"Failed to save artifact '{name}': {e}"}
 
-    # Stage 2: register on the blackboard so teammates can discover it.
-    # This is best-effort — if it fails (permissions, transient network),
-    # the file is still on disk so we report success with a warning rather
-    # than losing the work.
+    # Stage 2: register on the Team Drive so teammates can discover it
+    # (Phase-2 unit 4 — the blackboard ``artifacts/*`` pointer is GONE).
+    # This is best-effort graceful degradation: the file is already on
+    # disk, so any failure to register returns saved=True with a note and
+    # the workspace path rather than losing the work.
+    #   - teamed sender, content <= drive_artifact_max_mb → drive commit,
+    #     registered=True + a drive:// ref.
+    #   - oversize → registered=False + note (push it as a reviewed branch).
+    #   - solo / teamless → registered=False + note (artifact stays local).
     registered = True
     registration_error: str | None = None
+    registration_note: str | None = None
+    drive_ref: str | None = None
     if mesh_client:
+        sender_team = getattr(mesh_client, "team_name", None)
         agent_id = mesh_client.agent_id
-        key = f"artifacts/{agent_id}/{name}"
-        try:
-            meta = {
-                "path": str(filepath),
-                "size": len(content),
-                "name": name,
-            }
-            if description:
-                meta["description"] = description
-            await mesh_client.write_blackboard(key, meta)
-        except Exception as e:
-            logger.warning(
-                "save_artifact: file written but blackboard registration failed for %s: %s",
-                key, e,
-            )
+        sender_is_solo = (not sender_team) or (sender_team == agent_id)
+        max_bytes = limits.resolve("drive_artifact_max_mb") * 1024 * 1024
+        content_bytes = content.encode("utf-8", errors="replace")
+        if sender_is_solo:
             registered = False
-            registration_error = str(e)
+            registration_note = (
+                "No team drive — this artifact is local to your workspace "
+                f"({filepath}). Hand it off explicitly to share it."
+            )
+        elif len(content_bytes) > max_bytes:
+            registered = False
+            registration_note = (
+                f"Artifact is larger than the {max_bytes // (1024 * 1024)} MB "
+                "direct-commit cap — it stays local at your workspace path "
+                f"({filepath}). Push it to the Team Drive as a reviewed "
+                "branch (team_drive) to share it."
+            )
+        else:
+            try:
+                commit_resp = await mesh_client.commit_drive_artifact(
+                    sender_team, name=name, content=content, kind="artifact",
+                )
+                drive_ref = commit_resp.get("ref")
+            except Exception as e:
+                logger.warning(
+                    "save_artifact: file written but drive registration failed for %s/%s: %s",
+                    agent_id, name, e,
+                )
+                registered = False
+                registration_error = str(e)
 
     result: dict = {"saved": True, "path": str(filepath), "name": name}
+    if registered and drive_ref:
+        result["registered"] = True
+        result["drive_ref"] = drive_ref
     if not registered:
         result["registered"] = False
-        result["registration_error"] = registration_error
+        if registration_error:
+            result["registration_error"] = registration_error
+        if registration_note:
+            result["note"] = registration_note
     return result
 
 

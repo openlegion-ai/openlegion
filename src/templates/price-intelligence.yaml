@@ -162,8 +162,8 @@ agents:
         extract: current Buy Box price and availability
 
     permissions:
-      blackboard_read: ["prices/*", "tasks/*", "output/*", "status/*", "artifacts/*"]
-      blackboard_write: ["prices/*", "tasks/*", "output/*", "status/*"]
+      blackboard_read: ["prices/*", "tasks/*", "status/*"]
+      blackboard_write: ["prices/*", "tasks/*", "status/*"]
       can_publish: ["price_change", "extraction_failed"]
       can_subscribe: ["check_requested"]
       # Crawls login-gated supplier/competitor pricing pages via browser —
@@ -292,8 +292,8 @@ agents:
       - Call update_status() with your current state
 
     permissions:
-      blackboard_read: ["prices/*", "tasks/*", "output/*", "status/*", "artifacts/*"]
-      blackboard_write: ["prices/*/analysis", "tasks/*", "output/*", "status/*", "artifacts/*"]
+      blackboard_read: ["prices/*", "tasks/*", "status/*"]
+      blackboard_write: ["prices/*/analysis", "tasks/*", "status/*"]
       can_publish: ["price_report_ready"]
       can_subscribe: ["price_change"]
     resources:

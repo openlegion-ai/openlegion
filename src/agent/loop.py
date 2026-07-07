@@ -2148,7 +2148,7 @@ class AgentLoop:
     # across three repro cycles. Enforcing system-side closes that
     # trust gap completely.
     _HANDOFF_FAILURE_FLAGS = frozenset({
-        "create_failed", "wake_failed", "output_write_failed",
+        "create_failed", "wake_failed", "drive_write_failed",
     })
 
     @staticmethod
@@ -2229,7 +2229,7 @@ class AgentLoop:
         Round-4 extension: also scans ``tool_outputs`` for ``hand_off``
         results that indicate the downstream chain failed. If any
         hand_off in this turn returned ``handed_off=False`` or any of
-        ``create_failed`` / ``wake_failed`` / ``output_write_failed``,
+        ``create_failed`` / ``wake_failed`` / ``drive_write_failed``,
         the task fails — the LLM no longer has the option to mark
         ``done`` after a broken handoff just by producing text.
         """

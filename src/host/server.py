@@ -11,6 +11,8 @@ Provides endpoints for:
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import hmac
 import inspect
@@ -1801,10 +1803,20 @@ def create_mesh_app(
                     # get the same sanitize pass before riding the
                     # recipient's prompt (str() guards a non-string item
                     # from turning the wake into a join TypeError).
-                    wake_msg += (
-                        "\n\nData payload on the blackboard — fetch with "
-                        "read_blackboard: " + sanitize_for_prompt(", ".join(str(r)[:200] for r in _refs[:5]))
-                    )
+                    # Handoff payloads now live on the sender's Team Drive
+                    # (drive://{team}/{path}@{sha}); read them via
+                    # team_drive (clone/pull) or the drive file endpoint.
+                    _ref_str = sanitize_for_prompt(", ".join(str(r)[:200] for r in _refs[:5]))
+                    if any(str(r).startswith("drive://") for r in _refs):
+                        wake_msg += (
+                            "\n\nData payload on the Team Drive — read it via "
+                            "team_drive (clone/pull) at: " + _ref_str
+                        )
+                    else:
+                        wake_msg += (
+                            "\n\nData payload on the blackboard — fetch with "
+                            "read_blackboard: " + _ref_str
+                        )
 
         if lane_manager is not None and dispatch_loop is not None:
             ok, err = _try_wake_agent(
@@ -6545,6 +6557,132 @@ def create_mesh_app(
             provenance="user",
         )
         return {"rejected": True, "review": resolved}
+
+    # Direct-commit artifact store (Phase-2 unit 4). Handoff-data payloads
+    # and save_artifact registration commit STRAIGHT to main here — this is
+    # deliberate: artifacts are deliverable REGISTRATION, not reviewed
+    # source. Review-before-integrate governs agent-pushed feature branches
+    # (receive-pack + the pre-receive hook); this mesh-authored plumbing
+    # path records the sender as the commit author but bypasses the hook by
+    # never running a push. Member-or-operator, drive rate bucket, size cap.
+    _DRIVE_ARTIFACT_KINDS = {"handoff": "handoffs", "artifact": "artifacts"}
+
+    @app.post("/mesh/teams/{team_id}/drive/artifacts")
+    async def drive_commit_artifact(team_id: str, request: Request) -> dict:
+        """Commit a single deliverable file to the team drive's main.
+
+        Body: ``{kind: "handoff"|"artifact", name, content(, encoding)}``.
+        The path is ``{handoffs|artifacts}/{caller}/{name}`` — the caller
+        (verified sender identity) is the author and owns its own subtree.
+        Returns ``{committed, ref: "drive://{team}/{path}@{short_sha}", ...}``.
+        """
+        caller, _priv = _require_drive_access(team_id, request)
+        await _check_rate_limit("drive", caller)
+        body = await request.json()
+        kind = str(body.get("kind", "artifact"))
+        subdir = _DRIVE_ARTIFACT_KINDS.get(kind)
+        if subdir is None:
+            raise HTTPException(400, "kind must be 'handoff' or 'artifact'")
+        name = str(body.get("name", "")).strip()
+        encoding = str(body.get("encoding", "utf8")).lower()
+        raw = body.get("content", "")
+        if not isinstance(raw, str):
+            raise HTTPException(400, "content must be a string")
+        if encoding == "base64":
+            try:
+                content_bytes = base64.b64decode(raw, validate=True)
+            except (ValueError, binascii.Error):
+                raise HTTPException(400, "content is not valid base64")
+        elif encoding in ("utf8", "utf-8", ""):
+            content_bytes = raw.encode("utf-8")
+        else:
+            raise HTTPException(400, "encoding must be 'utf8' or 'base64'")
+        max_bytes = limits_mod.resolve("drive_artifact_max_mb") * _MB
+        if len(content_bytes) > max_bytes:
+            raise HTTPException(
+                413,
+                f"artifact exceeds the {max_bytes // _MB} MB direct-commit cap — "
+                "push large files as a reviewed branch instead",
+            )
+        try:
+            path = team_drive.validate_drive_path(f"{subdir}/{caller}/{name}")
+        except ValueError as e:
+            raise HTTPException(400, f"invalid artifact name: {e}")
+        repo = await _drive_repo(team_id)
+        # Quota guard — same posture as receive-pack (pre-checked; one
+        # commit may overshoot, then the endpoint blocks).
+        quota = limits_mod.resolve("drive_quota_mb") * _MB
+        size = await _drive_size(repo)
+        if size > quota:
+            raise HTTPException(
+                413,
+                f"Team Drive quota exceeded ({size // _MB} MB used, quota {quota // _MB} MB).",
+            )
+        message = f"{kind} artifact {name} by {caller}"
+        try:
+            commit = await team_drive.commit_file(
+                repo,
+                path,
+                content_bytes,
+                message=message,
+                author_name=caller,
+                author_email=f"{caller}@agents.local",
+            )
+        except team_drive.RefMoved as e:
+            raise HTTPException(409, str(e))
+        except team_drive.DriveError as e:
+            raise HTTPException(500, f"artifact commit failed: {e}")
+        _drive_size_cache.pop(str(repo), None)
+        short_sha = commit[:10]
+        ref = f"drive://{team_id}/{path}@{short_sha}"
+        blackboard.log_audit(
+            action="drive_artifact_commit",
+            actor=caller,
+            target=team_id,
+            field=path,
+            after_value=short_sha,
+            provenance="agent",
+        )
+        return {
+            "committed": True,
+            "ref": ref,
+            "path": path,
+            "commit": commit,
+            "short_sha": short_sha,
+        }
+
+    @app.get("/mesh/teams/{team_id}/drive/file")
+    async def drive_read_file(team_id: str, request: Request, path: str = "", ref: str = "main") -> dict:
+        """Read one file from the team drive without a clone (member-or-operator).
+
+        Returns ``{path, ref, content, encoding, size}``. Binary content
+        comes back base64-encoded. Content is RAW — the caller sanitizes
+        before surfacing it into an LLM prompt (drive_tool / dashboard do).
+        """
+        caller, _priv = _require_drive_access(team_id, request)
+        await _check_rate_limit("drive", caller)
+        try:
+            safe_path = team_drive.validate_drive_path(path)
+            safe_ref = team_drive.validate_drive_ref(ref)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        repo = await _drive_repo(team_id)
+        try:
+            data = await team_drive.read_file(repo, safe_path, ref=safe_ref)
+        except FileNotFoundError:
+            raise HTTPException(404, f"'{safe_path}' not found at {safe_ref}")
+        except team_drive.DriveError as e:
+            raise HTTPException(500, f"drive read failed: {e}")
+        max_bytes = limits_mod.resolve("drive_artifact_max_mb") * _MB
+        if len(data) > max_bytes:
+            raise HTTPException(413, f"file exceeds the {max_bytes // _MB} MB read cap")
+        try:
+            text = data.decode("utf-8")
+            encoding = "utf8"
+        except UnicodeDecodeError:
+            text = base64.b64encode(data).decode("ascii")
+            encoding = "base64"
+        return {"path": safe_path, "ref": safe_ref, "content": text, "encoding": encoding, "size": len(data)}
 
     async def _push_team_md(team_name: str, content: str) -> dict[str, bool]:
         """Push updated TEAM.md content to running team members.

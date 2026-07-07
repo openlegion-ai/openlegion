@@ -245,8 +245,10 @@ and lets teammates actually share work.
   in containers" observability gap for inter-agent reasoning); **provenance tier** (teammate
   content tagged + sanitized on context entry); **`ask_teammate`** (mesh-mediated, loads recipient
   expertise, bypasses the deep-work lane, returns inline, rate-limited, billed to asker).
-- **Refactor:** blackboard → signals only.
-- **Remove:** pushback-reissue dance; artifact-shuttling-through-256KB-blackboard patterns.
+- **Refactor:** blackboard → signals only. ✅ **DONE (unit 4)** — `hand_off` data + `save_artifact`
+  registration moved to the Team Drive; `output/*` + `artifacts/*` writers and ACL grants gone.
+- **Remove:** pushback-reissue dance; ~~artifact-shuttling-through-256KB-blackboard patterns~~ ✅
+  **DONE (unit 4)** — the blackboard `output/*`/`artifacts/*` payload homes are deleted (grep-zero).
 - **Security:** the one deliberate relaxation lives here; everything else stays mediated.
 
 ### Phase 3 — The workday
@@ -955,6 +957,39 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
     (§4); worker→operator asks 403 (Task-2e posture — no worker-injected synchronous prompt in
     the operator's privileged loop); cross-team block mirrors MessageRouter; every failure path
     returns `answered=False` + directive `error` + `recovery_hint` (Constraint #10).
+- **✅ Landed — Phase-2 unit 4: blackboard → signals only (C.1 row 2 closed).** The two blackboard
+  PAYLOAD writers moved to the Team Drive (B8 held: ONLY these two flows changed). (1) `hand_off`'s
+  `data` blob → `mesh_client.commit_drive_artifact` → new `POST /mesh/teams/{id}/drive/artifacts`
+  (member-or-operator, `drive` rate bucket, `drive_artifact_max_mb`=8 cap, quota-guarded), committed
+  to the SENDER's drive main under `handoffs/{sender}/{id}.json`; `artifact_ref` is now
+  `drive://{team}/{path}@{short_sha}`. Solo/teamless senders (incl. the operator, `team_name` None,
+  and team-of-one where `team_name==agent_id`) have no drive, so the payload folds INLINE into the
+  task brief under `## Handoff Data` (6k cap) with `artifact_refs=[]` — the only channel that ever
+  worked for those flows. The post-commit failure envelope is `drive_write_failed` (was
+  `output_write_failed`, Constraint #10 shape preserved EXACTLY; the loop's `_HANDOFF_FAILURE_FLAGS`
+  tracks the rename). (2) `save_artifact` stage-2 → the same drive endpoint with `kind="artifact"`
+  under `artifacts/{sender}/{name}`; oversize or solo/teamless degrades gracefully to
+  `saved=True, registered=False` + a note with the workspace path (same contract as the old
+  registration-failure path). Discovery is a drive listing (`team_drive('log')`) instead of
+  `list_blackboard("artifacts/")`. Read path for recipients + the dashboard drill-in:
+  `GET /mesh/teams/{id}/drive/file?path=&ref=` (`drive.read_file` = `cat-file`; RAW content, caller
+  sanitizes — the dashboard `_resolve_artifact` sanitizes drive text before render). **Direct-commit
+  to main is DELIBERATE** (recorded here per the spec): artifacts are deliverable REGISTRATION, not
+  reviewed source — review-before-integrate governs agent-pushed feature BRANCHES (receive-pack + the
+  pre-receive hook); `commit_file` is mesh-authored plumbing (read-tree/update-index/commit-tree/CAS
+  update-ref) that never runs a push, so it bypasses the hook by construction while still recording
+  the sender as the commit author. **C.4 phase-exit answer** ("what old path did this replace, and is
+  it gone?"): the replaced paths are the blackboard `output/{sender}/*` + `global/output/{sender}/*`
+  (hand_off) and `artifacts/{agent}/{name}` (save_artifact) writers — BOTH gone (grep-zero:
+  `write_blackboard(output/…)`/`(artifacts/…)` = 0 writers; `_HANDOFF_TTL` deleted; `output_write_failed`
+  removed from live code; every template YAML `blackboard_read`/`blackboard_write` `output/*`+`artifacts/*`
+  entry removed; the create-default `_DEFAULT_AGENT_COORDINATION_PERMS` and `_OPERATOR_PERMISSION_CEILING`
+  `blackboard_write` no longer grant them — so the operator ceiling now REJECTS an `artifacts/*` grant).
+  Blackboard SIGNAL namespaces (`tasks/*`, `status/*`, `context/*`, `signals/*`, `claim_task` CAS,
+  template `reviews/*`/`drafts/*`/`leads/*`/… working namespaces, the unit-2 inbox/threads path) STAY
+  untouched. Note: cross-team handoffs commit to the SENDER's drive, which a different-team recipient
+  cannot read directly (the drive wall is REAL membership) — the operator reads all; same-team is the
+  common case; this is an accepted narrowing recorded for adversarial review.
 
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
@@ -1265,7 +1300,7 @@ unfinished phase, not a follow-up.**
 | Old (delete) | New (replaces it) | Phase | Cruft risk if not deleted |
 |---|---|---|---|
 | `_load_projects()` YAML glob (`cli/config.py:777`) + `_*_project` helpers | Team store (real entity/id) | 1 | Two team "stores"; glob left as a fallback |
-| Blackboard `output/*` + `artifacts/*` payload writers in `hand_off` (`coordination_tool.py:305`) | Team Drive artifact store | 2 | Handoff data written to two places |
+| ~~Blackboard `output/*` + `artifacts/*` payload writers in `hand_off` (`coordination_tool.py:305`)~~ ✅ **DONE (unit 4)** — writers deleted, grep-zero; moved to Team Drive `POST /drive/artifacts` | Team Drive artifact store | 2 | Handoff data written to two places |
 | `inbox/{agent}/task_event/` back-edge feed + `check_inbox` blackboard read (`coordination_tool.py:553`) | Team Threads event feed | 2 | **Decide C.3-a first.** Two event feeds if threads only *adds* |
 | `MessageRouter.message_log` in-memory `deque` (`mesh.py:759`) | Durable Threads store | 2 | Dead deque shadowing the real store |
 | Heartbeat suppression path (`force_llm`/`is_default` skip, `cron.py:543-554`) + `execute_heartbeat` special-casing | Single agenda loop | 3 | **Two heartbeat code paths** if agenda is added alongside |

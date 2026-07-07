@@ -26,9 +26,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import signal
 import subprocess
+import tempfile
 import zlib
 from pathlib import Path
 
@@ -460,3 +462,146 @@ async def merge_branch(repo: Path, source_commit: str, *, message: str) -> str:
         return commit
 
     return await loop.run_in_executor(None, _plumb)
+
+
+# Path grammar for direct-commit artifacts. Each ``/``-separated segment
+# is a POSIX-ish filename: letters, digits, dot, dash, underscore, space.
+# No leading dash (option-injection), no ``..`` traversal, no empty
+# segments, no absolute paths. Validated on the mesh BEFORE the path
+# reaches ``update-index`` / ``cat-file``.
+_DRIVE_PATH_SEGMENT_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._ -]*")
+# ``ref`` for a file read: a branch name, ``main``, or a hex sha (short
+# or full). Same conservative grammar as branch names, sans path chars.
+_DRIVE_REF_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,200}")
+
+
+def validate_drive_path(path: str) -> str:
+    """Validate a drive-relative artifact path; returns it normalized.
+
+    Rejects traversal (``..``), absolute paths, empty/dot segments, and
+    option-injection (a leading ``-``). Raises :class:`ValueError` — the
+    caller maps that to an HTTP 400.
+    """
+    p = (path or "").strip().strip("/")
+    if not p or ".." in p.split("/"):
+        raise ValueError("path must be a non-empty relative path without '..'")
+    segments = p.split("/")
+    if len(segments) > 20:
+        raise ValueError("path is too deeply nested")
+    for seg in segments:
+        if not seg or seg in (".", "..") or not _DRIVE_PATH_SEGMENT_RE.fullmatch(seg):
+            raise ValueError(f"invalid path segment: {seg!r}")
+    return p
+
+
+def validate_drive_ref(ref: str) -> str:
+    """Validate a read ref (branch or sha); defaults to ``main`` when empty."""
+    r = (ref or "").strip() or "main"
+    if not _DRIVE_REF_RE.fullmatch(r) or ".." in r:
+        raise ValueError("ref must be a branch name or commit sha")
+    return r
+
+
+async def commit_file(
+    repo: Path,
+    path: str,
+    content: bytes,
+    *,
+    message: str,
+    author_name: str,
+    author_email: str,
+) -> str:
+    """Commit a single file directly to ``main`` (deliverable registration).
+
+    This is the direct-commit path used for artifact registration and
+    handoff-data payloads — NOT reviewed source. Review-before-integrate
+    governs agent-pushed feature BRANCHES (via receive-pack + the
+    pre-receive hook); this path is mesh-authored plumbing, so it writes
+    ``main`` directly with the SENDER recorded as the commit author.
+
+    Implementation is pure plumbing against a throwaway index so no
+    worktree is needed and nested paths (``handoffs/{a}/{id}.json``) are
+    built correctly: ``read-tree`` the current main tree, ``update-index``
+    the new blob at ``path``, ``write-tree``, ``commit-tree`` with the
+    sender identity, then a compare-and-swap ``update-ref`` against the
+    main tip read at the start (a racing main update fails the CAS).
+
+    Returns the new commit sha. Raises :class:`RefMoved` on a lost CAS
+    and :class:`DriveError` on any other plumbing failure.
+    """
+    loop = asyncio.get_running_loop()
+
+    def _plumb() -> str:
+        main_sha = _run_git(["rev-parse", "--verify", "refs/heads/main"], cwd=repo)
+        blob = _run_git(["hash-object", "-w", "--stdin"], cwd=repo, input_bytes=content)
+        with tempfile.TemporaryDirectory() as tmp:
+            index_path = os.path.join(tmp, "index")
+            idx_env = {**_subprocess_env(), "GIT_INDEX_FILE": index_path}
+            _run_git(["read-tree", main_sha], cwd=repo, env=idx_env)
+            # ``--`` before the pathspec so a path can never be read as an
+            # option; the grammar already forbids a leading dash, this is
+            # belt-and-braces.
+            _run_git(
+                ["update-index", "--add", "--cacheinfo", f"100644,{blob},{path}"],
+                cwd=repo,
+                env=idx_env,
+            )
+            tree = _run_git(["write-tree"], cwd=repo, env=idx_env)
+        ident = {
+            **_subprocess_env(),
+            "GIT_AUTHOR_NAME": author_name,
+            "GIT_AUTHOR_EMAIL": author_email,
+            "GIT_COMMITTER_NAME": "OpenLegion Mesh",
+            "GIT_COMMITTER_EMAIL": "mesh@openlegion.local",
+        }
+        commit = _run_git(
+            ["commit-tree", tree, "-p", main_sha, "-m", message],
+            cwd=repo,
+            env=ident,
+        )
+        try:
+            _run_git(
+                ["update-ref", "--stdin"],
+                cwd=repo,
+                input_bytes=f"update refs/heads/main {commit} {main_sha}\n".encode(),
+            )
+        except DriveError as e:
+            raise RefMoved(f"main moved during the commit (compare-and-swap failed) — retry: {e}")
+        return commit
+
+    return await loop.run_in_executor(None, _plumb)
+
+
+async def read_file(repo: Path, path: str, *, ref: str = "main") -> bytes:
+    """Read a single file's bytes from the drive at ``ref`` (default main).
+
+    Raises :class:`FileNotFoundError` when the path does not exist at that
+    ref, and :class:`DriveError` on other plumbing failures.
+    """
+    safe_path = validate_drive_path(path)
+    safe_ref = validate_drive_ref(ref)
+    loop = asyncio.get_running_loop()
+
+    def _cat() -> bytes:
+        # ``{ref}:{path}`` object spec; both halves are grammar-validated
+        # above so neither can inject a git option or traverse out.
+        try:
+            proc = subprocess.run(
+                ["git", "cat-file", "blob", f"{safe_ref}:{safe_path}"],
+                cwd=str(repo),
+                env=_subprocess_env(),
+                capture_output=True,
+                timeout=_PLUMBING_TIMEOUT,
+            )
+        except FileNotFoundError:
+            raise DriveError("git binary not found on the mesh host")
+        except subprocess.TimeoutExpired:
+            raise DriveError("git cat-file timed out")
+        if proc.returncode != 0:
+            detail = proc.stderr.decode("utf-8", errors="replace").strip().lower()
+            if "does not exist" in detail or "not a valid" in detail or "exists on disk" in detail:
+                raise FileNotFoundError(f"{safe_path} not found at {safe_ref}")
+            raise DriveError(f"cat-file failed: {detail[:200]}")
+        return proc.stdout
+
+    return await loop.run_in_executor(None, _cat)

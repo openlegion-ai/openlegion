@@ -35,7 +35,9 @@ _OPERATOR_PERMISSION_CEILING = {
     "can_manage_cron": True,
     "can_use_wallet": False,  # Requires explicit user setup (spends money)
     "blackboard_read": ["*"],
-    "blackboard_write": ["tasks/*", "context/*", "status/*", "output/*", "artifacts/*"],
+    # ``output/*`` + ``artifacts/*`` were removed in Phase-2 unit 4 — those
+    # payload flows moved to the Team Drive; the blackboard is signals-only.
+    "blackboard_write": ["tasks/*", "context/*", "status/*"],
 }
 
 

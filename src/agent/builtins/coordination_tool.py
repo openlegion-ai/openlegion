@@ -13,7 +13,6 @@ production fleet was running with the kill-switch off.
 from __future__ import annotations
 
 import asyncio
-import json
 import re
 
 from src.agent.tools import tool
@@ -28,16 +27,19 @@ from src.shared.utils import generate_id, sanitize_for_prompt, setup_logging
 
 logger = setup_logging("agent.builtins.coordination_tool")
 
-# Inbox / status / completion live in the durable tasks table. Handoff
-# artifacts (the optional ``data`` payload) still go to the blackboard
-# under ``output/{agent_id}/{handoff_id}`` — the task record carries
-# only the artifact_ref, keeping the SQLite table small.
-_HANDOFF_TTL = 86_400  # 24 hours — safety net for unprocessed handoffs
+# Inbox / status / completion live in the durable tasks table. The
+# optional handoff ``data`` payload now commits to the SENDER's Team
+# Drive (Phase-2 unit 4) under ``handoffs/{sender}/{id}.json`` — the task
+# record carries only the ``drive://`` artifact_ref. The blackboard
+# ``output/*`` payload path is GONE (signals-only blackboard). Solo /
+# teamless senders have no drive, so their payload folds inline into the
+# brief (the only channel that ever worked for those flows).
 
 # Cap on the inline handoff ``brief``. The brief becomes the task
 # description AND is delivered inline in the recipient's wake message
 # (mesh-side enrichment), so it must stay bounded — long-form payloads
-# belong in ``data`` (blackboard) or artifacts.
+# belong in ``data`` (Team Drive) or artifacts. The no-drive inline
+# ``data`` fallback shares this same cap.
 _MAX_BRIEF_CHARS = 6_000
 
 # Mirrors ``host/orchestration.TERMINAL_STATUSES`` — the set of statuses
@@ -66,7 +68,7 @@ def _failed_transition_envelope(
     coordination tools (``update_status`` / ``complete_task``).
 
     Mirrors the Bug G ``wake_failed`` shape and the Bug H
-    ``create_failed`` / ``output_write_failed`` envelopes used by
+    ``create_failed`` / ``drive_write_failed`` envelopes used by
     ``hand_off`` — handed_off-style boolean flag (``<kind>``) + an
     ``error`` field with "MUST NOT report success" + a directive
     ``recovery_hint`` that tells the LLM to surface to the operator
@@ -135,10 +137,11 @@ _RESERVED_ENVELOPE_KEYS: frozenset[str] = frozenset(
         "(form, depth, where to save it). The brief is delivered to the "
         "recipient together with the task.\n\n"
         "If you have structured output data to share, pass it as 'data' "
-        "(JSON string). It will be written to the blackboard and the task "
-        "will include a pointer so the recipient can read it. For "
-        "lightweight handoffs where the summary is enough context, omit "
-        "'data' and 'brief'.\n\n"
+        "(JSON string). It is committed to your Team Drive and the task "
+        "carries a drive:// pointer the recipient reads via team_drive. "
+        "(If you are not on a team, the data is folded inline into the "
+        "brief instead.) For lightweight handoffs where the summary is "
+        "enough context, omit 'data' and 'brief'.\n\n"
         "The target agent sees the task in their inbox (via check_inbox) "
         "with your summary, your brief, and a pointer to your output.\n\n"
         "hand_off delegates WORK. If you only need information from a "
@@ -177,9 +180,10 @@ _RESERVED_ENVELOPE_KEYS: frozenset[str] = frozenset(
             "type": "string",
             "description": (
                 "Optional JSON string of structured output data for the "
-                "recipient. Written to the blackboard so the recipient "
-                "can read the full details. Use 'brief' for instructions "
-                "and context; use 'data' for payloads."
+                "recipient. Committed to your Team Drive so the recipient "
+                "can read the full details (folded inline into the brief "
+                "if you have no team). Use 'brief' for instructions and "
+                "context; use 'data' for payloads."
             ),
             "default": "",
         },
@@ -282,74 +286,69 @@ async def hand_off(
     )
 
     if data and data.strip():
-        # Optional: stash the payload under an artifact_ref the
-        # recipient can fetch later. We reuse the blackboard for the
-        # actual bytes — the task carries only the reference. This
-        # keeps the table small and matches the pre-existing
-        # output/{from}/{handoff_id} convention.
-        try:
-            parsed_data = json.loads(data)
-        except json.JSONDecodeError:
-            parsed_data = {"text": data}
-        # Operator-bound handoff reports publish their output to the
-        # ``global/output/{sender}/`` namespace rather than the sender's
-        # team scope. That namespace is the one the operator's read
-        # carve-out (mesh_tool.read_blackboard) AND the permission model
-        # already target: permissions.can_read_blackboard restricts
-        # ``global/output/`` to the operator + the writing agent's own
-        # prefix, so the report is readable by exactly the operator and
-        # its author — nobody else. Writing it team-scoped (the prior
-        # behaviour) left it unreadable by the team-less operator while
-        # needlessly exposing it to the sender's whole team. ``to ==
-        # "operator"`` is the robust signal: it holds even when the fleet
-        # roster lookup above failed and ``target_is_global`` is unknown.
-        # ``global_scope`` keeps the key un-prefixed so it lands exactly
-        # at the key we record in ``artifact_refs``.
-        operator_bound = to == "operator"
-        if operator_bound:
-            artifact_ref = (
-                f"global/output/{mesh_client.agent_id}/{generate_id('ho')}"
-            )
+        # Handoff data payload → the SENDER's Team Drive (Phase-2 unit 4).
+        # A teamed sender commits the payload to its own drive's main under
+        # ``handoffs/{sender}/{id}.json``; the task carries the resulting
+        # ``drive://{team}/{path}@{sha}`` ref. A solo / teamless sender has
+        # no drive, so the payload folds inline into the brief (truncated to
+        # the 6k cap) — the blackboard ``output/*`` path is GONE entirely.
+        sender_team = mesh_client.team_name
+        # Solo team-of-one: TEAM_NAME falls back to the agent's own id, and
+        # teams/agents share one namespace — so team == agent_id means "no
+        # real team". Operator runs with team_name=None. Same detection as
+        # drive_tool / mesh endpoints (which 403 solo on the drive).
+        sender_is_solo = (not sender_team) or (sender_team == mesh_client.agent_id)
+        if sender_is_solo:
+            # No drive — fold the data inline under a dedicated section,
+            # sanitized (recipient treats sender payloads as untrusted) and
+            # truncated to the shared brief cap. artifact_refs stays empty.
+            inline_data = sanitize_for_prompt(data.strip())
+            base = description or ""
+            block = "\n\n## Handoff Data\n" + inline_data
+            combined = base + block
+            if len(combined) > _MAX_BRIEF_CHARS:
+                combined = combined[:_MAX_BRIEF_CHARS] + "\n\n[handoff data truncated]"
+            description = combined
         else:
-            artifact_ref = f"output/{mesh_client.agent_id}/{generate_id('ho')}"
-        try:
-            await mesh_client.write_blackboard(
-                artifact_ref, parsed_data, ttl=_HANDOFF_TTL,
-                team=write_team,
-                global_scope=operator_bound,
-            )
-        except Exception as e:
-            # Bug H: a bare ``{"error": ...}`` envelope lets agents
-            # report "done" to the user while no handoff data ever
-            # reached the peer. Directive shape with explicit MUST NOT
-            # report success + DO NOT mark complete in the recovery hint.
-            redacted = redact_text_with_urls(str(e))[:200]
-            logger.warning(
-                "hand_off output write for %s failed: %s", to, redacted,
-            )
-            return {
-                "handed_off": False,
-                "task_queued": False,
-                "output_write_failed": True,
-                "to": to,
-                "write_error": redacted,
-                "error": (
-                    f"output_write_failed: hand_off to '{to}' did not "
-                    f"complete ({redacted}). The handoff data may not "
-                    "have landed and no task was created — verify "
-                    "before retrying. You MUST NOT report success."
-                ),
-                "recovery_hint": (
-                    f"Surface the failure to the operator/user — "
-                    f"hand_off to peer '{to}' did not complete. DO NOT "
-                    "mark this work as complete in your final "
-                    "response. DO NOT retry hand_off without verifying "
-                    "via check_inbox or asking the operator to inspect "
-                    "the recipient's queue — a post-commit failure may "
-                    "have left a partial artifact, and a blind retry "
-                    "would create a duplicate."
-                ),
-            }
+            handoff_name = f"{generate_id('ho')}.json"
+            try:
+                commit_resp = await mesh_client.commit_drive_artifact(
+                    sender_team, name=handoff_name, content=data, kind="handoff",
+                )
+                artifact_ref = commit_resp.get("ref")
+            except Exception as e:
+                # Constraint #10 (was ``output_write_failed`` — now
+                # ``drive_write_failed``): a bare ``{"error": ...}`` envelope
+                # lets agents report "done" while no handoff data reached the
+                # peer. Directive shape with explicit MUST NOT report success
+                # + DO NOT mark complete in the recovery hint.
+                redacted = redact_text_with_urls(str(e))[:200]
+                logger.warning(
+                    "hand_off drive commit for %s failed: %s", to, redacted,
+                )
+                return {
+                    "handed_off": False,
+                    "task_queued": False,
+                    "drive_write_failed": True,
+                    "to": to,
+                    "write_error": redacted,
+                    "error": (
+                        f"drive_write_failed: hand_off to '{to}' did not "
+                        f"complete ({redacted}). The handoff data may not "
+                        "have landed and no task was created — verify "
+                        "before retrying. You MUST NOT report success."
+                    ),
+                    "recovery_hint": (
+                        f"Surface the failure to the operator/user — "
+                        f"hand_off to peer '{to}' did not complete. DO NOT "
+                        "mark this work as complete in your final "
+                        "response. DO NOT retry hand_off without verifying "
+                        "via check_inbox or asking the operator to inspect "
+                        "the recipient's queue — a post-commit failure may "
+                        "have left a partial artifact, and a blind retry "
+                        "would create a duplicate."
+                    ),
+                }
 
     # Read origin + current task id contextvars once so both create_task
     # and wake_agent propagate the same provenance. ``current_task_id``
@@ -525,7 +524,7 @@ async def hand_off(
         "hand_off result to=%s handed_off=%s task_id=%s flags=%s",
         to, result.get("handed_off"), task_id,
         [k for k in (
-            "create_failed", "wake_failed", "output_write_failed",
+            "create_failed", "wake_failed", "drive_write_failed",
             "task_queued",
         ) if result.get(k)],
     )

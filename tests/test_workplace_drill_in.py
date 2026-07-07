@@ -60,10 +60,13 @@ class _CSRFTestClient(TestClient):
         return super().request(method, url, **kwargs)
 
 
-def _make_client(components: dict, tasks_store) -> TestClient:
+def _make_client(components: dict, tasks_store, teams_store=None) -> TestClient:
     from src.dashboard.server import create_dashboard_router
+    kwargs = dict(components)
+    if teams_store is not None:
+        kwargs["teams_store"] = teams_store
     router = create_dashboard_router(
-        **components, mesh_port=8420, tasks_store=tasks_store,
+        **kwargs, mesh_port=8420, tasks_store=tasks_store,
     )
     app = FastAPI()
     app.include_router(router)
@@ -113,7 +116,44 @@ class TestWorkplaceDrillIn:
         assert "status_changed" in kinds
         assert isinstance(data["artifacts"], list)
 
-    def test_drill_in_resolves_text_artifact_inline(self):
+    def test_drill_in_resolves_drive_artifact_inline(self):
+        """Phase-2 unit 4: a ``drive://`` artifact_ref resolves by reading
+        the file straight from the team's bare repo."""
+        import asyncio
+        from pathlib import Path
+
+        from src.host import drive as team_drive
+
+        drive_dir = Path(self._tmp) / "drives"
+        repo = team_drive.ensure_team_drive("research", root=drive_dir)
+        commit = asyncio.run(
+            team_drive.commit_file(
+                Path(repo),
+                "handoffs/analyst/ho1.json",
+                b"the report body",
+                message="ho", author_name="analyst", author_email="analyst@agents.local",
+            )
+        )
+        # Wire a teams_store whose ensure_drive returns this repo path.
+        teams_store = MagicMock()
+        teams_store.ensure_drive.return_value = repo
+        client = _make_client(self.components, self.tasks, teams_store=teams_store)
+        ref = f"drive://research/handoffs/analyst/ho1.json@{commit[:10]}"
+        rec = self.tasks.create(
+            creator="op", assignee="analyst", title="t", artifact_refs=[ref],
+        )
+        resp = client.get(f"/dashboard/api/workplace/tasks/{rec['id']}")
+        assert resp.status_code == 200
+        artifacts = resp.json()["artifacts"]
+        assert len(artifacts) == 1
+        a = artifacts[0]
+        assert a["ref"] == ref
+        assert a["kind"] == "text"
+        assert a["content"] == "the report body"
+        assert a["content_truncated"] is False
+
+    def test_drill_in_resolves_legacy_blackboard_artifact_inline(self):
+        """Legacy blackboard-key refs still resolve via the fallback path."""
         rec = self.tasks.create(
             creator="op", assignee="analyst", title="t",
             artifact_refs=["output/analyst/ho1"],

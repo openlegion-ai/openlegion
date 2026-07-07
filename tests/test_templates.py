@@ -226,8 +226,12 @@ class TestCreateAgentParity(_TempConfigMixin):
         # #5 review fix — no worker starts with a read wildcard; the host
         # ACL is the read boundary) + the standard write prefixes.
         assert sorted(dana["blackboard_read"]) == ["teams/dana/*"]
-        for prefix in ("tasks/*", "context/*", "status/*", "output/*", "artifacts/*"):
+        # Signals-only blackboard (Phase-2 unit 4): output/* + artifacts/*
+        # are gone from the write default.
+        for prefix in ("tasks/*", "context/*", "status/*"):
             assert prefix in dana["blackboard_write"]
+        assert "output/*" not in dana["blackboard_write"]
+        assert "artifacts/*" not in dana["blackboard_write"]
         assert dana["can_publish"] == ["*"]
         assert dana["can_subscribe"] == ["*"]
 
@@ -461,7 +465,7 @@ class TestAddAgentPermissions(_TempConfigMixin):
         # Same dict the create_custom_agent route now passes.
         default_perms = {
             "blackboard_read": ["*"],
-            "blackboard_write": ["tasks/*", "context/*", "status/*", "output/*", "artifacts/*"],
+            "blackboard_write": ["tasks/*", "context/*", "status/*"],
             "can_publish": ["*"],
             "can_subscribe": ["*"],
             "can_use_browser": True,
@@ -478,7 +482,7 @@ class TestAddAgentPermissions(_TempConfigMixin):
         assert sorted(hank["blackboard_read"]) == ["teams/hank/*"]
         # Coordination write namespaces — must include tasks/* (hand_off)
         # and the other standard prefixes.
-        for pattern in ("tasks/*", "context/*", "status/*", "output/*", "artifacts/*"):
+        for pattern in ("tasks/*", "context/*", "status/*"):
             assert pattern in hank["blackboard_write"], (
                 f"missing required write pattern {pattern!r} in {hank['blackboard_write']!r}"
             )
@@ -1277,65 +1281,24 @@ class TestCreateAgentFromTemplate(_TempConfigMixin):
         assert budget.get("daily_usd") == 10.0
 
 
-def test_opportunity_finder_artifact_permissions():
-    """Modeler writes artifacts via save_artifact; researcher and evaluator
-    need to discover them. All three must grant artifacts/* on the blackboard
-    (read) and the modeler additionally on write.
-    """
-    template_path = Path(__file__).resolve().parent.parent / "src" / "templates" / "opportunity-finder.yaml"
-    data = yaml.safe_load(template_path.read_text())
-    agents = data["agents"]
-
-    for agent_id in ("gap-scout", "evaluator", "modeler"):
-        perms = agents[agent_id]["permissions"]
-        reads = perms.get("blackboard_read", [])
-        assert "artifacts/*" in reads, f"{agent_id} must be able to read artifacts/* on the blackboard"
-
-    # Modeler is the one calling save_artifact.
-    modeler_writes = agents["modeler"]["permissions"].get("blackboard_write", [])
-    assert "artifacts/*" in modeler_writes, (
-        "modeler must have artifacts/* in blackboard_write to register saved artifacts"
-    )
-
-
-def test_all_templates_save_artifact_has_permission():
-    """Any agent using save_artifact must have artifacts/* in blackboard_write.
-
-    Regression guard for the template permission bug found in PR review.
-    save_artifact writes a file and registers metadata at artifacts/{agent}/{name}
-    on the blackboard. Without artifacts/* in blackboard_write, the registration
-    fails silently and the artifact is invisible to blackboard-based discovery.
+def test_no_template_grants_output_or_artifacts_blackboard_acl():
+    """Phase-2 unit 4 grep-zero: the blackboard is signals-only, so NO
+    template may grant ``output/*`` or ``artifacts/*`` on ``blackboard_read``
+    or ``blackboard_write``. Those payload flows moved to the Team Drive;
+    save_artifact registers on the drive and discovery is a drive listing.
+    A ``*`` wildcard is still allowed (broad grant, not the dead namespace).
     """
     template_dir = Path(__file__).resolve().parent.parent / "src" / "templates"
     issues: list[str] = []
 
     for yaml_file in sorted(template_dir.glob("*.yaml")):
-        with open(yaml_file) as f:
-            tpl = yaml.safe_load(f)
-
-        agents = tpl.get("agents", {}) or {}
-        for agent_id, agent in agents.items():
-            # Scan all live prompt fields, not just instructions
-            prompt_fields = [
-                agent.get("instructions", ""),
-                agent.get("heartbeat", ""),
-                agent.get("initial_interface", ""),
-                agent.get("soul", ""),
-            ]
-            combined = "\n".join(str(f) for f in prompt_fields if f)
-            if "save_artifact" not in combined:
-                continue
-
+        tpl = yaml.safe_load(yaml_file.read_text())
+        for agent_id, agent in (tpl.get("agents", {}) or {}).items():
             perms = agent.get("permissions", {}) or {}
-            writes = perms.get("blackboard_write", []) or []
-
-            # Check for "*" wildcard or explicit "artifacts/*"
-            has_perm = any(w == "artifacts/*" or w == "*" for w in writes)
-
-            if not has_perm:
-                issues.append(
-                    f"{yaml_file.name}:{agent_id} uses save_artifact but blackboard_write={writes} lacks artifacts/*"
-                )
+            for field in ("blackboard_read", "blackboard_write"):
+                for pattern in perms.get(field, []) or []:
+                    if pattern in ("output/*", "artifacts/*"):
+                        issues.append(f"{yaml_file.name}:{agent_id}:{field} still grants {pattern!r}")
 
     assert not issues, "\n".join(issues)
 
