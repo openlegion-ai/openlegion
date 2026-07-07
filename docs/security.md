@@ -324,7 +324,7 @@ Agents process untrusted text from user messages, web pages, HTTP responses, too
 |-------------|------|----------------|
 | User input | `src/agent/server.py` | All user messages from all channels/CLI |
 | Tool results | `src/agent/loop.py` | All tool outputs (browser, web search, HTTP, file, run_command, memory, MCP) |
-| System prompt context | `src/agent/loop.py` | Workspace bootstrap, blackboard goals, memory facts, learnings, tool history |
+| System prompt context | `src/agent/loop.py` | Workspace bootstrap, standing goals (Team store), memory facts, learnings, tool history |
 
 ### What Gets Stripped
 

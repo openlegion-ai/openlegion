@@ -63,6 +63,25 @@ def test_export_bundles_config_permissions_cron(tmp_path, monkeypatch):
         assert isinstance(body["permissions"], dict)
         # no transport wired → workspace omitted, host-side bundle intact
         assert body["workspace"] is None
+        # no standing goals set → null, matching the optional-section style
+        assert body["goals"] is None
+    finally:
+        bb.close()
+
+
+def test_export_includes_standing_goals_record(tmp_path, monkeypatch):
+    """Ratified #7 / C.3-b: the personnel file carries the Team-store goals."""
+    app, bb = _build_app(tmp_path, monkeypatch)
+    try:
+        app.teams_store.set_agent_goals(
+            "scout", ["Find 10 qualified leads per week."], set_by="operator",
+        )
+        resp = TestClient(app).get("/mesh/agents/scout/export", headers=_OP)
+        assert resp.status_code == 200, resp.text
+        goals = resp.json()["goals"]
+        assert goals["goals"] == ["Find 10 qualified leads per week."]
+        assert goals["set_by"] == "operator"
+        assert goals["updated_at"]
     finally:
         bb.close()
 

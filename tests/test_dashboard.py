@@ -5948,7 +5948,7 @@ class TestDashboardFileDownload:
 
 
 class TestAgentGoalsEndpoints:
-    """Standing-goals read/edit surface (Memory tab → blackboard goals/{id})."""
+    """Standing-goals read/edit surface (Memory tab → Team store agent_goals)."""
 
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()
@@ -5968,7 +5968,7 @@ class TestAgentGoalsEndpoints:
         assert resp.status_code == 200
         assert resp.json() == {"goals": [], "updated_at": None}
 
-    def test_put_and_get_roundtrip_solo_key(self):
+    def test_put_and_get_roundtrip_store_record(self):
         resp = self.client.put(
             "/dashboard/api/agents/alpha/goals",
             json={"goals": ["Ship the weekly report."]},
@@ -5982,13 +5982,16 @@ class TestAgentGoalsEndpoints:
         assert body["goals"] == ["Ship the weekly report."]
         assert body["set_by"] == "user"
         assert body["updated_at"]
-        # Solo agent (no team) → the raw key, no teams/ prefix.
-        entry = self.components["blackboard"].read("goals/alpha")
-        assert entry is not None
-        assert entry.value["goals"] == ["Ship the weekly report."]
-        assert entry.ttl is None
+        # Persisted in the Team store, keyed by agent alone (ratified
+        # #7 / C.3-b) — nothing lands on the blackboard.
+        record = self.components["teams_store"].get_agent_goals("alpha")
+        assert record is not None
+        assert record["goals"] == ["Ship the weekly report."]
+        assert self.components["blackboard"].read("goals/alpha") is None
 
-    def test_team_agent_writes_scoped_key(self):
+    def test_team_membership_does_not_change_goal_keying(self):
+        # Goals are keyed by agent alone — joining a team must not move
+        # or re-scope the record (goals follow the agent across moves).
         self.components["teams_store"].create_team("team-a")
         self.components["teams_store"].add_member("team-a", "alpha")
         resp = self.client.put(
@@ -5996,14 +5999,14 @@ class TestAgentGoalsEndpoints:
             json={"goals": ["Watch the inbox."]},
         )
         assert resp.status_code == 200
-        # Team agents read via _scope_key → teams/{team}/goals/{id}.
-        entry = self.components["blackboard"].read("teams/team-a/goals/alpha")
-        assert entry is not None
-        assert entry.value["goals"] == ["Watch the inbox."]
+        record = self.components["teams_store"].get_agent_goals("alpha")
+        assert record is not None
+        assert record["goals"] == ["Watch the inbox."]
         get_resp = self.client.get("/dashboard/api/agents/alpha/goals")
         assert get_resp.json()["goals"] == ["Watch the inbox."]
-        # Nothing leaked to the unscoped key.
+        # Nothing leaked to the blackboard (raw or team-scoped key).
         assert self.components["blackboard"].read("goals/alpha") is None
+        assert self.components["blackboard"].read("teams/team-a/goals/alpha") is None
 
     def test_put_validation_rejects_bad_payloads(self):
         # Not a list.
@@ -6040,7 +6043,7 @@ class TestAgentGoalsEndpoints:
         assert resp.json() == {"cleared": True, "agent_id": "alpha"}
         get_resp = self.client.get("/dashboard/api/agents/alpha/goals")
         assert get_resp.json()["goals"] == []
-        assert self.components["blackboard"].read("goals/alpha") is None
+        assert self.components["teams_store"].get_agent_goals("alpha") is None
 
     def test_put_operator_rejected(self):
         # The registry dict is shared by reference with the router closure.

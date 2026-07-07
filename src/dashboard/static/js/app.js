@@ -391,7 +391,7 @@ function dashboard() {
     identityLearnings: null,
     identityLearningsLoading: false,
 
-    // Standing goals (Memory tab) — blackboard goals/{agent_id}
+    // Standing goals (Memory tab) — Team store agent_goals record
     agentGoals: [],
     agentGoalsMeta: null,
     agentGoalsLoading: false,

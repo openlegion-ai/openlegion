@@ -118,7 +118,7 @@ def _max_body_bytes() -> int:
 # match an unrelated future ``/mesh/browser/upload-stage*`` route. Prefix-match
 # the dashboard uploads subtree (it has a ``{name:path}`` param).
 _UPLOAD_ROUTE_EXACT: str = "/mesh/browser/upload-stage"  # agent->browser upload staging (route cap 50 MB; streams)
-_UPLOAD_ROUTE_PREFIX: str = "/dashboard/api/uploads/"    # dashboard file uploads (route cap 50 MB; BUFFERS body)
+_UPLOAD_ROUTE_PREFIX: str = "/dashboard/api/uploads/"  # dashboard file uploads (route cap 50 MB; BUFFERS body)
 
 
 def _upload_route_max_bytes() -> int:
@@ -170,11 +170,13 @@ def _install_body_size_limit(app: FastAPI) -> None:
                 size = int(cl)
             except ValueError:
                 return _StarletteJSONResponse(
-                    {"detail": "invalid Content-Length"}, status_code=400,
+                    {"detail": "invalid Content-Length"},
+                    status_code=400,
                 )
             if size > max_bytes:
                 return _StarletteJSONResponse(
-                    {"detail": "request body too large"}, status_code=413,
+                    {"detail": "request body too large"},
+                    status_code=413,
                 )
 
         # Streaming guard for chunked / Content-Length-absent bodies: a
@@ -196,7 +198,8 @@ def _install_body_size_limit(app: FastAPI) -> None:
             received += len(message.get("body", b""))
             if received > max_bytes:
                 return _StarletteJSONResponse(
-                    {"detail": "request body too large"}, status_code=413,
+                    {"detail": "request body too large"},
+                    status_code=413,
                 )
             if not message.get("more_body", False):
                 break
@@ -264,9 +267,7 @@ def _extract_prompt_preview(params: dict, max_len: int = 500) -> str:
 # prompts are legitimate, so this only trips on pathological / abusive
 # payloads (~4 MiB of serialized params). Overridable for operators with
 # unusually large legitimate contexts.
-_PROXY_INPUT_MAX_BYTES = int(
-    os.environ.get("OPENLEGION_PROXY_INPUT_MAX_BYTES", str(4 * 1024 * 1024))
-)
+_PROXY_INPUT_MAX_BYTES = int(os.environ.get("OPENLEGION_PROXY_INPUT_MAX_BYTES", str(4 * 1024 * 1024)))
 
 
 def _proxy_input_too_large(params: dict) -> int | None:
@@ -387,6 +388,7 @@ def _caller_is_operator(caller: str, request: Request) -> bool:
     del request  # reserved for future use; see docstring
     return caller == "operator"
 
+
 # Tiny TTL cache for pairing-record reads. The on-disk file changes only
 # on ``/pair`` operations, which are rare. 5s staleness is acceptable for
 # a defense-in-depth gate; ``_invalidate_pairing_cache`` lets the pair/
@@ -405,6 +407,7 @@ def _read_pairing_record(channel: str) -> dict | None:
     if cached and time.monotonic() - cached[0] < _PAIRING_CACHE_TTL:
         return cached[1]
     from src.cli.config import PROJECT_ROOT
+
     path = PROJECT_ROOT / "config" / f"{channel}_paired.json"
     record: dict | None
     if not path.exists():
@@ -491,7 +494,8 @@ def _downgrade_origin(origin: "MessageOrigin", reason: str) -> "MessageOrigin":
 
 
 def _validated_origin(
-    request: Request, caller: str = "",
+    request: Request,
+    caller: str = "",
 ) -> "MessageOrigin | None":
     """Parse ``X-Origin`` and downgrade unverifiable channel claims.
 
@@ -633,9 +637,7 @@ def _emit_team_event(
 #   * ``role``       — operator-only or operator-or-internal denied to a worker
 #   * ``permission`` — ``permissions.can_*()`` returned False
 #   * ``rate``       — rate limiter rejected
-_DENIAL_CATEGORIES: frozenset[str] = frozenset(
-    {"auth", "scope", "role", "permission", "rate", "limit"}
-)
+_DENIAL_CATEGORIES: frozenset[str] = frozenset({"auth", "scope", "role", "permission", "rate", "limit"})
 _denial_counter: dict[str, int] = defaultdict(int)
 # Mutable single-element wrapper so ``_record_denial`` can rotate the
 # day-key without juggling a ``global`` declaration on each call. Stored
@@ -681,7 +683,10 @@ def _record_denial(
         log_payload["denial_extra"] = extra
     logger.warning(
         "mesh denial: category=%s gate=%s caller=%s target=%s",
-        category, gate or "?", caller or "?", target or "?",
+        category,
+        gate or "?",
+        caller or "?",
+        target or "?",
         extra=log_payload,
     )
 
@@ -733,9 +738,7 @@ def create_mesh_app(
     async def _security_headers(request: Request, call_next):
         response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
-        response.headers.setdefault(
-            "Referrer-Policy", "strict-origin-when-cross-origin"
-        )
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
         response.headers.setdefault(
             "Permissions-Policy",
             "accelerometer=(), camera=(), geolocation=(), gyroscope=(), "
@@ -770,24 +773,22 @@ def create_mesh_app(
     # permission matrix so ``can_access_credential`` denies agent access to
     # a system secret even when its name doesn't match the provider-key
     # shape heuristic.
-    if credential_vault is not None and hasattr(
-        permissions, "set_system_credential_names"
-    ):
+    if credential_vault is not None and hasattr(permissions, "set_system_credential_names"):
         try:
-            permissions.set_system_credential_names(
-                credential_vault.list_system_credential_names()
-            )
+            permissions.set_system_credential_names(credential_vault.list_system_credential_names())
         except Exception as e:
             logger.error(
                 "Failed to register system credential names with permissions: %s",
-                e, exc_info=True,
+                e,
+                exc_info=True,
             )
 
     # Durable orchestration task records. ``OPENLEGION_ORCHESTRATION_TASKS_DB``
     # overrides the on-disk path — used by tests to keep the db inside
     # ``tmp_path`` instead of polluting cwd.
     _tasks_db_path = os.environ.get(
-        "OPENLEGION_ORCHESTRATION_TASKS_DB", "data/tasks.db",
+        "OPENLEGION_ORCHESTRATION_TASKS_DB",
+        "data/tasks.db",
     )
     tasks_store = Tasks(db_path=_tasks_db_path)
     app.tasks_store = tasks_store  # exposed for tests/dashboard
@@ -806,11 +807,14 @@ def create_mesh_app(
     # per-team cron, user rates via the dashboard. The bus emit drives
     # the Work tab's summary cards live (PR-B).
     from src.host.summaries import WorkSummariesStore
+
     _summaries_db_path = os.environ.get(
-        "OPENLEGION_WORK_SUMMARIES_DB", "data/work_summaries.db",
+        "OPENLEGION_WORK_SUMMARIES_DB",
+        "data/work_summaries.db",
     )
     summaries_store = WorkSummariesStore(
-        db_path=_summaries_db_path, event_bus=event_bus,
+        db_path=_summaries_db_path,
+        event_bus=event_bus,
     )
     app.summaries_store = summaries_store  # exposed for tests/dashboard
 
@@ -834,8 +838,10 @@ def create_mesh_app(
     # an inbox item or task — see ``user_notifications.py`` for the full
     # trust rationale.
     from src.host.user_notifications import UserNotificationLog
+
     _user_notifications_db_path = os.environ.get(
-        "OPENLEGION_USER_NOTIFICATIONS_DB", "data/user_notifications.db",
+        "OPENLEGION_USER_NOTIFICATIONS_DB",
+        "data/user_notifications.db",
     )
     user_notification_log = UserNotificationLog(db_path=_user_notifications_db_path)
     app.user_notification_log = user_notification_log  # exposed for tests/dashboard
@@ -849,13 +855,16 @@ def create_mesh_app(
     # The cancel/resolve endpoints address a specific request by id; the
     # ``GET /mesh/help-requests`` feed lists what's open.
     _help_requests_db_path = help_requests_db or os.environ.get(
-        "OPENLEGION_HELP_REQUESTS_DB", "data/help_requests.db",
+        "OPENLEGION_HELP_REQUESTS_DB",
+        "data/help_requests.db",
     )
     help_requests_store = HelpRequests(db_path=_help_requests_db_path)
     app.help_requests_store = help_requests_store  # exposed for tests + dashboard
 
     def _record_help_request(
-        kind: str, agent_id: str, payload: dict,
+        kind: str,
+        agent_id: str,
+        payload: dict,
     ) -> str:
         """Register an open help request and return its request_id."""
         return help_requests_store.record(kind, agent_id, payload)
@@ -889,9 +898,7 @@ def create_mesh_app(
         t = teams_store.team_of(agent_id)
         return {t} if t else set()
 
-    def _is_blackboard_cross_team(
-        caller: str, writer: str | None
-    ) -> bool:
+    def _is_blackboard_cross_team(caller: str, writer: str | None) -> bool:
         """Return True when caller and writer are workers in disjoint team sets.
 
         Best-effort detection used purely for telemetry — never gates access.
@@ -1063,7 +1070,9 @@ def create_mesh_app(
                 bucket.popleft()
             if len(bucket) >= limit:
                 _record_denial(
-                    "rate", caller=agent_id, gate=f"rate_limit:{endpoint}",
+                    "rate",
+                    caller=agent_id,
+                    gate=f"rate_limit:{endpoint}",
                 )
                 raise HTTPException(429, f"Rate limit exceeded for {endpoint}")
             bucket.append(now)
@@ -1078,7 +1087,10 @@ def create_mesh_app(
             results = await asyncio.gather(
                 *(
                     lane_manager.enqueue(
-                        wid, msg, mode="steer", system_note=True,
+                        wid,
+                        msg,
+                        mode="steer",
+                        system_note=True,
                     )
                     for wid in watcher_ids
                 ),
@@ -1152,7 +1164,9 @@ def create_mesh_app(
                 connector_store.remove_agent(agent_id)
             except Exception as e:
                 logger.warning(
-                    "Connector cleanup for '%s' failed: %s", agent_id, e,
+                    "Connector cleanup for '%s' failed: %s",
+                    agent_id,
+                    e,
                 )
 
     app.cleanup_agent = _cleanup_agent  # type: ignore[attr-defined]
@@ -1264,6 +1278,7 @@ def create_mesh_app(
         """
         try:
             from src.cli.config import _load_config
+
             cfg = _load_config()
         except Exception as e:  # pragma: no cover - defensive
             logger.debug("model-pin: config load failed for %s: %s", agent_id, e)
@@ -1292,6 +1307,7 @@ def create_mesh_app(
         """
         try:
             from src.cli.config import _load_config
+
             value = _load_config().get("llm", {}).get("utility_model", "")
         except Exception as e:  # pragma: no cover - defensive
             logger.debug("model-pin: utility model config load failed: %s", e)
@@ -1348,13 +1364,14 @@ def create_mesh_app(
                 allowed_bare.add(_bare(utility_model))
             if _bare(requested_model) not in allowed_bare:
                 _record_denial(
-                    "permission", caller=agent_id, target=requested_model,
+                    "permission",
+                    caller=agent_id,
+                    target=requested_model,
                     gate="api:model_pin",
                 )
                 raise HTTPException(
                     403,
-                    f"Agent {agent_id} is not authorized to use model "
-                    f"'{requested_model}'. Allowed: {sorted(allowed)}.",
+                    f"Agent {agent_id} is not authorized to use model '{requested_model}'. Allowed: {sorted(allowed)}.",
                 )
         # Cheap interim compatibility gate (mirrors the call-time check the
         # LLM proxy runs) — reject requested models with no usable
@@ -1363,15 +1380,20 @@ def create_mesh_app(
             compatible, reason = credential_vault.is_model_compatible(requested_model)
             if not compatible:
                 _record_denial(
-                    "permission", caller=agent_id, target=requested_model,
+                    "permission",
+                    caller=agent_id,
+                    target=requested_model,
                     gate="api:model_incompatible",
                 )
                 raise HTTPException(
-                    403, reason or model_not_compatible_message(requested_model),
+                    403,
+                    reason or model_not_compatible_message(requested_model),
                 )
 
     def _resolve_browser_target(
-        caller_id: str, target_claim: object, request: Request,
+        caller_id: str,
+        target_claim: object,
+        request: Request,
     ) -> str:
         """Resolve the effective browser-target agent_id for self/delegation paths.
 
@@ -1405,7 +1427,9 @@ def create_mesh_app(
         if not _caller_is_operator(caller_id, request):
             if not permissions.can_message(caller_id, target):
                 _record_denial(
-                    "permission", caller=caller_id, target=target,
+                    "permission",
+                    caller=caller_id,
+                    target=target,
                     gate="browser_delegate:can_message",
                 )
                 raise HTTPException(
@@ -1434,6 +1458,7 @@ def create_mesh_app(
             client_host = request.client.host if request.client else ""
             try:
                 import ipaddress
+
                 if ipaddress.ip_address(client_host).is_loopback:
                     return
             except (ValueError, AttributeError):
@@ -1471,6 +1496,7 @@ def create_mesh_app(
             client_host = request.client.host if request.client else ""
             try:
                 import ipaddress
+
                 if ipaddress.ip_address(client_host).is_loopback:
                     return
             except (ValueError, AttributeError):
@@ -1518,7 +1544,9 @@ def create_mesh_app(
         if not _caller_is_operator(msg.from_agent, request):
             if not permissions.can_message(msg.from_agent, msg.to):
                 _record_denial(
-                    "permission", caller=msg.from_agent, target=msg.to,
+                    "permission",
+                    caller=msg.from_agent,
+                    target=msg.to,
                     gate="message:can_message",
                 )
                 raise HTTPException(403, f"Agent {msg.from_agent} cannot message {msg.to}")
@@ -1526,7 +1554,9 @@ def create_mesh_app(
 
     @app.post("/mesh/wake")
     async def wake_agent(
-        request: Request, target: str = "", message: str = "",
+        request: Request,
+        target: str = "",
+        message: str = "",
     ) -> dict:
         """Wake a target agent by enqueuing a followup message via lanes.
 
@@ -1544,7 +1574,9 @@ def create_mesh_app(
         if not _caller_is_operator(caller, request):
             if not permissions.can_message(caller, target):
                 _record_denial(
-                    "permission", caller=caller, target=target,
+                    "permission",
+                    caller=caller,
+                    target=target,
                     gate="wake:can_message",
                 )
                 raise HTTPException(403, f"Agent {caller} cannot wake {target}")
@@ -1564,7 +1596,9 @@ def create_mesh_app(
         _lane_full = getattr(lane_manager, "lane_full", None)
         if lane_manager is not None and callable(_lane_full) and _lane_full(target):
             _record_denial(
-                "limit", caller=caller, target=target,
+                "limit",
+                caller=caller,
+                target=target,
                 gate="wake:lane_queue_full",
             )
             raise HTTPException(
@@ -1578,6 +1612,7 @@ def create_mesh_app(
             wake_msg = f"You have a new task from {caller}. Call check_inbox() to see it."
 
         from src.shared.types import MessageOrigin
+
         # Task 2c: ``_validated_origin`` re-checks ``kind="human"``
         # channel claims against the on-disk pairing record. Forged or
         # unverifiable claims are downgraded to ``kind="agent"`` so the
@@ -1643,13 +1678,14 @@ def create_mesh_app(
                 _task_record = tasks_store.get(task_id)
             except Exception as e:  # pragma: no cover - defensive
                 logger.warning(
-                    "wake task_id lookup failed for %s: %s", task_id, e,
+                    "wake task_id lookup failed for %s: %s",
+                    task_id,
+                    e,
                 )
                 _task_record = None
             if _task_record is None or _task_record.get("assignee") != target:
                 logger.info(
-                    "wake task_id %s dropped: assignee=%s != target=%s "
-                    "(M3 binding)",
+                    "wake task_id %s dropped: assignee=%s != target=%s (M3 binding)",
                     task_id,
                     None if _task_record is None else _task_record.get("assignee"),
                     target,
@@ -1667,10 +1703,7 @@ def create_mesh_app(
                 _desc = (_task_record.get("description") or "").strip()
                 _title = (_task_record.get("title") or "").strip()
                 if _desc and _desc != _title and _desc[:200] not in wake_msg:
-                    wake_msg += (
-                        "\n\n## Task Brief\n"
-                        + sanitize_for_prompt(_desc[:6_000])
-                    )
+                    wake_msg += "\n\n## Task Brief\n" + sanitize_for_prompt(_desc[:6_000])
                 _refs = _task_record.get("artifact_refs") or []
                 if _refs:
                     # Refs are creator-supplied strings off the task row —
@@ -1680,32 +1713,38 @@ def create_mesh_app(
                     # from turning the wake into a join TypeError).
                     wake_msg += (
                         "\n\nData payload on the blackboard — fetch with "
-                        "read_blackboard: "
-                        + sanitize_for_prompt(
-                            ", ".join(str(r)[:200] for r in _refs[:5])
-                        )
+                        "read_blackboard: " + sanitize_for_prompt(", ".join(str(r)[:200] for r in _refs[:5]))
                     )
 
         if lane_manager is not None and dispatch_loop is not None:
             ok, err = _try_wake_agent(
-                target, wake_msg, origin,
-                task_id=task_id, auto_notify=had_origin,
+                target,
+                wake_msg,
+                origin,
+                task_id=task_id,
+                auto_notify=had_origin,
                 # Propagate the handoff's originating trace so the recipient's
                 # work joins the same session (keystone for multi-agent chain
                 # reconstruction).
                 trace_id=request.headers.get("x-trace-id"),
                 on_fail=lambda e: logger.warning(
-                    "Wake enqueue for %s failed: %s", target, e,
+                    "Wake enqueue for %s failed: %s",
+                    target,
+                    e,
                 ),
             )
             if not ok:
                 return {"woken": False, "error": err}
             return {"woken": True, "target": target}
         # Fallback: send via router (message-only, no task processing)
-        await router.route(AgentMessage(
-            from_agent="mesh", to=target, type="coordination",
-            payload={"wake": True, "message": sanitize_for_prompt(wake_msg)},
-        ))
+        await router.route(
+            AgentMessage(
+                from_agent="mesh",
+                to=target,
+                type="coordination",
+                payload={"wake": True, "message": sanitize_for_prompt(wake_msg)},
+            )
+        )
         return {"woken": True, "target": target, "fallback": True}
 
     # === Blackboard ===
@@ -1719,7 +1758,9 @@ def create_mesh_app(
         if not _caller_is_operator(agent_id, request):
             if not permissions.can_read_blackboard(agent_id, prefix):
                 _record_denial(
-                    "permission", caller=agent_id, target=prefix,
+                    "permission",
+                    caller=agent_id,
+                    target=prefix,
                     gate="blackboard.list:can_read_blackboard",
                 )
                 raise HTTPException(403, f"Agent {agent_id} cannot read {prefix}")
@@ -1734,7 +1775,9 @@ def create_mesh_app(
         if not _caller_is_operator(agent_id, request):
             if not permissions.can_read_blackboard(agent_id, key):
                 _record_denial(
-                    "permission", caller=agent_id, target=key,
+                    "permission",
+                    caller=agent_id,
+                    target=key,
                     gate="blackboard.read:can_read_blackboard",
                 )
                 raise HTTPException(403, f"Agent {agent_id} cannot read {key}")
@@ -1744,15 +1787,16 @@ def create_mesh_app(
         # Phase 3 Slice 1 telemetry: count cross-team reads. Skip
         # internal/operator callers (fleet-global by design). No
         # enforcement — pure observability informing the design doc.
-        if not _is_internal_caller(request) and _is_blackboard_cross_team(
-            agent_id, entry.written_by
-        ):
+        if not _is_internal_caller(request) and _is_blackboard_cross_team(agent_id, entry.written_by):
             _record_blackboard_xteam("read")
         return entry.model_dump(mode="json")
 
     @app.put("/mesh/blackboard/{key:path}")
     async def write_blackboard(
-        key: str, agent_id: str, value: dict, request: Request,
+        key: str,
+        agent_id: str,
+        value: dict,
+        request: Request,
         ttl: int | None = None,
     ) -> dict:
         """Write to blackboard. Agent must have write permission."""
@@ -1768,7 +1812,9 @@ def create_mesh_app(
         if not _caller_is_operator(agent_id, request):
             if not permissions.can_write_blackboard(agent_id, key):
                 _record_denial(
-                    "permission", caller=agent_id, target=key,
+                    "permission",
+                    caller=agent_id,
+                    target=key,
                     gate="blackboard.write:can_write_blackboard",
                 )
                 raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
@@ -1777,24 +1823,23 @@ def create_mesh_app(
         # Skip internal/operator callers (fleet-global by design).
         if not _is_internal_caller(request):
             existing = blackboard.read(key)
-            if existing is not None and _is_blackboard_cross_team(
-                agent_id, existing.written_by
-            ):
+            if existing is not None and _is_blackboard_cross_team(agent_id, existing.written_by):
                 _record_blackboard_xteam("write")
         entry = blackboard.write(key, value, written_by=agent_id, ttl=ttl)
         if trace_store:
             req_trace_id = request.headers.get("x-trace-id")
             if req_trace_id:
                 trace_store.record(
-                    trace_id=req_trace_id, source="mesh.blackboard", agent=agent_id,
-                    event_type="blackboard_write", detail=key,
+                    trace_id=req_trace_id,
+                    source="mesh.blackboard",
+                    agent=agent_id,
+                    event_type="blackboard_write",
+                    detail=key,
                 )
         # Notify watchers via steer (batched into a single cross-thread call)
         watchers = blackboard.get_watchers_for_key(key, exclude=agent_id)
         if watchers:
-            notify_msg = (
-                f"[Blackboard: {key}] updated by {agent_id}, v{entry.version}"
-            )
+            notify_msg = f"[Blackboard: {key}] updated by {agent_id}, v{entry.version}"
             _notify_watchers_batch(watchers, notify_msg)
         return entry.model_dump(mode="json")
 
@@ -1806,7 +1851,9 @@ def create_mesh_app(
         if not _caller_is_operator(agent_id, request):
             if not permissions.can_write_blackboard(agent_id, key):
                 _record_denial(
-                    "permission", caller=agent_id, target=key,
+                    "permission",
+                    caller=agent_id,
+                    target=key,
                     gate="blackboard.delete:can_write_blackboard",
                 )
                 raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
@@ -1818,9 +1865,7 @@ def create_mesh_app(
         # is a write that mutates the key). Skip internal/operator callers.
         if not _is_internal_caller(request):
             existing = blackboard.read(key)
-            if existing is not None and _is_blackboard_cross_team(
-                agent_id, existing.written_by
-            ):
+            if existing is not None and _is_blackboard_cross_team(agent_id, existing.written_by):
                 _record_blackboard_xteam("write")
         try:
             blackboard.delete(key, deleted_by=agent_id)
@@ -1829,7 +1874,8 @@ def create_mesh_app(
         if event_bus is not None:
             try:
                 event_bus.emit(
-                    "blackboard_delete", agent=agent_id,
+                    "blackboard_delete",
+                    agent=agent_id,
                     data={"key": key, "deleted_by": agent_id},
                 )
             except Exception as e:
@@ -1844,7 +1890,9 @@ def create_mesh_app(
         if not _caller_is_operator(agent_id, request):
             if not permissions.can_read_blackboard(agent_id, pattern):
                 _record_denial(
-                    "permission", caller=agent_id, target=pattern,
+                    "permission",
+                    caller=agent_id,
+                    target=pattern,
                     gate="blackboard.watch:can_read_blackboard",
                 )
                 raise HTTPException(403, f"Agent {agent_id} cannot read pattern '{pattern}'")
@@ -1865,7 +1913,9 @@ def create_mesh_app(
         if not _caller_is_operator(agent_id, request):
             if not permissions.can_write_blackboard(agent_id, key):
                 _record_denial(
-                    "permission", caller=agent_id, target=key,
+                    "permission",
+                    caller=agent_id,
+                    target=key,
                     gate="blackboard.claim:can_write_blackboard",
                 )
                 raise HTTPException(403, f"Agent {agent_id} cannot write {key}")
@@ -1873,14 +1923,15 @@ def create_mesh_app(
         # an EXISTING entry. Skip internal/operator callers.
         if not _is_internal_caller(request):
             existing = blackboard.read(key)
-            if existing is not None and _is_blackboard_cross_team(
-                agent_id, existing.written_by
-            ):
+            if existing is not None and _is_blackboard_cross_team(agent_id, existing.written_by):
                 _record_blackboard_xteam("write")
         expected_version = body.expected_version
         value = body.value
         entry = blackboard.write_if_version(
-            key, value, written_by=agent_id, expected_version=expected_version,
+            key,
+            value,
+            written_by=agent_id,
+            expected_version=expected_version,
         )
         if entry is None:
             raise HTTPException(409, f"Version conflict on key '{key}'")
@@ -1888,15 +1939,16 @@ def create_mesh_app(
             req_trace_id = request.headers.get("x-trace-id")
             if req_trace_id:
                 trace_store.record(
-                    trace_id=req_trace_id, source="mesh.blackboard", agent=agent_id,
-                    event_type="blackboard_claim", detail=key,
+                    trace_id=req_trace_id,
+                    source="mesh.blackboard",
+                    agent=agent_id,
+                    event_type="blackboard_claim",
+                    detail=key,
                 )
         # Notify watchers (CAS writes are still writes, batched into single call)
         watchers = blackboard.get_watchers_for_key(key, exclude=agent_id)
         if watchers:
-            notify_msg = (
-                f"[Blackboard: {key}] claimed by {agent_id}, v{entry.version}"
-            )
+            notify_msg = f"[Blackboard: {key}] claimed by {agent_id}, v{entry.version}"
             _notify_watchers_batch(watchers, notify_msg)
         return entry.model_dump(mode="json")
 
@@ -1914,19 +1966,22 @@ def create_mesh_app(
             expected_prefix = f"teams/{source_team}/"
             if not event.topic.startswith(expected_prefix):
                 _record_denial(
-                    "scope", caller=event.source, target=event.topic,
+                    "scope",
+                    caller=event.source,
+                    target=event.topic,
                     gate="publish:team_prefix",
                     extra={"caller_team": source_team},
                 )
                 raise HTTPException(
-                    403,
-                    f"Agent {event.source} (team={source_team}) cannot publish to topic '{event.topic}'"
+                    403, f"Agent {event.source} (team={source_team}) cannot publish to topic '{event.topic}'"
                 )
 
         if not _caller_is_operator(event.source, request):
             if not permissions.can_publish(event.source, event.topic):
                 _record_denial(
-                    "permission", caller=event.source, target=event.topic,
+                    "permission",
+                    caller=event.source,
+                    target=event.topic,
                     gate="publish:can_publish",
                 )
                 raise HTTPException(403, f"Agent {event.source} cannot publish to {event.topic}")
@@ -1934,28 +1989,33 @@ def create_mesh_app(
             req_trace_id = request.headers.get("x-trace-id")
             if req_trace_id:
                 trace_store.record(
-                    trace_id=req_trace_id, source="mesh.pubsub", agent=event.source,
-                    event_type="pubsub_publish", detail=event.topic,
+                    trace_id=req_trace_id,
+                    source="mesh.pubsub",
+                    agent=event.source,
+                    event_type="pubsub_publish",
+                    detail=event.topic,
                 )
         subscribers = pubsub.get_subscribers(event.topic)
         if subscribers:
             # Prefer steer delivery for real-time reactivity (batched into single call)
             if lane_manager is not None and dispatch_loop is not None:
-                formatted_msg = (
-                    f"[Event: {event.topic}] from {event.source}: "
-                    f"{dumps_safe(event.payload)[:500]}"
-                )
+                formatted_msg = f"[Event: {event.topic}] from {event.source}: {dumps_safe(event.payload)[:500]}"
                 _notify_watchers_batch(subscribers, formatted_msg)
             else:
-                await asyncio.gather(*(
-                    router.route(AgentMessage(
-                        from_agent="mesh",
-                        to=agent_id,
-                        type="event",
-                        payload=event.model_dump(mode="json"),
-                    ))
-                    for agent_id in subscribers
-                ), return_exceptions=True)
+                await asyncio.gather(
+                    *(
+                        router.route(
+                            AgentMessage(
+                                from_agent="mesh",
+                                to=agent_id,
+                                type="event",
+                                payload=event.model_dump(mode="json"),
+                            )
+                        )
+                        for agent_id in subscribers
+                    ),
+                    return_exceptions=True,
+                )
         return {"subscribers_notified": len(subscribers)}
 
     @app.post("/mesh/subscribe")
@@ -1969,19 +2029,20 @@ def create_mesh_app(
             expected_prefix = f"teams/{sub_team}/"
             if not topic.startswith(expected_prefix):
                 _record_denial(
-                    "scope", caller=agent_id, target=topic,
+                    "scope",
+                    caller=agent_id,
+                    target=topic,
                     gate="subscribe:team_prefix",
                     extra={"caller_team": sub_team},
                 )
-                raise HTTPException(
-                    403,
-                    f"Agent {agent_id} (team={sub_team}) cannot subscribe to topic '{topic}'"
-                )
+                raise HTTPException(403, f"Agent {agent_id} (team={sub_team}) cannot subscribe to topic '{topic}'")
 
         if not _caller_is_operator(agent_id, request):
             if not permissions.can_subscribe(agent_id, topic):
                 _record_denial(
-                    "permission", caller=agent_id, target=topic,
+                    "permission",
+                    caller=agent_id,
+                    target=topic,
                     gate="subscribe:can_subscribe",
                 )
                 raise HTTPException(403, f"Agent {agent_id} cannot subscribe to {topic}")
@@ -2000,7 +2061,9 @@ def create_mesh_app(
         if not _caller_is_operator(agent_id, request):
             if not permissions.can_use_api(agent_id, api_request.service):
                 _record_denial(
-                    "permission", caller=agent_id, target=api_request.service,
+                    "permission",
+                    caller=agent_id,
+                    target=api_request.service,
                     gate="api:can_use_api",
                 )
                 raise HTTPException(403, f"Agent {agent_id} cannot access {api_request.service}")
@@ -2014,14 +2077,14 @@ def create_mesh_app(
         if _oversize is not None:
             logger.warning(
                 "Rejected oversized proxy input from agent=%s service=%s: %d bytes > %d cap",
-                agent_id, api_request.service, _oversize, _PROXY_INPUT_MAX_BYTES,
+                agent_id,
+                api_request.service,
+                _oversize,
+                _PROXY_INPUT_MAX_BYTES,
             )
             return APIProxyResponse(
                 success=False,
-                error=(
-                    f"Request input too large ({_oversize} bytes); "
-                    f"limit is {_PROXY_INPUT_MAX_BYTES} bytes."
-                ),
+                error=(f"Request input too large ({_oversize} bytes); limit is {_PROXY_INPUT_MAX_BYTES} bytes."),
                 status_code=413,
             )
 
@@ -2036,6 +2099,7 @@ def create_mesh_app(
         # finally runs AFTER execute_api_call (and its CostTracker.track) —
         # the call is awaited inside this same coroutine.
         from src.shared.trace import current_trace_id
+
         _trace_tok = current_trace_id.set(req_trace_id)
         try:
             prompt_preview = _extract_prompt_preview(api_request.params)
@@ -2086,19 +2150,27 @@ def create_mesh_app(
             except Exception:
                 logger.error(
                     "Post-processing failed (trace) for %s/%s agent=%s",
-                    api_request.service, api_request.action, agent_id, exc_info=True,
+                    api_request.service,
+                    api_request.action,
+                    agent_id,
+                    exc_info=True,
                 )
             try:
                 if event_bus is not None and not result.success and result.status_code == 402:
-                    event_bus.emit("credit_exhausted", agent=agent_id, data={
-                        "error": result.error or "Insufficient credits",
-                    })
+                    event_bus.emit(
+                        "credit_exhausted",
+                        agent=agent_id,
+                        data={
+                            "error": result.error or "Insufficient credits",
+                        },
+                    )
                 if event_bus is not None and result.success and result.data:
                     model = result.data.get("model", "")
                     tokens = result.data.get("tokens_used", 0)
                     input_tok = result.data.get("input_tokens", 0)
                     output_tok = result.data.get("output_tokens", 0)
                     from src.host.costs import estimate_cost
+
                     fixed_cost = result.data.get("fixed_cost_usd", 0)
                     # OAuth (Anthropic/OpenAI subscription) calls have no per-call
                     # cost — the authoritative usage table already skips them in
@@ -2107,16 +2179,24 @@ def create_mesh_app(
                     # for subscription traffic.
                     is_oauth = bool(result.data.get("oauth"))
                     event_data = {
-                        "service": api_request.service, "action": api_request.action,
+                        "service": api_request.service,
+                        "action": api_request.action,
                         "duration_ms": duration_ms,
                         "model": model,
                         "total_tokens": tokens,
                         "input_tokens": input_tok,
                         "output_tokens": output_tok,
                         "oauth": is_oauth,
-                        "cost_usd": 0.0 if is_oauth else (
-                            fixed_cost if fixed_cost else estimate_cost(
-                                model, input_tokens=input_tok, output_tokens=output_tok, total_tokens=tokens,
+                        "cost_usd": 0.0
+                        if is_oauth
+                        else (
+                            fixed_cost
+                            if fixed_cost
+                            else estimate_cost(
+                                model,
+                                input_tokens=input_tok,
+                                output_tokens=output_tok,
+                                total_tokens=tokens,
                             )
                         ),
                     }
@@ -2128,7 +2208,10 @@ def create_mesh_app(
             except Exception:
                 logger.error(
                     "Post-processing failed (events) for %s/%s agent=%s",
-                    api_request.service, api_request.action, agent_id, exc_info=True,
+                    api_request.service,
+                    api_request.action,
+                    agent_id,
+                    exc_info=True,
                 )
             return result
         finally:
@@ -2142,7 +2225,9 @@ def create_mesh_app(
         if not _caller_is_operator(agent_id, request):
             if not permissions.can_use_api(agent_id, api_request.service):
                 _record_denial(
-                    "permission", caller=agent_id, target=api_request.service,
+                    "permission",
+                    caller=agent_id,
+                    target=api_request.service,
                     gate="api_stream:can_use_api",
                 )
                 raise HTTPException(403, f"Agent {agent_id} cannot access {api_request.service}")
@@ -2156,12 +2241,14 @@ def create_mesh_app(
         if _oversize is not None:
             logger.warning(
                 "Rejected oversized stream input from agent=%s service=%s: %d bytes > %d cap",
-                agent_id, api_request.service, _oversize, _PROXY_INPUT_MAX_BYTES,
+                agent_id,
+                api_request.service,
+                _oversize,
+                _PROXY_INPUT_MAX_BYTES,
             )
             raise HTTPException(
                 413,
-                f"Request input too large ({_oversize} bytes); "
-                f"limit is {_PROXY_INPUT_MAX_BYTES} bytes.",
+                f"Request input too large ({_oversize} bytes); limit is {_PROXY_INPUT_MAX_BYTES} bytes.",
             )
 
         req_trace_id = request.headers.get("x-trace-id")
@@ -2178,6 +2265,7 @@ def create_mesh_app(
         # synchronous trace_store.record below uses req_trace_id directly,
         # not the contextvar, so it needs no seed.
         from src.shared.trace import current_trace_id
+
         prompt_preview = _extract_prompt_preview(api_request.params)
 
         try:
@@ -2199,7 +2287,10 @@ def create_mesh_app(
         except Exception:
             logger.error(
                 "Post-processing failed (trace) for %s/%s agent=%s",
-                api_request.service, api_request.action, agent_id, exc_info=True,
+                api_request.service,
+                api_request.action,
+                agent_id,
+                exc_info=True,
             )
 
         async def _inner_stream():
@@ -2224,6 +2315,7 @@ def create_mesh_app(
             try:
                 if event_bus is not None and (tokens or model):
                     from src.host.costs import estimate_cost
+
                     # OAuth (subscription) streams carry oauth=True in the done
                     # frame — report $0 to match the usage table, which never
                     # records cost for OAuth (stream_llm returns before track()).
@@ -2246,13 +2338,20 @@ def create_mesh_app(
                         ev["response_preview"] = response_preview
                     event_bus.emit("llm_call", agent=agent_id, data=ev)
                 if event_bus is not None and credit_error:
-                    event_bus.emit("credit_exhausted", agent=agent_id, data={
-                        "error": "Insufficient credits",
-                    })
+                    event_bus.emit(
+                        "credit_exhausted",
+                        agent=agent_id,
+                        data={
+                            "error": "Insufficient credits",
+                        },
+                    )
             except Exception:
                 logger.error(
                     "Post-processing failed (events) for %s/%s agent=%s",
-                    api_request.service, api_request.action, agent_id, exc_info=True,
+                    api_request.service,
+                    api_request.action,
+                    agent_id,
+                    exc_info=True,
                 )
             try:
                 if req_trace_id and trace_store and done_data:
@@ -2273,7 +2372,10 @@ def create_mesh_app(
             except Exception:
                 logger.error(
                     "Post-processing failed (trace) for %s/%s agent=%s",
-                    api_request.service, api_request.action, agent_id, exc_info=True,
+                    api_request.service,
+                    api_request.action,
+                    agent_id,
+                    exc_info=True,
                 )
 
         async def _stream_with_events():
@@ -2383,11 +2485,15 @@ def create_mesh_app(
             # provider error text is untrusted; redact before emitting.
             logger.warning("Credential resolve failed for %s: %s", name, exc)
             if event_bus is not None and exc.first_failure:
-                event_bus.emit("connection_refresh_failed", agent=agent_id, data={
-                    "connection": exc.connection,
-                    "provider": exc.provider,
-                    "error": redact_text_with_urls(str(exc.provider_error))[:200],
-                })
+                event_bus.emit(
+                    "connection_refresh_failed",
+                    agent=agent_id,
+                    data={
+                        "connection": exc.connection,
+                        "provider": exc.provider,
+                        "error": redact_text_with_urls(str(exc.provider_error))[:200],
+                    },
+                )
             raise HTTPException(502, f"Credential resolve failed: {name}") from exc
         except Exception as exc:  # noqa: BLE001 — surface refresh failures as 502
             logger.warning("Credential resolve failed for %s: %s", name, exc)
@@ -2415,6 +2521,7 @@ def create_mesh_app(
             raise HTTPException(503, "Connector gateway not configured")
         await _check_rate_limit("connectors", caller)
         from src.host.mcp_gateway import GatewayUnavailable
+
         try:
             connectors = await mcp_gateway.tools_for_agent(caller)
         except GatewayUnavailable as exc:
@@ -2442,13 +2549,19 @@ def create_mesh_app(
             GatewayUnavailable,
             UnknownConnectorError,
         )
+
         try:
             result = await mcp_gateway.call_tool(
-                connector, tool, arguments, agent_id=caller,
+                connector,
+                tool,
+                arguments,
+                agent_id=caller,
             )
         except PermissionError as exc:
             _record_denial(
-                "permission", caller=caller, target=connector,
+                "permission",
+                caller=caller,
+                target=connector,
                 gate="connector_assignment",
             )
             raise HTTPException(403, str(exc)) from exc
@@ -2461,7 +2574,8 @@ def create_mesh_app(
             # agents are an untrusted zone and don't get topology hints.
             logger.warning("Connector %r SSRF rejection: %s", connector, exc)
             raise HTTPException(
-                400, "connector URL failed security validation",
+                400,
+                "connector URL failed security validation",
             ) from exc
         except (ConnectorAuthError, ConnectorUnreachableError) as exc:
             # Operator-actionable states (reconnect / fix the URL). The
@@ -2509,7 +2623,10 @@ def create_mesh_app(
 
     @app.get("/mesh/wallet/balance")
     async def wallet_balance(
-        chain: str, agent_id: str, request: Request, token: str = "native",
+        chain: str,
+        agent_id: str,
+        request: Request,
+        token: str = "native",
     ) -> dict:
         """Get wallet balance.  Read-only, no signing."""
         agent_id = _resolve_agent_id(agent_id, request)
@@ -2539,8 +2656,11 @@ def create_mesh_app(
         await _check_rate_limit("wallet_read", agent_id)
         try:
             return await _ws_ref[0].read_contract(
-                agent_id, chain, data.get("contract", ""),
-                data.get("function", ""), data.get("args", []),
+                agent_id,
+                chain,
+                data.get("contract", ""),
+                data.get("function", ""),
+                data.get("args", []),
             )
         except ValueError as e:
             raise HTTPException(400, str(e))
@@ -2559,16 +2679,23 @@ def create_mesh_app(
         await _check_rate_limit("wallet_transfer", agent_id)
         logger.info(
             "Wallet transfer",
-            extra={"extra_data": {
-                "agent_id": agent_id, "chain": chain,
-                "to": data.get("to", ""), "amount": data.get("amount", ""),
-            }},
+            extra={
+                "extra_data": {
+                    "agent_id": agent_id,
+                    "chain": chain,
+                    "to": data.get("to", ""),
+                    "amount": data.get("amount", ""),
+                }
+            },
         )
         try:
             return await _ws_ref[0].transfer(
-                agent_id, chain,
-                data.get("to", ""), data.get("amount", ""),
-                data.get("token", "native"), permissions,
+                agent_id,
+                chain,
+                data.get("to", ""),
+                data.get("amount", ""),
+                data.get("token", "native"),
+                permissions,
             )
         except ValueError as e:
             raise HTTPException(400, str(e))
@@ -2592,16 +2719,24 @@ def create_mesh_app(
         await _check_rate_limit("wallet_execute", agent_id)
         logger.info(
             "Wallet execute",
-            extra={"extra_data": {
-                "agent_id": agent_id, "chain": chain,
-                "contract": contract, "function": data.get("function", ""),
-            }},
+            extra={
+                "extra_data": {
+                    "agent_id": agent_id,
+                    "chain": chain,
+                    "contract": contract,
+                    "function": data.get("function", ""),
+                }
+            },
         )
         try:
             return await _ws_ref[0].execute_contract(
-                agent_id, chain, contract,
-                data.get("function", ""), data.get("args", []),
-                data.get("value", "0"), data.get("transaction", ""),
+                agent_id,
+                chain,
+                contract,
+                data.get("function", ""),
+                data.get("args", []),
+                data.get("value", "0"),
+                data.get("transaction", ""),
                 permissions,
             )
         except ValueError as e:
@@ -2644,11 +2779,7 @@ def create_mesh_app(
             # constant time still leaks via debug logs if we surface it.
             expected = _auth_tokens.get("operator") if _auth_tokens else None
             bearer = _extract_bearer(request)
-            if (
-                not expected
-                or not bearer
-                or not hmac.compare_digest(bearer, expected)
-            ):
+            if not expected or not bearer or not hmac.compare_digest(bearer, expected):
                 raise HTTPException(
                     403,
                     "Reserved agent_id 'operator' requires the operator's bearer token",
@@ -2659,7 +2790,8 @@ def create_mesh_app(
             # bearer. ``canary-probe`` continues to use the internal-only
             # registration path (router.register_agent directly).
             raise HTTPException(
-                403, f"Reserved agent_id '{requested_id}' cannot register",
+                403,
+                f"Reserved agent_id '{requested_id}' cannot register",
             )
         else:
             # Standard path: format-validate and resolve identity from
@@ -2687,16 +2819,17 @@ def create_mesh_app(
         # Auto-watch task inbox (coordination protocol).
         # Only for agents with blackboard access (skip standalone agents).
         if agent_perms.blackboard_read:
-            inbox_pattern = (
-                f"teams/{reg_team}/tasks/{agent_id}/*"
-                if reg_team
-                else f"tasks/{agent_id}/*"
-            )
+            inbox_pattern = f"teams/{reg_team}/tasks/{agent_id}/*" if reg_team else f"tasks/{agent_id}/*"
             blackboard.add_watch(agent_id, inbox_pattern)
         if event_bus is not None:
-            event_bus.emit("agent_state", agent=agent_id, data={
-                "state": "registered", "capabilities": capabilities,
-            })
+            event_bus.emit(
+                "agent_state",
+                agent=agent_id,
+                data={
+                    "state": "registered",
+                    "capabilities": capabilities,
+                },
+            )
         return {"registered": True}
 
     # === Agent Notifications ===
@@ -2715,11 +2848,9 @@ def create_mesh_app(
         # Emit to dashboard first — users should see notifications even if
         # channel delivery (Telegram/Discord/etc.) fails below.
         if event_bus:
-            event_bus.emit("notification", agent=body.agent_id,
-                           data={"message": message})
+            event_bus.emit("notification", agent=body.agent_id, data={"message": message})
             if any(f in message for f in _WS_FILE_NAMES):
-                event_bus.emit("workspace_updated", agent=body.agent_id,
-                               data={"message": message})
+                event_bus.emit("workspace_updated", agent=body.agent_id, data={"message": message})
         try:
             await notify_fn(body.agent_id, message)
         except Exception as e:
@@ -2817,7 +2948,8 @@ def create_mesh_app(
         # callers (operator/mesh).
         if not permissions.can_request_user_credentials(agent_id):
             _record_denial(
-                "permission", caller=agent_id,
+                "permission",
+                caller=agent_id,
                 gate="credential-request:can_request_user_credentials",
             )
             raise HTTPException(
@@ -2876,7 +3008,9 @@ def create_mesh_app(
         """
         caller_id = _resolve_agent_id(data.get("agent_id", ""), request)
         agent_id = _resolve_browser_target(
-            caller_id, data.get("target_agent_id") or "", request,
+            caller_id,
+            data.get("target_agent_id") or "",
+            request,
         )
 
         # Per-action gate applies to the EFFECTIVE target (`agent_id`), same
@@ -2889,7 +3023,8 @@ def create_mesh_app(
         # narrowing wouldn't actually narrow.
         if not permissions.can_browser_action(agent_id, "request_browser_login"):
             raise HTTPException(
-                403, "Agent not permitted to perform 'request_browser_login'",
+                403,
+                "Agent not permitted to perform 'request_browser_login'",
             )
 
         # Rate-limit on the caller, not the target — otherwise a noisy
@@ -2941,7 +3076,8 @@ def create_mesh_app(
 
     @app.post("/mesh/browser-captcha-help-request")
     async def browser_captcha_help_request(
-        data: dict, request: Request,
+        data: dict,
+        request: Request,
     ) -> dict:
         """Phase 8 §11.14 — agent requests human help for a CAPTCHA.
 
@@ -2951,7 +3087,9 @@ def create_mesh_app(
         """
         caller_id = _resolve_agent_id(data.get("agent_id", ""), request)
         agent_id = _resolve_browser_target(
-            caller_id, data.get("target_agent_id") or "", request,
+            caller_id,
+            data.get("target_agent_id") or "",
+            request,
         )
 
         # Per-action gate (mirrors ``browser_login_request`` and
@@ -2963,7 +3101,8 @@ def create_mesh_app(
         # narrowing.
         if not permissions.can_browser_action(agent_id, "request_captcha_help"):
             raise HTTPException(
-                403, "Agent not permitted to perform 'request_captcha_help'",
+                403,
+                "Agent not permitted to perform 'request_captcha_help'",
             )
 
         await _check_rate_limit("notify", caller_id)
@@ -3004,7 +3143,9 @@ def create_mesh_app(
         }
 
     def _cancel_help_request(
-        kind: str, request_id: str, reason: str,
+        kind: str,
+        request_id: str,
+        reason: str,
     ) -> dict:
         """Resolve an open help request as cancelled.
 
@@ -3014,11 +3155,14 @@ def create_mesh_app(
         save resolve exactly once. Caller emits the follow-up event / steer.
         """
         record = help_requests_store.resolve(
-            request_id, expected_kind=kind, status="cancelled",
+            request_id,
+            expected_kind=kind,
+            status="cancelled",
         )
         if record is None:
             raise HTTPException(
-                404, f"{kind} request not found or already resolved",
+                404,
+                f"{kind} request not found or already resolved",
             )
         record["reason"] = reason
         return record
@@ -3033,16 +3177,21 @@ def create_mesh_app(
             return
         try:
             from src.shared.trace import new_trace_id
+
             await lane_manager.enqueue(
-                agent_id, sanitize_for_prompt(message),
-                mode="steer", trace_id=new_trace_id(),
+                agent_id,
+                sanitize_for_prompt(message),
+                mode="steer",
+                trace_id=new_trace_id(),
             )
         except Exception as e:
             logger.warning("cancel-steer enqueue failed for %s: %s", agent_id, e)
 
     @app.post("/mesh/credential-request/{request_id}/cancel")
     async def credential_request_cancel(
-        request_id: str, data: dict, request: Request,
+        request_id: str,
+        data: dict,
+        request: Request,
     ) -> dict:
         """User cancelled a pending credential request from the dashboard.
 
@@ -3056,7 +3205,8 @@ def create_mesh_app(
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(
-                403, "Only the operator can cancel a credential request",
+                403,
+                "Only the operator can cancel a credential request",
             )
         reason = (data or {}).get("reason", "user_cancelled")
         record = _cancel_help_request("credential_request", request_id, reason)
@@ -3089,17 +3239,22 @@ def create_mesh_app(
 
     @app.post("/mesh/browser-login-request/{request_id}/cancel")
     async def browser_login_request_cancel(
-        request_id: str, data: dict, request: Request,
+        request_id: str,
+        data: dict,
+        request: Request,
     ) -> dict:
         """User cancelled a pending browser login request."""
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(
-                403, "Only the operator can cancel a browser login request",
+                403,
+                "Only the operator can cancel a browser login request",
             )
         reason = (data or {}).get("reason", "user_cancelled")
         record = _cancel_help_request(
-            "browser_login_request", request_id, reason,
+            "browser_login_request",
+            request_id,
+            reason,
         )
         agent_id = record["agent_id"]
         service = record["payload"].get("service", "")
@@ -3128,17 +3283,22 @@ def create_mesh_app(
 
     @app.post("/mesh/browser-captcha-help-request/{request_id}/cancel")
     async def browser_captcha_help_request_cancel(
-        request_id: str, data: dict, request: Request,
+        request_id: str,
+        data: dict,
+        request: Request,
     ) -> dict:
         """User cancelled a pending CAPTCHA-help request."""
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(
-                403, "Only the operator can cancel a CAPTCHA-help request",
+                403,
+                "Only the operator can cancel a CAPTCHA-help request",
             )
         reason = (data or {}).get("reason", "user_cancelled")
         record = _cancel_help_request(
-            "browser_captcha_help_request", request_id, reason,
+            "browser_captcha_help_request",
+            request_id,
+            reason,
         )
         agent_id = record["agent_id"]
         service = record["payload"].get("service", "")
@@ -3240,6 +3400,7 @@ def create_mesh_app(
         # human-routing capabilities + the four siblings under explicit
         # keys so callers can distinguish them from tool capabilities.
         from src.cli.config import _load_config as _load_cfg_for_listing
+
         try:
             _cfg_for_listing = _load_cfg_for_listing()
         except Exception:
@@ -3283,18 +3444,15 @@ def create_mesh_app(
             if not caller_is_global and caller not in members:
                 _record_scope_warn()
                 logger.warning(
-                    "scope-warn: caller=%s requested /mesh/agents?team=%s "
-                    "but is not a member; mode=%s",
-                    caller, team, _TEAM_SCOPE_MODE,
+                    "scope-warn: caller=%s requested /mesh/agents?team=%s but is not a member; mode=%s",
+                    caller,
+                    team,
+                    _TEAM_SCOPE_MODE,
                 )
                 if _TEAM_SCOPE_MODE == "enforce":
                     return {}
 
-            result = {
-                aid: _agent_entry(aid, url)
-                for aid, url in router.agent_registry.items()
-                if aid in members
-            }
+            result = {aid: _agent_entry(aid, url) for aid, url in router.agent_registry.items() if aid in members}
             # Operator is fleet-global by design: team agents must be able to
             # discover and hand off back to it regardless of team membership.
             op_url = router.agent_registry.get("operator")
@@ -3309,10 +3467,7 @@ def create_mesh_app(
 
         # Unscoped path: full fleet for global callers; per-caller-team
         # filter for workers (warn-logged, enforce-applied).
-        full_fleet = {
-            aid: _agent_entry(aid, url)
-            for aid, url in router.agent_registry.items()
-        }
+        full_fleet = {aid: _agent_entry(aid, url) for aid, url in router.agent_registry.items()}
         if caller_is_global:
             return full_fleet
 
@@ -3323,16 +3478,11 @@ def create_mesh_app(
         # standalone agents who belong to no team).
         visible_members: set[str] = {caller}
         if own_teams:
-            visible_members.update(
-                a for a, t in _team_map.items() if t in own_teams
-            )
+            visible_members.update(a for a, t in _team_map.items() if t in own_teams)
         if "operator" in router.agent_registry:
             visible_members.add("operator")
 
-        filtered = {
-            aid: entry for aid, entry in full_fleet.items()
-            if aid in visible_members
-        }
+        filtered = {aid: entry for aid, entry in full_fleet.items() if aid in visible_members}
 
         # If the filter would have shrunk the response, emit warn
         # telemetry so ops can size the soak before flipping the flag.
@@ -3341,7 +3491,10 @@ def create_mesh_app(
             logger.warning(
                 "scope-warn: caller=%s requested /mesh/agents (no team filter); "
                 "would return %d under enforce, returning %d under %s",
-                caller, len(filtered), len(full_fleet), _TEAM_SCOPE_MODE,
+                caller,
+                len(filtered),
+                len(full_fleet),
+                _TEAM_SCOPE_MODE,
             )
             if _TEAM_SCOPE_MODE == "enforce":
                 return filtered
@@ -3418,55 +3571,43 @@ def create_mesh_app(
             agent_models: dict[str, str] = {}
             if include_models:
                 from src.cli.config import _load_config
+
                 _cfg = _load_config()
                 _agents_cfg = _cfg.get("agents", {})
                 _default_model = _cfg.get("llm", {}).get(
-                    "default_model", "openai/gpt-4o-mini",
+                    "default_model",
+                    "openai/gpt-4o-mini",
                 )
                 agent_models = {
-                    aid: _agents_cfg.get(aid, {}).get("model", _default_model)
-                    for aid in router.agent_registry
+                    aid: _agents_cfg.get(aid, {}).get("model", _default_model) for aid in router.agent_registry
                 }
 
             def _fleet_entry(aid: str) -> dict:
                 entry: dict = {
-                    "id": aid, "role": router.agent_roles.get(aid, ""),
+                    "id": aid,
+                    "role": router.agent_roles.get(aid, ""),
                 }
                 if include_models:
                     entry["model"] = agent_models.get(aid, "")
                 return entry
 
             if _caller_is_operator(agent_id, request):
-                result["fleet"] = [
-                    _fleet_entry(aid) for aid in router.agent_registry
-                ]
+                result["fleet"] = [_fleet_entry(aid) for aid in router.agent_registry]
             else:
                 _agent_team = teams_store.team_of(agent_id)
-                _agent_team_members: set[str] | None = (
-                    set(teams_store.members(_agent_team))
-                    if _agent_team else None
-                )
+                _agent_team_members: set[str] | None = set(teams_store.members(_agent_team)) if _agent_team else None
 
                 if _agent_team_members is not None:
-                    result["fleet"] = [
-                        _fleet_entry(aid)
-                        for aid in router.agent_registry
-                        if aid in _agent_team_members
-                    ]
+                    result["fleet"] = [_fleet_entry(aid) for aid in router.agent_registry if aid in _agent_team_members]
                 else:
                     result["fleet"] = [_fleet_entry(agent_id)]
 
         if section in ("cron", "all") and cron_scheduler:
-            result["cron"] = [
-                j for j in cron_scheduler.list_jobs()
-                if j.get("agent") == agent_id
-            ]
+            result["cron"] = [j for j in cron_scheduler.list_jobs() if j.get("agent") == agent_id]
 
         if section in ("health", "all") and health_monitor:
             statuses = health_monitor.get_status()
-            result["health"] = next(
-                (s for s in statuses if s["agent"] == agent_id), None
-            )
+            result["health"] = next((s for s in statuses if s["agent"] == agent_id), None)
 
         if section in ("team", "all"):
             result["team"] = teams_store.team_of(agent_id)
@@ -3492,10 +3633,7 @@ def create_mesh_app(
                 except Exception as e:
                     logger.debug("introspect allowed_models failed: %s", e)
                 try:
-                    credential_kinds = {
-                        p: credential_vault.get_credential_kind(p)
-                        for p in available_providers
-                    }
+                    credential_kinds = {p: credential_vault.get_credential_kind(p) for p in available_providers}
                 except Exception as e:
                     logger.debug("introspect credential_kinds failed: %s", e)
             result["llm"] = {
@@ -3530,7 +3668,8 @@ def create_mesh_app(
             if not _caller_is_operator(agent_id, request):
                 if not permissions.can_manage_cron(agent_id):
                     _record_denial(
-                        "permission", caller=agent_id,
+                        "permission",
+                        caller=agent_id,
                         gate="cron.create:can_manage_cron",
                     )
                     raise HTTPException(403, f"Agent {agent_id} is not allowed to manage cron jobs")
@@ -3548,17 +3687,24 @@ def create_mesh_app(
             try:
                 json.loads(tool_params)
             except (json.JSONDecodeError, TypeError):
-                raise HTTPException(400, "tool_params must be a valid JSON string (e.g. '{\"key\": \"value\"}')")
+                raise HTTPException(400, 'tool_params must be a valid JSON string (e.g. \'{"key": "value"}\')')
         try:
             job = cron_scheduler.add_job(
-                agent=agent_id, schedule=schedule, message=message, heartbeat=heartbeat,
-                tool_name=tool_name, tool_params=tool_params,
+                agent=agent_id,
+                schedule=schedule,
+                message=message,
+                heartbeat=heartbeat,
+                tool_name=tool_name,
+                tool_params=tool_params,
             )
         except ValueError as e:
             raise HTTPException(400, str(e))
         return {
-            "id": job.id, "agent": job.agent, "schedule": job.schedule,
-            "heartbeat": job.heartbeat, "tool_name": job.tool_name,
+            "id": job.id,
+            "agent": job.agent,
+            "schedule": job.schedule,
+            "heartbeat": job.heartbeat,
+            "tool_name": job.tool_name,
         }
 
     @app.get("/mesh/cron")
@@ -3579,7 +3725,8 @@ def create_mesh_app(
         if not _caller_is_operator(agent_id, request):
             if not permissions.can_manage_cron(agent_id):
                 _record_denial(
-                    "permission", caller=agent_id,
+                    "permission",
+                    caller=agent_id,
                     gate="cron.update:can_manage_cron",
                 )
                 raise HTTPException(403, f"Agent {agent_id} cannot manage cron jobs")
@@ -3599,6 +3746,7 @@ def create_mesh_app(
         if not job:
             raise HTTPException(404, f"Job not found: {job_id}")
         from dataclasses import asdict
+
         return {"status": "updated", "job": asdict(job)}
 
     @app.delete("/mesh/cron/{job_id}")
@@ -3608,7 +3756,8 @@ def create_mesh_app(
         if not _caller_is_operator(agent_id, request):
             if not permissions.can_manage_cron(agent_id):
                 _record_denial(
-                    "permission", caller=agent_id,
+                    "permission",
+                    caller=agent_id,
                     gate="cron.delete:can_manage_cron",
                 )
                 raise HTTPException(403, f"Agent {agent_id} cannot manage cron jobs")
@@ -3638,7 +3787,8 @@ def create_mesh_app(
         if not _caller_is_operator(spawned_by, request):
             if not permissions.can_spawn(spawned_by):
                 _record_denial(
-                    "permission", caller=spawned_by,
+                    "permission",
+                    caller=spawned_by,
                     gate="spawn:can_spawn",
                 )
                 raise HTTPException(403, f"Agent {spawned_by} is not allowed to spawn agents")
@@ -3651,39 +3801,59 @@ def create_mesh_app(
         if len(system_prompt) > _MAX_SYSTEM_PROMPT:
             raise HTTPException(400, f"system_prompt exceeds {_MAX_SYSTEM_PROMPT} char limit")
         from src.shared.utils import generate_id
+
         agent_id = generate_id("spawn")
         try:
             url = container_manager.spawn_agent(
-                agent_id=agent_id, role=role, system_prompt=system_prompt,
-                model=model, ttl=ttl,
+                agent_id=agent_id,
+                role=role,
+                system_prompt=system_prompt,
+                model=model,
+                ttl=ttl,
             )
             router.register_agent(agent_id, url)
             if health_monitor is not None:
                 health_monitor.register(agent_id)
             # Store ephemeral metadata for TTL cleanup
-            container_manager.agents.setdefault(agent_id, {}).update({
-                "ephemeral": True, "ttl": ttl,
-                "spawned_at": time.time(), "role": role,
-            })
+            container_manager.agents.setdefault(agent_id, {}).update(
+                {
+                    "ephemeral": True,
+                    "ttl": ttl,
+                    "spawned_at": time.time(),
+                    "role": role,
+                }
+            )
             ready = await container_manager.wait_for_agent(agent_id, timeout=60)
             if trace_store:
                 from src.shared.trace import new_trace_id as _new_trace_id
+
                 trace_store.record(
-                    trace_id=_new_trace_id(), source="mesh.spawn", agent=agent_id,
+                    trace_id=_new_trace_id(),
+                    source="mesh.spawn",
+                    agent=agent_id,
                     event_type="agent_spawn",
                     detail=f"role={role} spawned_by={spawned_by}",
                 )
             if event_bus is not None:
-                event_bus.emit("agent_state", agent=agent_id, data={
-                    "state": "spawned", "role": role, "ready": ready,
-                })
+                event_bus.emit(
+                    "agent_state",
+                    agent=agent_id,
+                    data={
+                        "state": "spawned",
+                        "role": role,
+                        "ready": ready,
+                    },
+                )
             return {
-                "agent_id": agent_id, "url": url, "role": role,
-                "ready": ready, "spawned_by": spawned_by, "ttl": ttl,
+                "agent_id": agent_id,
+                "url": url,
+                "role": role,
+                "ready": ready,
+                "spawned_by": spawned_by,
+                "ttl": ttl,
             }
         except Exception as e:
             raise HTTPException(500, f"Failed to spawn agent: {e}") from e
-
 
     # === Fleet Templates ===
 
@@ -3696,12 +3866,14 @@ def create_mesh_app(
         templates = _load_templates()
         result = []
         for name, tpl in templates.items():
-            result.append({
-                "name": name,
-                "description": tpl.get("description", ""),
-                "agent_count": len(tpl.get("agents", {})),
-                "agents": list(tpl.get("agents", {}).keys()),
-            })
+            result.append(
+                {
+                    "name": name,
+                    "description": tpl.get("description", ""),
+                    "agent_count": len(tpl.get("agents", {})),
+                    "agents": list(tpl.get("agents", {}).keys()),
+                }
+            )
         return {"templates": result}
 
     @app.post("/mesh/fleet/apply")
@@ -3727,14 +3899,14 @@ def create_mesh_app(
             if not _caller_is_operator(spawned_by, request):
                 if not permissions.can_manage_fleet(spawned_by):
                     _record_denial(
-                        "permission", caller=spawned_by,
+                        "permission",
+                        caller=spawned_by,
                         gate="fleet.apply:can_manage_fleet",
                     )
                     raise HTTPException(
                         403,
-                        f"Agent {spawned_by} is not allowed to apply fleet templates "
-                        "(requires can_manage_fleet)",
-                )
+                        f"Agent {spawned_by} is not allowed to apply fleet templates (requires can_manage_fleet)",
+                    )
 
         # M15 — applying a template is a spawn-class operation; rate-limit
         # it on the same ``spawn`` bucket as ``create_custom_agent`` (which
@@ -3758,6 +3930,7 @@ def create_mesh_app(
             raise HTTPException(400, f"Template '{template_name}' has no agents")
 
         import os as _os
+
         max_agents = int(_os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
 
         # Optional model override
@@ -3773,7 +3946,11 @@ def create_mesh_app(
             if not isinstance(agent_overrides, dict):
                 raise HTTPException(400, "agent_overrides must be an object")
             _ALLOWED_OVERRIDE_FIELDS = {
-                "model", "instructions", "soul", "heartbeat", "interface",
+                "model",
+                "instructions",
+                "soul",
+                "heartbeat",
+                "interface",
             }
             # Per-field length caps mirror src/agent/server.py _FILE_CAPS:
             #   INSTRUCTIONS.md: 12000, SOUL.md: 4000, INTERFACE.md: 4000,
@@ -3786,9 +3963,7 @@ def create_mesh_app(
             }
 
             # 1. Unknown agent names
-            unknown_agents = [
-                name for name in agent_overrides if name not in tpl_agents
-            ]
+            unknown_agents = [name for name in agent_overrides if name not in tpl_agents]
             if unknown_agents:
                 raise HTTPException(
                     400,
@@ -3799,16 +3974,14 @@ def create_mesh_app(
 
             # 2. Per-override field/value validation
             from src.shared.models import _resolve_litellm_key
+
             for agent_name, override in agent_overrides.items():
                 if not isinstance(override, dict):
                     raise HTTPException(
                         400,
-                        f"agent_overrides['{agent_name}'] must be an object, "
-                        f"got {type(override).__name__}",
+                        f"agent_overrides['{agent_name}'] must be an object, got {type(override).__name__}",
                     )
-                bad_fields = [
-                    k for k in override if k not in _ALLOWED_OVERRIDE_FIELDS
-                ]
+                bad_fields = [k for k in override if k not in _ALLOWED_OVERRIDE_FIELDS]
                 if bad_fields:
                     raise HTTPException(
                         400,
@@ -3821,14 +3994,12 @@ def create_mesh_app(
                     if not isinstance(mv, str) or not mv.strip():
                         raise HTTPException(
                             400,
-                            f"agent_overrides['{agent_name}'].model must be a "
-                            "non-empty string",
+                            f"agent_overrides['{agent_name}'].model must be a non-empty string",
                         )
                     if _resolve_litellm_key(mv) is None:
                         raise HTTPException(
                             400,
-                            f"agent_overrides['{agent_name}'].model "
-                            f"'{mv}' is not a known model",
+                            f"agent_overrides['{agent_name}'].model '{mv}' is not a known model",
                         )
                 for _field, _cap in _STRING_FIELD_CAPS.items():
                     if _field not in override:
@@ -3837,14 +4008,12 @@ def create_mesh_app(
                     if not isinstance(val, str):
                         raise HTTPException(
                             400,
-                            f"agent_overrides['{agent_name}'].{_field} "
-                            "must be a string",
+                            f"agent_overrides['{agent_name}'].{_field} must be a string",
                         )
                     if _cap is not None and len(val) > _cap:
                         raise HTTPException(
                             413,
-                            f"agent_overrides['{agent_name}'].{_field} "
-                            f"exceeds cap ({len(val)} > {_cap} chars)",
+                            f"agent_overrides['{agent_name}'].{_field} exceeds cap ({len(val)} > {_cap} chars)",
                         )
 
         # Credential-compatibility check on every model the apply will
@@ -3860,9 +4029,11 @@ def create_mesh_app(
         # docstring for the precedence rules and the None-coercion
         # contract.
         from src.shared.models import resolve_slot_model
+
         _cfg_for_resolve = _load_config()
         _default_model_for_resolve = _cfg_for_resolve.get(
-            "llm", {},
+            "llm",
+            {},
         ).get("default_model", "openai/gpt-4o-mini")
         if credential_vault is not None:
             _seen_models: set[str] = set()
@@ -3902,12 +4073,8 @@ def create_mesh_app(
             # (apply is idempotent on existing names).
             if max_agents > 0:
                 _cfg_existing = set(_load_config().get("agents", {}))
-                _live = {
-                    aid for aid in router.agent_registry if aid != "operator"
-                }
-                _existing = (
-                    _live | {a for a in _cfg_existing if a != "operator"}
-                )
+                _live = {aid for aid in router.agent_registry if aid != "operator"}
+                _existing = _live | {a for a in _cfg_existing if a != "operator"}
                 current_count = len(_existing)
                 new_slots = [n for n in tpl_agents if n not in _existing]
                 if current_count + len(new_slots) > max_agents:
@@ -3919,7 +4086,9 @@ def create_mesh_app(
                     )
             # Apply template to create config entries
             created_names = _apply_template(
-                template_name, tpl, agent_overrides=agent_overrides or None,
+                template_name,
+                tpl,
+                agent_overrides=agent_overrides or None,
             )
             # _apply_template calls _add_agent_permissions for each new
             # agent; reload the live matrix so /mesh/register sees the
@@ -3938,6 +4107,7 @@ def create_mesh_app(
         import random
 
         from src.cli.config import _update_agent_field
+
         used_avatars: set[int] = set()
         for agent_name in created_names:
             avatar = random.choice([i for i in range(1, 51) if i not in used_avatars])
@@ -3971,9 +4141,11 @@ def create_mesh_app(
                 model_override,
                 default_model,
             )
-            tools_dir = str(
-                (container_manager.project_root / "agent_tools" / agent_name).resolve()
-            ) if container_manager.project_root else ""
+            tools_dir = (
+                str((container_manager.project_root / "agent_tools" / agent_name).resolve())
+                if container_manager.project_root
+                else ""
+            )
 
             # Build per-agent env_overrides (NOT shared extra_env)
             env_overrides: dict[str, str] = {}
@@ -3990,6 +4162,7 @@ def create_mesh_app(
             set_llm_max_tokens_env(env_overrides, acfg)
             # Per-agent round/timeout caps → OPENLEGION_* (survives restart).
             from src.shared.limits import set_llm_limits_env
+
             set_llm_limits_env(env_overrides, acfg)
 
             try:
@@ -4007,6 +4180,7 @@ def create_mesh_app(
                 router.register_agent(agent_name, url, role=acfg.get("role", ""))
                 if transport is not None:
                     from src.host.transport import HttpTransport
+
                     if isinstance(transport, HttpTransport):
                         transport.register(agent_name, url)
                 if health_monitor is not None:
@@ -4018,15 +4192,23 @@ def create_mesh_app(
                 ready = await container_manager.wait_for_agent(agent_name, timeout=60)
 
                 if event_bus is not None:
-                    event_bus.emit("agent_state", agent=agent_name, data={
-                        "state": "added", "role": acfg.get("role", ""), "ready": ready,
-                    })
+                    event_bus.emit(
+                        "agent_state",
+                        agent=agent_name,
+                        data={
+                            "state": "added",
+                            "role": acfg.get("role", ""),
+                            "ready": ready,
+                        },
+                    )
 
-                created_agents.append({
-                    "agent_id": agent_name,
-                    "role": acfg.get("role", agent_name),
-                    "ready": ready,
-                })
+                created_agents.append(
+                    {
+                        "agent_id": agent_name,
+                        "role": acfg.get("role", agent_name),
+                        "ready": ready,
+                    }
+                )
             except Exception as e:
                 logger.error("Failed to start agent '%s' from template: %s", agent_name, e)
                 failed_agents.append({"agent_id": agent_name, "error": str(e)})
@@ -4054,8 +4236,7 @@ def create_mesh_app(
                 _record_denial("permission", caller=caller, gate=gate)
                 raise HTTPException(
                     403,
-                    f"Agent {caller} is not allowed to manage skills "
-                    "(requires can_manage_fleet)",
+                    f"Agent {caller} is not allowed to manage skills (requires can_manage_fleet)",
                 )
         return caller
 
@@ -4076,6 +4257,7 @@ def create_mesh_app(
             raise HTTPException(503, "Skills directory not available")
 
         from src import marketplace
+
         result = await asyncio.to_thread(
             marketplace.install_skill,
             repo_url,
@@ -4099,6 +4281,7 @@ def create_mesh_app(
             raise HTTPException(503, "Skills directory not available")
 
         from src import marketplace
+
         result = await asyncio.to_thread(marketplace.remove_skill, name, skills_installed)
         if "error" in result:
             # 404 only for a genuine miss; a rejected name is a bad request.
@@ -4149,6 +4332,7 @@ def create_mesh_app(
         skills = _clean_skill_names(data.get("skills", []))
 
         from src.cli.config import _load_permissions, _save_permissions
+
         perms = _load_permissions()
         agents = perms.setdefault("permissions", {})
         # Materialize the agent's full effective permissions before this partial
@@ -4170,6 +4354,7 @@ def create_mesh_app(
         skills = _clean_skill_names(data.get("skills", []))
 
         from src.cli.config import _load_permissions, _save_permissions
+
         perms = _load_permissions()
         perms["fleet_skills"] = skills
         _save_permissions(perms)
@@ -4185,9 +4370,7 @@ def create_mesh_app(
         """
         _require_skill_admin(request, {}, "skills.read:can_manage_fleet")
         per_agent = {
-            aid: list(perms.allowed_skills)
-            for aid, perms in permissions.permissions.items()
-            if perms.allowed_skills
+            aid: list(perms.allowed_skills) for aid, perms in permissions.permissions.items() if perms.allowed_skills
         }
         return {
             "fleet_skills": list(getattr(permissions, "fleet_skills", []) or []),
@@ -4210,13 +4393,13 @@ def create_mesh_app(
         if not _caller_is_operator(agent_id, request):
             if not permissions.can_manage_fleet(agent_id):
                 _record_denial(
-                    "permission", caller=agent_id,
+                    "permission",
+                    caller=agent_id,
                     gate="agent.create:can_manage_fleet",
                 )
                 raise HTTPException(
                     403,
-                    f"Agent {agent_id} is not allowed to create agents "
-                    "(requires can_manage_fleet)",
+                    f"Agent {agent_id} is not allowed to create agents (requires can_manage_fleet)",
                 )
 
         # Validate inputs
@@ -4231,6 +4414,7 @@ def create_mesh_app(
 
         # Validate agent name format
         from src.cli.config import _validate_agent_name
+
         try:
             name = _validate_agent_name(name)
         except Exception as e:
@@ -4238,6 +4422,7 @@ def create_mesh_app(
 
         # Check if agent already exists
         from src.cli.config import _load_config
+
         config = _load_config()
         if name in config.get("agents", {}):
             raise HTTPException(409, f"Agent '{name}' already exists")
@@ -4247,6 +4432,7 @@ def create_mesh_app(
         # it. ``config`` was loaded above for the dup-name check; the
         # authoritative count is re-read inside the lock.
         import os
+
         max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
 
         # Default model
@@ -4262,6 +4448,7 @@ def create_mesh_app(
         # to enumerate which providers actually have OAuth state.
         if credential_vault is not None:
             from src.shared.models import resolve_provider_for_model
+
             provider = resolve_provider_for_model(model)
             if provider:
                 available = credential_vault.get_providers_with_credentials()
@@ -4287,6 +4474,7 @@ def create_mesh_app(
             _add_agent_to_config,
             _update_agent_field,
         )
+
         # M15 — atomic plan-limit check + config write. Hold the shared
         # creation lock across the count re-read and ``_add_agent_to_config``
         # so two concurrent creates can't both pass the cap and overshoot
@@ -4303,20 +4491,21 @@ def create_mesh_app(
                 # Union config + live registry (same semantics as
                 # apply_fleet_template) so the cap counts agents written by
                 # a concurrent template apply even before they register.
-                _existing = (
-                    {a for a in _agents_now if a != "operator"}
-                    | {aid for aid in router.agent_registry if aid != "operator"}
-                )
+                _existing = {a for a in _agents_now if a != "operator"} | {
+                    aid for aid in router.agent_registry if aid != "operator"
+                }
                 current = len(_existing)
                 if current >= max_agents:
                     raise HTTPException(
                         409,
-                        f"Plan limit reached ({current}/{max_agents} agents). "
-                        "Remove an agent or upgrade your plan.",
+                        f"Plan limit reached ({current}/{max_agents} agents). Remove an agent or upgrade your plan.",
                     )
             _add_agent_to_config(
-                name=name, role=role or name, model=model,
-                initial_instructions=instructions, initial_soul=soul,
+                name=name,
+                role=role or name,
+                model=model,
+                initial_instructions=instructions,
+                initial_soul=soul,
             )
         _update_agent_field(name, "avatar", random.randint(1, 50))
         # Operator-created agents need the same coordination defaults as the
@@ -4343,18 +4532,22 @@ def create_mesh_app(
 
         try:
             url = container_manager.start_agent(
-                agent_id=name, role=role or name,
-                tools_dir=str(tools_dir), model=model,
+                agent_id=name,
+                role=role or name,
+                tools_dir=str(tools_dir),
+                model=model,
                 env_overrides=agent_env,
             )
         except Exception as e:
             # Roll back: remove config and permissions so the name isn't blocked
             from src.cli.config import _remove_agent
+
             try:
                 _remove_agent(name)
             except Exception:
                 pass
             import shutil
+
             shutil.rmtree(tools_dir, ignore_errors=True)
             raise HTTPException(500, f"Failed to start agent container: {e}") from e
 
@@ -4362,6 +4555,7 @@ def create_mesh_app(
             router.register_agent(name, url, role=role or name)
             if transport is not None:
                 from src.host.transport import HttpTransport
+
                 if isinstance(transport, HttpTransport):
                     transport.register(name, url)
             if health_monitor is not None:
@@ -4373,14 +4567,16 @@ def create_mesh_app(
             ready = await container_manager.wait_for_agent(name, timeout=60)
 
             if event_bus is not None:
-                event_bus.emit("agent_state", agent=name,
-                    data={"state": "added", "role": role, "ready": ready})
+                event_bus.emit("agent_state", agent=name, data={"state": "added", "role": role, "ready": ready})
 
             if trace_store:
                 from src.shared.trace import new_trace_id as _new_trace_id
+
                 trace_store.record(
-                    trace_id=_new_trace_id(), source="mesh.create_agent",
-                    agent=name, event_type="create_agent",
+                    trace_id=_new_trace_id(),
+                    source="mesh.create_agent",
+                    agent=name,
+                    event_type="create_agent",
                     detail=f"role={role}, model={model}, created_by={data.get('created_by', 'operator')}",
                 )
 
@@ -4392,14 +4588,15 @@ def create_mesh_app(
             except Exception:
                 pass
             from src.cli.config import _remove_agent
+
             try:
                 _remove_agent(name)
             except Exception:
                 pass
             import shutil
+
             shutil.rmtree(tools_dir, ignore_errors=True)
             raise HTTPException(500, f"Failed to register agent: {e}") from e
-
 
     # === Agent History Access ===
 
@@ -4407,8 +4604,10 @@ def create_mesh_app(
 
     @app.get("/mesh/agents/{agent_id}/history")
     async def get_agent_history(
-        agent_id: str, request: Request,
-        requesting_agent: str = "", period: str = "",
+        agent_id: str,
+        request: Request,
+        requesting_agent: str = "",
+        period: str = "",
     ) -> dict:
         """Retrieve an agent's daily logs. Permission-checked."""
         if requesting_agent:
@@ -4416,7 +4615,9 @@ def create_mesh_app(
             if not _caller_is_operator(requesting_agent, request):
                 if not permissions.can_message(requesting_agent, agent_id):
                     _record_denial(
-                        "permission", caller=requesting_agent, target=agent_id,
+                        "permission",
+                        caller=requesting_agent,
+                        target=agent_id,
                         gate="agent.history:can_message",
                     )
                     raise HTTPException(403, f"Agent {requesting_agent} cannot read history of {agent_id}")
@@ -4435,10 +4636,12 @@ def create_mesh_app(
                 raise HTTPException(502, f"Failed to fetch history from {agent_id}: {e}") from e
         agent_url = agent_entry.get("url", agent_entry) if isinstance(agent_entry, dict) else agent_entry
         import httpx
+
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(
-                    f"{agent_url}/history", params={"days": days},
+                    f"{agent_url}/history",
+                    params={"days": days},
                     headers=_agent_bearer_headers(agent_id),
                 )
                 resp.raise_for_status()
@@ -4473,7 +4676,9 @@ def create_mesh_app(
             if not _caller_is_operator(effective_caller, request):
                 if not permissions.can_message(effective_caller, agent_id):
                     _record_denial(
-                        "permission", caller=effective_caller, target=agent_id,
+                        "permission",
+                        caller=effective_caller,
+                        target=agent_id,
                         gate="agent.profile:can_message",
                     )
                     raise HTTPException(403, f"Agent {effective_caller} cannot read profile of {agent_id}")
@@ -4494,8 +4699,10 @@ def create_mesh_app(
                 status = h.status
                 if h.last_healthy:
                     from datetime import datetime, timezone
+
                     last_active = datetime.fromtimestamp(
-                        h.last_healthy, tz=timezone.utc,
+                        h.last_healthy,
+                        tz=timezone.utc,
                     ).isoformat()
 
         # PR-L' — most recent task_events row for this agent. Distinct
@@ -4509,13 +4716,16 @@ def create_mesh_app(
                 ts = tasks_store.last_event_ts_for_agent(agent_id)
                 if ts is not None:
                     from datetime import datetime, timezone
+
                     last_task_event_ts = datetime.fromtimestamp(
-                        ts, tz=timezone.utc,
+                        ts,
+                        tz=timezone.utc,
                     ).isoformat()
             except Exception as e:
                 logger.debug(
                     "last_event_ts_for_agent failed for '%s': %s",
-                    agent_id, e,
+                    agent_id,
+                    e,
                 )
 
         # Heartbeat schedule
@@ -4530,24 +4740,15 @@ def create_mesh_app(
         raw_subs = pubsub.get_agent_subscriptions(agent_id) if pubsub else []
         team_of = teams_store.team_of(agent_id)
         prefix = f"teams/{team_of}/" if team_of else ""
-        subscriptions = [
-            t[len(prefix):] if prefix and t.startswith(prefix) else t
-            for t in raw_subs
-        ]
+        subscriptions = [t[len(prefix) :] if prefix and t.startswith(prefix) else t for t in raw_subs]
 
         # Watches (strip team prefix)
         raw_watches = blackboard.get_agent_watches(agent_id)
-        watches = [
-            w[len(prefix):] if prefix and w.startswith(prefix) else w
-            for w in raw_watches
-        ]
+        watches = [w[len(prefix) :] if prefix and w.startswith(prefix) else w for w in raw_watches]
 
         # Recent blackboard writes (strip team prefix, keys only)
         raw_writes = blackboard.recent_keys_by_agent(agent_id)
-        recent_writes = [
-            k[len(prefix):] if prefix and k.startswith(prefix) else k
-            for k in raw_writes
-        ]
+        recent_writes = [k[len(prefix) :] if prefix and k.startswith(prefix) else k for k in raw_writes]
 
         # -- Agent-declared interface (INTERFACE.md) --
         interface = None
@@ -4564,6 +4765,7 @@ def create_mesh_app(
             if isinstance(agent_url, dict):
                 agent_url = agent_url.get("url", agent_url)
             import httpx
+
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
                     resp = await client.get(
@@ -4583,6 +4785,7 @@ def create_mesh_app(
         # avoid the naming collision. The other four sibling fields keep
         # their natural names (no collision).
         from src.cli.config import _load_config as _load_cfg_for_profile
+
         try:
             _cfg_for_profile = _load_cfg_for_profile()
         except Exception:
@@ -4604,9 +4807,7 @@ def create_mesh_app(
         #     two SQL aggregates per call on that path. Skipping them when
         #     the caller isn't operator-or-internal keeps the hot path lean.
         caller_for_gate = _resolve_agent_id("", request)
-        runtime_visible = (
-            _caller_is_operator(caller_for_gate, request) or _is_internal_caller(request)
-        )
+        runtime_visible = _caller_is_operator(caller_for_gate, request) or _is_internal_caller(request)
 
         runtime_fields: dict[str, object] = {}
         if runtime_visible:
@@ -4630,7 +4831,8 @@ def create_mesh_app(
                 except Exception:
                     logger.debug(
                         "cost_tracker.get_spend failed for %s",
-                        agent_id, exc_info=True,
+                        agent_id,
+                        exc_info=True,
                     )
             runtime_fields["spend_today_usd"] = spend_today_usd
             runtime_fields["spend_month_usd"] = spend_month_usd
@@ -4676,7 +4878,9 @@ def create_mesh_app(
 
     @app.post("/mesh/agents/{agent_id}/auth-failure")
     async def report_auth_failure(
-        agent_id: str, body: dict, request: Request,
+        agent_id: str,
+        body: dict,
+        request: Request,
     ) -> dict:
         """Agent self-reports a credential failure (Fix 4 in seam follow-up).
 
@@ -4693,11 +4897,14 @@ def create_mesh_app(
             requesting = _resolve_agent_id(agent_id, request)
             if requesting != agent_id:
                 _record_denial(
-                    "scope", caller=requesting, target=agent_id,
+                    "scope",
+                    caller=requesting,
+                    target=agent_id,
                     gate="auth_failure:self_report_only",
                 )
                 raise HTTPException(
-                    403, "Agents can only report failures for themselves",
+                    403,
+                    "Agents can only report failures for themselves",
                 )
             # Rate-limit only the agent-self-report path. Internal callers
             # (mesh's own ``_record_auth`` recorder threading the proxy
@@ -4715,7 +4922,10 @@ def create_mesh_app(
         except (TypeError, ValueError):
             http_status = 0
         quarantined = health_monitor.record_auth_failure(
-            agent_id, provider=provider, model=model, http_status=http_status,
+            agent_id,
+            provider=provider,
+            model=model,
+            http_status=http_status,
         )
         return {"recorded": True, "quarantined": quarantined}
 
@@ -4845,7 +5055,8 @@ def create_mesh_app(
         if health_monitor is not None:
             statuses = health_monitor.get_status()
             result["health"] = next(
-                (s for s in statuses if s["agent"] == agent_id), None,
+                (s for s in statuses if s["agent"] == agent_id),
+                None,
             )
         if lane_manager is not None:
             lane_status = lane_manager.get_status()
@@ -4913,12 +5124,14 @@ def create_mesh_app(
         if cost_tracker:
             for aid in agent_ids_user:
                 today_a = cost_tracker.get_spend(aid, "today").get(
-                    "total_cost", 0.0,
+                    "total_cost",
+                    0.0,
                 )
                 # ``yesterday`` is "since yesterday midnight" (includes
                 # today). Subtract today to isolate yesterday-only spend.
                 since_yest_a = cost_tracker.get_spend(aid, "yesterday").get(
-                    "total_cost", 0.0,
+                    "total_cost",
+                    0.0,
                 )
                 yest_a = max(since_yest_a - today_a, 0.0)
                 per_agent_cost_today[aid] = round(today_a, 4)
@@ -4927,9 +5140,7 @@ def create_mesh_app(
                 # ``None`` (rather than ``0.0``) lets the heartbeat
                 # playbook distinguish "agent stopped spending today"
                 # (ratio == 0.0) from "no yesterday baseline" (None).
-                per_agent_cost_ratio[aid] = (
-                    round(today_a / yest_a, 2) if yest_a > 0 else None
-                )
+                per_agent_cost_ratio[aid] = round(today_a / yest_a, 2) if yest_a > 0 else None
 
         # -- Per-agent task outcome / failure / stale counts (PR-J') --
         # The two count fields supersede the legacy ``failure_rate_by_agent``
@@ -4957,7 +5168,8 @@ def create_mesh_app(
                 outcome_rejected_24h = {
                     aid: count
                     for aid, count in tasks_store.count_outcomes_since(
-                        "rejected", since_seconds=_day_seconds,
+                        "rejected",
+                        since_seconds=_day_seconds,
                     ).items()
                     if aid != "operator"
                 }
@@ -4968,7 +5180,8 @@ def create_mesh_app(
                 outcome_rework_24h = {
                     aid: count
                     for aid, count in tasks_store.count_outcomes_since(
-                        "rework", since_seconds=_day_seconds,
+                        "rework",
+                        since_seconds=_day_seconds,
                     ).items()
                     if aid != "operator"
                 }
@@ -4985,11 +5198,7 @@ def create_mesh_app(
                 _stale_by_assignee = tasks_store.count_stale_since(
                     threshold_seconds=_day_seconds,
                 )
-                stale_tasks_24h = {
-                    aid: count
-                    for aid, count in _stale_by_assignee.items()
-                    if aid != "operator"
-                }
+                stale_tasks_24h = {aid: count for aid, count in _stale_by_assignee.items() if aid != "operator"}
                 inbox_stale_count = _stale_by_assignee.get("operator", 0)
                 # Chain-break observability — surfaces ``done`` tasks
                 # whose work didn't get handed off (no child row via
@@ -5021,15 +5230,18 @@ def create_mesh_app(
         for status_entry in health_list_user:
             agent_status = status_entry.get("status", "unknown")
             if agent_status in ("failed", "unhealthy"):
-                agents_attention.append({
-                    "agent_id": status_entry["agent"],
-                    "issue": agent_status,
-                    "failures": status_entry.get("failures", 0),
-                    "restarts": status_entry.get("restarts", 0),
-                })
+                agents_attention.append(
+                    {
+                        "agent_id": status_entry["agent"],
+                        "issue": agent_status,
+                        "failures": status_entry.get("failures", 0),
+                        "restarts": status_entry.get("restarts", 0),
+                    }
+                )
 
         # -- Plan limits from env vars --
         import os
+
         max_agents = int(os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
         max_teams = int(os.environ.get("OPENLEGION_MAX_TEAMS", "0"))
 
@@ -5109,7 +5321,7 @@ def create_mesh_app(
             # design can branch on read vs write volume. BOTH the new
             # ``blackboard_cross_team_total`` counter carries both kinds.
             "blackboard_cross_team_total": dict(_blackboard_xteam_count),
-                        # PR-K' minimal denial observability. 24h window, auto-reset
+            # PR-K' minimal denial observability. 24h window, auto-reset
             # at the day boundary. Operator-readable categories:
             # ``auth`` / ``scope`` / ``role`` / ``permission`` / ``rate``.
             # Categories that have not fired today are absent from the
@@ -5139,7 +5351,9 @@ def create_mesh_app(
         """
         if not _is_internal_caller(request):
             _record_denial(
-                "role", caller="?", target="lifecycle_event",
+                "role",
+                caller="?",
+                target="lifecycle_event",
                 gate="lifecycle_event:internal_only",
             )
             raise HTTPException(403, "lifecycle_event is internal-only")
@@ -5237,7 +5451,9 @@ def create_mesh_app(
 
     @app.get("/mesh/agents/{agent_id}/stale-tasks")
     async def agent_stale_tasks(
-        agent_id: str, request: Request, threshold_hours: int = 24,
+        agent_id: str,
+        request: Request,
+        threshold_hours: int = 24,
     ) -> dict:
         """List up to 5 oldest stale (non-terminal, created >threshold ago) tasks.
 
@@ -5250,12 +5466,15 @@ def create_mesh_app(
         _validate_agent_id(agent_id)
         if not (1 <= threshold_hours <= 168):
             raise HTTPException(
-                400, "threshold_hours must be between 1 and 168 (1 hour to 7 days)",
+                400,
+                "threshold_hours must be between 1 and 168 (1 hour to 7 days)",
             )
         threshold_seconds = float(threshold_hours) * 3600.0
         try:
             ids = tasks_store.list_stale_for_assignee(
-                agent_id, threshold_seconds=threshold_seconds, limit=5,
+                agent_id,
+                threshold_seconds=threshold_seconds,
+                limit=5,
             )
         except Exception as e:
             logger.debug("stale-tasks lookup failed for %s: %s", agent_id, e)
@@ -5288,14 +5507,16 @@ def create_mesh_app(
         teams_cfg = teams_store.list_teams(include_archived=include_archived)
         result = []
         for pname, pdata in sorted(teams_cfg.items(), key=lambda x: x[1].get("created_at") or ""):
-            result.append({
-                "name": pname,
-                "team_name": pname,
-                "description": pdata.get("description", ""),
-                "members": pdata.get("members", []),
-                "created_at": pdata.get("created_at", ""),
-                "status": pdata.get("status", "active") or "active",
-            })
+            result.append(
+                {
+                    "name": pname,
+                    "team_name": pname,
+                    "description": pdata.get("description", ""),
+                    "members": pdata.get("members", []),
+                    "created_at": pdata.get("created_at", ""),
+                    "status": pdata.get("status", "active") or "active",
+                }
+            )
         return {"teams": result}
 
     @app.post("/mesh/teams")
@@ -5356,8 +5577,7 @@ def create_mesh_app(
                 if current_count >= _max_teams:
                     raise HTTPException(
                         403,
-                        f"Team limit reached ({_max_teams}). "
-                        "Upgrade your plan for more teams.",
+                        f"Team limit reached ({_max_teams}). Upgrade your plan for more teams.",
                     )
             try:
                 teams_store.create_team(name, description=description)
@@ -5382,19 +5602,23 @@ def create_mesh_app(
         if cron_scheduler is not None:
             try:
                 persisted = teams_store.get_team(name) or {}
-                _custom_schedule = (
-                    (persisted.get("settings") or {}).get("summary_schedule")
-                )
+                _custom_schedule = (persisted.get("settings") or {}).get("summary_schedule")
                 cron_scheduler.ensure_summary_job(
-                    scope_kind="team", scope_id=name,
+                    scope_kind="team",
+                    scope_id=name,
                     schedule=_custom_schedule,
                 )
             except Exception as e:
                 logger.warning(
-                    "ensure_summary_job on team create %s failed: %s", name, e,
+                    "ensure_summary_job on team create %s failed: %s",
+                    name,
+                    e,
                 )
         _emit_team_event(
-            event_bus, "team_created", agent="operator", name=name,
+            event_bus,
+            "team_created",
+            agent="operator",
+            name=name,
             extra={"description": description, "members": list(members)},
         )
         return {"created": True, "name": name, "team_name": name, "team_id": name}
@@ -5409,6 +5633,7 @@ def create_mesh_app(
             _add_team_blackboard_permissions,
             _remove_team_blackboard_permissions,
         )
+
         body = await request.json()
         agent = body.get("agent", "").strip()
         if not agent:
@@ -5429,6 +5654,7 @@ def create_mesh_app(
         if _resolve_agent_id("", request) != "operator":
             raise HTTPException(403, "Only the operator can manage teams")
         from src.cli.config import _remove_team_blackboard_permissions
+
         if not teams_store.team_exists(team_name):
             raise HTTPException(400, f"Team '{team_name}' not found")
         teams_store.remove_member(team_name, agent)
@@ -5442,6 +5668,7 @@ def create_mesh_app(
         if _resolve_agent_id("", request) != "operator":
             raise HTTPException(403, "Only the operator can manage teams")
         from src.cli.config import _remove_team_blackboard_permissions
+
         try:
             former_members = teams_store.delete_team(team_name)
         except TeamNotFound as e:
@@ -5462,12 +5689,15 @@ def create_mesh_app(
             except Exception as e:
                 logger.warning(
                     "remove summary cron on mesh team-delete %s failed: %s",
-                    team_name, e,
+                    team_name,
+                    e,
                 )
         _emit_team_event(event_bus, "team_deleted", agent="operator", name=team_name)
         return {
-            "deleted": True, "name": team_name,
-            "team_name": team_name, "team_id": team_name,
+            "deleted": True,
+            "name": team_name,
+            "team_name": team_name,
+            "team_id": team_name,
         }
 
     async def _push_team_md(team_name: str, content: str) -> dict[str, bool]:
@@ -5493,11 +5723,13 @@ def create_mesh_app(
         async def _push_one(aid: str) -> tuple[str, bool]:
             try:
                 resp = await transport.request(
-                    aid, "PUT", "/team", json={"content": content}, timeout=10,
+                    aid,
+                    "PUT",
+                    "/team",
+                    json={"content": content},
+                    timeout=10,
                 )
-                return aid, not (
-                    isinstance(resp, dict) and resp.get("error")
-                )
+                return aid, not (isinstance(resp, dict) and resp.get("error"))
             except Exception as e:
                 logger.warning("TEAM.md push to %s failed: %s", aid, e)
                 return aid, False
@@ -5520,6 +5752,7 @@ def create_mesh_app(
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can manage teams")
         from src.cli.config import TEAMS_DIR
+
         body = await request.json()
         section = str(body.get("section", "")).strip()
         content = sanitize_for_prompt(str(body.get("content", ""))).strip()
@@ -5533,8 +5766,7 @@ def create_mesh_app(
         if len(content) > 2000:
             raise HTTPException(
                 400,
-                "content exceeds 2000 chars — TEAM.md is in every "
-                "member's prompt; keep sections tight",
+                "content exceeds 2000 chars — TEAM.md is in every member's prompt; keep sections tight",
             )
         if not teams_store.team_exists(team_name):
             raise HTTPException(404, f"Team '{team_name}' not found")
@@ -5544,20 +5776,23 @@ def create_mesh_app(
         # the source of truth for existence, not the dir).
         team_md_path = teams_store.team_md_path(team_name) or (TEAMS_DIR / team_name / "team.md")
         team_md_path.parent.mkdir(parents=True, exist_ok=True)
-        existing = (
-            team_md_path.read_text(errors="replace")
-            if team_md_path.exists() else f"# {team_name}\n"
-        )
+        existing = team_md_path.read_text(errors="replace") if team_md_path.exists() else f"# {team_name}\n"
         updated = replace_markdown_section(existing, section, content)
         team_md_path.write_text(updated)
         pushed = await _push_team_md(team_name, updated)
         _emit_team_event(
-            event_bus, "team_updated", agent="operator", name=team_name,
+            event_bus,
+            "team_updated",
+            agent="operator",
+            name=team_name,
             extra={"field": "brief", "section": section},
         )
         return {
-            "updated": True, "team": team_name, "section": section,
-            "pushed": pushed, "size": len(updated),
+            "updated": True,
+            "team": team_name,
+            "section": section,
+            "pushed": pushed,
+            "size": len(updated),
         }
 
     @app.put("/mesh/teams/{team_name}/context")
@@ -5572,6 +5807,7 @@ def create_mesh_app(
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can manage teams")
         from src.cli.config import TEAMS_DIR
+
         body = await request.json()
         context = sanitize_for_prompt(body.get("context", "")).strip()
 
@@ -5594,13 +5830,18 @@ def create_mesh_app(
         pushed = await _push_team_md(team_name, new_content)
 
         _emit_team_event(
-            event_bus, "team_updated", agent="operator", name=team_name,
+            event_bus,
+            "team_updated",
+            agent="operator",
+            name=team_name,
             extra={"field": "context"},
         )
 
         return {
-            "updated": True, "team": team_name,
-            "team_name": team_name, "team_id": team_name,
+            "updated": True,
+            "team": team_name,
+            "team_name": team_name,
+            "team_id": team_name,
             "pushed": pushed,
         }
 
@@ -5628,7 +5869,8 @@ def create_mesh_app(
             north_star = sanitize_for_prompt(str(north_star_raw)).strip()
             if len(north_star) > 2000:
                 raise HTTPException(
-                    400, "north_star must be 2000 characters or fewer",
+                    400,
+                    "north_star must be 2000 characters or fewer",
                 )
             if not north_star:
                 north_star = None
@@ -5639,11 +5881,13 @@ def create_mesh_app(
         else:
             if not isinstance(success_criteria_raw, list):
                 raise HTTPException(
-                    400, "success_criteria must be a list of strings",
+                    400,
+                    "success_criteria must be a list of strings",
                 )
             if len(success_criteria_raw) > 10:
                 raise HTTPException(
-                    400, "success_criteria may contain at most 10 items",
+                    400,
+                    "success_criteria may contain at most 10 items",
                 )
             cleaned: list[str] = []
             for item in success_criteria_raw:
@@ -5664,7 +5908,10 @@ def create_mesh_app(
             raise HTTPException(404, f"Team '{team_name}' not found")
 
         _emit_team_event(
-            event_bus, "team_updated", agent="operator", name=team_name,
+            event_bus,
+            "team_updated",
+            agent="operator",
+            name=team_name,
             extra={"field": "goal"},
         )
 
@@ -5768,12 +6015,15 @@ def create_mesh_app(
         try:
             blackboard.write(
                 f"inbox/operator/task_event/{task_id}",
-                payload, written_by="mesh", ttl=_BACK_EDGE_TTL_ACTIONABLE,
+                payload,
+                written_by="mesh",
+                ttl=_BACK_EDGE_TTL_ACTIONABLE,
             )
         except Exception as e:
             logger.warning(
                 "Operator back-edge write failed for task %s: %s",
-                task_id, e,
+                task_id,
+                e,
             )
             return
         if lane_manager is None or dispatch_loop is None:
@@ -5787,8 +6037,7 @@ def create_mesh_app(
         # the per-task stamp so a suppressed task can still wake once
         # the window drains.
         while (
-            _operator_recovery_wake_times
-            and now - _operator_recovery_wake_times[0] > _OPERATOR_RECOVERY_WAKE_WINDOW_S
+            _operator_recovery_wake_times and now - _operator_recovery_wake_times[0] > _OPERATOR_RECOVERY_WAKE_WINDOW_S
         ):
             _operator_recovery_wake_times.popleft()
         if len(_operator_recovery_wake_times) >= _OPERATOR_RECOVERY_WAKE_MAX:
@@ -5796,7 +6045,8 @@ def create_mesh_app(
                 "operator recovery wake for task %s suppressed: global "
                 "cap (%d wakes / %ds) reached — event written, heartbeat "
                 "check_inbox will catch up",
-                task_id, _OPERATOR_RECOVERY_WAKE_MAX,
+                task_id,
+                _OPERATOR_RECOVERY_WAKE_MAX,
                 int(_OPERATOR_RECOVERY_WAKE_WINDOW_S),
             )
             return
@@ -5821,7 +6071,9 @@ def create_mesh_app(
                 user=str(origin_dict.get("user") or ""),
             )
             _try_wake_agent(
-                "operator", wake_msg, wake_origin,
+                "operator",
+                wake_msg,
+                wake_origin,
                 auto_notify=False,
                 # Continue the failed task's session so the operator's
                 # recovery work joins the same trace (this path runs from
@@ -5829,12 +6081,16 @@ def create_mesh_app(
                 # pass the task's stored trace explicitly — like retry does).
                 trace_id=task_record.get("trace_id"),
                 on_fail=lambda e: logger.warning(
-                    "Operator wake for task %s failed: %s", task_id, e,
+                    "Operator wake for task %s failed: %s",
+                    task_id,
+                    e,
                 ),
             )
         except Exception as e:
             logger.warning(
-                "Operator wake for task %s failed: %s", task_id, e,
+                "Operator wake for task %s failed: %s",
+                task_id,
+                e,
             )
 
     def _write_task_event_back_edge(
@@ -5890,7 +6146,9 @@ def create_mesh_app(
                     and assignee != "operator"
                 ):
                     _wake_operator_for_human_chain(
-                        task_record, event_kind, payload_extras,
+                        task_record,
+                        event_kind,
+                        payload_extras,
                     )
                 return
             if not origin_user or origin_user == assignee:
@@ -5913,18 +6171,20 @@ def create_mesh_app(
                     if k not in payload:
                         payload[k] = v
             back_edge_ttl = (
-                _BACK_EDGE_TTL_ACTIONABLE
-                if event_kind in _BACK_EDGE_WAKE_KINDS
-                else _BACK_EDGE_TTL_INFORMATIONAL
+                _BACK_EDGE_TTL_ACTIONABLE if event_kind in _BACK_EDGE_WAKE_KINDS else _BACK_EDGE_TTL_INFORMATIONAL
             )
             try:
                 blackboard.write(
                     f"inbox/{origin_user}/task_event/{task_id}",
-                    payload, written_by="mesh", ttl=back_edge_ttl,
+                    payload,
+                    written_by="mesh",
+                    ttl=back_edge_ttl,
                 )
             except Exception as e:
                 logger.warning(
-                    "Back-edge write failed for task %s: %s", task_id, e,
+                    "Back-edge write failed for task %s: %s",
+                    task_id,
+                    e,
                 )
                 return
 
@@ -5954,7 +6214,9 @@ def create_mesh_app(
                 logger.info(
                     "back-edge wake for task %s skipped: origin_user=%s != "
                     "creator=%s (L9 binding); event still written",
-                    task_id, origin_user, creator,
+                    task_id,
+                    origin_user,
+                    creator,
                 )
                 return
             if origin_user not in router.agent_registry:
@@ -5971,13 +6233,13 @@ def create_mesh_app(
                     user=str(origin_user),
                 )
                 title = task_record.get("title") or "(no title)"
-                wake_msg = (
-                    f"Task {task_id} ({title}) reached {event_kind}. "
-                    "Call check_inbox to see the event payload."
-                )
+                wake_msg = f"Task {task_id} ({title}) reached {event_kind}. Call check_inbox to see the event payload."
                 _try_wake_agent(
-                    origin_user, wake_msg, wake_origin,
-                    task_id=task_id, auto_notify=False,
+                    origin_user,
+                    wake_msg,
+                    wake_origin,
+                    task_id=task_id,
+                    auto_notify=False,
                     # Continue the originating task's session: this back-edge
                     # fires from update_task_status (no seeded contextvar), so
                     # pass the task's stored trace so the notified originator's
@@ -5985,18 +6247,23 @@ def create_mesh_app(
                     trace_id=task_record.get("trace_id"),
                     on_fail=lambda e: logger.warning(
                         "Back-edge wake for %s on task %s failed: %s",
-                        origin_user, task_id, e,
+                        origin_user,
+                        task_id,
+                        e,
                     ),
                 )
             except Exception as e:
                 logger.warning(
                     "Back-edge wake for %s on task %s failed: %s",
-                    origin_user, task_id, e,
+                    origin_user,
+                    task_id,
+                    e,
                 )
         except Exception as e:  # belt-and-suspenders
             logger.warning(
                 "Back-edge handler crashed for task %s: %s",
-                task_record.get("id"), e,
+                task_record.get("id"),
+                e,
             )
 
     # Expose so the lane watchdog (built in runtime.py before this app)
@@ -6034,9 +6301,14 @@ def create_mesh_app(
             "/mesh/tasks POST entry caller=%s headers=%s",
             caller,
             {
-                k: v for k, v in request.headers.items()
-                if k.lower() in (
-                    "x-trace-id", "x-task-id", "x-origin", "x-agent-id",
+                k: v
+                for k, v in request.headers.items()
+                if k.lower()
+                in (
+                    "x-trace-id",
+                    "x-task-id",
+                    "x-origin",
+                    "x-agent-id",
                 )
             },
         )
@@ -6051,8 +6323,10 @@ def create_mesh_app(
         assignee = assignee_raw.strip() if isinstance(assignee_raw, str) else ""
         if assignee != assignee_raw:
             logger.warning(
-                "tasks.create normalized assignee %r → %r (whitespace "
-                "stripped) for caller=%s", assignee_raw, assignee, caller,
+                "tasks.create normalized assignee %r → %r (whitespace stripped) for caller=%s",
+                assignee_raw,
+                assignee,
+                caller,
             )
         title = sanitize_for_prompt(body.get("title", "")).strip()
         description = sanitize_for_prompt(body.get("description") or "")
@@ -6065,7 +6339,8 @@ def create_mesh_app(
         thinking = body.get("thinking") or None
         if thinking is not None and thinking not in THINKING_LEVELS:
             raise HTTPException(
-                400, f"thinking must be off/low/medium/high, got {thinking!r}",
+                400,
+                f"thinking must be off/low/medium/high, got {thinking!r}",
             )
         if not title:
             raise HTTPException(400, "title is required")
@@ -6080,13 +6355,14 @@ def create_mesh_app(
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             if not permissions.can_message(caller, assignee):
                 _record_denial(
-                    "permission", caller=caller, target=assignee,
+                    "permission",
+                    caller=caller,
+                    target=assignee,
                     gate="tasks.create:can_message",
                 )
                 raise HTTPException(
                     403,
-                    f"Agent {caller} cannot create task for {assignee!r} "
-                    "(can_message not granted)",
+                    f"Agent {caller} cannot create task for {assignee!r} (can_message not granted)",
                 )
         # Cross-team scope: callers can only create tasks in teams
         # they belong to (operators / mesh are global). Standalone is
@@ -6102,9 +6378,11 @@ def create_mesh_app(
         # while a present log here proves the request reached the
         # store.create call site.
         logger.info(
-            "/mesh/tasks POST body caller=%s assignee=%s team_id=%s "
-            "parent_task_id=%s title=%r",
-            caller, assignee, team_id, parent_task_id,
+            "/mesh/tasks POST body caller=%s assignee=%s team_id=%s parent_task_id=%s title=%r",
+            caller,
+            assignee,
+            team_id,
+            parent_task_id,
             (title or "")[:80],
         )
 
@@ -6121,6 +6399,7 @@ def create_mesh_app(
         # right after ``store.create`` (the only contextvar reader here).
         _req_trace_id = request.headers.get("x-trace-id")
         from src.shared.trace import current_trace_id
+
         _trace_tok = current_trace_id.set(_req_trace_id)
         try:
             record = store.create(
@@ -6142,7 +6421,9 @@ def create_mesh_app(
             # the agent's ``create_failed`` envelope surfaces the actual
             # reason instead of a generic 500.
             _record_denial(
-                "limit", caller=caller, target=assignee,
+                "limit",
+                caller=caller,
+                target=assignee,
                 gate="tasks.create:resource_cap",
             )
             logger.warning("tasks.create rejected by cap: %s", e)
@@ -6177,38 +6458,24 @@ def create_mesh_app(
             )
         mismatches: list[str] = []
         if record.get("assignee") != assignee:
-            mismatches.append(
-                f"assignee: stored={record.get('assignee')!r} "
-                f"requested={assignee!r}"
-            )
+            mismatches.append(f"assignee: stored={record.get('assignee')!r} requested={assignee!r}")
         if record.get("creator") != caller:
-            mismatches.append(
-                f"creator: stored={record.get('creator')!r} "
-                f"requested={caller!r}"
-            )
+            mismatches.append(f"creator: stored={record.get('creator')!r} requested={caller!r}")
         if record.get("team_id") != team_id:
-            mismatches.append(
-                f"team_id: stored={record.get('team_id')!r} "
-                f"requested={team_id!r}"
-            )
+            mismatches.append(f"team_id: stored={record.get('team_id')!r} requested={team_id!r}")
         if record.get("parent_task_id") != parent_task_id:
-            mismatches.append(
-                f"parent_task_id: stored={record.get('parent_task_id')!r} "
-                f"requested={parent_task_id!r}"
-            )
+            mismatches.append(f"parent_task_id: stored={record.get('parent_task_id')!r} requested={parent_task_id!r}")
         if record.get("status") != "pending":
-            mismatches.append(
-                f"status: stored={record.get('status')!r} expected='pending'"
-            )
+            mismatches.append(f"status: stored={record.get('status')!r} expected='pending'")
         if mismatches:
             logger.error(
                 "tasks.create post-write verify: task %s mismatch — %s",
-                record["id"], "; ".join(mismatches),
+                record["id"],
+                "; ".join(mismatches),
             )
             raise HTTPException(
                 500,
-                f"Task {record['id']!r} post-write verify failed: "
-                + "; ".join(mismatches),
+                f"Task {record['id']!r} post-write verify failed: " + "; ".join(mismatches),
             )
         return record
 
@@ -6221,11 +6488,7 @@ def create_mesh_app(
         """
         store = tasks_store
         caller = _extract_verified_agent_id(request)
-        if (
-            caller != assignee
-            and not _caller_is_operator(caller, request)
-            and not _is_internal_caller(request)
-        ):
+        if caller != assignee and not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(
                 403,
                 "Only the assignee, operator, or internal callers can read this inbox",
@@ -6253,7 +6516,8 @@ def create_mesh_app(
 
     @app.get("/mesh/tasks/workflow/{root_task_id}")
     async def get_workflow_snapshot(
-        root_task_id: str, request: Request,
+        root_task_id: str,
+        request: Request,
     ) -> dict:
         """Return a workflow chain snapshot rooted at ``root_task_id``.
 
@@ -6271,10 +6535,7 @@ def create_mesh_app(
         a typo from an empty chain).
         """
         caller = _extract_verified_agent_id(request)
-        if not (
-            _caller_is_operator(caller, request)
-            or _is_internal_caller(request)
-        ):
+        if not (_caller_is_operator(caller, request) or _is_internal_caller(request)):
             raise HTTPException(
                 403,
                 "workflow_snapshot is operator-only",
@@ -6282,7 +6543,8 @@ def create_mesh_app(
         snapshot = tasks_store.workflow_snapshot(root_task_id)
         if snapshot is None:
             raise HTTPException(
-                404, f"Root task '{root_task_id}' not found",
+                404,
+                f"Root task '{root_task_id}' not found",
             )
         return snapshot
 
@@ -6302,10 +6564,7 @@ def create_mesh_app(
         not a strict per-task ledger. Operator-only.
         """
         caller = _extract_verified_agent_id(request)
-        if not (
-            _caller_is_operator(caller, request)
-            or _is_internal_caller(request)
-        ):
+        if not (_caller_is_operator(caller, request) or _is_internal_caller(request)):
             raise HTTPException(403, "task run inspection is operator-only")
         record = tasks_store.get(task_id)
         if record is None:
@@ -6349,23 +6608,33 @@ def create_mesh_app(
                     if m:
                         models.add(str(m))
                 if ev.get("status") == "error" or ev.get("error"):
-                    trace_errors.append({
-                        "event_type": ev.get("event_type", ""),
-                        "error": (ev.get("error") or "")[:200],
-                        "timestamp": ev.get("timestamp"),
-                    })
+                    trace_errors.append(
+                        {
+                            "event_type": ev.get("event_type", ""),
+                            "error": (ev.get("error") or "")[:200],
+                            "timestamp": ev.get("timestamp"),
+                        }
+                    )
 
-        duration_s = (
-            round(ended - started, 1) if started else None
-        )
+        duration_s = round(ended - started, 1) if started else None
         return {
             "task": {
                 k: record.get(k)
                 for k in (
-                    "id", "title", "status", "assignee", "creator",
-                    "thinking", "blocker_note", "outcome", "feedback_text",
-                    "result_summary", "created_at", "completed_at",
-                    "parent_task_id", "previous_task_id",
+                    "id",
+                    "title",
+                    "status",
+                    "assignee",
+                    "creator",
+                    "thinking",
+                    "blocker_note",
+                    "outcome",
+                    "feedback_text",
+                    "result_summary",
+                    "created_at",
+                    "completed_at",
+                    "parent_task_id",
+                    "previous_task_id",
                 )
             },
             "execution": {
@@ -6384,7 +6653,9 @@ def create_mesh_app(
 
     @app.get("/mesh/user-notifications")
     async def get_user_notifications(
-        request: Request, hours: float = 24, limit: int = 50,
+        request: Request,
+        hours: float = 24,
+        limit: int = 50,
     ) -> dict:
         """Return recent agent→user notifications (operator-only).
 
@@ -6398,20 +6669,14 @@ def create_mesh_app(
         agent boundary so the endpoint stays a thin data layer.
         """
         caller = _extract_verified_agent_id(request)
-        if not (
-            _caller_is_operator(caller, request)
-            or _is_internal_caller(request)
-        ):
+        if not (_caller_is_operator(caller, request) or _is_internal_caller(request)):
             raise HTTPException(
                 403,
                 "user-notifications is operator-only",
             )
         rows = user_notification_log.recent(hours=hours, limit=limit)
         return {
-            "notifications": [
-                {"from": r["agent_id"], "message": r["message"], "ts": r["ts"]}
-                for r in rows
-            ],
+            "notifications": [{"from": r["agent_id"], "message": r["message"], "ts": r["ts"]} for r in rows],
         }
 
     @app.get("/mesh/tasks/{task_id}")
@@ -6521,7 +6786,10 @@ def create_mesh_app(
             )
         try:
             updated = store.update_status(
-                task_id, status, actor=caller, blocker_note=blocker_note,
+                task_id,
+                status,
+                actor=caller,
+                blocker_note=blocker_note,
                 result_summary=_result_summary,
             )
         except InvalidStatusTransition as e:
@@ -6543,13 +6811,15 @@ def create_mesh_app(
                 # normalize_blocker_note (redacted + collapsed), so this
                 # back-edge (read by other agents via check_inbox) can't
                 # leak a secret from the raw request body.
-                payload_extras["blocker_note"] = (fresh.get("blocker_note") or "")
+                payload_extras["blocker_note"] = fresh.get("blocker_note") or ""
             elif status == "failed":
-                payload_extras["error"] = (fresh.get("blocker_note") or "")
+                payload_extras["error"] = fresh.get("blocker_note") or ""
             elif status == "done":
                 payload_extras["summary"] = result_dict.get("summary", "")
             _write_task_event_back_edge(
-                fresh, event_kind=event_kind, payload_extras=payload_extras,
+                fresh,
+                event_kind=event_kind,
+                payload_extras=payload_extras,
             )
         return updated
 
@@ -6580,7 +6850,9 @@ def create_mesh_app(
         }
 
     def _try_wake_agent(
-        target: str, message: str, origin: "MessageOrigin | None",
+        target: str,
+        message: str,
+        origin: "MessageOrigin | None",
         *,
         task_id: str | None = None,
         trace_id: str | None = None,
@@ -6615,8 +6887,14 @@ def create_mesh_app(
         if not target or target not in router.agent_registry:
             return False, None
         had_origin = origin is not None
-        eff_origin = origin if origin is not None else MessageOrigin(
-            kind="agent", channel="", user="",
+        eff_origin = (
+            origin
+            if origin is not None
+            else MessageOrigin(
+                kind="agent",
+                channel="",
+                user="",
+            )
         )
         # Session observability: propagate the originating turn's trace_id into
         # the lane so the woken agent's work (LLM calls, tool_call/handoff
@@ -6628,16 +6906,20 @@ def create_mesh_app(
         # already know the trace (e.g. retry of a stored task) pass it
         # explicitly; ``None`` downstream falls back to a fresh id.
         from src.shared.trace import current_trace_id
+
         eff_trace_id = trace_id if trace_id is not None else current_trace_id.get()
         # Build the coroutine first so we can close it explicitly if the
         # dispatch loop is unhealthy — otherwise an orphaned coroutine
         # would emit a "coroutine was never awaited" warning.
         coro = lane_manager.enqueue(
-            target, sanitize_for_prompt(message), mode="followup",
+            target,
+            sanitize_for_prompt(message),
+            mode="followup",
             trace_id=eff_trace_id,
             origin=eff_origin,
             auto_notify=had_origin if auto_notify is None else auto_notify,
-            task_id=task_id, system_note=True,
+            task_id=task_id,
+            system_note=True,
         )
         try:
             asyncio.run_coroutine_threadsafe(coro, dispatch_loop)
@@ -6659,10 +6941,7 @@ def create_mesh_app(
         """
         store = tasks_store
         caller = _extract_verified_agent_id(request)
-        if not (
-            _caller_is_operator(caller, request)
-            or _is_internal_caller(request)
-        ):
+        if not (_caller_is_operator(caller, request) or _is_internal_caller(request)):
             raise HTTPException(
                 403,
                 "Reroute is operator-only (administrative recovery action)",
@@ -6677,18 +6956,23 @@ def create_mesh_app(
         if not allowed:
             raise HTTPException(
                 400,
-                json.dumps({
-                    "error": "over_budget",
-                    "detail": (
-                        f"Agent {new_assignee!r} is over budget; refusing to "
-                        "reroute task to a target that cannot run."
-                    ),
-                    "budget": info,
-                }),
+                json.dumps(
+                    {
+                        "error": "over_budget",
+                        "detail": (
+                            f"Agent {new_assignee!r} is over budget; refusing to "
+                            "reroute task to a target that cannot run."
+                        ),
+                        "budget": info,
+                    }
+                ),
             )
         try:
             updated = store.reroute(
-                task_id, new_assignee, actor=caller, reason=reason,
+                task_id,
+                new_assignee,
+                actor=caller,
+                reason=reason,
             )
         except TaskNotFound:
             raise HTTPException(404, f"Task '{task_id}' not found")
@@ -6702,8 +6986,7 @@ def create_mesh_app(
         reason_suffix = f" ({reason})" if reason else ""
         _try_wake_agent(
             new_assignee,
-            f"Operator rerouted task to you: {title!r}{reason_suffix}. "
-            "Call check_inbox() to pick it up.",
+            f"Operator rerouted task to you: {title!r}{reason_suffix}. Call check_inbox() to pick it up.",
             origin,
             # Continue the rerouted task's session (consistent with retry);
             # this endpoint doesn't seed the contextvar.
@@ -6724,10 +7007,7 @@ def create_mesh_app(
         """
         store = tasks_store
         caller = _extract_verified_agent_id(request)
-        if not (
-            _caller_is_operator(caller, request)
-            or _is_internal_caller(request)
-        ):
+        if not (_caller_is_operator(caller, request) or _is_internal_caller(request)):
             raise HTTPException(
                 403,
                 "Retry is operator-only (administrative recovery action)",
@@ -6757,10 +7037,7 @@ def create_mesh_app(
             # overrides skip this — the caller already rewrote the brief.
             blocker = (original.get("blocker_note") or "").strip()
             if blocker:
-                description = (
-                    f"{description or original['title']}\n\n"
-                    f"## Previous attempt failed\n{blocker[:500]}"
-                )
+                description = f"{description or original['title']}\n\n## Previous attempt failed\n{blocker[:500]}"
         new_assignee = body.get("assignee") or original["assignee"]
         if not new_assignee or not _AGENT_ID_RE.match(new_assignee):
             raise HTTPException(400, f"Invalid assignee: {new_assignee!r}")
@@ -6771,14 +7048,16 @@ def create_mesh_app(
         if not allowed:
             raise HTTPException(
                 400,
-                json.dumps({
-                    "error": "over_budget",
-                    "detail": (
-                        f"Agent {new_assignee!r} is over budget; refusing to "
-                        "retry the task onto a target that cannot run."
-                    ),
-                    "budget": info,
-                }),
+                json.dumps(
+                    {
+                        "error": "over_budget",
+                        "detail": (
+                            f"Agent {new_assignee!r} is over budget; refusing to "
+                            "retry the task onto a target that cannot run."
+                        ),
+                        "budget": info,
+                    }
+                ),
             )
         origin = _validated_origin(request, caller)
         origin_dict = origin.model_dump() if origin is not None else None
@@ -6792,6 +7071,7 @@ def create_mesh_app(
         # whose original carried no trace and that arrived header-less.
         _retry_trace_id = original.get("trace_id") or request.headers.get("x-trace-id")
         from src.shared.trace import current_trace_id
+
         _trace_tok = current_trace_id.set(_retry_trace_id)
         try:
             clone = store.create(
@@ -6816,8 +7096,7 @@ def create_mesh_app(
         # starts immediately rather than waiting for a heartbeat.
         _try_wake_agent(
             new_assignee,
-            f"Operator retried failed task as {clone['id']!r}: {title!r}. "
-            "Call check_inbox() to pick it up.",
+            f"Operator retried failed task as {clone['id']!r}: {title!r}. Call check_inbox() to pick it up.",
             origin,
             # Continue the original task's session on the retry clone (the
             # contextvar was already reset above, so pass it explicitly).
@@ -6858,11 +7137,13 @@ def create_mesh_app(
         caller = _extract_verified_agent_id(request)
         if not (_caller_is_operator(caller, request) or _is_internal_caller(request)):
             _record_denial(
-                "role", caller=caller,
+                "role",
+                caller=caller,
                 gate="work_summaries.create:operator_or_internal",
             )
             raise HTTPException(
-                403, "Only the operator can create work summaries",
+                403,
+                "Only the operator can create work summaries",
             )
         scope_kind = (data.get("scope_kind") or "").strip()
         scope_id = (data.get("scope_id") or "").strip()
@@ -6872,28 +7153,30 @@ def create_mesh_app(
         metrics = data.get("metrics") or {}
         recommendations = data.get("recommendations") or []
         if not (
-            scope_kind and scope_id and narrative_md
+            scope_kind
+            and scope_id
+            and narrative_md
             and isinstance(period_start, (int, float))
             and isinstance(period_end, (int, float))
         ):
             raise HTTPException(
                 400,
-                "Required fields: scope_kind, scope_id, period_start "
-                "(number), period_end (number), narrative_md",
+                "Required fields: scope_kind, scope_id, period_start (number), period_end (number), narrative_md",
             )
         if not isinstance(metrics, dict):
             raise HTTPException(400, "metrics must be a JSON object")
         if not isinstance(recommendations, list):
             raise HTTPException(400, "recommendations must be a JSON array")
         from src.host.summaries import MAX_NARRATIVE_CHARS
+
         if len(narrative_md) > MAX_NARRATIVE_CHARS:
             raise HTTPException(
                 413,
-                f"narrative_md exceeds {MAX_NARRATIVE_CHARS} chars "
-                f"(got {len(narrative_md)})",
+                f"narrative_md exceeds {MAX_NARRATIVE_CHARS} chars (got {len(narrative_md)})",
             )
         try:
             from src.host.summaries import InvalidScope
+
             row = summaries_store.create(
                 scope_kind=scope_kind,
                 scope_id=scope_id,
@@ -6901,9 +7184,7 @@ def create_mesh_app(
                 period_end=float(period_end),
                 narrative_md=sanitize_for_prompt(narrative_md),
                 metrics=metrics,
-                recommendations=[
-                    sanitize_for_prompt(str(r))[:500] for r in recommendations
-                ],
+                recommendations=[sanitize_for_prompt(str(r))[:500] for r in recommendations],
                 generated_by=caller,
             )
         except InvalidScope as e:
@@ -6927,9 +7208,12 @@ def create_mesh_app(
         summaries_store._safe_reap()
         try:
             from src.host.summaries import InvalidScope
+
             rows = summaries_store.list_recent(
-                scope_kind=scope_kind, scope_id=scope_id,
-                limit=limit, offset=offset,
+                scope_kind=scope_kind,
+                scope_id=scope_id,
+                limit=limit,
+                offset=offset,
             )
         except InvalidScope as e:
             raise HTTPException(400, str(e))
@@ -6949,7 +7233,9 @@ def create_mesh_app(
         if row is None or not _can_read_summary(caller, request, row):
             if row is not None:
                 _record_denial(
-                    "scope", caller=caller, target=summary_id,
+                    "scope",
+                    caller=caller,
+                    target=summary_id,
                     gate="work_summaries.get:scope",
                 )
             # Uniform 404 for both not-found and not-authorized (no oracle).
@@ -6958,7 +7244,9 @@ def create_mesh_app(
 
     @app.post("/mesh/work-summaries/{summary_id}/rating")
     async def rate_work_summary(
-        summary_id: str, data: dict, request: Request,
+        summary_id: str,
+        data: dict,
+        request: Request,
     ) -> dict:
         """Operator (acting for the user) rates a summary.
 
@@ -6969,11 +7257,14 @@ def create_mesh_app(
         caller = _extract_verified_agent_id(request)
         if not (_caller_is_operator(caller, request) or _is_internal_caller(request)):
             _record_denial(
-                "role", caller=caller, target=summary_id,
+                "role",
+                caller=caller,
+                target=summary_id,
                 gate="work_summaries.rate:operator_or_internal",
             )
             raise HTTPException(
-                403, "Only the operator can rate work summaries",
+                403,
+                "Only the operator can rate work summaries",
             )
         rating = (data.get("rating") or "").strip()
         feedback = data.get("feedback")
@@ -6984,8 +7275,10 @@ def create_mesh_app(
                 RatingLocked,
                 SummaryNotFound,
             )
+
             return summaries_store.set_rating(
-                summary_id, rating,
+                summary_id,
+                rating,
                 feedback=sanitize_for_prompt(feedback) if feedback else None,
                 actor=caller,
             )
@@ -7032,14 +7325,18 @@ def create_mesh_app(
             "counts": counts,
             "blockers": [
                 {
-                    "id": r["id"], "assignee": r["assignee"],
-                    "title": r["title"], "blocker_note": r.get("blocker_note"),
+                    "id": r["id"],
+                    "assignee": r["assignee"],
+                    "title": r["title"],
+                    "blocker_note": r.get("blocker_note"),
                 }
                 for r in blocked_rows[:5]
             ],
             "recent_done": [
                 {
-                    "id": r["id"], "assignee": r["assignee"], "title": r["title"],
+                    "id": r["id"],
+                    "assignee": r["assignee"],
+                    "title": r["title"],
                     "completed_at": r.get("completed_at"),
                 }
                 for r in done_rows[:5]
@@ -7111,7 +7408,9 @@ def create_mesh_app(
 
     @app.get("/mesh/agents/{agent_id}/queue")
     async def agent_queue(
-        agent_id: str, request: Request, limit: int = 10,
+        agent_id: str,
+        request: Request,
+        limit: int = 10,
     ) -> dict:
         """Recent tasks for an agent grouped by status.
 
@@ -7122,11 +7421,7 @@ def create_mesh_app(
         """
         store = tasks_store
         caller = _extract_verified_agent_id(request)
-        if not (
-            caller == agent_id
-            or _caller_is_operator(caller, request)
-            or _is_internal_caller(request)
-        ):
+        if not (caller == agent_id or _caller_is_operator(caller, request) or _is_internal_caller(request)):
             agent_proj = teams_store.team_of(agent_id)
             if agent_proj is None or not _is_team_member(caller, agent_proj):
                 raise HTTPException(
@@ -7140,7 +7435,11 @@ def create_mesh_app(
         _reap_tasks_opportunistically()
         rows = store.list_inbox(agent_id, include_terminal=True)
         buckets: dict[str, list[dict]] = {
-            "active": [], "blocked": [], "done": [], "failed": [], "cancelled": [],
+            "active": [],
+            "blocked": [],
+            "done": [],
+            "failed": [],
+            "cancelled": [],
         }
         # Sort newest-first so the "last N" slice is informative.
         rows.sort(key=lambda r: r.get("updated_at") or 0, reverse=True)
@@ -7154,19 +7453,23 @@ def create_mesh_app(
                 continue
             if len(buckets[key]) >= limit:
                 continue
-            buckets[key].append({
-                "id": r["id"], "title": r["title"],
-                "status": r["status"],
-                "team_id": r.get("team_id"),
-                "blocker_note": r.get("blocker_note"),
-                "updated_at": r.get("updated_at"),
-                "completed_at": r.get("completed_at"),
-            })
+            buckets[key].append(
+                {
+                    "id": r["id"],
+                    "title": r["title"],
+                    "status": r["status"],
+                    "team_id": r.get("team_id"),
+                    "blocker_note": r.get("blocker_note"),
+                    "updated_at": r.get("updated_at"),
+                    "completed_at": r.get("completed_at"),
+                }
+            )
         return {"agent_id": agent_id, "limit": limit, "queue": buckets}
 
     def _parse_since(since: str | None) -> float:
         """Parse a since= filter — accepts ISO timestamp, ``"24h"``/``"7d"``, or ``""``."""
         import time as _time
+
         if not since:
             return _time.time() - (7 * 24 * 60 * 60)
         raw = since.strip()
@@ -7182,6 +7485,7 @@ def create_mesh_app(
         # first made a full ``...T...`` timestamp silently fall back to 7d.
         try:
             from datetime import datetime as _dt
+
             dt = _dt.fromisoformat(raw.replace("Z", "+00:00").replace("z", "+00:00"))
             return dt.timestamp()
         except (ValueError, TypeError):
@@ -7189,7 +7493,9 @@ def create_mesh_app(
 
     @app.get("/mesh/teams/{team_id}/outputs")
     async def team_outputs(
-        team_id: str, request: Request, since: str = "",
+        team_id: str,
+        request: Request,
+        since: str = "",
     ) -> dict:
         """Completed task artifacts for a team in a time window.
 
@@ -7213,11 +7519,15 @@ def create_mesh_app(
             completed_at = r.get("completed_at") or 0
             if completed_at < floor:
                 continue
-            outputs.append({
-                "id": r["id"], "title": r["title"], "assignee": r["assignee"],
-                "completed_at": completed_at,
-                "artifact_refs": r.get("artifact_refs", []) or [],
-            })
+            outputs.append(
+                {
+                    "id": r["id"],
+                    "title": r["title"],
+                    "assignee": r["assignee"],
+                    "completed_at": completed_at,
+                    "artifact_refs": r.get("artifact_refs", []) or [],
+                }
+            )
         outputs.sort(key=lambda x: x["completed_at"], reverse=True)
         return {
             "team_id": team_id,
@@ -7227,7 +7537,9 @@ def create_mesh_app(
 
     @app.get("/mesh/teams/{team_id}/summary")
     async def team_summary(
-        team_id: str, request: Request, hours: float = 0,
+        team_id: str,
+        request: Request,
+        hours: float = 0,
     ) -> dict:
         """Synthesized status text + structured fields for a team.
 
@@ -7290,11 +7602,14 @@ def create_mesh_app(
         if hours and hours > 0:
             try:
                 result["outcomes_window"] = store.count_team_outcomes_since(
-                    team_id, since_seconds=min(float(hours), 720.0) * 3600,
+                    team_id,
+                    since_seconds=min(float(hours), 720.0) * 3600,
                 )
             except Exception as e:
                 logger.warning(
-                    "team outcome counts failed for %s: %s", team_id, e,
+                    "team outcome counts failed for %s: %s",
+                    team_id,
+                    e,
                 )
         return result
 
@@ -7329,12 +7644,15 @@ def create_mesh_app(
             except Exception as e:
                 logger.warning(
                     "remove summary cron on archive %s failed: %s",
-                    team_name, e,
+                    team_name,
+                    e,
                 )
         _emit_team_event(event_bus, "team_archived", agent="operator", name=team_name)
         return {
-            "archived": True, "team": team_name,
-            "team_name": team_name, "team_id": team_name,
+            "archived": True,
+            "team": team_name,
+            "team_name": team_name,
+            "team_id": team_name,
         }
 
     @app.post("/mesh/teams/{team_name}/unarchive")
@@ -7356,22 +7674,24 @@ def create_mesh_app(
         if cron_scheduler is not None:
             try:
                 team_meta = teams_store.get_team(team_name) or {}
-                _custom_schedule = (
-                    (team_meta.get("settings") or {}).get("summary_schedule")
-                )
+                _custom_schedule = (team_meta.get("settings") or {}).get("summary_schedule")
                 cron_scheduler.ensure_summary_job(
-                    scope_kind="team", scope_id=team_name,
+                    scope_kind="team",
+                    scope_id=team_name,
                     schedule=_custom_schedule,
                 )
             except Exception as e:
                 logger.warning(
                     "ensure_summary_job on unarchive %s failed: %s",
-                    team_name, e,
+                    team_name,
+                    e,
                 )
         _emit_team_event(event_bus, "team_unarchived", agent="operator", name=team_name)
         return {
-            "archived": False, "team": team_name,
-            "team_name": team_name, "team_id": team_name,
+            "archived": False,
+            "team": team_name,
+            "team_name": team_name,
+            "team_id": team_name,
         }
 
     @app.post("/mesh/agents/{agent_id}/archive")
@@ -7388,6 +7708,7 @@ def create_mesh_app(
         if agent_id == "operator":
             raise HTTPException(400, "The operator agent cannot be archived")
         from src.cli.config import _archive_agent, _load_config
+
         cfg = _load_config()
         if agent_id not in cfg.get("agents", {}):
             raise HTTPException(404, f"Agent '{agent_id}' not found")
@@ -7420,7 +7741,8 @@ def create_mesh_app(
         if event_bus is not None:
             try:
                 event_bus.emit(
-                    "agent_archived", agent=agent_id,
+                    "agent_archived",
+                    agent=agent_id,
                     data={"agent_id": agent_id},
                 )
             except Exception as e:
@@ -7434,6 +7756,7 @@ def create_mesh_app(
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can unarchive agents")
         from src.cli.config import _load_config, _unarchive_agent
+
         cfg = _load_config()
         if agent_id not in cfg.get("agents", {}):
             raise HTTPException(404, f"Agent '{agent_id}' not found")
@@ -7444,7 +7767,8 @@ def create_mesh_app(
         if event_bus is not None:
             try:
                 event_bus.emit(
-                    "agent_unarchived", agent=agent_id,
+                    "agent_unarchived",
+                    agent=agent_id,
                     data={"agent_id": agent_id},
                 )
             except Exception as e:
@@ -7488,9 +7812,7 @@ def create_mesh_app(
         cron_jobs: list[dict] = []
         if cron_scheduler is not None:
             try:
-                cron_jobs = [
-                    j for j in cron_scheduler.list_jobs() if j.get("agent") == agent_id
-                ]
+                cron_jobs = [j for j in cron_scheduler.list_jobs() if j.get("agent") == agent_id]
             except Exception as e:
                 logger.warning("export_agent: cron read for %s failed: %s", agent_id, e)
 
@@ -7519,7 +7841,176 @@ def create_mesh_app(
             "permissions": perms,
             "cron_jobs": cron_jobs,
             "workspace": workspace,
+            # Standing goals record from the Team store (ratified #7 /
+            # C.3-b) — ``None`` when unset, matching ``workspace``'s
+            # optional-section style.
+            "goals": teams_store.get_agent_goals(agent_id),
         }
+
+    # ── Per-agent standing goals (TeamStore ``agent_goals``) ─────
+    #
+    # Ratified decision #7 (C.3-b): standing goals live in the Team
+    # store, keyed by agent alone — the blackboard ``goals/`` key path
+    # is gone. Reads are self-or-operator (delivery is the agent's own
+    # prompt build via ``AgentLoop._fetch_goals``); writes are operator/
+    # internal-only because goals are standing instructions injected
+    # into the target agent's every prompt (prompt-injection channel
+    # into persistent context).
+
+    _MAX_AGENT_GOALS = 5
+    _MAX_AGENT_GOAL_CHARS = 300
+
+    def _require_goals_writer(request: Request) -> None:
+        caller = _extract_verified_agent_id(request)
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
+            _record_denial(
+                "permission",
+                caller=caller,
+                gate="goals:write",
+            )
+            raise HTTPException(403, "Only the operator can set agent goals")
+
+    @app.get("/mesh/agents/{agent_id}/goals")
+    async def get_agent_goals_endpoint(agent_id: str, request: Request) -> dict:
+        """Read an agent's standing goals record from the Team store.
+
+        Allowed for the agent itself (bearer-verified), the operator,
+        and internal callers. Returns ``goals: []`` when unset — the
+        record shape is stable so the agent-side reader never needs a
+        presence check.
+        """
+        caller = _extract_verified_agent_id(request)
+        if caller != agent_id and not _caller_is_operator(caller, request) and not _is_internal_caller(request):
+            _record_denial(
+                "permission",
+                caller=caller,
+                target=agent_id,
+                gate="goals:read",
+            )
+            raise HTTPException(
+                403,
+                "Goals are readable by the agent itself or the operator only",
+            )
+        record = teams_store.get_agent_goals(agent_id) or {}
+        goals = record.get("goals")
+        return {
+            "agent_id": agent_id,
+            "goals": goals if isinstance(goals, list) else [],
+            "set_by": record.get("set_by"),
+            "updated_at": record.get("updated_at"),
+        }
+
+    @app.put("/mesh/agents/{agent_id}/goals")
+    async def set_agent_goals_endpoint(agent_id: str, request: Request) -> dict:
+        """Replace an agent's standing goals (operator/internal only).
+
+        Body ``{"goals": [str], "set_by"?}``. Validation mirrors the
+        operator tool: max 5 goals, each a non-empty string <=300 chars
+        after ``sanitize_for_prompt``. An empty list clears (same as
+        DELETE). The operator's own fleet/business goals live in
+        ``manage_goals`` (GOALS.json), not here.
+        """
+        _require_goals_writer(request)
+        if agent_id == "operator":
+            raise HTTPException(
+                400,
+                "set_agent_goals targets WORKER agents; the operator's own fleet/business goals live in manage_goals.",
+            )
+        if agent_id not in router.agent_registry:
+            available = ", ".join(sorted(router.agent_registry))
+            raise HTTPException(
+                404,
+                f"Agent '{agent_id}' not found. Available: {available}",
+            )
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, "body must be a JSON object")
+        goals = body.get("goals")
+        if not isinstance(goals, list):
+            raise HTTPException(400, "goals must be a list of strings")
+        if len(goals) > _MAX_AGENT_GOALS:
+            raise HTTPException(
+                400,
+                f"goals exceeds max length {_MAX_AGENT_GOALS} — keep the list short enough to act on every prompt",
+            )
+        cleaned: list[str] = []
+        for g in goals:
+            if not isinstance(g, str):
+                raise HTTPException(400, "each goal must be a string")
+            s = sanitize_for_prompt(g).strip()
+            if not s:
+                raise HTTPException(400, "each goal must be a non-empty string")
+            if len(s) > _MAX_AGENT_GOAL_CHARS:
+                raise HTTPException(
+                    400,
+                    f"each goal must be <={_MAX_AGENT_GOAL_CHARS} chars (one sentence)",
+                )
+            cleaned.append(s)
+        set_by_raw = body.get("set_by") or "operator"
+        if not isinstance(set_by_raw, str):
+            raise HTTPException(400, "set_by must be a string")
+        set_by = sanitize_for_prompt(set_by_raw).strip()[:64] or "operator"
+        prior = teams_store.get_agent_goals(agent_id) or {}
+        prior_goals = prior.get("goals") or []
+        if not cleaned:
+            teams_store.clear_agent_goals(agent_id)
+            _audit_goals_change(agent_id, "clear_goals", prior_goals, [], set_by)
+            return {"agent_id": agent_id, "cleared": True}
+        teams_store.set_agent_goals(agent_id, cleaned, set_by=set_by)
+        _audit_goals_change(agent_id, "edit_goals", prior_goals, cleaned, set_by)
+        return {"agent_id": agent_id, "set": True, "count": len(cleaned)}
+
+    def _audit_goals_change(
+        agent_id: str,
+        action: str,
+        before: list,
+        after: list,
+        actor: str,
+    ) -> None:
+        """Audit-log a standing-goals change (parity with the dashboard's
+        human write path) — goals are prompt-injected standing instructions,
+        so LLM-driven rewrites must leave a reviewable trace."""
+        try:
+            blackboard.log_audit(
+                action=action,
+                target=agent_id,
+                field="goals",
+                before_value="\n".join(str(g) for g in before),
+                after_value="\n".join(str(g) for g in after),
+                actor=actor,
+                provenance="mesh",
+            )
+        except Exception:
+            logger.exception("Failed to audit goals change for %s", agent_id)
+
+    @app.delete("/mesh/agents/{agent_id}/goals")
+    async def clear_agent_goals_endpoint(agent_id: str, request: Request) -> dict:
+        """Clear an agent's standing goals (operator/internal only). Idempotent
+        for a KNOWN agent; an unknown id is a 404 so a typo'd clear can't
+        report success while the real target's goals stay in force."""
+        _require_goals_writer(request)
+        if agent_id == "operator":
+            raise HTTPException(
+                400,
+                "set_agent_goals targets WORKER agents; the operator's own fleet/business goals live in manage_goals.",
+            )
+        if agent_id not in router.agent_registry:
+            available = ", ".join(sorted(router.agent_registry))
+            raise HTTPException(
+                404,
+                f"Agent '{agent_id}' not found. Available: {available}",
+            )
+        prior = teams_store.get_agent_goals(agent_id) or {}
+        existed = teams_store.clear_agent_goals(agent_id)
+        if existed:
+            _audit_goals_change(
+                agent_id,
+                "clear_goals",
+                prior.get("goals") or [],
+                [],
+                "operator",
+            )
+        return {"agent_id": agent_id, "cleared": True, "existed": existed}
 
     @app.post("/mesh/teams/{team_name}/propose-delete")
     async def propose_delete_team(team_name: str, request: Request) -> dict:
@@ -7547,8 +8038,7 @@ def create_mesh_app(
         if status != "archived":
             raise HTTPException(
                 400,
-                "Team must be archived before delete. "
-                "Call /mesh/teams/{team_name}/archive first.",
+                "Team must be archived before delete. Call /mesh/teams/{team_name}/archive first.",
             )
         origin = _validated_origin(request, caller)
         origin_kind = origin.kind if origin is not None else None
@@ -7567,9 +8057,7 @@ def create_mesh_app(
         # Short headline shown in the inline chat card (max ~80 chars
         # so it doesn't wrap awkwardly). The longer policy explanation
         # is kept in the payload for the legacy CLI surface.
-        summary = (
-            f"Delete team {team_name!r} and unlink {len(members)} agent(s)"
-        )
+        summary = f"Delete team {team_name!r} and unlink {len(members)} agent(s)"
         payload = {
             "name": team_name,
             "summary": summary,
@@ -7591,7 +8079,8 @@ def create_mesh_app(
             "change_id": nonce,
             "summary": summary,
             "expires_at": datetime.fromtimestamp(
-                record["expires_at"], tz=timezone.utc,
+                record["expires_at"],
+                tz=timezone.utc,
             ).isoformat(),
             "payload_digest": record["payload_digest"],
             "requires_confirmation": True,
@@ -7612,6 +8101,7 @@ def create_mesh_app(
         if agent_id == "operator":
             raise HTTPException(400, "The operator agent cannot be deleted")
         from src.cli.config import _agent_status, _load_config
+
         cfg = _load_config()
         if agent_id not in cfg.get("agents", {}):
             raise HTTPException(404, f"Agent '{agent_id}' not found")
@@ -7619,8 +8109,7 @@ def create_mesh_app(
         if status != "archived":
             raise HTTPException(
                 400,
-                "Agent must be archived before delete. "
-                "Call /mesh/agents/{agent_id}/archive first.",
+                "Agent must be archived before delete. Call /mesh/agents/{agent_id}/archive first.",
             )
         origin = _validated_origin(request, caller)
         origin_kind = origin.kind if origin is not None else None
@@ -7655,7 +8144,8 @@ def create_mesh_app(
             "change_id": nonce,
             "summary": summary,
             "expires_at": datetime.fromtimestamp(
-                record["expires_at"], tz=timezone.utc,
+                record["expires_at"],
+                tz=timezone.utc,
             ).isoformat(),
             "payload_digest": record["payload_digest"],
             "requires_confirmation": True,
@@ -7673,6 +8163,7 @@ def create_mesh_app(
         target_id = record["target_id"]
         if kind == "team":
             from src.cli.config import _remove_team_blackboard_permissions
+
             try:
                 former_members = teams_store.delete_team(target_id)
             except TeamNotFound:
@@ -7692,20 +8183,25 @@ def create_mesh_app(
                 except Exception as e:
                     logger.warning(
                         "remove summary cron on delete %s failed: %s",
-                        target_id, e,
+                        target_id,
+                        e,
                     )
             # New audit rows use ``delete_team``; historical
 
             blackboard.log_audit(
-                action="delete_team", target=target_id,
+                action="delete_team",
+                target=target_id,
                 change_id=record["nonce"],
             )
             return {
-                "success": True, "deleted": "team",
-                "name": target_id, "team_id": target_id,
+                "success": True,
+                "deleted": "team",
+                "name": target_id,
+                "team_id": target_id,
             }
         if kind == "agent":
             from src.cli.config import _load_config, _remove_agent
+
             if target_id not in _load_config().get("agents", {}):
                 raise HTTPException(404, f"Agent '{target_id}' no longer exists")
             # H11/H12: stop the container through the runtime backend (not the
@@ -7722,7 +8218,8 @@ def create_mesh_app(
                 except Exception as e:
                     logger.warning(
                         "stop_agent(%s, remove_data=True) failed during delete: %s",
-                        target_id, e,
+                        target_id,
+                        e,
                     )
             try:
                 _remove_agent(target_id, stop_container=False)
@@ -7744,12 +8241,14 @@ def create_mesh_app(
                 except Exception:
                     pass
             blackboard.log_audit(
-                action="delete_agent", target=target_id,
+                action="delete_agent",
+                target=target_id,
                 change_id=record["nonce"],
             )
             return {"success": True, "deleted": "agent", "agent_id": target_id}
         raise HTTPException(
-            400, f"Unsupported pending-delete target_kind: {kind!r}",
+            400,
+            f"Unsupported pending-delete target_kind: {kind!r}",
         )
 
     @app.post("/mesh/tasks/{task_id}/cancel")
@@ -7844,15 +8343,20 @@ def create_mesh_app(
         feedback = feedback.strip()
         if len(feedback) > MAX_FEEDBACK_CHARS:
             raise HTTPException(
-                400, f"feedback exceeds {MAX_FEEDBACK_CHARS} chars",
+                400,
+                f"feedback exceeds {MAX_FEEDBACK_CHARS} chars",
             )
         if outcome in ("rework", "rejected") and not feedback:
             raise HTTPException(
-                400, f"feedback is required for outcome={outcome!r}",
+                400,
+                f"feedback is required for outcome={outcome!r}",
             )
         try:
             updated = tasks_store.set_outcome(
-                task_id, outcome, feedback or None, actor="operator",
+                task_id,
+                outcome,
+                feedback or None,
+                actor="operator",
             )
         except TaskNotFound as e:
             raise HTTPException(404, "Task not found") from e
@@ -7864,19 +8368,27 @@ def create_mesh_app(
         # A1 — push actionable feedback into the rated agent's learnings
         # (best-effort; see src/host/feedback_push.py for the contract).
         from src.host.feedback_push import push_outcome_feedback
+
         push_status = await push_outcome_feedback(
-            transport, updated, outcome, feedback,
+            transport,
+            updated,
+            outcome,
+            feedback,
         )
         if push_status:
             result["feedback_push"] = push_status
         if outcome == "rework":
             try:
                 rework = tasks_store.create_rework_task(
-                    task_id, feedback, actor="operator",
+                    task_id,
+                    feedback,
+                    actor="operator",
                 )
             except (TaskNotFound, ValueError) as e:
                 logger.warning(
-                    "rework spawn failed for %s: %s", task_id, e,
+                    "rework spawn failed for %s: %s",
+                    task_id,
+                    e,
                 )
                 result["rework_error"] = str(e)
             else:
@@ -7887,11 +8399,14 @@ def create_mesh_app(
     # === Operator Config Endpoints ===
 
     _CONFIG_FIELD_MAP = {
-        "instructions": "initial_instructions", "soul": "initial_soul",
+        "instructions": "initial_instructions",
+        "soul": "initial_soul",
         "heartbeat": "initial_heartbeat",
         "interface": "initial_interface",
-        "model": "model", "role": "role",
-        "thinking": "thinking", "budget": "budget",
+        "model": "model",
+        "role": "role",
+        "thinking": "thinking",
+        "budget": "budget",
     }
 
     @app.get("/mesh/agents/{agent_id}/config")
@@ -7921,6 +8436,7 @@ def create_mesh_app(
         await _check_rate_limit("agent_profile", "operator")
 
         from src.cli.config import _load_config
+
         agent_cfg_root = _load_config()
         agents = agent_cfg_root.get("agents", {})
         if agent_id not in agents:
@@ -7928,6 +8444,7 @@ def create_mesh_app(
         raw = agents[agent_id]
 
         from src.shared import limits as _limits_mod
+
         # Translate yaml internals -> canonical edit_agent field names.
         full: dict = {
             "model": raw.get("model", ""),
@@ -7944,10 +8461,8 @@ def create_mesh_app(
             # Per-agent operational caps — fall back to the EFFECTIVE value
             # (env/global → default), so the operator sees what the agent
             # actually runs, not just the static floor.
-            "max_tool_rounds": raw.get("max_tool_rounds")
-            or _limits_mod.resolve("task_max_tool_rounds"),
-            "llm_timeout_seconds": raw.get("llm_timeout_seconds")
-            or _limits_mod.resolve("llm_timeout_seconds"),
+            "max_tool_rounds": raw.get("max_tool_rounds") or _limits_mod.resolve("task_max_tool_rounds"),
+            "llm_timeout_seconds": raw.get("llm_timeout_seconds") or _limits_mod.resolve("llm_timeout_seconds"),
         }
 
         # Permissions live in PERMISSIONS_FILE, not agents.yaml. Load via
@@ -8040,7 +8555,9 @@ def create_mesh_app(
 
     @app.get("/mesh/agents/{agent_id}/artifacts/{name:path}")
     async def read_peer_artifact(
-        agent_id: str, name: str, request: Request,
+        agent_id: str,
+        name: str,
+        request: Request,
     ) -> dict:
         """Read a single peer artifact's content. Operator-or-internal only.
 
@@ -8060,7 +8577,10 @@ def create_mesh_app(
             raise HTTPException(503, "Transport not available")
 
         result = await transport.request(
-            agent_id, "GET", f"/artifacts/{name}", timeout=30,
+            agent_id,
+            "GET",
+            f"/artifacts/{name}",
+            timeout=30,
         )
         if isinstance(result, dict) and "error" in result and "content" not in result:
             status = result.get("status_code", 502)
@@ -8068,7 +8588,8 @@ def create_mesh_app(
             # "HTTP 413" string); 404 maps to 404 with a clean message.
             if status == 404:
                 raise HTTPException(
-                    404, f"Artifact '{name}' not found on agent '{agent_id}'",
+                    404,
+                    f"Artifact '{name}' not found on agent '{agent_id}'",
                 )
             if status == 413:
                 raise HTTPException(
@@ -8095,8 +8616,11 @@ def create_mesh_app(
 
     @app.get("/mesh/agents/{agent_id}/files")
     async def list_peer_files(
-        agent_id: str, request: Request,
-        path: str = ".", recursive: bool = False, pattern: str = "*",
+        agent_id: str,
+        request: Request,
+        path: str = ".",
+        recursive: bool = False,
+        pattern: str = "*",
     ) -> dict:
         """List a peer agent's /data files. Operator-or-internal only.
 
@@ -8116,24 +8640,37 @@ def create_mesh_app(
         if transport is None:
             raise HTTPException(503, "Transport not available")
         from urllib.parse import urlencode
-        qs = urlencode({
-            "path": path, "recursive": str(bool(recursive)).lower(),
-            "pattern": pattern,
-        })
+
+        qs = urlencode(
+            {
+                "path": path,
+                "recursive": str(bool(recursive)).lower(),
+                "pattern": pattern,
+            }
+        )
         result = await transport.request(
-            agent_id, "GET", f"/files?{qs}", timeout=10,
+            agent_id,
+            "GET",
+            f"/files?{qs}",
+            timeout=10,
         )
         if isinstance(result, dict) and "error" in result and "entries" not in result:
             status = result.get("status_code", 502)
             raise HTTPException(status, result["error"])
         entries = result.get("entries", []) if isinstance(result, dict) else []
-        return {"agent_id": agent_id, "entries": entries,
-                "count": result.get("count", len(entries)) if isinstance(result, dict) else 0}
+        return {
+            "agent_id": agent_id,
+            "entries": entries,
+            "count": result.get("count", len(entries)) if isinstance(result, dict) else 0,
+        }
 
     @app.get("/mesh/agents/{agent_id}/files/{path:path}")
     async def read_peer_file(
-        agent_id: str, path: str, request: Request,
-        offset: int = 0, max_bytes: int = 0,
+        agent_id: str,
+        path: str,
+        request: Request,
+        offset: int = 0,
+        max_bytes: int = 0,
     ) -> dict:
         """Read one peer /data file's content. Operator-or-internal only.
 
@@ -8153,18 +8690,23 @@ def create_mesh_app(
         if transport is None:
             raise HTTPException(503, "Transport not available")
         from urllib.parse import quote, urlencode
+
         qs = urlencode({"offset": max(0, offset), "max_bytes": max(0, max_bytes)})
         # Quote the path segment — the validated name may contain spaces, which
         # break a raw interpolation into the agent URL (curl on the sandbox
         # backend). The query string is appended after the quoted path.
         result = await transport.request(
-            agent_id, "GET", f"/files/{quote(path, safe='/')}?{qs}", timeout=30,
+            agent_id,
+            "GET",
+            f"/files/{quote(path, safe='/')}?{qs}",
+            timeout=30,
         )
         if isinstance(result, dict) and "error" in result and "content" not in result:
             status = result.get("status_code", 502)
             if status == 404:
                 raise HTTPException(
-                    404, f"File '{path}' not found on agent '{agent_id}'",
+                    404,
+                    f"File '{path}' not found on agent '{agent_id}'",
                 )
             if status == 400:
                 raise HTTPException(400, result["error"])
@@ -8182,8 +8724,11 @@ def create_mesh_app(
         }
 
     async def _apply_pending_change(
-        change_id: str, change: dict,
-        *, undoable: bool = False, is_undo: bool = False,
+        change_id: str,
+        change: dict,
+        *,
+        undoable: bool = False,
+        is_undo: bool = False,
     ) -> dict:
         """Apply a consumed pending change — shared by soft, confirm, and undo paths.
 
@@ -8210,6 +8755,7 @@ def create_mesh_app(
 
         if field == "permissions":
             from src.cli.config import _load_permissions, _save_permissions
+
             perms = _load_permissions()
             # Apply semantics differ between forward and undo paths:
             #   * Forward apply (caller passed partial dict): MERGE the
@@ -8228,7 +8774,8 @@ def create_mesh_app(
                     perms.setdefault("permissions", {})[agent_id] = new_value
                 else:
                     perms.setdefault("permissions", {}).setdefault(
-                        agent_id, {},
+                        agent_id,
+                        {},
                     ).update(new_value)
                 _save_permissions(perms)
             # Hot-reload the in-memory permission matrix
@@ -8278,7 +8825,9 @@ def create_mesh_app(
             if ws_file and isinstance(new_value, str):
                 try:
                     await transport.request(
-                        agent_id, "PUT", f"/workspace/{ws_file}",
+                        agent_id,
+                        "PUT",
+                        f"/workspace/{ws_file}",
                         json={"content": f"# {field.title()}\n\n{new_value}"},
                         timeout=10,
                     )
@@ -8312,15 +8861,15 @@ def create_mesh_app(
             transport
             and agent_id in router.agent_registry
             and _config_push_key is not None
-            and (
-                isinstance(new_value, str)
-                or (field in _int_push_fields and isinstance(new_value, int))
-            )
+            and (isinstance(new_value, str) or (field in _int_push_fields and isinstance(new_value, int)))
         ):
             try:
                 result = await transport.request(
-                    agent_id, "POST", "/config",
-                    json={_config_push_key: new_value}, timeout=10,
+                    agent_id,
+                    "POST",
+                    "/config",
+                    json={_config_push_key: new_value},
+                    timeout=10,
                 )
                 # transport.request returns {"error": ...} dicts for HTTP /
                 # timeout / connect failures rather than raising. Surface
@@ -8331,20 +8880,26 @@ def create_mesh_app(
                     hot_reload_ok = False
                     logger.warning(
                         "Hot-reload %s for '%s' returned error: %s",
-                        field, agent_id, result["error"],
+                        field,
+                        agent_id,
+                        result["error"],
                     )
                 elif isinstance(result, dict) and result.get("status") not in (None, "ok"):
                     # Non-"ok" status from the agent counts as a soft failure.
                     hot_reload_ok = False
                     logger.warning(
                         "Hot-reload %s for '%s' returned non-ok status: %s",
-                        field, agent_id, result.get("status"),
+                        field,
+                        agent_id,
+                        result.get("status"),
                     )
             except Exception as e:
                 hot_reload_ok = False
                 logger.warning(
                     "Failed to hot-reload %s for '%s': %s",
-                    field, agent_id, e,
+                    field,
+                    agent_id,
+                    e,
                 )
 
         # Heartbeat schedule sync. Two trigger paths converge here:
@@ -8359,11 +8914,8 @@ def create_mesh_app(
         #     value is pre-validated by the operator-tool layer.
         if cron_scheduler is not None and isinstance(new_value, str) and field in ("heartbeat", "heartbeat_schedule"):
             sched = new_value.strip()
-            _is_schedule = (
-                bool(re.fullmatch(r"every\s+\d+[smhd]", sched, re.IGNORECASE))
-                or (len(sched.split()) == 5 and all(
-                    re.match(r"^[\d,\-\*/]+$", p) for p in sched.split()
-                ))
+            _is_schedule = bool(re.fullmatch(r"every\s+\d+[smhd]", sched, re.IGNORECASE)) or (
+                len(sched.split()) == 5 and all(re.match(r"^[\d,\-\*/]+$", p) for p in sched.split())
             )
             if _is_schedule:
                 hb_job = cron_scheduler.find_heartbeat_job(agent_id)
@@ -8378,12 +8930,14 @@ def create_mesh_app(
                         hb_job = cron_scheduler.ensure_heartbeat(agent_id, schedule=sched)
                         logger.info(
                             "Created heartbeat job for '%s': %s",
-                            agent_id, sched,
+                            agent_id,
+                            sched,
                         )
                     except Exception as e:
                         logger.warning(
                             "Failed to create heartbeat job for '%s': %s",
-                            agent_id, e,
+                            agent_id,
+                            e,
                         )
                         hb_job = None
                 if hb_job is not None and hb_job.schedule != sched:
@@ -8391,16 +8945,20 @@ def create_mesh_app(
                         await cron_scheduler.update_job(hb_job.id, schedule=sched)
                         logger.info(
                             "Updated heartbeat schedule for '%s': %s",
-                            agent_id, sched,
+                            agent_id,
+                            sched,
                         )
                     except Exception as e:
                         logger.warning(
                             "Failed to update heartbeat schedule for '%s': %s",
-                            agent_id, e,
+                            agent_id,
+                            e,
                         )
 
         blackboard.log_audit(
-            action="edit_agent", target=agent_id, field=field,
+            action="edit_agent",
+            target=agent_id,
+            field=field,
             before_value=json.dumps(old_value) if not isinstance(old_value, str) else old_value,
             after_value=json.dumps(new_value) if not isinstance(new_value, str) else new_value,
             change_id=change_id,
@@ -8430,7 +8988,8 @@ def create_mesh_app(
         if field in HARD_EDIT_FIELDS and event_bus is not None:
             try:
                 event_bus.emit(
-                    "agent_config_updated", agent=agent_id,
+                    "agent_config_updated",
+                    agent=agent_id,
                     data={
                         "agent_id": agent_id,
                         "field": field,
@@ -8447,7 +9006,8 @@ def create_mesh_app(
         if field == "model" and health_monitor is not None:
             try:
                 health_monitor.clear_quarantine(
-                    agent_id, reason="model changed via edit_agent",
+                    agent_id,
+                    reason="model changed via edit_agent",
                 )
             except Exception as e:
                 logger.debug("clear_quarantine on edit failed: %s", e)
@@ -8548,6 +9108,7 @@ def create_mesh_app(
             # vault-less tests don't regress to 400.
             if credential_vault is not None:
                 from src.shared.models import resolve_provider_for_model
+
                 _provider = resolve_provider_for_model(new_value)
                 if _provider:
                     _available = credential_vault.get_providers_with_credentials()
@@ -8555,7 +9116,9 @@ def create_mesh_app(
                         raise HTTPException(
                             400,
                             missing_provider_key_message(
-                                new_value, _provider, _available,
+                                new_value,
+                                _provider,
+                                _available,
                             ),
                         )
                 # Credential-kind-aware check: OAuth-only providers only
@@ -8563,7 +9126,8 @@ def create_mesh_app(
                 _compatible, _reason = credential_vault.is_model_compatible(new_value)
                 if not _compatible:
                     raise HTTPException(
-                        400, _reason or model_not_compatible_message(new_value),
+                        400,
+                        _reason or model_not_compatible_message(new_value),
                     )
         elif field == "thinking":
             if new_value not in THINKING_LEVELS:
@@ -8578,25 +9142,27 @@ def create_mesh_app(
             # LLM_MAX_TOKENS clamp in src/agent/__main__.py.
             if not isinstance(new_value, int) or isinstance(new_value, bool):
                 raise HTTPException(
-                    400, "max_output_tokens must be an integer",
+                    400,
+                    "max_output_tokens must be an integer",
                 )
             if not (MAX_OUTPUT_TOKENS_MIN <= new_value <= MAX_OUTPUT_TOKENS_MAX):
                 raise HTTPException(
                     400,
-                    f"max_output_tokens must be between "
-                    f"{MAX_OUTPUT_TOKENS_MIN} and {MAX_OUTPUT_TOKENS_MAX}",
+                    f"max_output_tokens must be between {MAX_OUTPUT_TOKENS_MIN} and {MAX_OUTPUT_TOKENS_MAX}",
                 )
         elif field in ("max_tool_rounds", "llm_timeout_seconds"):
             # Per-agent operational caps. Re-enforce server-side; range is the
             # central limits clamp spec (single source of truth). bool is an
             # int subclass — reject it so True/False can't slip through as 1/0.
             from src.shared import limits as _limits
+
             if not isinstance(new_value, int) or isinstance(new_value, bool):
                 raise HTTPException(400, f"{field} must be an integer")
             _d, _lo, _hi = _limits.LIMIT_SPECS[_limits.AGENT_CONFIG_KEYS[field]]
             if not (_lo <= new_value <= _hi):
                 raise HTTPException(
-                    400, f"{field} must be between {_lo} and {_hi}",
+                    400,
+                    f"{field} must be between {_lo} and {_hi}",
                 )
         elif field == "permissions":
             # Finding H1 (May 2026 remediation): re-enforce the operator
@@ -8611,11 +9177,13 @@ def create_mesh_app(
             # ``PUT /api/agents/{id}/permissions`` endpoint, which is
             # DELIBERATELY left without this ceiling.
             from src.host.permissions import clamp_to_operator_ceiling
+
             ceiling_err = clamp_to_operator_ceiling(field, new_value)
             if ceiling_err:
                 raise HTTPException(400, ceiling_err)
 
         from src.cli.config import _load_config
+
         agent_cfg = _load_config()
         agents = agent_cfg.get("agents", {})
         if agent_id not in agents:
@@ -8634,6 +9202,7 @@ def create_mesh_app(
                     old_value = hb_job.schedule
         elif field == "permissions":
             from src.cli.config import _load_permissions
+
             perms = _load_permissions()
             old_value = perms.get("permissions", {}).get(agent_id, {})
         else:
@@ -8655,6 +9224,7 @@ def create_mesh_app(
                 # not the static default, so Undo restores what the agent was
                 # actually running, not the floor.
                 from src.shared import limits as _limits
+
                 _missing_default = _limits.resolve(_limits.AGENT_CONFIG_KEYS[field])
             else:
                 _missing_default = ""
@@ -8686,7 +9256,8 @@ def create_mesh_app(
         # operator knows. We compute the list before record() so we
         # don't have to filter ourselves out.
         prior_unconsumed = change_history.list_unconsumed_for_field(
-            agent_id, field,
+            agent_id,
+            field,
         )
 
         # Record the change for undo. Summary uses humanized field names
@@ -8759,7 +9330,8 @@ def create_mesh_app(
                     )
                 except Exception as e:
                     logger.debug(
-                        "operator_action_receipt_superseded emit failed: %s", e,
+                        "operator_action_receipt_superseded emit failed: %s",
+                        e,
                     )
 
         # Fix 4 (seam follow-up): a successful ``model`` change is the
@@ -8769,7 +9341,8 @@ def create_mesh_app(
         if field == "model" and health_monitor is not None:
             try:
                 health_monitor.clear_quarantine(
-                    agent_id, reason="model changed via edit_agent",
+                    agent_id,
+                    reason="model changed via edit_agent",
                 )
             except Exception as e:
                 logger.debug("clear_quarantine on edit failed: %s", e)
@@ -8780,7 +9353,8 @@ def create_mesh_app(
             "field": field,
             "undo_token": undo_token,
             "expires_at": datetime.fromtimestamp(
-                record["expires_at"], tz=timezone.utc,
+                record["expires_at"],
+                tz=timezone.utc,
             ).isoformat(),
             "ttl_seconds": _ttl_for_field(field),
             "field_class": "hard" if field in _HARD_EDIT_FIELDS else "soft",
@@ -8813,7 +9387,8 @@ def create_mesh_app(
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(
-                403, "Only the operator can toggle internet access",
+                403,
+                "Only the operator can toggle internet access",
             )
 
         data = await request.json()
@@ -8831,7 +9406,8 @@ def create_mesh_app(
 
         perms = _load_permissions()
         op_perms = perms.setdefault("permissions", {}).setdefault(
-            _OPERATOR_AGENT_ID, {},
+            _OPERATOR_AGENT_ID,
+            {},
         )
         previous = bool(op_perms.get("can_use_internet", False))
         op_perms["can_use_internet"] = enabled
@@ -8847,18 +9423,23 @@ def create_mesh_app(
         if transport is not None and _OPERATOR_AGENT_ID in router.agent_registry:
             try:
                 result = await transport.request(
-                    _OPERATOR_AGENT_ID, "POST", "/config",
-                    json={"internet_access_enabled": enabled}, timeout=10,
+                    _OPERATOR_AGENT_ID,
+                    "POST",
+                    "/config",
+                    json={"internet_access_enabled": enabled},
+                    timeout=10,
                 )
                 if isinstance(result, dict) and "error" in result:
                     hot_reload_ok = False
                     logger.warning(
-                        "Operator /config push failed: %s", result["error"],
+                        "Operator /config push failed: %s",
+                        result["error"],
                     )
             except Exception as e:
                 hot_reload_ok = False
                 logger.warning(
-                    "Operator /config push raised: %s", e,
+                    "Operator /config push raised: %s",
+                    e,
                 )
 
         blackboard.log_audit(
@@ -8873,7 +9454,8 @@ def create_mesh_app(
         if event_bus is not None:
             try:
                 event_bus.emit(
-                    "agent_config_updated", agent=_OPERATOR_AGENT_ID,
+                    "agent_config_updated",
+                    agent=_OPERATOR_AGENT_ID,
                     data={
                         "agent_id": _OPERATOR_AGENT_ID,
                         "field": "can_use_internet",
@@ -8882,7 +9464,8 @@ def create_mesh_app(
                 )
             except Exception as e:
                 logger.debug(
-                    "agent_config_updated emit failed for internet-access: %s", e,
+                    "agent_config_updated emit failed for internet-access: %s",
+                    e,
                 )
 
         return {
@@ -8903,9 +9486,11 @@ def create_mesh_app(
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(
-                403, "Only the operator can read internet-access state",
+                403,
+                "Only the operator can read internet-access state",
             )
         from src.cli.config import _OPERATOR_AGENT_ID, _load_permissions
+
         perms = _load_permissions()
         op_perms = perms.get("permissions", {}).get(_OPERATOR_AGENT_ID, {})
         return {"enabled": bool(op_perms.get("can_use_internet", False))}
@@ -8926,7 +9511,8 @@ def create_mesh_app(
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(
-                403, "Only the operator can toggle browser access",
+                403,
+                "Only the operator can toggle browser access",
             )
 
         data = await request.json()
@@ -8944,7 +9530,8 @@ def create_mesh_app(
 
         perms = _load_permissions()
         op_perms = perms.setdefault("permissions", {}).setdefault(
-            _OPERATOR_AGENT_ID, {},
+            _OPERATOR_AGENT_ID,
+            {},
         )
         previous = bool(op_perms.get("can_use_browser", False))
         op_perms["can_use_browser"] = enabled
@@ -8956,13 +9543,17 @@ def create_mesh_app(
         if transport is not None and _OPERATOR_AGENT_ID in router.agent_registry:
             try:
                 result = await transport.request(
-                    _OPERATOR_AGENT_ID, "POST", "/config",
-                    json={"browser_access_enabled": enabled}, timeout=10,
+                    _OPERATOR_AGENT_ID,
+                    "POST",
+                    "/config",
+                    json={"browser_access_enabled": enabled},
+                    timeout=10,
                 )
                 if isinstance(result, dict) and "error" in result:
                     hot_reload_ok = False
                     logger.warning(
-                        "Operator /config push failed: %s", result["error"],
+                        "Operator /config push failed: %s",
+                        result["error"],
                     )
             except Exception as e:
                 hot_reload_ok = False
@@ -8980,7 +9571,8 @@ def create_mesh_app(
         if event_bus is not None:
             try:
                 event_bus.emit(
-                    "agent_config_updated", agent=_OPERATOR_AGENT_ID,
+                    "agent_config_updated",
+                    agent=_OPERATOR_AGENT_ID,
                     data={
                         "agent_id": _OPERATOR_AGENT_ID,
                         "field": "can_use_browser",
@@ -8989,7 +9581,8 @@ def create_mesh_app(
                 )
             except Exception as e:
                 logger.debug(
-                    "agent_config_updated emit failed for browser-access: %s", e,
+                    "agent_config_updated emit failed for browser-access: %s",
+                    e,
                 )
 
         return {
@@ -9009,9 +9602,11 @@ def create_mesh_app(
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(
-                403, "Only the operator can read browser-access state",
+                403,
+                "Only the operator can read browser-access state",
             )
         from src.cli.config import _OPERATOR_AGENT_ID, _load_permissions
+
         perms = _load_permissions()
         op_perms = perms.get("permissions", {}).get(_OPERATOR_AGENT_ID, {})
         return {"enabled": bool(op_perms.get("can_use_browser", False))}
@@ -9036,7 +9631,8 @@ def create_mesh_app(
             # peek so the dashboard can render the right copy. Both
             # collapse to 404 from the HTTP boundary.
             raise HTTPException(
-                404, "Undo token unknown, expired, or already used",
+                404,
+                "Undo token unknown, expired, or already used",
             )
 
         # Reapply the old value. Note swap: new=old (the value the user
@@ -9075,10 +9671,7 @@ def create_mesh_app(
                         "actor": caller,
                         "agent_id": record["agent_id"],
                         "field": record["field"],
-                        "summary": (
-                            f"Reverted {record['agent_id']}'s "
-                            f"{_humanize_field(record['field'])}"
-                        ),
+                        "summary": (f"Reverted {record['agent_id']}'s {_humanize_field(record['field'])}"),
                         "undo_token": undo_token,
                         "restored_value": record["old_value"],
                     },
@@ -9158,7 +9751,8 @@ def create_mesh_app(
         # (/mesh/teams/{name}/propose-delete and
         # /mesh/agents/{id}/propose-delete) hard-code those values.
         if record.get("action_kind") == "delete" and record.get("target_kind") in {
-            "team", "agent",
+            "team",
+            "agent",
         }:
             return await _apply_pending_delete(record)
 
@@ -9166,8 +9760,7 @@ def create_mesh_app(
         # retired legacy edit-apply path. Refuse it loudly so the
         # producer surfaces in logs.
         logger.warning(
-            "rejecting non-delete pending row on /mesh/config/confirm: "
-            "action_kind=%r target_kind=%r",
+            "rejecting non-delete pending row on /mesh/config/confirm: action_kind=%r target_kind=%r",
             record.get("action_kind"),
             record.get("target_kind"),
         )
@@ -9228,6 +9821,7 @@ def create_mesh_app(
 
         # Build a shallow copy of the request with the rewritten body.
         from starlette.requests import Request as _StarletteRequest
+
         forwarded = _StarletteRequest(request.scope, _receive)
         return await confirm_config_change(forwarded)
 
@@ -9290,8 +9884,7 @@ def create_mesh_app(
         except (ValueError, TypeError):
             raise HTTPException(
                 400,
-                f"Invalid before_date: {before_date}. Expected ISO 8601"
-                " (e.g., '2026-04-01' or '2026-04-01T00:00:00Z')",
+                f"Invalid before_date: {before_date}. Expected ISO 8601 (e.g., '2026-04-01' or '2026-04-01T00:00:00Z')",
             )
         # Best-effort actor: real operator/internal caller, else "operator".
         actor = caller or "operator"
@@ -9312,6 +9905,7 @@ def create_mesh_app(
     # === Browser Service Proxy ===
 
     import httpx as _httpx
+
     _browser_proxy_client = _httpx.AsyncClient(timeout=60)
 
     _last_browser_boot_id: str | None = None
@@ -9335,6 +9929,7 @@ def create_mesh_app(
 
         from src.cli.config import _load_config
         from src.cli.proxy import parse_proxy_url, resolve_agent_proxy
+
         _fresh_cfg = _load_config()
         agents_cfg = _fresh_cfg.get("agents", {})
         network_cfg = _fresh_cfg.get("network", {})
@@ -9395,7 +9990,8 @@ def create_mesh_app(
             if svc_token:
                 headers["Authorization"] = f"Bearer {svc_token}"
             resp = await _browser_proxy_client.get(
-                f"{svc_url}/browser/status", headers=headers,
+                f"{svc_url}/browser/status",
+                headers=headers,
             )
             data = resp.json()
             boot_id = data.get("boot_id")
@@ -9448,7 +10044,9 @@ def create_mesh_app(
             if svc_token:
                 headers["Authorization"] = f"Bearer {svc_token}"
             resp = await _browser_proxy_client.get(
-                f"{svc_url}/browser/status", headers=headers, timeout=5,
+                f"{svc_url}/browser/status",
+                headers=headers,
+                timeout=5,
             )
             boot_id = resp.json().get("boot_id")
             if boot_id:
@@ -9499,11 +10097,11 @@ def create_mesh_app(
             # Quiet when it's the first couple of misses (normal during
             # boot / brief outages); loud once it looks like a real problem,
             # then back off so we don't flood logs indefinitely.
-            if n in (_POLL_WARN_THRESHOLD, _POLL_WARN_THRESHOLD * 4,
-                     _POLL_WARN_THRESHOLD * 16):
+            if n in (_POLL_WARN_THRESHOLD, _POLL_WARN_THRESHOLD * 4, _POLL_WARN_THRESHOLD * 16):
                 logger.warning(
-                    "Browser metrics poll has failed %d consecutive times "
-                    "(%s)", n, reason,
+                    "Browser metrics poll has failed %d consecutive times (%s)",
+                    n,
+                    reason,
                 )
             else:
                 logger.debug("Browser metrics poll failed: %s", reason)
@@ -9567,10 +10165,7 @@ def create_mesh_app(
                     # Keep the original response rather than aborting;
                     # next tick will recover.
 
-        payloads = [
-            p for p in (data.get("metrics") or [])
-            if int(p.get("seq", 0)) > _poll_state["last_seen_seq"]
-        ]
+        payloads = [p for p in (data.get("metrics") or []) if int(p.get("seq", 0)) > _poll_state["last_seen_seq"]]
         # On first-seen (fresh mesh or browser restart), only surface the
         # latest payload per (agent, kind). A long-running browser
         # service can return hours of history; flooding the dashboard's
@@ -9584,7 +10179,8 @@ def create_mesh_app(
                 key = (p.get("agent_id", ""), p.get("kind", ""))
                 latest_by_key[key] = p
             payloads = sorted(
-                latest_by_key.values(), key=lambda p: int(p.get("seq", 0)),
+                latest_by_key.values(),
+                key=lambda p: int(p.get("seq", 0)),
             )
 
         for payload in payloads:
@@ -9595,11 +10191,7 @@ def create_mesh_app(
             # §6.3 nav_probe events get their own type so the dashboard can
             # render them distinctly (warning toast on mismatch, etc.) and
             # they don't overwrite the per-minute drain in browserMetrics[].
-            event_type = (
-                "browser_nav_probe"
-                if payload.get("kind") == "nav_probe"
-                else "browser_metrics"
-            )
+            event_type = "browser_nav_probe" if payload.get("kind") == "nav_probe" else "browser_metrics"
             # Stamp boot_id into the per-payload event data so the dashboard
             # can detect a browser-service restart mid-session and flush its
             # local history (otherwise post-restart seq=1..N would interleave
@@ -9608,9 +10200,7 @@ def create_mesh_app(
             # they're just from a different counter generation). The mesh
             # poller already resets its own watermark on boot_id change
             # above; this propagates the same signal one hop further.
-            event_data = (
-                {**payload, "boot_id": boot_id} if boot_id else payload
-            )
+            event_data = {**payload, "boot_id": boot_id} if boot_id else payload
             event_bus.emit(event_type, agent=agent_id, data=event_data)
 
     async def _browser_metrics_loop() -> None:
@@ -9665,7 +10255,9 @@ def create_mesh_app(
         caller_id = _extract_verified_agent_id(request)
         body = await request.json()
         req_agent_id = _resolve_browser_target(
-            caller_id, body.get("target_agent_id") or "", request,
+            caller_id,
+            body.get("target_agent_id") or "",
+            request,
         )
 
         action = body.get("action", "")
@@ -9700,6 +10292,7 @@ def create_mesh_app(
             nav_url = params.get("url", "")
             if nav_url:
                 from src.agent.builtins.http_tool import _resolve_and_pin
+
                 try:
                     # Blocking DNS resolution — run off the event loop so a slow
                     # resolver can't stall the mesh's shared loop (it carries all
@@ -9718,17 +10311,23 @@ def create_mesh_app(
         # without removing the action from `browser_actions` per agent.
         if action == "inspect_requests":
             from src.browser.flags import get_bool
+
             if get_bool(
-                "BROWSER_NETWORK_INSPECT_DISABLED", False, agent_id=req_agent_id,
+                "BROWSER_NETWORK_INSPECT_DISABLED",
+                False,
+                agent_id=req_agent_id,
             ):
-                raise HTTPException(403, detail={
-                    "success": False,
-                    "error": {
-                        "code": "forbidden",
-                        "message": "Network inspection disabled by operator",
-                        "retry_after_ms": None,
+                raise HTTPException(
+                    403,
+                    detail={
+                        "success": False,
+                        "error": {
+                            "code": "forbidden",
+                            "message": "Network inspection disabled by operator",
+                            "retry_after_ms": None,
+                        },
                     },
-                })
+                )
 
         # Check for browser service restart — re-push proxy config for ALL agents
         try:
@@ -9805,19 +10404,23 @@ def create_mesh_app(
         _UPLOAD_STAGE_DIR.mkdir(parents=True, exist_ok=True)
     except OSError as _e:
         logger.warning(
-            "Could not create upload-stage dir %s: %s", _UPLOAD_STAGE_DIR, _e,
+            "Could not create upload-stage dir %s: %s",
+            _UPLOAD_STAGE_DIR,
+            _e,
         )
 
     try:
         _UPLOAD_STAGE_TTL_S = max(
-            5, int(_os.environ.get("OPENLEGION_UPLOAD_STAGE_TTL_S", "60")),
+            5,
+            int(_os.environ.get("OPENLEGION_UPLOAD_STAGE_TTL_S", "60")),
         )
     except ValueError:
         _UPLOAD_STAGE_TTL_S = 60
 
     try:
         _UPLOAD_STAGE_MAX_MB = max(
-            1, int(_os.environ.get("OPENLEGION_UPLOAD_STAGE_MAX_MB", "50")),
+            1,
+            int(_os.environ.get("OPENLEGION_UPLOAD_STAGE_MAX_MB", "50")),
         )
     except ValueError:
         _UPLOAD_STAGE_MAX_MB = 50
@@ -9973,7 +10576,8 @@ def create_mesh_app(
                             bin_partial.unlink()
                         expires_at = (
                             datetime.fromtimestamp(
-                                meta_path.stat().st_mtime, timezone.utc,
+                                meta_path.stat().st_mtime,
+                                timezone.utc,
                             )
                             + timedelta(seconds=_UPLOAD_STAGE_TTL_S)
                         ).isoformat()
@@ -10040,7 +10644,9 @@ def create_mesh_app(
         await _check_rate_limit("upload_apply", caller_id)
         body = await request.json()
         req_agent_id = _resolve_browser_target(
-            caller_id, body.get("target_agent_id") or "", request,
+            caller_id,
+            body.get("target_agent_id") or "",
+            request,
         )
 
         if not permissions.can_browser_action(req_agent_id, "upload_file"):
@@ -10054,22 +10660,17 @@ def create_mesh_app(
             raise HTTPException(400, "idempotency_key must be a string")
         if not ref:
             raise HTTPException(400, "ref required")
-        if (
-            not isinstance(staged_handles, list)
-            or not all(isinstance(h, str) and h for h in staged_handles)
-        ):
+        if not isinstance(staged_handles, list) or not all(isinstance(h, str) and h for h in staged_handles):
             raise HTTPException(400, "staged_handles must be a non-empty list of strings")
         if not staged_handles:
             raise HTTPException(400, "staged_handles must not be empty")
         if len(staged_handles) > 5:
             raise HTTPException(400, "at most 5 files per upload")
         if suggested_filenames:
-            if (
-                not isinstance(suggested_filenames, list)
-                or not all(isinstance(n, str) for n in suggested_filenames)
-            ):
+            if not isinstance(suggested_filenames, list) or not all(isinstance(n, str) for n in suggested_filenames):
                 raise HTTPException(
-                    400, "suggested_filenames must be a list of strings",
+                    400,
+                    "suggested_filenames must be a list of strings",
                 )
             if len(suggested_filenames) != len(staged_handles):
                 raise HTTPException(
@@ -10127,9 +10728,7 @@ def create_mesh_app(
                 # check above did not match (key mismatch, missing key,
                 # or stale). Treat as unknown.
                 raise HTTPException(404, f"Unknown staged_handle: {handle}")
-            suggested = (
-                suggested_filenames[i] if i < len(suggested_filenames) else ""
-            )
+            suggested = suggested_filenames[i] if i < len(suggested_filenames) else ""
             resolved.append((handle, bin_path, meta, suggested))
 
         browser_service_url = None
@@ -10351,7 +10950,8 @@ def create_mesh_app(
             if dispatch_loop is not None:
                 await asyncio.wrap_future(
                     asyncio.run_coroutine_threadsafe(
-                        lane_manager.rehydrate_pending(), dispatch_loop,
+                        lane_manager.rehydrate_pending(),
+                        dispatch_loop,
                     )
                 )
             else:
@@ -10403,17 +11003,22 @@ def create_mesh_app(
         caller_id = _extract_verified_agent_id(request)
         body = await request.json()
         req_agent_id = _resolve_browser_target(
-            caller_id, body.get("target_agent_id") or "", request,
+            caller_id,
+            body.get("target_agent_id") or "",
+            request,
         )
 
         if get_bool("BROWSER_DOWNLOADS_DISABLED", False, agent_id=req_agent_id):
-            raise HTTPException(403, detail={
-                "success": False,
-                "error": {
-                    "code": "forbidden",
-                    "message": "Downloads disabled by operator",
+            raise HTTPException(
+                403,
+                detail={
+                    "success": False,
+                    "error": {
+                        "code": "forbidden",
+                        "message": "Downloads disabled by operator",
+                    },
                 },
-            })
+            )
 
         ref = body.get("ref", "")
         if not ref:
@@ -10432,10 +11037,7 @@ def create_mesh_app(
         agent_entry = router.agent_registry.get(req_agent_id)
         if not agent_entry:
             raise HTTPException(404, f"Agent not registered: {req_agent_id}")
-        agent_url = (
-            agent_entry.get("url", agent_entry)
-            if isinstance(agent_entry, dict) else agent_entry
-        )
+        agent_url = agent_entry.get("url", agent_entry) if isinstance(agent_entry, dict) else agent_entry
 
         browser_auth = getattr(container_manager, "browser_auth_token", "")
         headers: dict = {}
@@ -10502,7 +11104,8 @@ def create_mesh_app(
                     )
                     if ingest_resp.status_code >= 400:
                         raise HTTPException(
-                            ingest_resp.status_code, ingest_resp.text,
+                            ingest_resp.status_code,
+                            ingest_resp.text,
                         )
                     ingest_data = ingest_resp.json()
         except HTTPException as e:
@@ -10547,6 +11150,7 @@ def create_mesh_app(
         # Browsers send cookies with WebSocket upgrade requests, so we can
         # use the same auth as the dashboard HTTP endpoints.
         from src.dashboard.auth import verify_session_cookie
+
         cookie_value = websocket.cookies.get("ol_session", "")
         auth_error = verify_session_cookie(cookie_value)
         if auth_error is not None:
@@ -10555,6 +11159,7 @@ def create_mesh_app(
 
         # Lazily bind event loop on first WebSocket connect
         import asyncio
+
         event_bus.set_loop(asyncio.get_running_loop())
 
         await websocket.accept()
@@ -10615,13 +11220,16 @@ def create_mesh_app(
         Returns an error string or None on success.
         """
         from src.dashboard.auth import verify_session_cookie
+
         cookies = getattr(request_or_ws, "cookies", {}) or {}
         cookie_value = cookies.get("ol_session", "")
         return verify_session_cookie(cookie_value)
 
     @app.get("/agent-vnc/{agent_id}/{path:path}")
     async def vnc_http_proxy_per_agent(
-        agent_id: str, path: str, request: Request,
+        agent_id: str,
+        path: str,
+        request: Request,
     ):
         """Per-agent VNC HTTP proxy → browser service /agent-vnc/{agent_id}/...."""
         _reject_agent_tokens(request)
@@ -10640,6 +11248,7 @@ def create_mesh_app(
         if request.url.query:
             target += f"?{request.url.query}"
         import httpx
+
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(
@@ -10649,7 +11258,9 @@ def create_mesh_app(
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             logger.warning(
                 "Per-agent VNC HTTP proxy failed %s -> %s: %s",
-                agent_id, target, exc,
+                agent_id,
+                target,
+                exc,
             )
             raise HTTPException(502, "Browser VNC not reachable")
         headers = {}
@@ -10668,7 +11279,9 @@ def create_mesh_app(
 
     @app.websocket("/agent-vnc/{agent_id}/{path:path}")
     async def vnc_ws_proxy_per_agent(
-        websocket: WebSocket, agent_id: str, path: str,
+        websocket: WebSocket,
+        agent_id: str,
+        path: str,
     ):
         """Per-agent VNC WebSocket proxy → browser service /agent-vnc/{agent_id}/...."""
         auth_error = await _verify_vnc_dashboard_session(websocket)
@@ -10685,7 +11298,8 @@ def create_mesh_app(
                 for expected in _auth_tokens.values():
                     if hmac.compare_digest(token, expected):
                         await websocket.close(
-                            code=1008, reason="Agent access denied",
+                            code=1008,
+                            reason="Agent access denied",
                         )
                         return
         if not _AGENT_ID_RE.fullmatch(agent_id):
@@ -10698,7 +11312,8 @@ def create_mesh_app(
         svc_token = getattr(container_manager, "browser_auth_token", "")
         if not svc_url:
             await websocket.close(
-                code=1011, reason="Browser service not available",
+                code=1011,
+                reason="Browser service not available",
             )
             return
 
@@ -10711,6 +11326,7 @@ def create_mesh_app(
         target = f"{target}/agent-vnc/{agent_id}/{path}"
         if websocket.query_params:
             from urllib.parse import urlencode
+
             qs = urlencode(list(websocket.query_params.multi_items()))
             if qs:
                 target += f"?{qs}"
@@ -10740,7 +11356,8 @@ def create_mesh_app(
                                 await upstream.send(msg["text"])
                     except Exception as e:
                         logger.warning(
-                            "Per-agent VNC client→upstream error: %s", e,
+                            "Per-agent VNC client→upstream error: %s",
+                            e,
                         )
 
                 async def upstream_to_client():
@@ -10752,7 +11369,8 @@ def create_mesh_app(
                                 await websocket.send_text(msg)
                     except Exception as e:
                         logger.warning(
-                            "Per-agent VNC upstream→client error: %s", e,
+                            "Per-agent VNC upstream→client error: %s",
+                            e,
                         )
 
                 async def browser_keepalive():
@@ -10765,6 +11383,7 @@ def create_mesh_app(
                         return
                     try:
                         import httpx as _httpx
+
                         async with _httpx.AsyncClient(timeout=5) as _client:
                             while True:
                                 await asyncio.sleep(30)
@@ -10784,14 +11403,17 @@ def create_mesh_app(
                     asyncio.create_task(browser_keepalive()),
                 ]
                 _done, pending = await asyncio.wait(
-                    tasks, return_when=asyncio.FIRST_COMPLETED,
+                    tasks,
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
                 for task in pending:
                     task.cancel()
         except Exception as exc:
             logger.warning(
                 "Per-agent VNC WebSocket proxy error %s -> %s: %s",
-                agent_id, target, exc,
+                agent_id,
+                target,
+                exc,
             )
         finally:
             with contextlib.suppress(Exception):

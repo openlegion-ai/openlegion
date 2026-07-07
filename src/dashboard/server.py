@@ -7535,49 +7535,34 @@ def create_dashboard_router(
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
 
-    # ── Agent standing goals (blackboard ``goals/{agent_id}``) ─
+    # ── Agent standing goals (Team store ``agent_goals``) ──────
 
     # Human/dashboard surface for the per-agent standing goals the
     # operator writes via ``set_agent_goals`` — injected into the
     # agent's every prompt as "## Your Current Goals" and pursued
-    # during idle heartbeats. Trust model: the dashboard is the
-    # full-trust human surface writing through the trusted store
-    # directly, so the ``goals/``-namespace fail-close in
-    # ``PermissionMatrix.can_write_blackboard`` (which blocks AGENT
-    # writers — a worker's wildcard can never cover a peer's goals
-    # key) is not bypassed-for-agents by this path: no agent identity
-    # is involved here.
+    # during idle heartbeats. Ratified #7 / C.3-b: goals live in the
+    # Team store, keyed by agent alone (they follow the agent across
+    # team moves). Trust model: the dashboard is the full-trust human
+    # surface writing through the trusted store directly — the mesh
+    # ``PUT /mesh/agents/{id}/goals`` operator gate is for AGENT
+    # callers; no agent identity is involved here.
 
     _MAX_AGENT_GOALS = 5
     _MAX_AGENT_GOAL_CHARS = 300
-
-    def _agent_goals_key(agent_id: str) -> str:
-        """Resolve the scoped goals key for an agent.
-
-        Mirrors the agent-side reader (``AgentLoop._fetch_goals`` reads
-        via ``mesh_client._scope_key``): team agents read
-        ``teams/{team}/goals/{agent_id}``, solo agents read the raw
-        ``goals/{agent_id}`` key.
-        """
-        team = teams_store.team_of(agent_id)
-        if team:
-            return f"teams/{team}/goals/{agent_id}"
-        return f"goals/{agent_id}"
 
     @api_router.get("/api/agents/{agent_id}/goals")
     async def api_agent_goals_get(agent_id: str) -> dict:
         if agent_id not in agent_registry:
             raise HTTPException(status_code=404, detail="Agent not found")
-        entry = blackboard.read(_agent_goals_key(agent_id))
-        if entry is None:
+        record = teams_store.get_agent_goals(agent_id)
+        if record is None:
             return {"goals": [], "updated_at": None}
-        value = entry.value if isinstance(entry.value, dict) else {}
-        raw = value.get("goals", [])
+        raw = record.get("goals", [])
         goals = [str(g) for g in raw] if isinstance(raw, list) else []
         return {
             "goals": goals,
-            "updated_at": value.get("updated_at"),
-            "set_by": value.get("set_by"),
+            "updated_at": record.get("updated_at"),
+            "set_by": record.get("set_by"),
         }
 
     @api_router.put("/api/agents/{agent_id}/goals")
@@ -7619,15 +7604,14 @@ def create_dashboard_router(
                 )
             cleaned.append(s)
 
-        key = _agent_goals_key(agent_id)
-        prior = blackboard.read(key)
+        prior = teams_store.get_agent_goals(agent_id)
         prior_goals = []
-        if prior is not None and isinstance(prior.value, dict):
-            prior_goals = prior.value.get("goals", []) or []
+        if prior is not None and isinstance(prior.get("goals"), list):
+            prior_goals = prior["goals"]
 
         if not cleaned:
-            # Blackboard.delete is idempotent — clearing unset goals is fine.
-            blackboard.delete(key, deleted_by="user")
+            # clear_agent_goals is idempotent — clearing unset goals is fine.
+            teams_store.clear_agent_goals(agent_id)
             blackboard.log_audit(
                 action="clear_goals",
                 target=agent_id,
@@ -7638,16 +7622,7 @@ def create_dashboard_router(
             )
             return {"cleared": True, "agent_id": agent_id}
 
-        from datetime import datetime, timezone
-        blackboard.write(
-            key,
-            {
-                "goals": cleaned,
-                "set_by": "user",
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            },
-            written_by="user",
-        )
+        teams_store.set_agent_goals(agent_id, cleaned, set_by="user")
         blackboard.log_audit(
             action="edit_goals",
             target=agent_id,
