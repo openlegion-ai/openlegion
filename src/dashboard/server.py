@@ -915,7 +915,8 @@ def create_dashboard_router(
                 "X-Frame-Options": "SAMEORIGIN",
                 "Content-Security-Policy": (
                     "default-src 'self'; "
-                    "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
+                    "script-src 'self' 'unsafe-inline' 'unsafe-eval' "
+                    "https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
                     "style-src 'self' 'unsafe-inline'; "
                     "connect-src 'self'; "
                     "frame-src 'self'; "
@@ -8982,7 +8983,8 @@ def create_spa_catchall_router() -> APIRouter:
                 "X-Frame-Options": "SAMEORIGIN",
                 "Content-Security-Policy": (
                     "default-src 'self'; "
-                    "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
+                    "script-src 'self' 'unsafe-inline' 'unsafe-eval' "
+                    "https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
                     "style-src 'self' 'unsafe-inline'; "
                     "connect-src 'self'; "
                     "frame-src 'self'; "
