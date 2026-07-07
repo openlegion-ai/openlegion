@@ -811,6 +811,60 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   (`_body_cap_for_path` → push cap + 1 MB slack). No dashboard UI (rides unit 2);
   merge/reject reachable via mesh endpoints (dashboard/operator-tool surface deferred).
 
+- **✅ Landed — Phase-2 unit 1 adversarial-review fixes (three finders concurred).** Applied
+  on the same branch after the unit landed:
+  1. **HIGH — unforgeable review + atomic merge.** `drive_reviews` gains a `head_sha` column
+     (same canonical-v1 executescript, `user_version` stays 1 — no migration); `create_review`
+     records `git rev-parse refs/heads/{branch}` at submit and the row exposes `head_sha`/
+     `head_sha_short` (operator sees what they approve). Merge is now claim-first and atomic:
+     `claim_review_for_merge` flips `open→merging` in a `BEGIN IMMEDIATE` txn BEFORE any git
+     side effect — a lost claim (already merged/rejected/merging, or a racing second merge)
+     409s and runs NO git, so two merges can't both push and no stray empty merge commit can
+     land. The recorded `head_sha` is re-verified against the live branch tip at merge time:
+     a post-approval branch advance → 409 "branch changed — resubmit" (closes the
+     worker-advances-after-approval TOCTOU); the EXACT recorded sha is merged (not the live
+     ref). `finalize_merge` (`merging→merged`) and `revert_merge_claim` (`merging→open` on any
+     git failure) bracket the git section; `reject` acts on `open` only, so a concurrent
+     reject can never flip a `merging` row to `rejected` while main is being integrated (the
+     git/DB divergence race). Closes: concurrent merge+reject can't leave main integrated with
+     a rejected row; double-merge can't push a stray empty commit; post-approval advance → 409.
+  2. **MED — hermetic mesh git env.** `_subprocess_env` now carries `GIT_CONFIG_NOSYSTEM=1`
+     and `GIT_CONFIG_GLOBAL=/dev/null` (both RPC + plumbing paths), matching the agent tool —
+     ambient host `core.hooksPath`/`receive.*` can't disable main protection.
+  3. **MED — quota/RAM concurrency.** A per-repo `asyncio.Lock` (keyed by team_id, on
+     `app.state`, NOT a module global) is held across the size-check → receive-pack →
+     cache-invalidate window, so a concurrent-push overshoot is bounded to a single push
+     (the "bounded by one push" comment is now actually true, not aspirational). A bounded
+     drive-category `Semaphore(8)` (also on `app.state`) wraps upload-pack + receive-pack to
+     bound mesh RAM. **Per-op RAM ceiling** is ~`drive_push_max_mb` of buffered body per
+     in-flight request, so the drive's worst case at cap is `8 × (push cap + slack)`; a full
+     streaming-response refactor is a deliberate DEFERRED follow-up (documented, out of scope
+     here).
+  4. **MED — self-heal off the event loop.** `_drive_repo` is async and offloads the
+     `ensure_drive` (re-provision) call via `run_in_executor`, matching branch_exists/
+     repo_size; all five drive endpoints await it.
+  5. **MED — git-version gate + test portability.** RESOLUTION: on the host (git 2.43) both
+     `--name-only` and `-z` work, but `git merge-tree`'s `--name-only` was added in **git
+     2.40** while `--write-tree`/`-z` are the 2.38 floor. Rather than bump the gate to 2.40,
+     we **dropped `--name-only`** and parse the `-z` NUL-delimited output directly
+     (`_parse_merge_tree_z`), which also isolates conflicted FILENAMES from the trailing
+     informational-message prose section (fixes the conflict-info cosmetic). The gate stays
+     `git_supports_merge_tree() >= (2,38)`. The merge/conflict tests carry a module-level
+     `@_requires_merge_tree` skipif so older CI hosts SKIP rather than hard-fail.
+  6. **LOW — merge of a deleted branch.** Re-checked at merge time (only main is
+     delete-protected) → clean 409 "branch was deleted; resubmit", not a raw 500.
+  7. **LOW — feature-branch griefing.** `receive.denyDeletes=true` +
+     `receive.denyNonFastForwards=true` set idempotently at provision (in
+     `_install_hook_and_config`) so a worker can't delete or force-push over another member's
+     in-review branch; main keeps its hook; tags are deliberately unrestricted (a worker tag
+     can't touch main). Normal fast-forward pushes still succeed.
+  **Test gaps closed:** malformed receive-pack → clean DriveError→500 (uvloop early-exit
+  branch, not shadowed by the body-cap middleware); endpoint push-cap 413 in the 1–2 MB
+  slack band ("per-push cap" message); pre-receive worker delete/force-push of main + tag
+  posture; strengthened assertions (cross-team clone → 403 specifically; operator push →
+  main ref moved server-side; quota reject → rejected commit absent from the bare repo;
+  token absent from `<clone>/.git/config` after a real clone). Drive suite 53→69 tests.
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|

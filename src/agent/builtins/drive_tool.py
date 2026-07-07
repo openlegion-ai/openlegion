@@ -358,6 +358,8 @@ async def team_drive(
                 "title": sanitize_for_prompt(str(r.get("title", ""))),
                 "summary": sanitize_for_prompt(str(r.get("summary", "")))[:1000],
                 "status": str(r.get("status", "")),
+                # Short reviewed-tip sha so a reader sees what gets integrated.
+                "head_sha": sanitize_for_prompt(str(r.get("head_sha_short") or r.get("head_sha") or "")),
                 "created_at": r.get("created_at"),
                 "resolved_at": r.get("resolved_at"),
             })

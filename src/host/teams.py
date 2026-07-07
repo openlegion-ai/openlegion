@@ -191,7 +191,9 @@ class TeamStore:
                 -- Team Drive review queue (Phase-2 unit 1). One row per
                 -- submitted branch review; resubmitting the same branch
                 -- supersedes the older open row. status:
-                -- open | merged | rejected | superseded.
+                -- open | merging | merged | rejected | superseded.
+                -- head_sha pins the branch tip reviewed, so the merge path
+                -- integrates that EXACT commit (approval TOCTOU guard).
                 CREATE TABLE IF NOT EXISTS drive_reviews (
                     id           TEXT PRIMARY KEY,
                     team_id      TEXT NOT NULL,
@@ -202,6 +204,7 @@ class TeamStore:
                     status       TEXT NOT NULL DEFAULT 'open',
                     reviewer     TEXT,
                     merge_commit TEXT,
+                    head_sha     TEXT,
                     created_at   TEXT,
                     resolved_at  TEXT
                 );
@@ -583,11 +586,12 @@ class TeamStore:
 
     _REVIEW_COLS = (
         "id, team_id, branch, author, title, summary, status, "
-        "reviewer, merge_commit, created_at, resolved_at"
+        "reviewer, merge_commit, head_sha, created_at, resolved_at"
     )
 
     @staticmethod
     def _row_to_review(row: tuple) -> dict:
+        head_sha = row[9]
         return {
             "id": row[0],
             "team_id": row[1],
@@ -598,14 +602,26 @@ class TeamStore:
             "status": row[6],
             "reviewer": row[7],
             "merge_commit": row[8],
-            "created_at": row[9],
-            "resolved_at": row[10],
+            "head_sha": head_sha,
+            # Short form for the operator's approval view (what they merge).
+            "head_sha_short": (head_sha[:10] if head_sha else None),
+            "created_at": row[10],
+            "resolved_at": row[11],
         }
 
-    def create_review(self, team_id: str, branch: str, author: str, title: str, summary: str = "") -> dict:
+    def create_review(
+        self,
+        team_id: str,
+        branch: str,
+        author: str,
+        title: str,
+        summary: str = "",
+        head_sha: str | None = None,
+    ) -> dict:
         """Open a review for ``branch``. Any older OPEN review for the
         same (team, branch) is marked ``superseded`` in the same
-        transaction — one live review per branch."""
+        transaction — one live review per branch. ``head_sha`` pins the
+        reviewed branch tip (the merge path integrates that exact commit)."""
         review_id = generate_id("rev")
         now = _now()
         with self._txn() as conn:
@@ -617,9 +633,10 @@ class TeamStore:
                 (now, team_id, branch),
             )
             conn.execute(
-                "INSERT INTO drive_reviews (id, team_id, branch, author, title, summary, status, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, 'open', ?)",
-                (review_id, team_id, branch, author, title, summary, now),
+                "INSERT INTO drive_reviews "
+                "(id, team_id, branch, author, title, summary, status, head_sha, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?)",
+                (review_id, team_id, branch, author, title, summary, head_sha, now),
             )
         return self.get_review(review_id)  # type: ignore[return-value]
 
@@ -668,6 +685,57 @@ class TeamStore:
                 (status, reviewer, merge_commit, _now(), review_id),
             )
         return self.get_review(review_id)  # type: ignore[return-value]
+
+    # ── atomic merge claim (open → merging → merged/open) ────────
+    #
+    # The merge endpoint is claim-first: it transitions open→merging in a
+    # BEGIN IMMEDIATE transaction BEFORE any git side effect. A lost claim
+    # (already merged/rejected/merging, or a racing second merge) 409s and
+    # runs no git — so two merges can't both push, and a stray empty merge
+    # commit can't land. reject acts on ``open`` only (never on a merging
+    # row it does not own), so a concurrent reject can't flip the row to
+    # ``rejected`` while a merge is integrating on main.
+
+    def claim_review_for_merge(self, review_id: str) -> dict:
+        """Atomically transition an OPEN review to ``merging``.
+
+        Raises ValueError if the review is missing or not open — the caller
+        MUST run no git side effect without a successful claim."""
+        with self._txn() as conn:
+            row = conn.execute("SELECT status FROM drive_reviews WHERE id = ?", (review_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"Review '{review_id}' not found")
+            if row[0] != "open":
+                raise ValueError(f"Review '{review_id}' is already {row[0]}")
+            conn.execute("UPDATE drive_reviews SET status = 'merging' WHERE id = ?", (review_id,))
+        return self.get_review(review_id)  # type: ignore[return-value]
+
+    def finalize_merge(self, review_id: str, merge_commit: str, reviewer: str) -> dict:
+        """Transition a ``merging`` review to ``merged`` once main is
+        integrated. Raises ValueError if the row is no longer ``merging``
+        — but the merge commit is already on main, so the caller must
+        surface the divergence rather than silently swallow it."""
+        with self._txn() as conn:
+            row = conn.execute("SELECT status FROM drive_reviews WHERE id = ?", (review_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"Review '{review_id}' not found")
+            if row[0] != "merging":
+                raise ValueError(f"Review '{review_id}' is {row[0]}, expected merging")
+            conn.execute(
+                "UPDATE drive_reviews SET status = 'merged', reviewer = ?, merge_commit = ?, resolved_at = ? "
+                "WHERE id = ?",
+                (reviewer, merge_commit, _now(), review_id),
+            )
+        return self.get_review(review_id)  # type: ignore[return-value]
+
+    def revert_merge_claim(self, review_id: str) -> None:
+        """Roll a ``merging`` review back to ``open`` after a failed git
+        merge (nothing reached main). No-op if the row already moved."""
+        with self._txn() as conn:
+            conn.execute(
+                "UPDATE drive_reviews SET status = 'open' WHERE id = ? AND status = 'merging'",
+                (review_id,),
+            )
 
     # ── files ────────────────────────────────────────────────────
 

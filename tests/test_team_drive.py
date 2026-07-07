@@ -49,6 +49,14 @@ TOKENS = {
     "solo-a": "solo-token",
 }
 
+# Review merges need `git merge-tree --write-tree` (git >= 2.38). Older CI
+# hosts SKIP the merge/conflict tests rather than hard-fail (repo rule:
+# env-dependent tests skip gracefully).
+_MERGE_TREE_OK = drive_mod.git_supports_merge_tree()
+_requires_merge_tree = pytest.mark.skipif(
+    not _MERGE_TREE_OK, reason="host git too old for `git merge-tree --write-tree` (needs >= 2.38)"
+)
+
 
 def _headers(agent: str) -> dict:
     return {"Authorization": f"Bearer {TOKENS[agent]}", "X-Agent-ID": agent}
@@ -383,6 +391,78 @@ class TestDriveReviewStore:
         with pytest.raises(TeamNotFound):
             drive_env["store"].create_review("ghost", "b", "a", "t")
 
+    def test_head_sha_recorded_and_shortened(self, drive_env):
+        store = drive_env["store"]
+        full = "a" * 40
+        r = store.create_review("team-x", "feat-h", "member1", "t", head_sha=full)
+        row = store.get_review(r["id"])
+        assert row["head_sha"] == full
+        assert row["head_sha_short"] == full[:10]
+        # No pin recorded → short is None (legacy rows).
+        r2 = store.create_review("team-x", "feat-h2", "member1", "t")
+        row2 = store.get_review(r2["id"])
+        assert row2["head_sha"] is None and row2["head_sha_short"] is None
+
+
+class TestDriveMergeClaim:
+    """The atomic open→merging→merged claim that makes review merges
+    unforgeable and race-safe (concurrent merge+reject / double-merge)."""
+
+    def test_claim_then_finalize(self, drive_env):
+        store = drive_env["store"]
+        r = store.create_review("team-x", "feat-c", "member1", "t", head_sha="deadbeef")
+        claimed = store.claim_review_for_merge(r["id"])
+        assert claimed["status"] == "merging"
+        fin = store.finalize_merge(r["id"], "mergecommit", reviewer="operator")
+        assert fin["status"] == "merged" and fin["merge_commit"] == "mergecommit"
+
+    def test_double_claim_rejected(self, drive_env):
+        store = drive_env["store"]
+        r = store.create_review("team-x", "feat-c2", "member1", "t")
+        store.claim_review_for_merge(r["id"])
+        with pytest.raises(ValueError):
+            store.claim_review_for_merge(r["id"])
+
+    def test_reject_cannot_touch_merging_row(self, drive_env):
+        """Concurrent merge+reject: once a merge has claimed (merging), a
+        reject must NOT be able to flip the row to rejected — otherwise main
+        could be integrated while the row reads rejected."""
+        store = drive_env["store"]
+        r = store.create_review("team-x", "feat-c3", "member1", "t")
+        store.claim_review_for_merge(r["id"])
+        with pytest.raises(ValueError):
+            store.resolve_review(r["id"], "rejected", reviewer="operator")
+
+    def test_revert_reopens_only_merging(self, drive_env):
+        store = drive_env["store"]
+        r = store.create_review("team-x", "feat-c4", "member1", "t")
+        store.claim_review_for_merge(r["id"])
+        store.revert_merge_claim(r["id"])
+        assert store.get_review(r["id"])["status"] == "open"
+        # No-op when the row is not merging.
+        store.resolve_review(r["id"], "rejected", reviewer="operator")
+        store.revert_merge_claim(r["id"])
+        assert store.get_review(r["id"])["status"] == "rejected"
+
+    def test_finalize_requires_merging(self, drive_env):
+        store = drive_env["store"]
+        r = store.create_review("team-x", "feat-c5", "member1", "t")
+        with pytest.raises(ValueError):
+            store.finalize_merge(r["id"], "c", reviewer="operator")
+
+
+def test_subprocess_env_is_hermetic():
+    """Mesh git subprocesses ignore ambient host/global config so a stray
+    core.hooksPath / receive.* can't disable main protection (finding: MED
+    hermetic mesh git env)."""
+    env = drive_mod._subprocess_env()
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert env["GIT_CONFIG_GLOBAL"] == os.devnull
+    priv = drive_mod._subprocess_env(privileged=True)
+    assert priv["GIT_CONFIG_NOSYSTEM"] == "1"
+    assert priv["GIT_CONFIG_GLOBAL"] == os.devnull
+    assert priv["OL_DRIVE_PRIVILEGED"] == "1"
+
 
 # ── Auth matrix (ASGI level) ─────────────────────────────────────────
 
@@ -523,13 +603,20 @@ class TestSmartHttpRoundTrip:
         _git(None, "clone", _drive_url(live_server), str(verify), agent="member2")
         assert not (verify / "sneak.md").exists()
 
-    def test_operator_can_push_main(self, live_server, tmp_path):
+    def test_operator_can_push_main(self, live_server, drive_env, tmp_path):
         clone = tmp_path / "wc-op"
         _git(None, "clone", _drive_url(live_server), str(clone), agent="operator")
         (clone / "policy.md").write_text("operator-integrated\n")
         _git(clone, "add", "-A", agent="operator")
         _git(clone, "commit", "-m", "operator update", agent="operator")
+        local_head = _git(clone, "rev-parse", "HEAD", agent="operator").stdout.strip()
         _git(clone, "push", "origin", "main", agent="operator")
+        # main actually moved server-side to the operator's commit.
+        repo = drive_env["store"].get_team("team-x")["drive_ref"]
+        server_main = subprocess.run(
+            ["git", "rev-parse", "refs/heads/main"], cwd=repo, capture_output=True, text=True
+        ).stdout.strip()
+        assert server_main == local_head
 
     def test_cross_team_clone_denied(self, live_server, tmp_path):
         result = _git(
@@ -537,6 +624,17 @@ class TestSmartHttpRoundTrip:
             agent="outsider", check=False,
         )
         assert result.returncode != 0
+        # Specifically a 403 (membership wall), not a generic transport fault.
+        assert "403" in (result.stdout + result.stderr)
+
+    def test_token_never_persisted_in_clone_config(self, live_server, tmp_path):
+        """The per-invocation `-c http.extraHeader` bearer must not survive
+        into <clone>/.git/config after a real clone."""
+        clone = tmp_path / "wc-token"
+        _git(None, "clone", _drive_url(live_server), str(clone))
+        config = (clone / ".git" / "config").read_text()
+        assert TOKENS["member1"] not in config
+        assert "Authorization" not in config
 
     def test_push_cap_413(self, live_server, tmp_path, monkeypatch):
         monkeypatch.setenv("OPENLEGION_DRIVE_PUSH_MAX_MB", "1")
@@ -550,7 +648,7 @@ class TestSmartHttpRoundTrip:
         assert result.returncode != 0
         assert "413" in (result.stdout + result.stderr)
 
-    def test_quota_reject_413(self, live_server, tmp_path, monkeypatch):
+    def test_quota_reject_413(self, live_server, drive_env, tmp_path, monkeypatch):
         monkeypatch.setenv("OPENLEGION_DRIVE_QUOTA_MB", "1")
         clone = tmp_path / "wc-quota"
         _git(None, "clone", _drive_url(live_server), str(clone))
@@ -564,9 +662,119 @@ class TestSmartHttpRoundTrip:
         (clone / "more.bin").write_bytes(os.urandom(256 * 1024))
         _git(clone, "add", "-A")
         _git(clone, "commit", "-m", "more")
+        rejected_sha = _git(clone, "rev-parse", "HEAD").stdout.strip()
         result = _git(clone, "push", "origin", "feat-fill", check=False)
         assert result.returncode != 0
         assert "413" in (result.stdout + result.stderr)
+        # The rejected commit never landed in the bare repo.
+        repo = drive_env["store"].get_team("team-x")["drive_ref"]
+        present = subprocess.run(
+            ["git", "cat-file", "-e", rejected_sha], cwd=repo, capture_output=True
+        )
+        assert present.returncode != 0, "quota-rejected commit is present in the bare repo"
+
+    def test_endpoint_push_cap_413_in_slack_band(self, live_server, drive_env, tmp_path, monkeypatch):
+        """A body between the middleware slack and the push cap trips the
+        endpoint's OWN `len(body) > push_cap` 413 (not the body-cap
+        middleware), with the per-push-cap message."""
+        import httpx
+
+        monkeypatch.setenv("OPENLEGION_DRIVE_PUSH_MAX_MB", "1")  # cap 1 MB, middleware 2 MB
+        payload = b"x" * (1_500_000)  # 1.5 MB: passes middleware, over the push cap
+        resp = httpx.post(
+            f"{live_server}/mesh/teams/team-x/drive/git-receive-pack",
+            content=payload,
+            headers=_headers("member1"),
+            timeout=30,
+        )
+        assert resp.status_code == 413
+        assert "per-push cap" in resp.json()["detail"]
+
+    def test_malformed_receive_pack_clean_500(self, live_server, tmp_path):
+        """A malformed receive-pack body (bad pkt-line) whose git subprocess
+        may exit before draining stdin must surface a clean DriveError->500,
+        never an event-loop traceback, and must not be shadowed by the
+        body-cap middleware (the body is tiny)."""
+        import httpx
+
+        resp = httpx.post(
+            f"{live_server}/mesh/teams/team-x/drive/git-receive-pack",
+            content=b"not-a-valid-pktline-stream",
+            headers=_headers("member1"),
+            timeout=30,
+        )
+        assert resp.status_code == 500
+        assert "receive-pack failed" in resp.json()["detail"]
+
+
+class TestRefProtection:
+    """pre-receive main protection + feature-branch anti-griefing (deny
+    deletes / non-fast-forwards on worker pushes; tags deliberately allowed)."""
+
+    def _server_ref(self, drive_env, ref: str) -> subprocess.CompletedProcess:
+        repo = drive_env["store"].get_team("team-x")["drive_ref"]
+        return subprocess.run(
+            ["git", "rev-parse", "--verify", ref], cwd=repo, capture_output=True, text=True
+        )
+
+    def test_worker_delete_main_rejected(self, live_server, drive_env, tmp_path):
+        clone = tmp_path / "wc-delmain"
+        _git(None, "clone", _drive_url(live_server), str(clone))
+        result = _git(clone, "push", "origin", "--delete", "main", check=False)
+        assert result.returncode != 0
+        assert self._server_ref(drive_env, "refs/heads/main").returncode == 0
+
+    def test_worker_force_push_main_rejected(self, live_server, drive_env, tmp_path):
+        clone = tmp_path / "wc-ffmain"
+        _git(None, "clone", _drive_url(live_server), str(clone))
+        (clone / "x.md").write_text("divergent\n")
+        _git(clone, "add", "-A")
+        _git(clone, "commit", "--amend", "-m", "rewritten seed")  # diverges from origin/main
+        result = _git(clone, "push", "--force", "origin", "main", check=False)
+        assert result.returncode != 0
+        assert "protected" in (result.stdout + result.stderr)
+
+    def test_worker_tag_push_allowed(self, live_server, drive_env, tmp_path):
+        # Posture decision: tags are NOT protected for workers — a tag can't
+        # touch main, so it's a benign collaboration primitive.
+        clone = tmp_path / "wc-tag"
+        _git(None, "clone", _drive_url(live_server), str(clone))
+        _git(clone, "tag", "v1")
+        result = _git(clone, "push", "origin", "v1", check=False)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert self._server_ref(drive_env, "refs/tags/v1").returncode == 0
+
+    def test_worker_cannot_delete_feature_branch(self, live_server, drive_env, tmp_path):
+        clone = tmp_path / "wc-fdel"
+        _git(None, "clone", _drive_url(live_server), str(clone))
+        _git(clone, "switch", "-c", "feat-del")
+        (clone / "d.md").write_text("d\n")
+        _git(clone, "add", "-A")
+        _git(clone, "commit", "-m", "d")
+        _git(clone, "push", "origin", "feat-del")
+        result = _git(clone, "push", "origin", "--delete", "feat-del", check=False)
+        assert result.returncode != 0  # receive.denyDeletes
+        assert self._server_ref(drive_env, "refs/heads/feat-del").returncode == 0
+
+    def test_worker_ff_ok_but_nonff_force_rejected(self, live_server, drive_env, tmp_path):
+        clone = tmp_path / "wc-ff"
+        _git(None, "clone", _drive_url(live_server), str(clone))
+        _git(clone, "switch", "-c", "feat-ff")
+        (clone / "f1.md").write_text("1\n")
+        _git(clone, "add", "-A")
+        _git(clone, "commit", "-m", "1")
+        _git(clone, "push", "origin", "feat-ff")
+        # A normal fast-forward push still works.
+        (clone / "f2.md").write_text("2\n")
+        _git(clone, "add", "-A")
+        _git(clone, "commit", "-m", "2")
+        _git(clone, "push", "origin", "feat-ff")
+        # A non-fast-forward (rewound history) force-push is rejected server-side.
+        _git(clone, "commit", "--amend", "-m", "rewritten")
+        result = _git(clone, "push", "--force", "origin", "feat-ff", check=False)
+        assert result.returncode != 0  # receive.denyNonFastForwards
+        combined = (result.stdout + result.stderr).lower()
+        assert "non-fast-forward" in combined or "denynonfastforwards" in combined
 
 
 class TestGzipBodies:
@@ -641,6 +849,7 @@ class TestReviewFlow:
             timeout=30,
         )
 
+    @_requires_merge_tree
     def test_submit_merge_and_integration_visible(self, live_server, drive_env, tmp_path):
         self._push_branch(live_server, tmp_path, "feat-report", "report.md", "# Q3 report\n")
         resp = self._post(
@@ -665,12 +874,54 @@ class TestReviewFlow:
         _git(None, "clone", _drive_url(live_server), str(verify), agent="member2")
         assert (verify / "report.md").read_text() == "# Q3 report\n"
 
-        # The merged review cannot be re-merged.
+        # The merged review cannot be re-merged, and the double-merge must
+        # NOT push a stray empty merge commit onto main (claim-first: the
+        # second merge 409s at the claim, running no git).
+        repo = drive_env["store"].get_team("team-x")["drive_ref"]
+        before = subprocess.run(
+            ["git", "rev-list", "--count", "main"], cwd=repo, capture_output=True, text=True
+        ).stdout.strip()
         again = self._post(
             live_server, f"/mesh/teams/team-x/drive/reviews/{review['id']}/merge", "operator",
         )
         assert again.status_code == 409
+        after = subprocess.run(
+            ["git", "rev-list", "--count", "main"], cwd=repo, capture_output=True, text=True
+        ).stdout.strip()
+        assert before == after, "double-merge pushed a stray commit onto main"
 
+    @_requires_merge_tree
+    def test_post_approval_branch_advance_resubmit_409(self, live_server, drive_env, tmp_path):
+        """A worker advancing the branch AFTER approval must not slip the new
+        commit past review: the merge 409s "resubmit" and main is untouched."""
+        clone = self._push_branch(live_server, tmp_path, "feat-move", "m.md", "reviewed\n")
+        review = self._post(
+            live_server, "/mesh/teams/team-x/drive/reviews", "member1",
+            {"branch": "feat-move", "title": "move"},
+        ).json()["review"]
+        assert review["head_sha"], "review must pin the reviewed tip"
+        # Worker advances the branch past the reviewed tip.
+        (clone / "m.md").write_text("SNEAKY post-approval change\n")
+        _git(clone, "add", "-A")
+        _git(clone, "commit", "-m", "sneak after approval")
+        _git(clone, "push", "origin", "feat-move")
+        repo = drive_env["store"].get_team("team-x")["drive_ref"]
+        main_before = subprocess.run(
+            ["git", "rev-parse", "refs/heads/main"], cwd=repo, capture_output=True, text=True
+        ).stdout.strip()
+        merge = self._post(
+            live_server, f"/mesh/teams/team-x/drive/reviews/{review['id']}/merge", "operator",
+        )
+        assert merge.status_code == 409
+        assert "resubmit" in str(merge.json()["detail"])
+        # main did not move, and the review reverted to open for a fresh look.
+        main_after = subprocess.run(
+            ["git", "rev-parse", "refs/heads/main"], cwd=repo, capture_output=True, text=True
+        ).stdout.strip()
+        assert main_before == main_after
+        assert drive_env["store"].get_review(review["id"])["status"] == "open"
+
+    @_requires_merge_tree
     def test_merge_conflict_409(self, live_server, drive_env, tmp_path):
         # Two branches from the same base editing the same file differently;
         # merge the first, then the second conflicts.

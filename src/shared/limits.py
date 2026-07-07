@@ -61,7 +61,9 @@ LIMIT_SPECS: dict[str, tuple[int, int, int]] = {
     # next boot/provision, not retroactively.
     "drive_push_max_mb": (64, 1, 512),
     # Team Drive: on-disk repo size quota (MB). Checked BEFORE receive-pack
-    # runs, so a single overshoot is bounded by drive_push_max_mb.
+    # runs, under a per-repo lock that serializes the check→push→invalidate
+    # window — so a concurrent-push overshoot is bounded to ONE push
+    # (drive_push_max_mb), not N simultaneous pushes.
     "drive_quota_mb": (512, 1, 65536),
 }
 

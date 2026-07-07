@@ -117,7 +117,17 @@ def _subprocess_env(*, privileged: bool = False) -> dict[str, str]:
     and SYSTEM credentials); git only needs PATH, and the hook contract
     needs OL_DRIVE_PRIVILEGED for operator-tier calls.
     """
-    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": os.environ.get("HOME", "/tmp")}
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": os.environ.get("HOME", "/tmp"),
+        # Hermetic git: ignore ambient host/global config so a stray
+        # core.hooksPath / receive.* on the mesh box can't disable main
+        # protection (matches the agent tool's posture). GIT_CONFIG_GLOBAL
+        # is pointed at /dev/null rather than unset — unset would let git
+        # fall back to $HOME/.gitconfig.
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": os.devnull,
+    }
     if privileged:
         env["OL_DRIVE_PRIVILEGED"] = "1"
     return env
@@ -163,6 +173,15 @@ def _install_hook_and_config(repo: Path) -> None:
     _run_git(["config", "receive.maxInputSize", str(max_input)], cwd=repo)
     # Reject dangling-object tricks and keep server-side history linear-ish.
     _run_git(["config", "receive.denyDeleteCurrent", "true"], cwd=repo)
+    # Feature-branch anti-griefing: a worker must not delete or force-push
+    # over another member's in-review branch. denyDeletes blocks ref
+    # deletion; denyNonFastForwards blocks rewinding a ref to a non-descendant.
+    # Both apply to receive-pack pushes only (the mesh-side integrate uses
+    # update-ref, which these configs never govern) and are idempotently
+    # re-applied on every ensure. refs/heads/main stays hook-protected on top;
+    # tags are deliberately NOT restricted (a worker tag can't touch main).
+    _run_git(["config", "receive.denyDeletes", "true"], cwd=repo)
+    _run_git(["config", "receive.denyNonFastForwards", "true"], cwd=repo)
 
 
 def ensure_team_drive(team_id: str, root: Path | None = None) -> str:
@@ -343,17 +362,57 @@ def branch_exists(repo: Path, branch: str) -> bool:
         return False
 
 
-async def merge_branch(repo: Path, branch: str, *, message: str) -> str:
-    """Merge ``refs/heads/{branch}`` into main mesh-side (the integrate path).
+def branch_head_sha(repo: Path, branch: str) -> str:
+    """Current commit sha at ``refs/heads/{branch}`` (``""`` if absent).
 
-    ``git merge-tree --write-tree`` computes the merged tree without a
-    worktree; a clean result becomes a two-parent commit installed on
-    main via an ``update-ref --stdin`` compare-and-swap against the
-    main tip read at the start — a racing push to main (operator-tier)
-    fails the CAS instead of being silently overwritten.
+    Recorded at review time and re-checked at merge time so a worker that
+    advances the branch AFTER approval can't change what gets integrated.
+    """
+    try:
+        return _run_git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=repo)
+    except DriveError:
+        return ""
+
+
+def _parse_merge_tree_z(raw: bytes) -> tuple[str, list[str]]:
+    """Parse ``git merge-tree --write-tree -z`` output into (tree, files).
+
+    The ``-z`` format is NUL-delimited: ``<tree-oid> NUL (<conflicted-file
+    -info> NUL)* NUL (<informational-message> NUL)*``. The conflicted-file
+    section holds ``<mode> <oid> <stage>\\t<path>`` entries (one per merge
+    stage, so a path repeats); we split on the tab and dedupe to isolate
+    real FILENAMES from the trailing prose section (which starts after the
+    empty separator). Using ``-z`` also avoids ``--name-only`` (added in
+    git 2.40) so the minimum stays git 2.38 (``--write-tree``/``-z``).
+    """
+    parts = raw.split(b"\0")
+    tree = parts[0].decode("utf-8", errors="replace").strip() if parts else ""
+    files: list[str] = []
+    for chunk in parts[1:]:
+        if chunk == b"":
+            break  # end of the conflicted-file-info section
+        txt = chunk.decode("utf-8", errors="replace")
+        name = txt.split("\t", 1)[1] if "\t" in txt else txt
+        name = name.strip()
+        if name and name not in files:
+            files.append(name)
+    return tree, files
+
+
+async def merge_branch(repo: Path, source_commit: str, *, message: str) -> str:
+    """Merge commit ``source_commit`` into main mesh-side (integrate path).
+
+    The caller passes the EXACT commit sha recorded at review time (not a
+    live branch ref), so a worker advancing the branch after approval
+    cannot change what gets integrated. ``git merge-tree --write-tree -z``
+    computes the merged tree without a worktree; a clean result becomes a
+    two-parent commit installed on main via an ``update-ref --stdin``
+    compare-and-swap against the main tip read at the start — a racing push
+    to main (operator-tier) fails the CAS instead of being overwritten.
 
     Returns the new merge commit sha. Raises :class:`MergeConflict` on
-    content conflicts and :class:`DriveError` on anything else.
+    content conflicts, :class:`RefMoved` on a lost CAS, and
+    :class:`DriveError` on anything else.
     """
     if not git_supports_merge_tree():
         raise DriveError(
@@ -363,30 +422,28 @@ async def merge_branch(repo: Path, branch: str, *, message: str) -> str:
 
     def _plumb() -> str:
         main_sha = _run_git(["rev-parse", "--verify", "refs/heads/main"], cwd=repo)
-        branch_sha = _run_git(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], cwd=repo)
-        # Full ref names on purpose: a branch that starts with ``-`` can
-        # never be parsed as an option once prefixed with refs/heads/.
+        # Peel the recorded sha to a commit; a bad/unreachable sha errors
+        # cleanly here. A 40-hex sha can never be parsed as an option.
+        src_sha = _run_git(["rev-parse", "--verify", f"{source_commit}^{{commit}}"], cwd=repo)
         proc = subprocess.run(
-            ["git", "merge-tree", "--write-tree", "--name-only", "refs/heads/main", f"refs/heads/{branch}"],
+            ["git", "merge-tree", "--write-tree", "-z", main_sha, src_sha],
             cwd=str(repo),
             env=_subprocess_env(),
             capture_output=True,
             timeout=GIT_RPC_TIMEOUT,
         )
-        lines = proc.stdout.decode("utf-8", errors="replace").splitlines()
+        tree, files = _parse_merge_tree_z(proc.stdout)
         if proc.returncode == 1:
-            # Line 1 is the (conflicted) tree oid; the rest name the files.
             raise MergeConflict(
-                f"merge of '{branch}' into main has conflicts",
-                conflict_info=[ln for ln in lines[1:] if ln.strip()],
+                f"merge of {src_sha[:10]} into main has conflicts",
+                conflict_info=files,
             )
-        if proc.returncode != 0 or not lines:
+        if proc.returncode != 0 or not tree:
             detail = proc.stderr.decode("utf-8", errors="replace").strip()[:300]
             raise DriveError(f"merge-tree failed: {detail}")
-        tree = lines[0].strip()
         env = {**_subprocess_env(), **_MESH_GIT_IDENT}
         commit = _run_git(
-            ["commit-tree", tree, "-p", main_sha, "-p", branch_sha, "-m", message],
+            ["commit-tree", tree, "-p", main_sha, "-p", src_sha, "-m", message],
             cwd=repo,
             env=env,
         )

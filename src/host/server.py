@@ -5799,7 +5799,28 @@ def create_mesh_app(
     _drive_size_cache: dict[str, tuple[float, int]] = {}
     _DRIVE_SIZE_TTL = 15.0
     _DRIVE_BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,200}")
-    _DRIVE_REVIEW_STATUSES = ("open", "merged", "rejected", "superseded")
+    _DRIVE_REVIEW_STATUSES = ("open", "merging", "merged", "rejected", "superseded")
+
+    # Concurrency governance for the smart-HTTP transport (Constraint #8:
+    # on app.state, never a module global). The category semaphore bounds
+    # how many upload-pack/receive-pack packs the mesh holds in RAM at once
+    # — the per-op RAM ceiling is ~drive_push_max_mb of body per in-flight
+    # request (the full pack is buffered; a streaming refactor is a
+    # documented follow-up), so at cap the drive's worst-case footprint is
+    # _DRIVE_MAX_CONCURRENCY * (push cap + slack). The per-repo lock
+    # serializes the quota-check → receive-pack → cache-invalidate window
+    # for ONE repo so a concurrent-push overshoot is bounded to a single
+    # push, while different repos still push in parallel under the semaphore.
+    _DRIVE_MAX_CONCURRENCY = 8
+    app.state.drive_concurrency = asyncio.Semaphore(_DRIVE_MAX_CONCURRENCY)
+    app.state.drive_repo_locks: dict[str, asyncio.Lock] = {}
+
+    def _drive_repo_lock(team_id: str) -> asyncio.Lock:
+        lock = app.state.drive_repo_locks.get(team_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            app.state.drive_repo_locks[team_id] = lock
+        return lock
 
     def _require_drive_access(team_id: str, request: Request) -> tuple[str, bool]:
         """Verified caller + privilege flag for a drive endpoint.
@@ -5828,10 +5849,15 @@ def create_mesh_app(
             raise HTTPException(403, f"Agent '{caller}' is not a member of team '{team_id}'")
         return caller, False
 
-    def _drive_repo(team_id: str) -> "_DrivePath":
-        """Resolve (and self-heal) the team's bare-repo path."""
+    async def _drive_repo(team_id: str) -> "_DrivePath":
+        """Resolve (and self-heal) the team's bare-repo path.
+
+        ``ensure_drive`` may re-provision (git init + seed) which is
+        blocking, so it runs off the event loop like the other drive git
+        calls (branch_exists / repo_size)."""
+        loop = asyncio.get_running_loop()
         try:
-            ref = teams_store.ensure_drive(team_id)
+            ref = await loop.run_in_executor(None, teams_store.ensure_drive, team_id)
         except TeamNotFound:
             raise HTTPException(404, f"Team '{team_id}' not found")
         if not ref:
@@ -5874,7 +5900,7 @@ def create_mesh_app(
         await _check_rate_limit("drive", caller)
         if service not in team_drive.SMART_SERVICES:
             raise HTTPException(400, "service must be git-upload-pack or git-receive-pack")
-        repo = _drive_repo(team_id)
+        repo = await _drive_repo(team_id)
         try:
             body = await team_drive.advertise_refs(service, repo)
         except team_drive.DriveError as e:
@@ -5890,12 +5916,15 @@ def create_mesh_app(
         """git fetch/clone data channel (read path)."""
         caller, _priv = _require_drive_access(team_id, request)
         await _check_rate_limit("drive", caller)
-        repo = _drive_repo(team_id)
-        body = await _drive_rpc_body(request, _max_body_bytes())
-        try:
-            out = await team_drive.service_rpc("git-upload-pack", repo, body)
-        except team_drive.DriveError as e:
-            raise HTTPException(500, f"upload-pack failed: {e}")
+        repo = await _drive_repo(team_id)
+        # Bound concurrent packs held in mesh RAM (upload + receive share
+        # one category semaphore).
+        async with app.state.drive_concurrency:
+            body = await _drive_rpc_body(request, _max_body_bytes())
+            try:
+                out = await team_drive.service_rpc("git-upload-pack", repo, body)
+            except team_drive.DriveError as e:
+                raise HTTPException(500, f"upload-pack failed: {e}")
         return Response(
             content=out,
             media_type="application/x-git-upload-pack-result",
@@ -5906,30 +5935,37 @@ def create_mesh_app(
     async def drive_receive_pack(team_id: str, request: Request) -> Response:
         """git push data channel (write path): quota pre-check + push cap.
 
-        The quota check runs BEFORE the pack lands, so a single overshoot
-        is bounded by the per-push cap (documented tradeoff — the repo
-        can end at most one push over quota, then blocks).
+        The category semaphore bounds concurrent packs in mesh RAM; the
+        per-repo lock serializes the quota-check → receive-pack →
+        cache-invalidate window for THIS repo, so concurrent pushes to the
+        same drive can overshoot the quota by at most a single push (then
+        the next serialized push is rejected). Different repos still push
+        in parallel under the semaphore.
         """
         caller, privileged = _require_drive_access(team_id, request)
         await _check_rate_limit("drive", caller)
-        repo = _drive_repo(team_id)
+        repo = await _drive_repo(team_id)
         push_cap = limits_mod.resolve("drive_push_max_mb") * _MB
         quota = limits_mod.resolve("drive_quota_mb") * _MB
-        size = await _drive_size(repo)
-        if size > quota:
-            raise HTTPException(
-                413,
-                f"Team Drive quota exceeded ({size // _MB} MB used, quota {quota // _MB} MB). "
-                "Prune large files/history or ask the operator to raise OPENLEGION_DRIVE_QUOTA_MB.",
-            )
-        body = await _drive_rpc_body(request, push_cap)
-        if len(body) > push_cap:
-            raise HTTPException(413, f"push exceeds the {push_cap // _MB} MB per-push cap")
-        try:
-            out = await team_drive.service_rpc("git-receive-pack", repo, body, privileged=privileged)
-        except team_drive.DriveError as e:
-            raise HTTPException(500, f"receive-pack failed: {e}")
-        _drive_size_cache.pop(str(repo), None)
+        async with app.state.drive_concurrency:
+            async with _drive_repo_lock(team_id):
+                size = await _drive_size(repo)
+                if size > quota:
+                    raise HTTPException(
+                        413,
+                        f"Team Drive quota exceeded ({size // _MB} MB used, quota {quota // _MB} MB). "
+                        "Prune large files/history or ask the operator to raise OPENLEGION_DRIVE_QUOTA_MB.",
+                    )
+                body = await _drive_rpc_body(request, push_cap)
+                if len(body) > push_cap:
+                    raise HTTPException(413, f"push exceeds the {push_cap // _MB} MB per-push cap")
+                try:
+                    out = await team_drive.service_rpc(
+                        "git-receive-pack", repo, body, privileged=privileged
+                    )
+                except team_drive.DriveError as e:
+                    raise HTTPException(500, f"receive-pack failed: {e}")
+                _drive_size_cache.pop(str(repo), None)
         blackboard.log_audit(
             action="drive_push",
             actor=caller,
@@ -5957,12 +5993,14 @@ def create_mesh_app(
             raise HTTPException(400, "main is the integration target — submit a feature branch")
         if not title:
             raise HTTPException(400, "title is required")
-        repo = _drive_repo(team_id)
+        repo = await _drive_repo(team_id)
         loop = asyncio.get_running_loop()
-        exists = await loop.run_in_executor(None, team_drive.branch_exists, repo, branch)
-        if not exists:
+        head_sha = await loop.run_in_executor(None, team_drive.branch_head_sha, repo, branch)
+        if not head_sha:
             raise HTTPException(400, f"branch '{branch}' does not exist on the Team Drive — push it first")
-        review = teams_store.create_review(team_id, branch, caller, title, summary)
+        # Pin the reviewed tip so the merge integrates this EXACT commit even
+        # if the worker advances the branch after approval (TOCTOU guard).
+        review = teams_store.create_review(team_id, branch, caller, title, summary, head_sha=head_sha)
         blackboard.log_audit(
             action="drive_review_submit",
             actor=caller,
@@ -5992,25 +6030,60 @@ def create_mesh_app(
             raise HTTPException(409, f"Review '{review_id}' is already {review['status']}")
         return review
 
+    def _drive_review_for_team(team_id: str, review_id: str) -> dict:
+        """Existence + team-match gate (no status check — the atomic claim
+        owns the status transition)."""
+        if not teams_store.team_exists(team_id):
+            raise HTTPException(404, f"Team '{team_id}' not found")
+        review = teams_store.get_review(review_id)
+        if review is None or review["team_id"] != team_id:
+            raise HTTPException(404, f"Review '{review_id}' not found for team '{team_id}'")
+        return review
+
     @app.post("/mesh/teams/{team_id}/drive/reviews/{review_id}/merge")
     async def drive_merge_review(team_id: str, review_id: str, request: Request) -> dict:
         """Integrate a reviewed branch into main (operator-or-internal).
 
-        Mesh-side ``git merge-tree --write-tree`` + a compare-and-swap
-        ``update-ref`` — content conflicts and CAS races both 409.
+        Claim-first and atomic: the review is transitioned ``open→merging``
+        in the store BEFORE any git side effect (a lost claim 409s and runs
+        no git, so two merges can't both push and a stray empty merge commit
+        can't land). The reviewed tip (``head_sha``) is re-verified against
+        the live branch — a post-approval advance 409s "resubmit"; a deleted
+        branch 409s cleanly. The EXACT reviewed commit is then merged via
+        mesh-side ``git merge-tree --write-tree`` + a compare-and-swap
+        ``update-ref``. Any git failure reverts ``merging→open``; content
+        conflicts and CAS races 409.
         """
         _require_operator_or_internal(request)
         caller = _extract_verified_agent_id(request)
         await _check_rate_limit("drive", caller)
-        review = _drive_open_review_or_error(team_id, review_id)
-        repo = _drive_repo(team_id)
+        _drive_review_for_team(team_id, review_id)
+        # Atomic claim: open → merging BEFORE any git side effect.
+        try:
+            review = teams_store.claim_review_for_merge(review_id)
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        branch = review["branch"]
+        recorded_sha = review["head_sha"]
+        loop = asyncio.get_running_loop()
         message = (
             f"Merge review {review_id}: {review['title']} "
-            f"(branch {review['branch']}, by {review['author']})"
+            f"(branch {branch}, by {review['author']})"
         )
+        # Everything from here to the git merge landing on main must revert
+        # the claim on ANY failure — otherwise the row wedges in 'merging'.
         try:
-            commit = await team_drive.merge_branch(repo, review["branch"], message=message)
+            repo = await _drive_repo(team_id)
+            live_sha = await loop.run_in_executor(None, team_drive.branch_head_sha, repo, branch)
+            if not live_sha:
+                raise HTTPException(409, f"branch '{branch}' was deleted; resubmit the review")
+            if recorded_sha and live_sha != recorded_sha:
+                raise HTTPException(409, "branch changed since review — resubmit")
+            # Merge the pinned reviewed commit (fall back to the live tip for
+            # legacy rows created before head_sha existed).
+            commit = await team_drive.merge_branch(repo, recorded_sha or live_sha, message=message)
         except team_drive.MergeConflict as e:
+            teams_store.revert_merge_claim(review_id)
             raise HTTPException(
                 409,
                 {
@@ -6024,21 +6097,29 @@ def create_mesh_app(
                 },
             )
         except team_drive.RefMoved as e:
+            teams_store.revert_merge_claim(review_id)
             raise HTTPException(409, str(e))
         except team_drive.DriveError as e:
+            teams_store.revert_merge_claim(review_id)
             raise HTTPException(500, f"merge failed: {e}")
+        except HTTPException:
+            teams_store.revert_merge_claim(review_id)
+            raise
+        # The merge landed on main; finalize merging → merged.
         try:
-            resolved = teams_store.resolve_review(review_id, "merged", reviewer=caller, merge_commit=commit)
+            resolved = teams_store.finalize_merge(review_id, commit, reviewer=caller)
         except ValueError as e:
-            # The ref moved under us via a concurrent resolve — the merge
-            # commit is on main; surface the state honestly.
+            # The row moved out from under us (should not happen — reject
+            # can't touch a merging row); the commit IS on main, so surface
+            # the divergence honestly rather than claim a clean merge. Do
+            # NOT revert here — main is already integrated.
             raise HTTPException(409, str(e))
         _drive_size_cache.pop(str(repo), None)
         blackboard.log_audit(
             action="drive_review_merge",
             actor=caller,
             target=team_id,
-            field=review["branch"],
+            field=branch,
             after_value=commit,
             provenance="user",
         )
