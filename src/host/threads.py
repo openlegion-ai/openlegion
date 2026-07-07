@@ -70,6 +70,12 @@ EVENT_INFO_WINDOW_SECONDS = 86_400  # 24 hours
 # this phase.
 EVENT_RETENTION_SECONDS = 90 * 86_400
 
+# Hard bound for one ``list_events_for`` call: the SQL LIMIT caps the
+# rows scanned (newest-first) BEFORE the Python dedupe pass, and the
+# returned list is sliced to the same bound. Well past anything a real
+# fleet produces inside the serving windows.
+EVENT_QUERY_LIMIT = 500
+
 # Caps. Body text is truncated (with a visible notice); an oversized
 # payload is REPLACED with a truncation marker because a truncated JSON
 # document is worse than no document.
@@ -257,6 +263,14 @@ class ThreadStore:
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (tid, scope_id, kind, title, task_id, created_by, now, now),
             )
+            # Revive an archived row: ensure_* against a recreated team
+            # (or a DM pair re-messaging after a team delete) must
+            # resurface the live thread, not leave callers pointing at
+            # archived history.
+            conn.execute(
+                "UPDATE threads SET archived = 0 WHERE id = ? AND archived = 1",
+                (tid,),
+            )
         return self.get_thread(tid)  # type: ignore[return-value]
 
     def get_thread(self, thread_id: str) -> dict | None:
@@ -382,7 +396,12 @@ class ThreadStore:
                 (thread_id, sender, recipient, kind, body, payload_json, now),
             )
             message_id = cur.lastrowid
-            conn.execute("UPDATE threads SET updated_at = ? WHERE id = ?", (now, thread_id))
+            # New traffic un-archives the thread: a DM row landing after
+            # a team delete makes the conversation visible again.
+            conn.execute(
+                "UPDATE threads SET updated_at = ?, archived = 0 WHERE id = ?",
+                (now, thread_id),
+            )
         self._safe_emit(
             "thread_message",
             agent=sender,
@@ -451,12 +470,25 @@ class ThreadStore:
     ) -> list[dict]:
         """Serve the back-edge event envelopes addressed to ``recipient``.
 
-        The former blackboard TTL split is applied here as query
-        windows: actionable payload kinds (``task_failed`` /
-        ``task_blocked``) surface for ``actionable_window`` (7 days);
-        everything else (``task_completed`` / ``task_cancelled``) for
-        ``info_window`` (24 hours). Returns newest-first envelope dicts
-        (the stored payload + ``id`` / ``thread_id`` / ``created_at``).
+        The old blackboard back-edge was an UPSERT per (recipient,
+        task): one event per task, latest transition wins, and the
+        surviving row's window was re-classified on every overwrite.
+        The append model stores every transition, so this read restores
+        overwrite semantics: only the NEWEST row per task thread
+        survives (dedupe key = the task-scoped thread id; non-task
+        threads fall back to the message id, i.e. no dedupe), and the
+        window classification applies to that surviving row only — a
+        later informational transition (``task_completed`` after
+        ``task_blocked``) silences the stale actionable event and ages
+        out at 24h.
+
+        The former TTL split is applied as query windows: actionable
+        payload kinds (``task_failed`` / ``task_blocked``) surface for
+        ``actionable_window`` (7 days); everything else
+        (``task_completed`` / ``task_cancelled``) for ``info_window``
+        (24 hours). Returns newest-first envelope dicts (the stored
+        payload + ``id`` / ``thread_id`` / ``created_at``), hard-capped
+        at :data:`EVENT_QUERY_LIMIT`.
         """
         self._safe_reap()
         now = time.time()
@@ -465,13 +497,22 @@ class ThreadStore:
             rows = conn.execute(
                 f"SELECT {self._MESSAGE_COLS} FROM thread_messages "
                 "WHERE recipient = ? AND kind = 'event' AND created_at >= ? "
-                "ORDER BY created_at DESC, id DESC",
-                (recipient, cutoff),
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (recipient, cutoff, EVENT_QUERY_LIMIT),
             ).fetchall()
         events: list[dict] = []
+        seen: set[str] = set()
         info_cutoff = now - info_window
-        for r in rows:
+        for r in rows:  # newest-first — the first row per key wins
             msg = self._row_to_message(r)
+            thread_id = str(msg["thread_id"] or "")
+            key = thread_id if thread_id.startswith("task:") else f"msg:{msg['id']}"
+            if key in seen:
+                continue
+            # Mark BEFORE the window check: an aged-out newest row must
+            # still shadow the task's older transitions (overwrite
+            # semantics), not let a stale actionable event resurface.
+            seen.add(key)
             payload = msg["payload"] if isinstance(msg["payload"], dict) else {}
             if payload.get("kind") not in ACTIONABLE_EVENT_KINDS and (msg["created_at"] or 0) < info_cutoff:
                 continue
@@ -480,7 +521,7 @@ class ThreadStore:
             envelope["thread_id"] = msg["thread_id"]
             envelope["created_at"] = msg["created_at"]
             events.append(envelope)
-        return events
+        return events[:EVENT_QUERY_LIMIT]
 
     # ── reaper ───────────────────────────────────────────────────
 

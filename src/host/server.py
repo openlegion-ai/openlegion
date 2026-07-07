@@ -907,16 +907,23 @@ def create_mesh_app(
 
     # Boot backfill: every team gets a channel thread + thread_ref.
     # Covers teams created before this unit landed and any create path
-    # that predates the endpoint-layer hook. Best-effort per team.
+    # that predates the endpoint-layer hook. Best-effort PER TEAM — one
+    # bad team must not abandon the rest of the fleet's channels.
     try:
         # Archived teams excluded: their threads are archived history —
         # a channel is created (or restored) only for live teams.
-        for _team_id, _team in teams_store.list_teams(include_archived=False).items():
-            if not _team.get("thread_ref"):
-                _ch = thread_store.ensure_channel(_team_id)
-                teams_store.set_thread_ref(_team_id, _ch["id"])
+        _teams_for_backfill = teams_store.list_teams(include_archived=False)
     except Exception as e:
-        logger.warning("team channel-thread backfill failed: %s", e)
+        logger.warning("team channel-thread backfill failed to list teams: %s", e)
+        _teams_for_backfill = {}
+    for _team_id, _team in _teams_for_backfill.items():
+        if _team.get("thread_ref"):
+            continue
+        try:
+            _ch = thread_store.ensure_channel(_team_id)
+            teams_store.set_thread_ref(_team_id, _ch["id"])
+        except Exception as e:
+            logger.warning("channel-thread backfill for team %s failed: %s", _team_id, e)
 
     def _caller_teams(agent_id: str) -> set[str]:
         """Return the team memberships visible to ``agent_id``.
@@ -1071,6 +1078,11 @@ def create_mesh_app(
         # flooded lane is independent of blackboard writes. Generous since
         # legitimate handoff chains wake many agents.
         "wake": (3000, 60),
+        # Direct agent→agent messaging through the router. Every routed
+        # message now lands a durable thread row (Team Threads), so a
+        # runaway message loop is a disk-write loop too — its own
+        # bucket caps it independently of wake/blackboard traffic.
+        "message": (300, 60),
         "publish": (20000, 60),
         "notify": (3000, 60),
         "cron_create": (1000, 60),
@@ -1594,6 +1606,7 @@ def create_mesh_app(
                     gate="message:can_message",
                 )
                 raise HTTPException(403, f"Agent {msg.from_agent} cannot message {msg.to}")
+        await _check_rate_limit("message", msg.from_agent)
         return await router.route(msg)
 
     @app.post("/mesh/wake")
@@ -8615,11 +8628,16 @@ def create_mesh_app(
                 "Task events are readable by the agent itself or the operator only",
             )
         if agent_id != "operator" and agent_id not in router.agent_registry:
-            available = ", ".join(sorted(router.agent_registry))
-            raise HTTPException(
-                404,
-                f"Agent '{agent_id}' not found. Available: {available}",
-            )
+            # Roster disclosure is operator/internal-only: a worker
+            # probing an unknown id (only reachable as a self-read for
+            # an unregistered-but-authed agent) gets a bare 404.
+            if _caller_is_operator(caller, request) or _is_internal_caller(request):
+                available = ", ".join(sorted(router.agent_registry))
+                raise HTTPException(
+                    404,
+                    f"Agent '{agent_id}' not found. Available: {available}",
+                )
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
         events = thread_store.list_events_for(agent_id)
         return {"agent_id": agent_id, "events": events, "count": len(events)}
 

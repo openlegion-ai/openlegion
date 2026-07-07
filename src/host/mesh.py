@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from src.shared.redaction import deep_redact
 from src.shared.sqlite_helpers import open_db
 from src.shared.types import AgentMessage, BlackboardEntry
 from src.shared.utils import dumps_safe, setup_logging
@@ -823,19 +824,30 @@ class MessageRouter:
             try:
                 sender_team = self.team_resolver(message.from_agent) if self.team_resolver else None
                 scope = sender_team or message.from_agent
-                th = self.thread_store.ensure_dm_thread(scope, message.from_agent, message.to)
-                preview = _truncate_preview(dumps_safe(message.payload or {}))
-                self.thread_store.post_message(
-                    th["id"],
-                    message.from_agent,
-                    recipient=message.to,
-                    body=f"[{message.type}] {preview}",
-                    payload={
-                        "type": message.type,
-                        "message_id": message.id,
-                        "payload": message.payload,
-                    },
-                )
+                # Shared redaction over the payload AND the derived body
+                # preview — routed traffic can quote credential-bearing
+                # headers/URLs that must never persist in the durable
+                # thread record.
+                safe_payload = deep_redact(message.payload or {})
+                preview = _truncate_preview(dumps_safe(safe_payload))
+
+                def _record_dm() -> None:
+                    th = self.thread_store.ensure_dm_thread(scope, message.from_agent, message.to)
+                    self.thread_store.post_message(
+                        th["id"],
+                        message.from_agent,
+                        recipient=message.to,
+                        body=f"[{message.type}] {preview}",
+                        payload={
+                            "type": message.type,
+                            "message_id": message.id,
+                            "payload": safe_payload,
+                        },
+                    )
+
+                # Off-loop: SQLite's busy_timeout (up to 30s under
+                # contention) must never stall the mesh event loop.
+                await asyncio.get_running_loop().run_in_executor(None, _record_dm)
             except Exception as e:
                 logger.warning(
                     "thread record for %s->%s failed: %s",

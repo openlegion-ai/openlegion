@@ -39,8 +39,9 @@ from src.shared.utils import setup_logging
 logger = setup_logging("host.user_notifications")
 
 # Retention window — rows older than this are reaped on the next write.
-# 7 days matches the back-edge ``task_event`` inbox TTL (the other
-# "diagnostic breadcrumb" surface the operator reads).
+# 7 days matches ``threads.EVENT_ACTIONABLE_WINDOW_SECONDS`` — the
+# back-edge event serving window (the other "diagnostic breadcrumb"
+# surface the operator reads).
 RETENTION_SECONDS = 7 * 86400
 
 

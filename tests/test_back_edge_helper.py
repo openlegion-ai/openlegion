@@ -516,6 +516,66 @@ class TestBackEdgeServingWindows:
         assert payload["blocker_note"] == "need creds"
 
 
+class TestBackEdgeMultiplicity:
+    """Overwrite semantics restored read-side: the old blackboard
+    back-edge was an upsert per (recipient, task) — one event per task,
+    latest transition wins. The append model must serve the same."""
+
+    def test_blocked_then_done_serves_one_informational(
+        self, mesh_app_with_back_edge,
+    ):
+        app, thread_store, _lane, _loop = mesh_app_with_back_edge
+
+        app._write_task_event_back_edge(
+            _record("task_multi_1", status="blocked"),
+            event_kind="task_blocked",
+            payload_extras={"blocker_note": "stuck"},
+        )
+        app._write_task_event_back_edge(
+            _record("task_multi_1", status="done"),
+            event_kind="task_completed",
+            payload_extras={"summary": "recovered"},
+        )
+        _settle()
+
+        events = [
+            e for e in _events_for(thread_store, "scout")
+            if e.get("task_id") == "task_multi_1"
+        ]
+        # Exactly ONE event — the later informational transition
+        # silences the stale actionable one.
+        assert [e["kind"] for e in events] == ["task_completed"]
+
+        # ...and it ages out on the 24h informational window without
+        # resurfacing the shadowed task_blocked row.
+        _age_event(thread_store, "task_multi_1", 86_400 + 60)
+        assert not any(
+            e.get("task_id") == "task_multi_1"
+            for e in _events_for(thread_store, "scout")
+        )
+
+    def test_repeated_failures_serve_one_task_failed(
+        self, mesh_app_with_back_edge,
+    ):
+        app, thread_store, _lane, _loop = mesh_app_with_back_edge
+
+        for err in ("first", "retry"):
+            app._write_task_event_back_edge(
+                _record("task_multi_2", status="failed"),
+                event_kind="task_failed",
+                payload_extras={"error": err},
+            )
+        _settle()
+
+        events = [
+            e for e in _events_for(thread_store, "scout")
+            if e.get("task_id") == "task_multi_2"
+        ]
+        assert len(events) == 1
+        assert events[0]["kind"] == "task_failed"
+        assert events[0]["error"] == "retry"  # newest transition wins
+
+
 class TestOperatorRecoveryWakeGlobalThrottle:
     def test_mass_failure_storm_caps_wakes_but_writes_all_events(
         self, mesh_app_with_back_edge,

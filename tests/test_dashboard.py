@@ -3269,6 +3269,43 @@ class TestDashboardProjectCRUD:
         resp = self.client.delete("/dashboard/api/teams/ghost")
         assert resp.status_code == 404
 
+    def test_create_team_creates_channel_thread(self):
+        """POST /api/teams mirrors the mesh path: channel thread created
+        and the team row's thread_ref points at it."""
+        from pathlib import Path
+        with patch("src.cli.config.CONFIG_FILE", Path(self._config_file)), \
+             patch("src.cli.config.AGENTS_FILE", Path(self._agents_file)), \
+             patch("src.cli.config.PERMISSIONS_FILE", Path(self._tmpdir) / "perms.json"):
+            resp = self.client.post("/dashboard/api/teams", json={
+                "name": "threaded",
+                "description": "",
+                "members": [],
+            })
+        assert resp.status_code == 200
+        team = self.components["teams_store"].get_team("threaded")
+        assert team["thread_ref"] == "channel:threaded"
+        ch = self.components["thread_store"].get_thread("channel:threaded")
+        assert ch is not None
+        assert ch["kind"] == "channel"
+        assert ch["scope_id"] == "threaded"
+
+    def test_delete_team_archives_threads(self):
+        """DELETE /api/teams/{name} mirrors the mesh path: the team's
+        threads are ARCHIVED (audit trail), never deleted."""
+        from pathlib import Path
+
+        ts = self.components["thread_store"]
+        self.components["teams_store"].create_team("doomed")
+        ts.ensure_channel("doomed")
+
+        with patch("src.cli.config.PERMISSIONS_FILE", Path(self._tmpdir) / "perms.json"):
+            resp = self.client.delete("/dashboard/api/teams/doomed")
+        assert resp.status_code == 200
+        assert ts.list_threads(scope_id="doomed") == []
+        archived = ts.list_threads(scope_id="doomed", include_archived=True)
+        assert [t["id"] for t in archived] == ["channel:doomed"]
+        assert archived[0]["archived"] is True
+
     def test_add_member(self):
         """POST /api/teams/{name}/members adds an agent to the team."""
         from pathlib import Path

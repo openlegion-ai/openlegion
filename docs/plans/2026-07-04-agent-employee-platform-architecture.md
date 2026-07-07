@@ -896,6 +896,24 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
      informational, never parsed.
   3. Window filtering happens at read time, so observability (the task thread) keeps
      the full 90-day event record while check_inbox stays bounded.
+  4. **Adversarial-review fix — event multiplicity regression.** The old blackboard
+     back-edge was an UPSERT per (recipient, task): one event per task, latest
+     transition wins, window re-classified on overwrite. The initial append model
+     served EVERY transition for 7 days. Caught in adversarial review; fixed via
+     read-side newest-per-task dedupe in `list_events_for` (dedupe key = the
+     task-scoped thread id, window classification on the surviving row only, SQL
+     LIMIT 500 newest-first) — restoring overwrite semantics exactly.
+  5. **✎ Deviation:** the boot backfill skips ARCHIVED teams (deliberate — their
+     threads are archived history; a channel is created/restored only for live teams).
+  6. **REJECTED finding:** no blackboard→threads migration for in-flight
+     `inbox/*/task_event/*` events, per the ratified no-compat mandate (§8 #4 and the
+     Phase-1 "clean-slate deploys only" precedent) — a deploy mid-window drops
+     undelivered back-edge events once, by design.
+  7. **ACCEPTED with documentation:** (a) the dashboard tier's cookie-optional
+     self-hosted posture now fronts thread CONTENT via `/api/threads*` — a
+     pre-existing gate (flagged for the security ledger, not a Phase-2 regression);
+     (b) DM thread `scope_id` is first-writer-wins (sender's team at first message) —
+     observability-only, but `archive_scope` can miss operator-initiated DM threads.
 
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
@@ -920,17 +938,20 @@ collision guard + no worker read wildcard), and TEAM.md is capped. Phase-exit ch
 
 Next, in order:
 1. **Phase-2 pre-decisions** (decide BEFORE building, like C.3-b was):
-   (a) **C.3-a — Threads vs the inbox event feed**: does Team Threads REPLACE
-   `inbox/{agent}/task_event/` or coexist? Recommendation stands at replace (one event
-   surface); if replace, delete the blackboard back-edge path and repoint `check_inbox`.
+   (a) ~~**C.3-a — Threads vs the inbox event feed**: does Team Threads REPLACE
+   `inbox/{agent}/task_event/` or coexist?~~ **DONE** — ratified REPLACE (§8 #8,
+   2026-07-07) and executed in Phase-2 unit 2 (blackboard back-edge path deleted,
+   `check_inbox` repointed; see the landed entry above).
    (e) **C.3-e — SandboxBackend**: it has no shared-volume analog for Team Drive/Scratch
    (B-pre #6) — invest in a microVM sync layer, or delete the backend and commit to
    Docker. Do not leave it half-supporting the flagship feature.
    Also revisit §8 #1 (raw shared scratch stays deferred; git-Drive-first is the default).
 2. **Phase 2 — collaboration substrate** (§6): Team Drive (git, mesh-mediated),
-   Team Threads (durable store replacing `MessageRouter.message_log`, B-pre #4),
+   Team Threads (**DONE** — Phase-2 unit 2; durable store replaced
+   `MessageRouter.message_log`, B-pre #4),
    `ask_teammate`, provenance tier; blackboard → signals only (respect B8's rider list).
    The volume lifecycle owner now exists (the TeamStore — A.3 #3 satisfied).
+   (Full YOU-ARE-HERE advance happens at phase end.)
 3. **Then Phases 3–5** as sequenced in §6 (B1 reframe for Phase 3's "dual lanes" —
    priority steer, NOT parallel; B2 spend split gates the suppression removal;
    B3 scope for Phase 5 hibernation). Personnel-file *import* still needs B-pre #2's

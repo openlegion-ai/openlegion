@@ -46,8 +46,9 @@ _TERMINAL_STATES: frozenset[str] = frozenset({"done", "failed", "cancelled"})
 
 # Cap on back-edge events returned by ``check_inbox``. The operator is the
 # originator of nearly every workflow, so on a busy fleet the back-edge
-# event list (7-day TTL, never pruned by the call) can grow to hundreds of
-# entries and flood the LLM context (~80k-170k tokens) on every heartbeat.
+# event list (7-day actionable serving window (mesh-side), never pruned by
+# the call) can grow to hundreds of entries and flood the LLM context
+# (~80k-170k tokens) on every heartbeat.
 # Actionable kinds (task_failed / task_blocked) are NEVER dropped; the cap
 # only evicts the newest-surviving informational events.
 _MAX_INBOX_EVENTS = 25
@@ -594,7 +595,8 @@ async def check_inbox(*, mesh_client=None) -> dict:
 
     # Bound the event list before returning. The operator originates almost
     # every workflow, so without a cap this list grows to hundreds of entries
-    # (7-day TTL) and re-floods the LLM context on every heartbeat. Actionable
+    # (7-day actionable serving window, mesh-side) and re-floods the LLM
+    # context on every heartbeat. Actionable
     # events (task_failed / task_blocked) must NEVER be dropped; informational
     # events (task_completed / task_cancelled) are evicted oldest-first to make
     # room. Within the returned list, actionable events come first (newest

@@ -5688,6 +5688,15 @@ def create_dashboard_router(
             # Refresh the LIVE matrix so the new members' team patterns
             # apply immediately (disk writes alone wait for a restart).
             permissions.reload()
+        # Team channel thread (Phase-2 Team Threads): mirror the mesh
+        # create path — best-effort; a thread hiccup must not fail team
+        # creation, and the boot backfill catches a NULL thread_ref.
+        if thread_store is not None:
+            try:
+                _channel = thread_store.ensure_channel(name)
+                teams_store.set_thread_ref(name, _channel["id"])
+            except Exception as e:
+                logger.warning("channel thread create for team %s failed: %s", name, e)
         # Real-time cron lifecycle: schedule the daily work-summary
         # for the newly-created team. Without this, dashboard-created
         # teams went without a live cron until the next mesh restart
@@ -5735,6 +5744,17 @@ def create_dashboard_router(
             _remove_team_blackboard_permissions(agent, team_name)
         if former_members:
             permissions.reload()
+        # Archive (never delete — audit trail) the team's threads,
+        # mirroring the mesh delete path. Best-effort.
+        if thread_store is not None:
+            try:
+                thread_store.archive_scope(team_name)
+            except Exception as e:
+                logger.warning(
+                    "thread archive on dashboard team-delete %s failed: %s",
+                    team_name,
+                    e,
+                )
         # Real-time cron lifecycle: drop the daily work-summary cron
         # for the deleted team. The mesh propose/confirm delete path
         # already does this; the dashboard direct-delete had to mirror

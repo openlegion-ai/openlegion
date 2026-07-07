@@ -1089,6 +1089,37 @@ async def test_router_records_solo_sender_under_own_scope():
 
 
 @pytest.mark.asyncio
+async def test_router_redacts_secrets_in_thread_record():
+    """B-fix: shared redaction runs over the payload AND the derived body
+    preview before the durable dm row is written — an Authorization
+    header or credential-bearing URL must never persist in threads.db."""
+    from src.host.threads import ThreadStore
+    from src.shared.types import AgentMessage
+
+    store = ThreadStore(":memory:")
+    router = _dm_router(thread_store=store)
+    router._get_client = _make_async_returner(_FakeDeliveryClient())
+
+    payload = {
+        "headers": {"Authorization": "Bearer sk-supersecrettoken12345678"},
+        "url": "https://svc:hunter2pass@api.example.com/v1?api_key=tok12345",
+    }
+    result = await router.route(
+        AgentMessage(from_agent="alice", to="bob", type="query", payload=payload)
+    )
+    assert result == {"ok": True}
+
+    (row,) = store.list_messages("dm:alice:bob")
+    stored = json.dumps(row["payload"]) + (row["body"] or "")
+    assert "sk-supersecrettoken12345678" not in stored
+    assert "hunter2pass" not in stored
+    assert "tok12345" not in stored
+    # The record is redacted, not dropped — shape survives.
+    assert row["payload"]["payload"]["headers"]["Authorization"].startswith("Bearer ")
+    store.close()
+
+
+@pytest.mark.asyncio
 async def test_router_thread_store_failure_does_not_block_delivery():
     """A thread-store hiccup is best-effort — the message still routes."""
     from unittest.mock import MagicMock
