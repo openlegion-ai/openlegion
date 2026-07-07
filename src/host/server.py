@@ -5641,6 +5641,11 @@ def create_mesh_app(
                 if old and old != name:
                     _remove_team_blackboard_permissions(agent, old)
                 _add_team_blackboard_permissions(agent, name)
+            if members:
+                # ACL writes land on disk; refresh the LIVE matrix so the
+                # new members' team patterns apply to the very next
+                # blackboard/pubsub call (not at the next mesh restart).
+                permissions.reload()
         # Real-time cron lifecycle: schedule the daily work-summary
         # fire on team creation so the operator doesn't have to wait
         # for the next mesh restart for the reconcile to pick it up.
@@ -5698,6 +5703,7 @@ def create_mesh_app(
         if old and old != team_name:
             _remove_team_blackboard_permissions(agent, old)
         _add_team_blackboard_permissions(agent, team_name)
+        permissions.reload()
         return {"added": True, "team_id": team_name, "team_name": team_name, "agent": agent}
 
     @app.delete("/mesh/teams/{team_name}/members/{agent}")
@@ -5712,6 +5718,7 @@ def create_mesh_app(
             raise HTTPException(400, f"Team '{team_name}' not found")
         teams_store.remove_member(team_name, agent)
         _remove_team_blackboard_permissions(agent, team_name)
+        permissions.reload()
         return {"removed": True, "team_id": team_name, "team_name": team_name, "agent": agent}
 
     @app.delete("/mesh/teams/{team_name}")
@@ -5728,6 +5735,8 @@ def create_mesh_app(
             raise HTTPException(404, str(e))
         for agent in former_members:
             _remove_team_blackboard_permissions(agent, team_name)
+        if former_members:
+            permissions.reload()
         # Real-time cron lifecycle: drop the daily work-summary cron
         # for the deleted team. This is the mesh DIRECT-delete path
         # (distinct from the propose/confirm flow, which also cleans
@@ -7717,7 +7726,10 @@ def create_mesh_app(
         except TeamNotFound:
             raise HTTPException(404, f"Team '{team_name}' not found")
         _emit_team_event(
-            event_bus, "team_updated", agent="operator", name=team_name,
+            event_bus,
+            "team_updated",
+            agent="operator",
+            name=team_name,
             extra={"field": "budget"},
         )
         return {
@@ -8275,6 +8287,8 @@ def create_mesh_app(
                 raise HTTPException(404, f"Team '{target_id}' no longer exists")
             for agent in former_members:
                 _remove_team_blackboard_permissions(agent, target_id)
+            if former_members:
+                permissions.reload()
             # Real-time cron lifecycle (codex r1 P2): delete the
             # daily work-summary cron when the team itself is
             # deleted. Symmetric to the archive path; archive already

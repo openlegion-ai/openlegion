@@ -359,8 +359,11 @@ class TestCreateCustomAgent:
         on_disk = _json.loads(perms_path.read_text())
         agent_perms = on_disk["permissions"]["freshie"]
 
-        # Blackboard reads — wildcard so the agent can discover any topic.
-        assert "*" in agent_perms["blackboard_read"]
+        # Blackboard reads — the private team-of-one pattern ONLY (ratified
+        # #5 review fix: no worker starts with a read wildcard; the host
+        # ACL is the read boundary and joins add team patterns).
+        assert agent_perms["blackboard_read"] == ["teams/freshie/*"]
+        assert "*" not in agent_perms["blackboard_read"]
 
         # Blackboard writes — five coordination namespaces.
         write = set(agent_perms["blackboard_write"])
@@ -388,7 +391,7 @@ class TestCreateCustomAgent:
         perms = mesh_app["perms"]
         perms.reload()
         live = perms.get_permissions("freshie")
-        assert "*" in live.blackboard_read
+        assert live.blackboard_read == ["teams/freshie/*"]
         assert "tasks/*" in live.blackboard_write
         # Full default capability set: browser + internet + schedules ON,
         # wallet OFF (parity with the human `_create_agent` path).

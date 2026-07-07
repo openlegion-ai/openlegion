@@ -671,6 +671,37 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   pre-merge (the read tool was blocked outright); the inline brief remains the
   functioning channel. CLAUDE.md (teams.py row + blackboard tradeoff bullet) and
   docs/architecture.md + docs/security.md updated in lockstep.
+  **Adversarial review (security + correctness lenses) — 5 findings, all fixed pre-PR:**
+  (1) [security, MEDIUM] fresh no-template creates carried `blackboard_read: ["*"]`
+  from `_DEFAULT_AGENT_COORDINATION_PERMS` — with the client-side guards deleted, a
+  never-teamed solo held HOST-level fleet-wide reads (strictly wider than a team
+  member, whose join strips `*`; the isolation test fixture masked it by hand-writing
+  narrowed ACLs). Fixed three ways: the default no longer ships a read wildcard, the
+  create merge strips `*` from workers' blackboard fields (defense vs future
+  templates), and the boot backfill narrows the untouched pre-#5 default shapes
+  (["*"] / ["*"]+self) while never touching human-customized lists; fixture rewritten
+  to pin the REAL create-path posture. (2) [correctness, MEDIUM] ephemeral `spawn-*`
+  agents (no permissions.json entry → deny-all default record) got working blackboard
+  TOOLS but 403-only ACLs. Fixed structurally: the self namespace is now a
+  RESOLUTION-TIME carve-out (`PermissionMatrix._is_own_namespace` — an agent can
+  always touch `teams/{its-own-id}/`, sound because of the collision guard, zero
+  shared reach), covering spawn agents, legacy rows, and mid-rewrite windows by
+  construction; the boot backfill became additive ("self always" without narrowing
+  custom patterns), also closing (3) [MEDIUM-LOW] legacy teamless template agents
+  with non-empty pre-#5 ACLs that the empty-only backfill skipped. (4) [MEDIUM]
+  membership ACL rewires were disk-only — no `permissions.reload()` on any of the
+  nine mesh/dashboard membership endpoints, so a leaver kept live old-team access
+  until mesh restart; all nine now refresh the live matrix (pinned by a live-matrix
+  HTTP test). (5) [LOW] health-monitor/dashboard restarts rebuilt env without
+  TEAM_NAME → silent scope flip to the self namespace on restart; fixed at the
+  RUNTIME-BACKEND level (`set_team_env_provider`, the LLM_UTILITY_MODEL pattern) so
+  every start path — boot, REPL/health/dashboard restarts, spawn — resolves the
+  effective team identically; the per-caller env plumbing in cli/runtime was deleted.
+  Accepted with documentation: unified prompt text says "other agents" to a
+  team-of-one whose board reaches nobody (misdirects the LLM, no data risk — Phase 3's
+  agenda-loop prompt rewrite is the right home for per-audience text); pubsub gates,
+  pseudo-team roster resolution, operator carve-outs, and hand_off riders all
+  verified clean by both reviewers.
 
 ### YOU ARE HERE → next phase
 Foundation (#1180/#1181/#1183/#1184) and the rename (#1185) are merged. Phase 0's removal

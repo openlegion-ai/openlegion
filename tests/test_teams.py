@@ -285,6 +285,52 @@ class TestMeshTeamEndpoints:
         assert "teams/proj1/*" not in perms["permissions"]["agent1"]["blackboard_read"]
 
     @pytest.mark.asyncio
+    async def test_membership_change_applies_to_live_matrix(self, tmp_path, monkeypatch):
+        """Review F2: ACL rewires must hit the LIVE PermissionMatrix, not
+        just permissions.json — a join grants and a leave revokes team
+        access on the very next call, not at the next mesh restart."""
+        monkeypatch.chdir(tmp_path)
+        perms_file = _write_perms(
+            tmp_path,
+            {"agent1": {"blackboard_read": [], "blackboard_write": []}},
+        )
+        import src.cli.config as cli_cfg
+
+        monkeypatch.setattr(cli_cfg, "PERMISSIONS_FILE", perms_file)
+        import src.host.server as server_module
+
+        importlib.reload(server_module)
+        # Point the matrix at the SAME file the ACL helpers write, so
+        # reload() sees their changes (prod: both are config/permissions.json).
+        matrix = PermissionMatrix(config_path=str(perms_file))
+        router = MessageRouter(matrix, {"operator": "http://op:8400"})
+        blackboard = Blackboard(str(tmp_path / "bb.db"))
+        store = TeamStore(db_path=":memory:")
+        store.create_team("proj1")
+        app = server_module.create_mesh_app(
+            blackboard=blackboard,
+            pubsub=PubSub(),
+            router=router,
+            permissions=matrix,
+            teams_store=store,
+            auth_tokens={"operator": "op-token"},
+        )
+        try:
+            r = await _post(app, "/mesh/teams/proj1/members", {"agent": "agent1"})
+            assert r.status_code == 200
+            # LIVE matrix reflects the join immediately.
+            assert matrix.can_read_blackboard("agent1", "teams/proj1/x") is True
+            r = await _delete(app, "/mesh/teams/proj1/members/agent1")
+            assert r.status_code == 200
+            # ...and the leave. (Its own namespace stays reachable via the
+            # resolution-time self carve-out.)
+            assert matrix.can_read_blackboard("agent1", "teams/proj1/x") is False
+            assert matrix.can_read_blackboard("agent1", "teams/agent1/x") is True
+        finally:
+            blackboard.close()
+            importlib.reload(server_module)
+
+    @pytest.mark.asyncio
     async def test_remove_member_clears_permissions(self, team_app):
         app, store, perms_file, _ = team_app
         store.create_team("proj1")

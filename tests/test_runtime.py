@@ -20,6 +20,7 @@ from src.host.runtime import (
 
 # ── RuntimeBackend interface ──────────────────────────────────
 
+
 class TestRuntimeBackendInterface:
     def test_list_agents(self):
         class StubBackend(RuntimeBackend):
@@ -41,6 +42,7 @@ class TestRuntimeBackendInterface:
 
 # ── DockerBackend ─────────────────────────────────────────────
 
+
 class TestDockerBackend:
     def test_backend_name(self):
         assert DockerBackend.backend_name() == "docker"
@@ -50,6 +52,7 @@ class TestDockerBackend:
 #
 # Security findings H11 (token revocation on delete), H12 (data volume
 # wipe on delete) and M16 (token leak on failed mid-creation).
+
 
 class TestDockerBackendLifecycle:
     def _make_backend(self) -> DockerBackend:
@@ -149,6 +152,7 @@ class TestDockerBackendLifecycle:
 # [Errno 98] address already in use, never bound, and the whole instance
 # served 404s, self-perpetuating on every restart.
 
+
 class TestDockerBackendPortAllocator:
     def _make_backend(self, *, next_port: int = 8401, mesh_host_port: int = 8420) -> DockerBackend:
         backend = DockerBackend.__new__(DockerBackend)
@@ -199,6 +203,7 @@ class TestDockerBackendPortAllocator:
 
 
 # ── SandboxBackend ────────────────────────────────────────────
+
 
 class TestSandboxBackend:
     def test_backend_name(self):
@@ -265,8 +270,11 @@ class TestSandboxBackend:
         backend._workspace_root.mkdir(parents=True)
 
         ws = backend._prepare_workspace(
-            agent_id="solo", role="test", tools_dir="",
-            system_prompt="", model="",
+            agent_id="solo",
+            role="test",
+            tools_dir="",
+            system_prompt="",
+            model="",
         )
         assert not (ws / "TEAM.md").exists()
         assert not (ws / "PROJECT.md").exists()
@@ -413,6 +421,7 @@ class TestSandboxBackend:
 
 # ── sandbox_available detection ───────────────────────────────
 
+
 class TestSandboxDetection:
     def test_available_when_command_succeeds(self):
         mock_result = MagicMock()
@@ -432,6 +441,7 @@ class TestSandboxDetection:
 
 
 # ── select_backend ────────────────────────────────────────────
+
 
 class TestSelectBackend:
     def test_default_is_docker(self):
@@ -470,6 +480,7 @@ class TestSelectBackend:
         ):
             # Ensure OPENLEGION_HOST_NETWORK is not set
             import os
+
             os.environ.pop("OPENLEGION_HOST_NETWORK", None)
             mock_instance = MagicMock()
             MockDocker.return_value = mock_instance
@@ -492,11 +503,13 @@ class TestSelectBackend:
 
 # ── _should_use_host_network ─────────────────────────────────
 
+
 class TestShouldUseHostNetwork:
     def test_default_is_false(self):
         """Without env var, bridge networking is used."""
         with patch.dict("os.environ", {}, clear=False):
             import os
+
             os.environ.pop("OPENLEGION_HOST_NETWORK", None)
             assert _should_use_host_network() is False
 
@@ -519,6 +532,7 @@ class TestShouldUseHostNetwork:
 
 # ── _resolve_embedding / _embedding_providers_with_keys ──────
 
+
 class TestResolveEmbedding:
     def test_explicit_override_wins(self):
         # An explicit operator choice is honored even with other keys present.
@@ -537,7 +551,8 @@ class TestResolveEmbedding:
 
     def test_ladder_prefers_openai(self):
         assert _resolve_embedding(
-            None, {"openai", "voyage", "cohere"},
+            None,
+            {"openai", "voyage", "cohere"},
         ) == ("text-embedding-3-small", 1536)
 
     def test_no_keys_keyword_only(self):
@@ -550,7 +565,9 @@ class TestResolveEmbedding:
 class TestEmbeddingProvidersWithKeys:
     def test_detects_configured_key(self):
         with patch.dict(
-            "os.environ", {"OPENLEGION_SYSTEM_VOYAGE_API_KEY": "vk-test"}, clear=False,
+            "os.environ",
+            {"OPENLEGION_SYSTEM_VOYAGE_API_KEY": "vk-test"},
+            clear=False,
         ):
             assert "voyage" in _embedding_providers_with_keys()
 
@@ -571,6 +588,7 @@ class TestEmbeddingProvidersWithKeys:
 
 
 # ── _docker_safe_name ────────────────────────────────────────
+
 
 class TestDockerSafeName:
     def test_spaces_replaced(self):
@@ -596,6 +614,7 @@ class TestDockerSafeName:
 def _make_docker_backend(**overrides):
     """Create a DockerBackend without calling __init__ (avoids Docker)."""
     import threading
+
     backend = DockerBackend.__new__(DockerBackend)
     backend.agents = {}
     backend.auth_tokens = {}
@@ -773,8 +792,10 @@ class TestDockerBackendSlimResources:
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        with patch("httpx.get", return_value=mock_resp), \
-             patch.dict(_os.environ, {"OPENLEGION_MAX_AGENTS": str(max_agents)}):
+        with (
+            patch("httpx.get", return_value=mock_resp),
+            patch.dict(_os.environ, {"OPENLEGION_MAX_AGENTS": str(max_agents)}),
+        ):
             backend.start_browser_service()
 
         run_call = mock_client.containers.run.call_args
@@ -800,8 +821,10 @@ class TestDockerBackendSlimResources:
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        with patch("httpx.get", return_value=mock_resp), \
-             patch.dict(_os.environ, {"OPENLEGION_BROWSER_MAX_CONCURRENT": "7"}):
+        with (
+            patch("httpx.get", return_value=mock_resp),
+            patch.dict(_os.environ, {"OPENLEGION_BROWSER_MAX_CONCURRENT": "7"}),
+        ):
             backend.start_browser_service()
 
         run_call = mock_client.containers.run.call_args
@@ -826,8 +849,7 @@ class TestDockerBackendSlimResources:
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        with patch("httpx.get", return_value=mock_resp), \
-             patch.dict(_os.environ, {}, clear=False):
+        with patch("httpx.get", return_value=mock_resp), patch.dict(_os.environ, {}, clear=False):
             _os.environ.pop("OPENLEGION_BROWSER_MAX_CONCURRENT", None)
             backend.start_browser_service()
 
@@ -875,8 +897,10 @@ class TestDockerBackendSlimResources:
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        with patch("httpx.get", return_value=mock_resp), \
-             patch.dict(_os.environ, {"OPENLEGION_BROWSER_ALLOW_HOST_NETWORK": "1"}):
+        with (
+            patch("httpx.get", return_value=mock_resp),
+            patch.dict(_os.environ, {"OPENLEGION_BROWSER_ALLOW_HOST_NETWORK": "1"}),
+        ):
             backend.start_browser_service()
 
         run_call = mock_client.containers.run.call_args
@@ -900,8 +924,10 @@ class TestDockerBackendSlimResources:
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        with patch("httpx.get", return_value=mock_resp), \
-             patch.dict(_os.environ, {"BROWSER_EGRESS_ALLOWLIST": "10.0.0.0/24,192.168.5.5/32"}):
+        with (
+            patch("httpx.get", return_value=mock_resp),
+            patch.dict(_os.environ, {"BROWSER_EGRESS_ALLOWLIST": "10.0.0.0/24,192.168.5.5/32"}),
+        ):
             backend.start_browser_service()
 
         run_call = mock_client.containers.run.call_args
@@ -922,8 +948,7 @@ class TestDockerBackendSlimResources:
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        with patch("httpx.get", return_value=mock_resp), \
-             patch.dict(_os.environ, {"BROWSER_EGRESS_DISABLE": "1"}):
+        with patch("httpx.get", return_value=mock_resp), patch.dict(_os.environ, {"BROWSER_EGRESS_DISABLE": "1"}):
             backend.start_browser_service()
 
         run_call = mock_client.containers.run.call_args
@@ -948,14 +973,15 @@ class TestDockerBackendSlimResources:
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        with patch("httpx.get", return_value=mock_resp), \
-             patch.dict(_os.environ, {"OPENLEGION_BROWSER_ALLOW_HOST_NETWORK": "1"}), \
-             caplog.at_level(logging.WARNING, logger="host.runtime"):
+        with (
+            patch("httpx.get", return_value=mock_resp),
+            patch.dict(_os.environ, {"OPENLEGION_BROWSER_ALLOW_HOST_NETWORK": "1"}),
+            caplog.at_level(logging.WARNING, logger="host.runtime"),
+        ):
             backend.start_browser_service()
 
         # At least one WARNING record mentioning "egress filter" should be present
-        matches = [r for r in caplog.records
-                   if r.levelno >= logging.WARNING and "egress filter" in r.message.lower()]
+        matches = [r for r in caplog.records if r.levelno >= logging.WARNING and "egress filter" in r.message.lower()]
         assert matches, f"Expected warning about egress filter in host mode, got: {[r.message for r in caplog.records]}"
 
     def test_browser_cap_drop_all_with_minimal_adds(self):
@@ -1014,8 +1040,10 @@ class TestDockerBackendSlimResources:
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        with patch("httpx.get", return_value=mock_resp), \
-             patch.dict(_os.environ, {"OPENLEGION_BROWSER_ALLOW_HOST_NETWORK": "1"}):
+        with (
+            patch("httpx.get", return_value=mock_resp),
+            patch.dict(_os.environ, {"OPENLEGION_BROWSER_ALLOW_HOST_NETWORK": "1"}),
+        ):
             backend.start_browser_service()
 
         run_call = mock_client.containers.run.call_args
@@ -1060,11 +1088,16 @@ class TestDockerBackendSlimResources:
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        with patch("httpx.get", return_value=mock_resp), \
-             patch.dict(_os.environ, {
-                 "BROWSER_PROXY_URL": "http://10.0.0.5:3128",
-                 "BROWSER_EGRESS_ALLOWLIST": "10.0.0.5/32",
-             }):
+        with (
+            patch("httpx.get", return_value=mock_resp),
+            patch.dict(
+                _os.environ,
+                {
+                    "BROWSER_PROXY_URL": "http://10.0.0.5:3128",
+                    "BROWSER_EGRESS_ALLOWLIST": "10.0.0.5/32",
+                },
+            ),
+        ):
             backend.start_browser_service()
 
         run_call = mock_client.containers.run.call_args
@@ -1087,10 +1120,13 @@ class TestDockerBackendSlimResources:
         backend.client = mock_client
 
         # Allowlist covers 192.168.x but proxy is on 10.0.0.5 — misconfiguration.
-        with patch.dict(_os.environ, {
-            "BROWSER_PROXY_URL": "http://10.0.0.5:3128",
-            "BROWSER_EGRESS_ALLOWLIST": "192.168.1.0/24",
-        }):
+        with patch.dict(
+            _os.environ,
+            {
+                "BROWSER_PROXY_URL": "http://10.0.0.5:3128",
+                "BROWSER_EGRESS_ALLOWLIST": "192.168.1.0/24",
+            },
+        ):
             with pytest.raises(RuntimeError, match="does not cover"):
                 backend.start_browser_service()
 
@@ -1111,11 +1147,16 @@ class TestDockerBackendSlimResources:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         # 10.0.0.5 is inside 10.0.0.0/24 — should pass.
-        with patch("httpx.get", return_value=mock_resp), \
-             patch.dict(_os.environ, {
-                 "BROWSER_PROXY_URL": "http://10.0.0.5:3128",
-                 "BROWSER_EGRESS_ALLOWLIST": "10.0.0.0/24",
-             }):
+        with (
+            patch("httpx.get", return_value=mock_resp),
+            patch.dict(
+                _os.environ,
+                {
+                    "BROWSER_PROXY_URL": "http://10.0.0.5:3128",
+                    "BROWSER_EGRESS_ALLOWLIST": "10.0.0.0/24",
+                },
+            ),
+        ):
             backend.start_browser_service()
 
         run_call = mock_client.containers.run.call_args
@@ -1137,11 +1178,16 @@ class TestDockerBackendSlimResources:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         # First entry is irrelevant, second covers 10.0.0.5.
-        with patch("httpx.get", return_value=mock_resp), \
-             patch.dict(_os.environ, {
-                 "BROWSER_PROXY_URL": "http://10.0.0.5:3128",
-                 "BROWSER_EGRESS_ALLOWLIST": "172.16.0.0/12, 10.0.0.0/8",
-             }):
+        with (
+            patch("httpx.get", return_value=mock_resp),
+            patch.dict(
+                _os.environ,
+                {
+                    "BROWSER_PROXY_URL": "http://10.0.0.5:3128",
+                    "BROWSER_EGRESS_ALLOWLIST": "172.16.0.0/12, 10.0.0.0/8",
+                },
+            ),
+        ):
             backend.start_browser_service()
 
         run_call = mock_client.containers.run.call_args
@@ -1166,8 +1212,10 @@ class TestDockerBackendSlimResources:
         # 1.1.1.1 (Cloudflare) is genuinely public — not classified as private,
         # loopback, link-local, or reserved by Python's ipaddress module, so the
         # private-IP guard should not trip. BROWSER_EGRESS_ALLOWLIST stays unset.
-        with patch("httpx.get", return_value=mock_resp), \
-             patch.dict(_os.environ, {"BROWSER_PROXY_URL": "http://1.1.1.1:3128"}, clear=False):
+        with (
+            patch("httpx.get", return_value=mock_resp),
+            patch.dict(_os.environ, {"BROWSER_PROXY_URL": "http://1.1.1.1:3128"}, clear=False),
+        ):
             _os.environ.pop("BROWSER_EGRESS_ALLOWLIST", None)
             backend.start_browser_service()
 
@@ -1347,9 +1395,7 @@ class TestAgentNetwork:
         backend._ensure_agent_network()
 
         create_kwargs = backend.client.networks.create.call_args.kwargs
-        assert create_kwargs["options"] == {
-            "com.docker.network.bridge.enable_icc": "false"
-        }
+        assert create_kwargs["options"] == {"com.docker.network.bridge.enable_icc": "false"}
 
     def test_keeps_stale_if_remove_fails(self):
         """Falls back to stale internal network if removal fails."""
@@ -1444,6 +1490,58 @@ class TestEnvOverrides:
         assert env["INITIAL_INSTRUCTIONS"] == "Be helpful."
         assert env["TEAM_NAME"] == "myproj"
         assert env["EMBEDDING_MODEL"] == "text-embedding-3-small"
+
+    def test_team_env_provider_injected_on_every_start(self):
+        """Review F4: TEAM_NAME/TEAM_MD_PATH come from the backend-level
+        team env provider, so restart/spawn paths (which never pass
+        per-start env_overrides) still scope the agent correctly."""
+        import docker as _docker
+
+        backend = _make_docker_backend()
+        backend.set_team_env_provider(lambda aid: {"TEAM_NAME": f"team-of-{aid}"})
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
+        backend.client = mock_client
+
+        backend.start_agent(agent_id="worker1", role="test", tools_dir="")
+        env = mock_client.containers.run.call_args.kwargs.get("environment", {})
+        assert env["TEAM_NAME"] == "team-of-worker1"
+
+    def test_team_env_provider_overridden_by_env_overrides(self):
+        """Explicit per-start env_overrides win over the provider."""
+        import docker as _docker
+
+        backend = _make_docker_backend()
+        backend.set_team_env_provider(lambda aid: {"TEAM_NAME": "from-provider"})
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
+        backend.client = mock_client
+
+        backend.start_agent(
+            agent_id="worker1",
+            role="test",
+            tools_dir="",
+            env_overrides={"TEAM_NAME": "explicit"},
+        )
+        env = mock_client.containers.run.call_args.kwargs.get("environment", {})
+        assert env["TEAM_NAME"] == "explicit"
+
+    def test_team_env_provider_failure_is_nonfatal(self):
+        """A provider error must never block an agent start."""
+        import docker as _docker
+
+        backend = _make_docker_backend()
+        backend.set_team_env_provider(lambda aid: (_ for _ in ()).throw(RuntimeError("db")))
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock()
+        mock_client.containers.get.side_effect = _docker.errors.NotFound("not found")
+        backend.client = mock_client
+
+        backend.start_agent(agent_id="worker1", role="test", tools_dir="")
+        env = mock_client.containers.run.call_args.kwargs.get("environment", {})
+        assert "TEAM_NAME" not in env
 
     def test_docker_env_overrides_do_not_mutate_extra_env(self):
         """Passing env_overrides must not modify the shared extra_env dict."""
@@ -1589,6 +1687,7 @@ class TestEntrypointHelpers:
         script = repo_root / "docker" / "browser-entrypoint.sh"
         if not script.exists():
             import pytest
+
             pytest.skip(f"entrypoint script not found at {script}")
         # shellcheck-clean: source then call helper with quoted arg.
         cmd = f"source {shlex.quote(str(script))} && {helper} {shlex.quote(arg)}"
@@ -1610,6 +1709,7 @@ class TestEntrypointHelpers:
         script = repo_root / "docker" / "browser-entrypoint.sh"
         if not script.exists():
             import pytest
+
             pytest.skip(f"entrypoint script not found at {script}")
         cmd = f"source {shlex.quote(str(script))} && {function_name}"
         return subprocess.run(
@@ -1653,8 +1753,13 @@ class TestEntrypointHelpers:
     # ── is_valid_ipv4_cidr ────────────────────────────────────
 
     def test_cidr_accepts_valid(self):
-        for c in ("10.0.0.0/24", "192.168.1.1/32", "0.0.0.0/0",
-                  "255.255.255.255/32", "10.0.0.5"):  # bare IP defaults to /32
+        for c in (
+            "10.0.0.0/24",
+            "192.168.1.1/32",
+            "0.0.0.0/0",
+            "255.255.255.255/32",
+            "10.0.0.5",
+        ):  # bare IP defaults to /32
             assert self._call("is_valid_ipv4_cidr", c), c
 
     def test_cidr_accepts_boundary_prefix(self):
@@ -1716,6 +1821,7 @@ class TestBuildMcpServersEnv:
 
     def _vault_with(self, monkeypatch, **creds):
         from src.host.credentials import CredentialVault
+
         for name, value in creds.items():
             monkeypatch.setenv(f"OPENLEGION_CRED_{name.upper()}", value)
         return CredentialVault()
@@ -1737,10 +1843,14 @@ class TestBuildMcpServersEnv:
 
     def test_plain_config_no_handles_passes_through(self):
         b = self._backend()
-        servers = [{
-            "name": "fs", "command": "mcp-server-fs", "args": ["/data"],
-            "env": {"DEBUG": "1"},
-        }]
+        servers = [
+            {
+                "name": "fs",
+                "command": "mcp-server-fs",
+                "args": ["/data"],
+                "env": {"DEBUG": "1"},
+            }
+        ]
         result = json.loads(b._build_mcp_servers_env(servers, agent_id="a1"))
         assert result == servers
 
@@ -1749,10 +1859,13 @@ class TestBuildMcpServersEnv:
             vault=self._vault_with(monkeypatch, linear_token="LINEAR-SECRET"),
             permissions=self._perms_allow_all(),
         )
-        servers = [{
-            "name": "linear", "command": "mcp-server-linear",
-            "env": {"API_KEY": "$CRED{linear_token}"},
-        }]
+        servers = [
+            {
+                "name": "linear",
+                "command": "mcp-server-linear",
+                "env": {"API_KEY": "$CRED{linear_token}"},
+            }
+        ]
         result = json.loads(b._build_mcp_servers_env(servers, agent_id="a1"))
         assert result[0]["env"]["API_KEY"] == "LINEAR-SECRET"
 
@@ -1761,20 +1874,26 @@ class TestBuildMcpServersEnv:
             vault=self._vault_with(monkeypatch, linear_token="LINEAR-SECRET"),
             permissions=self._perms_allow_all(),
         )
-        servers = [{
-            "name": "linear", "command": "mcp-server-linear",
-            "args": ["--token", "$CRED{linear_token}"],
-        }]
+        servers = [
+            {
+                "name": "linear",
+                "command": "mcp-server-linear",
+                "args": ["--token", "$CRED{linear_token}"],
+            }
+        ]
         result = json.loads(b._build_mcp_servers_env(servers, agent_id="a1"))
         assert result[0]["args"] == ["--token", "LINEAR-SECRET"]
 
     def test_handle_in_env_without_vault_raises_clearly(self):
         # vault and permissions still None (class defaults).
         b = self._backend()
-        servers = [{
-            "name": "x", "command": "y",
-            "env": {"KEY": "$CRED{anything}"},
-        }]
+        servers = [
+            {
+                "name": "x",
+                "command": "y",
+                "env": {"KEY": "$CRED{anything}"},
+            }
+        ]
         with pytest.raises(ValueError) as excinfo:
             b._build_mcp_servers_env(servers, agent_id="a1")
         msg = str(excinfo.value)
@@ -1784,10 +1903,13 @@ class TestBuildMcpServersEnv:
 
     def test_handle_in_args_without_vault_raises_clearly(self):
         b = self._backend()
-        servers = [{
-            "name": "x", "command": "y",
-            "args": ["--token", "$CRED{anything}"],
-        }]
+        servers = [
+            {
+                "name": "x",
+                "command": "y",
+                "args": ["--token", "$CRED{anything}"],
+            }
+        ]
         with pytest.raises(ValueError):
             b._build_mcp_servers_env(servers, agent_id="a1")
 
@@ -1814,20 +1936,20 @@ class TestBuildMcpServersEnv:
         result = json.loads(b._build_mcp_servers_env(servers, agent_id="a1"))
         assert [s["name"] for s in result] == ["good"]
         assert result[0]["env"]["K"] == "x"
-        assert any(
-            "bad" in r.message and "github_token" in r.message
-            for r in caplog.records
-        )
+        assert any("bad" in r.message and "github_token" in r.message for r in caplog.records)
 
     def test_permission_denied_drops_only_that_server(self, monkeypatch, caplog):
         b = self._backend(
             vault=self._vault_with(monkeypatch, linear_token="x"),
             permissions=self._perms_deny_all(),
         )
-        servers = [{
-            "name": "x", "command": "y",
-            "env": {"K": "$CRED{linear_token}"},
-        }]
+        servers = [
+            {
+                "name": "x",
+                "command": "y",
+                "env": {"K": "$CRED{linear_token}"},
+            }
+        ]
         result = json.loads(b._build_mcp_servers_env(servers, agent_id="a1"))
         assert result == []
         assert any("permission" in r.message.lower() for r in caplog.records)
@@ -1837,10 +1959,13 @@ class TestBuildMcpServersEnv:
         v = self._vault_with(monkeypatch, linear_token="ABC")
         p = self._perms_allow_all()
         b.set_credential_resolver(vault=v, permissions=p)
-        servers = [{
-            "name": "x", "command": "y",
-            "env": {"K": "$CRED{linear_token}"},
-        }]
+        servers = [
+            {
+                "name": "x",
+                "command": "y",
+                "env": {"K": "$CRED{linear_token}"},
+            }
+        ]
         result = json.loads(b._build_mcp_servers_env(servers, agent_id="a1"))
         assert result[0]["env"]["K"] == "ABC"
 
@@ -1850,10 +1975,13 @@ class TestBuildMcpServersEnv:
         b._vault = MagicMock()  # pretend wired
         b._permissions = MagicMock()
         b.set_credential_resolver(vault=None, permissions=None)
-        servers = [{
-            "name": "x", "command": "y",
-            "env": {"K": "$CRED{anything}"},
-        }]
+        servers = [
+            {
+                "name": "x",
+                "command": "y",
+                "env": {"K": "$CRED{anything}"},
+            }
+        ]
         with pytest.raises(ValueError):
             b._build_mcp_servers_env(servers, agent_id="a1")
 
@@ -1898,8 +2026,10 @@ def _capture_dispatch_fn(monkeypatch, *, app=None):
 
         def timeout_for(self, agent):
             from src.host.lanes import _DEFAULT_LANE_TIMEOUT_SECONDS
+
             return self._per_agent_timeouts.get(
-                agent, _DEFAULT_LANE_TIMEOUT_SECONDS,
+                agent,
+                _DEFAULT_LANE_TIMEOUT_SECONDS,
             )
 
     monkeypatch.setattr("src.host.lanes.LaneManager", _FakeLaneManager)
@@ -1930,7 +2060,8 @@ def _capture_dispatch_fn(monkeypatch, *, app=None):
 class TestDispatchTimeoutAlignment:
     @pytest.mark.asyncio
     async def test_chat_request_uses_lane_cap_timeout_not_120(
-        self, monkeypatch,
+        self,
+        monkeypatch,
     ):
         """``_direct_dispatch`` must pass the ``/chat`` timeout as a backstop
         set just ABOVE the lane wall-clock cap (cap + 60), not transport's
@@ -1951,7 +2082,8 @@ class TestDispatchTimeoutAlignment:
 
     @pytest.mark.asyncio
     async def test_chat_request_tracks_per_agent_watchdog_ttl_override(
-        self, monkeypatch,
+        self,
+        monkeypatch,
     ):
         """When an agent has a per-agent lane cap (e.g. from
         ``settings.watchdog_ttl_seconds`` → ``set_agent_timeout``), the inner
@@ -1973,7 +2105,8 @@ class TestDispatchTimeoutAlignment:
 
     @pytest.mark.asyncio
     async def test_dispatch_synthesizes_trace_id_when_context_has_none(
-        self, monkeypatch,
+        self,
+        monkeypatch,
     ):
         """Lane-dispatched turns run in the lane worker's bare context, so
         ``current_trace_id`` is unset. Without a synthesized id the
@@ -1996,7 +2129,8 @@ class TestDispatchTimeoutAlignment:
 
     @pytest.mark.asyncio
     async def test_dispatch_propagates_ambient_trace_id_unchanged(
-        self, monkeypatch,
+        self,
+        monkeypatch,
     ):
         """An ambient trace id (channel/user-originated dispatch) must keep
         propagating verbatim — synthesis only fills the gap."""
@@ -2026,11 +2160,13 @@ class TestDispatchTimeoutAlignment:
 
 def _tasks_store(tmp_path):
     from src.host.orchestration import Tasks
+
     return Tasks(db_path=str(tmp_path / "tasks.db"))
 
 
 def _app_with_tasks(store):
     import types as _types
+
     return _types.SimpleNamespace(tasks_store=store)
 
 
@@ -2041,9 +2177,7 @@ class TestDispatchErrorRedaction:
         from src.cli.runtime import _build_dispatch_error_note
 
         secret = "supersecret_query_value_123"
-        exc = RuntimeError(
-            f"502 from https://api.example.com/run?api_key={secret}&x=1"
-        )
+        exc = RuntimeError(f"502 from https://api.example.com/run?api_key={secret}&x=1")
         note = _build_dispatch_error_note(exc)
 
         assert secret not in note
@@ -2078,7 +2212,9 @@ class TestDispatchErrorRedaction:
 class TestDispatchErrorSurfacing:
     @pytest.mark.asyncio
     async def test_transport_error_closes_task_failed_with_redacted_note(
-        self, monkeypatch, tmp_path,
+        self,
+        monkeypatch,
+        tmp_path,
     ):
         """A transport error WITH a task_id closes the durable task to
         ``failed`` and stores a REDACTED, meaningful ``blocker_note`` — the
@@ -2091,12 +2227,11 @@ class TestDispatchErrorSurfacing:
         store.update_status(task_id, "working", actor="worker")
 
         dispatch_fn, ctx, transport = _capture_dispatch_fn(
-            monkeypatch, app=_app_with_tasks(store),
+            monkeypatch,
+            app=_app_with_tasks(store),
         )
         secret = "supersecret_query_value_123"
-        transport.request.side_effect = RuntimeError(
-            f"502 from https://api.example.com/run?api_key={secret}&x=1"
-        )
+        transport.request.side_effect = RuntimeError(f"502 from https://api.example.com/run?api_key={secret}&x=1")
 
         result = await dispatch_fn("worker", "go", task_id=task_id)
 
@@ -2113,7 +2248,9 @@ class TestDispatchErrorSurfacing:
 
     @pytest.mark.asyncio
     async def test_stored_note_truncated_to_500_chars(
-        self, monkeypatch, tmp_path,
+        self,
+        monkeypatch,
+        tmp_path,
     ):
         store = _tasks_store(tmp_path)
         rec = store.create(creator="op", assignee="worker", title="do thing")
@@ -2121,7 +2258,8 @@ class TestDispatchErrorSurfacing:
         store.update_status(task_id, "working", actor="worker")
 
         dispatch_fn, ctx, transport = _capture_dispatch_fn(
-            monkeypatch, app=_app_with_tasks(store),
+            monkeypatch,
+            app=_app_with_tasks(store),
         )
         transport.request.side_effect = RuntimeError("y" * 4000)
 
@@ -2133,18 +2271,19 @@ class TestDispatchErrorSurfacing:
 
     @pytest.mark.asyncio
     async def test_no_task_id_does_not_crash_and_is_non_leaky(
-        self, monkeypatch, tmp_path,
+        self,
+        monkeypatch,
+        tmp_path,
     ):
         """Manual chat / heartbeat path (no task_id): no durable task to
         close, must not raise, and the returned string must be redacted."""
         store = _tasks_store(tmp_path)
         dispatch_fn, ctx, transport = _capture_dispatch_fn(
-            monkeypatch, app=_app_with_tasks(store),
+            monkeypatch,
+            app=_app_with_tasks(store),
         )
         secret = "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-        transport.request.side_effect = RuntimeError(
-            f"boom token={secret}"
-        )
+        transport.request.side_effect = RuntimeError(f"boom token={secret}")
 
         result = await dispatch_fn("worker", "hi")  # no task_id
 
@@ -2154,7 +2293,9 @@ class TestDispatchErrorSurfacing:
 
     @pytest.mark.asyncio
     async def test_already_terminal_task_not_clobbered(
-        self, monkeypatch, tmp_path,
+        self,
+        monkeypatch,
+        tmp_path,
     ):
         """If the assignee already wrote a real terminal status during a race,
         the dispatch-error close must NOT overwrite it."""
@@ -2166,7 +2307,8 @@ class TestDispatchErrorSurfacing:
         store.update_status(task_id, "done", actor="worker")
 
         dispatch_fn, ctx, transport = _capture_dispatch_fn(
-            monkeypatch, app=_app_with_tasks(store),
+            monkeypatch,
+            app=_app_with_tasks(store),
         )
         transport.request.side_effect = RuntimeError("late error")
 
@@ -2178,7 +2320,9 @@ class TestDispatchErrorSurfacing:
 
     @pytest.mark.asyncio
     async def test_already_blocked_task_not_clobbered(
-        self, monkeypatch, tmp_path,
+        self,
+        monkeypatch,
+        tmp_path,
     ):
         """An assignee-authored ``blocked`` status (and its meaningful
         blocker_note) must NOT be overwritten by a dispatch transport error,
@@ -2189,12 +2333,15 @@ class TestDispatchErrorSurfacing:
         store.update_status(task_id, "working", actor="worker")
         # Assignee blocked the task with a meaningful note before our close.
         store.update_status(
-            task_id, "blocked", actor="worker",
+            task_id,
+            "blocked",
+            actor="worker",
             blocker_note="waiting on credential CRED_FOO",
         )
 
         dispatch_fn, ctx, transport = _capture_dispatch_fn(
-            monkeypatch, app=_app_with_tasks(store),
+            monkeypatch,
+            app=_app_with_tasks(store),
         )
         transport.request.side_effect = RuntimeError("late dispatch error")
 
@@ -2207,7 +2354,9 @@ class TestDispatchErrorSurfacing:
 
     @pytest.mark.asyncio
     async def test_stored_note_strips_bearer_and_connstring(
-        self, monkeypatch, tmp_path,
+        self,
+        monkeypatch,
+        tmp_path,
     ):
         """A dispatch error carrying a ``Bearer`` auth value and a non-HTTP
         connection-string password must have BOTH stripped from the stored,
@@ -2218,13 +2367,12 @@ class TestDispatchErrorSurfacing:
         store.update_status(task_id, "working", actor="worker")
 
         dispatch_fn, ctx, transport = _capture_dispatch_fn(
-            monkeypatch, app=_app_with_tasks(store),
+            monkeypatch,
+            app=_app_with_tasks(store),
         )
         bearer = "Bearer leakedBearerToken123"
         conn = "postgres://dbuser:dbp4ss@db.internal:5432/main"
-        transport.request.side_effect = RuntimeError(
-            f"auth failed: {bearer}; dsn={conn}"
-        )
+        transport.request.side_effect = RuntimeError(f"auth failed: {bearer}; dsn={conn}")
 
         await dispatch_fn("worker", "go", task_id=task_id)
 
@@ -2236,7 +2384,9 @@ class TestDispatchErrorSurfacing:
 
     @pytest.mark.asyncio
     async def test_cancelled_error_is_not_swallowed(
-        self, monkeypatch, tmp_path,
+        self,
+        monkeypatch,
+        tmp_path,
     ):
         """``asyncio.CancelledError`` MUST propagate so the lane's ``wait_for``
         watchdog can still cancel a long run — the ``except Exception`` clause
@@ -2249,7 +2399,8 @@ class TestDispatchErrorSurfacing:
         store.update_status(task_id, "working", actor="worker")
 
         dispatch_fn, ctx, transport = _capture_dispatch_fn(
-            monkeypatch, app=_app_with_tasks(store),
+            monkeypatch,
+            app=_app_with_tasks(store),
         )
         transport.request.side_effect = _asyncio.CancelledError()
 
@@ -2280,11 +2431,9 @@ class TestInfraDisconnectClassifier:
 
         from src.cli.runtime import _is_infra_disconnect
 
-        assert _is_infra_disconnect(
-            httpx.RemoteProtocolError(
-                "Server disconnected without sending a response."
-            )
-        ) is True
+        assert (
+            _is_infra_disconnect(httpx.RemoteProtocolError("Server disconnected without sending a response.")) is True
+        )
 
     def test_httpx_connect_and_read_errors_are_infra(self):
         import httpx
@@ -2300,9 +2449,7 @@ class TestInfraDisconnectClassifier:
         from src.cli.runtime import _is_infra_disconnect
 
         # A non-httpx wrapper carrying the same connection-drop signature.
-        assert _is_infra_disconnect(
-            RuntimeError("Server disconnected without sending a response")
-        ) is True
+        assert _is_infra_disconnect(RuntimeError("Server disconnected without sending a response")) is True
 
     def test_genuine_task_error_is_not_infra(self):
         import httpx
@@ -2311,9 +2458,7 @@ class TestInfraDisconnectClassifier:
 
         # A real application error (e.g. agent returned 500 with a body) is
         # NOT a connection drop — must stay terminal ``failed``.
-        assert _is_infra_disconnect(
-            RuntimeError("502 from https://api.example.com/run")
-        ) is False
+        assert _is_infra_disconnect(RuntimeError("502 from https://api.example.com/run")) is False
         assert _is_infra_disconnect(RuntimeError("tool execution failed")) is False
         # A read TIMEOUT while the connection stays up is the agent being slow
         # (lane-watchdog territory), not an infra tear-down.
@@ -2323,7 +2468,9 @@ class TestInfraDisconnectClassifier:
 class TestInfraInterruptRecoverable:
     @pytest.mark.asyncio
     async def test_server_disconnected_lands_blocked_not_failed(
-        self, monkeypatch, tmp_path,
+        self,
+        monkeypatch,
+        tmp_path,
     ):
         """A dispatch killed by a host-restart connection drop closes the
         durable task to ``blocked`` (recoverable) with an honest note —
@@ -2336,13 +2483,12 @@ class TestInfraInterruptRecoverable:
         store.update_status(task_id, "working", actor="worker")
 
         dispatch_fn, ctx, transport = _capture_dispatch_fn(
-            monkeypatch, app=_app_with_tasks(store),
+            monkeypatch,
+            app=_app_with_tasks(store),
         )
         # The drop is only recoverable BECAUSE the mesh is shutting down.
         ctx._shutting_down = True
-        transport.request.side_effect = httpx.RemoteProtocolError(
-            "Server disconnected without sending a response."
-        )
+        transport.request.side_effect = httpx.RemoteProtocolError("Server disconnected without sending a response.")
 
         await dispatch_fn("worker", "go", task_id=task_id)
 
@@ -2352,7 +2498,9 @@ class TestInfraInterruptRecoverable:
 
     @pytest.mark.asyncio
     async def test_connect_error_lands_blocked(
-        self, monkeypatch, tmp_path,
+        self,
+        monkeypatch,
+        tmp_path,
     ):
         """A bare connection-refused (host/agent gone) is also recoverable."""
         import httpx
@@ -2363,7 +2511,8 @@ class TestInfraInterruptRecoverable:
         store.update_status(task_id, "working", actor="worker")
 
         dispatch_fn, ctx, transport = _capture_dispatch_fn(
-            monkeypatch, app=_app_with_tasks(store),
+            monkeypatch,
+            app=_app_with_tasks(store),
         )
         ctx._shutting_down = True
         transport.request.side_effect = httpx.ConnectError("Connection refused")
@@ -2374,7 +2523,9 @@ class TestInfraInterruptRecoverable:
 
     @pytest.mark.asyncio
     async def test_disconnect_while_not_shutting_down_lands_failed(
-        self, monkeypatch, tmp_path,
+        self,
+        monkeypatch,
+        tmp_path,
     ):
         """The SAME transport-drop signature, but the mesh is NOT shutting
         down (e.g. the agent container genuinely crashed), must close the task
@@ -2388,13 +2539,12 @@ class TestInfraInterruptRecoverable:
         store.update_status(task_id, "working", actor="worker")
 
         dispatch_fn, ctx, transport = _capture_dispatch_fn(
-            monkeypatch, app=_app_with_tasks(store),
+            monkeypatch,
+            app=_app_with_tasks(store),
         )
         # Mesh is NOT shutting down (default from __new__-bypass; assert it).
         assert getattr(ctx, "_shutting_down", False) is False
-        transport.request.side_effect = httpx.RemoteProtocolError(
-            "Server disconnected without sending a response."
-        )
+        transport.request.side_effect = httpx.RemoteProtocolError("Server disconnected without sending a response.")
 
         await dispatch_fn("worker", "go", task_id=task_id)
 
@@ -2404,7 +2554,9 @@ class TestInfraInterruptRecoverable:
 
     @pytest.mark.asyncio
     async def test_genuine_error_still_lands_failed(
-        self, monkeypatch, tmp_path,
+        self,
+        monkeypatch,
+        tmp_path,
     ):
         """A genuine (non-connection-drop) dispatch error must still close the
         task to terminal ``failed`` — the recoverable carve-out is narrow."""
@@ -2414,11 +2566,10 @@ class TestInfraInterruptRecoverable:
         store.update_status(task_id, "working", actor="worker")
 
         dispatch_fn, ctx, transport = _capture_dispatch_fn(
-            monkeypatch, app=_app_with_tasks(store),
+            monkeypatch,
+            app=_app_with_tasks(store),
         )
-        transport.request.side_effect = RuntimeError(
-            "502 from https://api.example.com/run"
-        )
+        transport.request.side_effect = RuntimeError("502 from https://api.example.com/run")
 
         await dispatch_fn("worker", "go", task_id=task_id)
 
@@ -2428,7 +2579,9 @@ class TestInfraInterruptRecoverable:
 
     @pytest.mark.asyncio
     async def test_infra_interrupt_does_not_clobber_assignee_blocked(
-        self, monkeypatch, tmp_path,
+        self,
+        monkeypatch,
+        tmp_path,
     ):
         """An assignee-authored ``blocked`` (with its own note) is preserved
         even on an infra interrupt — the already-terminal/blocked pre-check
@@ -2440,17 +2593,18 @@ class TestInfraInterruptRecoverable:
         task_id = rec["id"]
         store.update_status(task_id, "working", actor="worker")
         store.update_status(
-            task_id, "blocked", actor="worker",
+            task_id,
+            "blocked",
+            actor="worker",
             blocker_note="waiting on credential CRED_FOO",
         )
 
         dispatch_fn, ctx, transport = _capture_dispatch_fn(
-            monkeypatch, app=_app_with_tasks(store),
+            monkeypatch,
+            app=_app_with_tasks(store),
         )
         ctx._shutting_down = True
-        transport.request.side_effect = httpx.RemoteProtocolError(
-            "Server disconnected without sending a response."
-        )
+        transport.request.side_effect = httpx.RemoteProtocolError("Server disconnected without sending a response.")
 
         await dispatch_fn("worker", "go", task_id=task_id)
 
@@ -2496,22 +2650,26 @@ class TestDeliverChainOutcomeNote:
             event_bus = _Bus()
             lane_manager = None
             _dispatch_loop = None
-            _maybe_wake_operator_verification = (
-                RuntimeContext._maybe_wake_operator_verification
-            )
+            _maybe_wake_operator_verification = RuntimeContext._maybe_wake_operator_verification
 
         return _Stub()
 
     def _root(self):
         return {
-            "id": "t-root", "assignee": "worker", "title": "do thing",
+            "id": "t-root",
+            "assignee": "worker",
+            "title": "do thing",
             "origin": {"kind": "human", "channel": "dashboard", "user": "u1"},
         }
 
     async def _deliver(self, stub, kind):
         from src.cli.runtime import RuntimeContext
+
         return await RuntimeContext._deliver_chain_outcome(
-            stub, self._root(), kind, "summary",
+            stub,
+            self._root(),
+            kind,
+            "summary",
         )
 
     @pytest.mark.asyncio
@@ -2533,9 +2691,7 @@ class TestDeliverChainOutcomeNote:
         assert await self._deliver(stub, "failed") is True
         assert await self._deliver(stub, "stall") is True
         assert stub.transport.calls[0][3]["message"].startswith("⚠️ Task failed")
-        assert stub.transport.calls[1][3]["message"].startswith(
-            "⏳ Taking longer than expected"
-        )
+        assert stub.transport.calls[1][3]["message"].startswith("⏳ Taking longer than expected")
 
     @pytest.mark.asyncio
     async def test_error_dict_fails_delivery_without_emit(self):
@@ -2558,6 +2714,7 @@ class TestDeliverChainOutcomeNote:
         """Stale agent image (no /chat/note) must be loud — the default
         deploy trap is git-pull without an image rebuild."""
         import logging
+
         stub = self._stub({"error": "HTTP 404", "status_code": 404})
         with caplog.at_level(logging.ERROR):
             assert await self._deliver(stub, "done") is False
@@ -2585,6 +2742,7 @@ class TestChannelPushRetry:
 
     def _origin(self):
         from src.shared.types import MessageOrigin
+
         return MessageOrigin(kind="human", channel="telegram", user="u1")
 
     @pytest.mark.asyncio
@@ -2594,13 +2752,19 @@ class TestChannelPushRetry:
         class _Stub:
             def __init__(self):
                 self.calls = 0
+
             async def _handle_notify_origin(self, origin, message, agent_name):
                 self.calls += 1
                 return self.calls > 2  # fail attempts 1,2; succeed on 3
 
         stub = _Stub()
         await RuntimeContext._channel_push_with_retry(
-            stub, self._origin(), "msg", "agent", attempts=3, backoff_s=0,
+            stub,
+            self._origin(),
+            "msg",
+            "agent",
+            attempts=3,
+            backoff_s=0,
         )
         assert stub.calls == 3  # stopped as soon as it succeeded
 
@@ -2611,13 +2775,19 @@ class TestChannelPushRetry:
         class _Stub:
             def __init__(self):
                 self.calls = 0
+
             async def _handle_notify_origin(self, origin, message, agent_name):
                 self.calls += 1
                 return False  # always fail
 
         stub = _Stub()
         await RuntimeContext._channel_push_with_retry(
-            stub, self._origin(), "msg", "agent", attempts=3, backoff_s=0,
+            stub,
+            self._origin(),
+            "msg",
+            "agent",
+            attempts=3,
+            backoff_s=0,
         )
         assert stub.calls == 3  # exactly `attempts`, then gives up (no hot loop)
 
@@ -2628,13 +2798,19 @@ class TestChannelPushRetry:
         class _Stub:
             def __init__(self):
                 self.calls = 0
+
             async def _handle_notify_origin(self, origin, message, agent_name):
                 self.calls += 1
                 return True
 
         stub = _Stub()
         await RuntimeContext._channel_push_with_retry(
-            stub, self._origin(), "msg", "agent", attempts=3, backoff_s=0,
+            stub,
+            self._origin(),
+            "msg",
+            "agent",
+            attempts=3,
+            backoff_s=0,
         )
         assert stub.calls == 1
 
@@ -2649,6 +2825,7 @@ class TestChannelPushRetry:
         class _Stub:
             def __init__(self):
                 self.calls = 0
+
             async def _handle_notify_origin(self, origin, message, agent_name):
                 self.calls += 1
                 await _a.sleep(3600)  # hang
@@ -2656,8 +2833,13 @@ class TestChannelPushRetry:
         stub = _Stub()
         await _a.wait_for(
             RuntimeContext._channel_push_with_retry(
-                stub, self._origin(), "msg", "agent",
-                attempts=3, backoff_s=0, timeout_s=0.01,
+                stub,
+                self._origin(),
+                "msg",
+                "agent",
+                attempts=3,
+                backoff_s=0,
+                timeout_s=0.01,
             ),
             timeout=5,  # the whole call must finish well under this
         )
@@ -2703,15 +2885,15 @@ class TestVerificationWake:
             _verify_wake_times = _deque()
             _VERIFY_WAKE_MAX = RuntimeContext._VERIFY_WAKE_MAX
             _VERIFY_WAKE_WINDOW_S = RuntimeContext._VERIFY_WAKE_WINDOW_S
-            _maybe_wake_operator_verification = (
-                RuntimeContext._maybe_wake_operator_verification
-            )
+            _maybe_wake_operator_verification = RuntimeContext._maybe_wake_operator_verification
 
         return RuntimeContext, _Stub(), loop
 
     def _root(self):
         return {
-            "id": "t-root", "assignee": "worker", "title": "ship the thing",
+            "id": "t-root",
+            "assignee": "worker",
+            "title": "ship the thing",
             "origin": {"kind": "human", "channel": "dashboard", "user": "u1"},
         }
 
@@ -2721,6 +2903,7 @@ class TestVerificationWake:
         # between them. Poll briefly so the enqueue body has actually run.
         import concurrent.futures
         import time as _t
+
         for _ in range(100):
             done = concurrent.futures.Future()
             loop.call_soon_threadsafe(lambda: done.set_result(True))
@@ -2737,7 +2920,10 @@ class TestVerificationWake:
         RuntimeContext, stub, loop = self._ctx_stub()
         try:
             ok = await RuntimeContext._deliver_chain_outcome(
-                stub, self._root(), "done", "summary",
+                stub,
+                self._root(),
+                "done",
+                "summary",
             )
             assert ok is True
             self._drain(loop, until=lambda: stub.lane_manager.calls)
@@ -2758,7 +2944,10 @@ class TestVerificationWake:
         try:
             for kind in ("failed", "stall"):
                 await RuntimeContext._deliver_chain_outcome(
-                    stub, self._root(), kind, "summary",
+                    stub,
+                    self._root(),
+                    kind,
+                    "summary",
                 )
             self._drain(loop)
             assert stub.lane_manager.calls == []
@@ -2775,7 +2964,10 @@ class TestVerificationWake:
             for _ in range(stub._VERIFY_WAKE_MAX):
                 stub._verify_wake_times.append(now)
             await RuntimeContext._deliver_chain_outcome(
-                stub, self._root(), "done", "summary",
+                stub,
+                self._root(),
+                "done",
+                "summary",
             )
             self._drain(loop)
             assert stub.lane_manager.calls == []
@@ -2788,7 +2980,10 @@ class TestVerificationWake:
         try:
             stub._dispatch_loop = None  # wake guard path
             ok = await RuntimeContext._deliver_chain_outcome(
-                stub, self._root(), "done", "summary",
+                stub,
+                self._root(),
+                "done",
+                "summary",
             )
             assert ok is True  # note already written — delivery stands
         finally:
@@ -2803,6 +2998,7 @@ class TestSystemNoteCallSites:
 
     def _src(self, rel: str) -> str:
         from pathlib import Path
+
         root = Path(__file__).resolve().parents[1]
         return (root / rel).read_text(encoding="utf-8")
 
@@ -2880,6 +3076,7 @@ class TestSystemSignalReroute:
     def _drain(self, loop, until):
         import concurrent.futures
         import time as _t
+
         for _ in range(150):
             done = concurrent.futures.Future()
             loop.call_soon_threadsafe(lambda: done.set_result(True))
@@ -2891,11 +3088,12 @@ class TestSystemSignalReroute:
     def test_connection_refresh_failed_writes_operator_note(self):
         stub, loop = self._stub()
         try:
-            stub._system_signal_producer({
-                "type": "connection_refresh_failed",
-                "data": {"connection": "gdrive", "provider": "google",
-                         "error": "invalid_grant"},
-            })
+            stub._system_signal_producer(
+                {
+                    "type": "connection_refresh_failed",
+                    "data": {"connection": "gdrive", "provider": "google", "error": "invalid_grant"},
+                }
+            )
             self._drain(loop, until=lambda: stub.transport.calls)
             agent, method, path, payload = stub.transport.calls[0]
             assert (agent, method, path) == ("operator", "POST", "/chat/note")
@@ -2910,11 +3108,13 @@ class TestSystemSignalReroute:
     def test_quarantined_health_change_writes_operator_note(self):
         stub, loop = self._stub()
         try:
-            stub._system_signal_producer({
-                "type": "health_change", "agent": "scout",
-                "data": {"previous": "healthy", "current": "quarantined",
-                         "reason": "3 consecutive auth failures"},
-            })
+            stub._system_signal_producer(
+                {
+                    "type": "health_change",
+                    "agent": "scout",
+                    "data": {"previous": "healthy", "current": "quarantined", "reason": "3 consecutive auth failures"},
+                }
+            )
             self._drain(loop, until=lambda: stub.transport.calls)
             payload = stub.transport.calls[0][3]
             assert "scout" in payload["message"]
@@ -2926,10 +3126,13 @@ class TestSystemSignalReroute:
     def test_non_quarantine_health_change_ignored(self):
         stub, loop = self._stub()
         try:
-            stub._system_signal_producer({
-                "type": "health_change", "agent": "scout",
-                "data": {"previous": "healthy", "current": "degraded"},
-            })
+            stub._system_signal_producer(
+                {
+                    "type": "health_change",
+                    "agent": "scout",
+                    "data": {"previous": "healthy", "current": "degraded"},
+                }
+            )
             stub._system_signal_producer({"type": "task_created", "data": {}})
             self._drain(loop, until=lambda: True)
             assert stub.transport.calls == []
@@ -2957,7 +3160,10 @@ class TestSystemSignalReroute:
 
         stub = _Stub()
         await RuntimeContext._operator_note_with_retry(
-            stub, "x", attempts=3, backoff_s=0,
+            stub,
+            "x",
+            attempts=3,
+            backoff_s=0,
         )
         assert stub.transport.calls == 3
 
@@ -3115,8 +3321,11 @@ class TestUtilityModelEnv:
         )
         backend = self._make_sandbox(tmp_path)
         ws = backend._prepare_workspace(
-            agent_id="tiered", role="test", tools_dir="",
-            system_prompt="", model="openai/gpt-4o-mini",
+            agent_id="tiered",
+            role="test",
+            tools_dir="",
+            system_prompt="",
+            model="openai/gpt-4o-mini",
         )
         env_content = (ws / ".agent.env").read_text()
         assert "LLM_UTILITY_MODEL=openai/gpt-4.1-nano" in env_content
@@ -3128,8 +3337,11 @@ class TestUtilityModelEnv:
         )
         backend = self._make_sandbox(tmp_path)
         ws = backend._prepare_workspace(
-            agent_id="untiered", role="test", tools_dir="",
-            system_prompt="", model="openai/gpt-4o-mini",
+            agent_id="untiered",
+            role="test",
+            tools_dir="",
+            system_prompt="",
+            model="openai/gpt-4o-mini",
         )
         env_content = (ws / ".agent.env").read_text()
         assert "LLM_UTILITY_MODEL" not in env_content
@@ -3141,8 +3353,11 @@ class TestUtilityModelEnv:
         )
         backend = self._make_sandbox(tmp_path)
         ws = backend._prepare_workspace(
-            agent_id="empty", role="test", tools_dir="",
-            system_prompt="", model="",
+            agent_id="empty",
+            role="test",
+            tools_dir="",
+            system_prompt="",
+            model="",
         )
         env_content = (ws / ".agent.env").read_text()
         assert "LLM_UTILITY_MODEL" not in env_content
@@ -3160,8 +3375,10 @@ class TestUtilityModelEnv:
             lambda *a, **k: {"llm": {"utility_model": 42}},
         )
         assert backend._utility_model_from_config() == ""
+
         # A config read failure must never block an agent start.
         def _boom(*a, **k):
             raise OSError("unreadable")
+
         monkeypatch.setattr("src.cli.config._load_config", _boom)
         assert backend._utility_model_from_config() == ""

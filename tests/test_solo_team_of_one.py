@@ -49,46 +49,54 @@ def solo_app(tmp_path, monkeypatch):
     a member, and bearer auth so identities are verified."""
     monkeypatch.chdir(tmp_path)
     perms_file = tmp_path / "permissions.json"
-    perms_file.write_text(json.dumps({
-        "permissions": {
-            "solo-a": {
-                "blackboard_read": ["teams/solo-a/*"],
-                "blackboard_write": ["teams/solo-a/*"],
-                "can_publish": ["*"],
-                "can_subscribe": ["*"],
-            },
-            "solo-b": {
-                "blackboard_read": ["teams/solo-b/*"],
-                "blackboard_write": ["teams/solo-b/*"],
-                "can_publish": ["*"],
-                "can_subscribe": ["*"],
-            },
-            "member1": {
-                "blackboard_read": ["teams/team-x/*", "teams/member1/*"],
-                "blackboard_write": ["teams/team-x/*", "teams/member1/*"],
-                "can_publish": ["*"],
-                "can_subscribe": ["*"],
-            },
-            "operator": {
-                "blackboard_read": ["*"],
-                "blackboard_write": ["*"],
-                "can_publish": ["*"],
-                "can_subscribe": ["*"],
-            },
-        },
-    }))
+    perms_file.write_text(
+        json.dumps(
+            {
+                "permissions": {
+                    "solo-a": {
+                        "blackboard_read": ["teams/solo-a/*"],
+                        "blackboard_write": ["teams/solo-a/*"],
+                        "can_publish": ["*"],
+                        "can_subscribe": ["*"],
+                    },
+                    "solo-b": {
+                        "blackboard_read": ["teams/solo-b/*"],
+                        "blackboard_write": ["teams/solo-b/*"],
+                        "can_publish": ["*"],
+                        "can_subscribe": ["*"],
+                    },
+                    "member1": {
+                        "blackboard_read": ["teams/team-x/*", "teams/member1/*"],
+                        "blackboard_write": ["teams/team-x/*", "teams/member1/*"],
+                        "can_publish": ["*"],
+                        "can_subscribe": ["*"],
+                    },
+                    "operator": {
+                        "blackboard_read": ["*"],
+                        "blackboard_write": ["*"],
+                        "can_publish": ["*"],
+                        "can_subscribe": ["*"],
+                    },
+                },
+            }
+        )
+    )
     import src.cli.config as cli_cfg
 
     monkeypatch.setattr(cli_cfg, "PERMISSIONS_FILE", perms_file)
     agents_file = tmp_path / "agents.yaml"
-    agents_file.write_text(yaml.dump({
-        "agents": {
-            "solo-a": {"role": "a"},
-            "solo-b": {"role": "b"},
-            "member1": {"role": "m"},
-            "operator": {"role": "operator"},
-        },
-    }))
+    agents_file.write_text(
+        yaml.dump(
+            {
+                "agents": {
+                    "solo-a": {"role": "a"},
+                    "solo-b": {"role": "b"},
+                    "member1": {"role": "m"},
+                    "operator": {"role": "operator"},
+                },
+            }
+        )
+    )
     monkeypatch.setattr(cli_cfg, "AGENTS_FILE", agents_file)
 
     import src.host.server as server_module
@@ -280,14 +288,18 @@ class TestJoinLeaveSelfPattern:
         )
 
         perms_file = tmp_path / "permissions.json"
-        perms_file.write_text(json.dumps({
-            "permissions": {
-                "rover": {
-                    "blackboard_read": ["teams/rover/*"],
-                    "blackboard_write": ["teams/rover/*"],
-                },
-            },
-        }))
+        perms_file.write_text(
+            json.dumps(
+                {
+                    "permissions": {
+                        "rover": {
+                            "blackboard_read": ["teams/rover/*"],
+                            "blackboard_write": ["teams/rover/*"],
+                        },
+                    },
+                }
+            )
+        )
         with patch("src.cli.config.PERMISSIONS_FILE", perms_file):
             _add_team_blackboard_permissions("rover", "alpha")
             mid = json.loads(perms_file.read_text())["permissions"]["rover"]
@@ -307,20 +319,32 @@ class TestJoinLeaveSelfPattern:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("OPENLEGION_TEAMS_DB", str(tmp_path / "teams.db"))
         perms_file = tmp_path / "permissions.json"
-        perms_file.write_text(json.dumps({
-            "permissions": {
-                "lonely": {"blackboard_read": [], "blackboard_write": []},
-                "scoped": {
-                    "blackboard_read": ["research/*"],
-                    "blackboard_write": [],
-                },
-                "operator": {"blackboard_read": ["*"], "blackboard_write": ["*"]},
-            },
-        }))
+        perms_file.write_text(
+            json.dumps(
+                {
+                    "permissions": {
+                        "lonely": {"blackboard_read": [], "blackboard_write": []},
+                        "scoped": {
+                            "blackboard_read": ["research/*"],
+                            "blackboard_write": [],
+                        },
+                        "operator": {"blackboard_read": ["*"], "blackboard_write": ["*"]},
+                    },
+                }
+            )
+        )
         agents_file = tmp_path / "agents.yaml"
-        agents_file.write_text(yaml.dump({"agents": {
-            "lonely": {"role": "x"}, "scoped": {"role": "y"}, "operator": {"role": "op"},
-        }}))
+        agents_file.write_text(
+            yaml.dump(
+                {
+                    "agents": {
+                        "lonely": {"role": "x"},
+                        "scoped": {"role": "y"},
+                        "operator": {"role": "op"},
+                    }
+                }
+            )
+        )
         monkeypatch.setattr(cli_cfg, "PERMISSIONS_FILE", perms_file)
         monkeypatch.setattr(cli_cfg, "AGENTS_FILE", agents_file)
         monkeypatch.setattr(cli_cfg, "CONFIG_FILE", tmp_path / "mesh.yaml")
@@ -330,9 +354,11 @@ class TestJoinLeaveSelfPattern:
         perms = json.loads(perms_file.read_text())["permissions"]
         assert perms["lonely"]["blackboard_read"] == ["teams/lonely/*"]
         assert perms["lonely"]["blackboard_write"] == ["teams/lonely/*"]
-        # An agent with ANY pattern is left untouched.
-        assert perms["scoped"]["blackboard_read"] == ["research/*"]
-        assert perms["scoped"]["blackboard_write"] == []
+        # "Self always" is ADDITIVE: a teamless worker with custom patterns
+        # keeps them and gains its self pattern (review F3 — legacy teamless
+        # template agents must not end up all-403 with blackboard prompts).
+        assert sorted(perms["scoped"]["blackboard_read"]) == ["research/*", "teams/scoped/*"]
+        assert perms["scoped"]["blackboard_write"] == ["teams/scoped/*"]
         # The operator is never rewritten.
         assert perms["operator"]["blackboard_read"] == ["*"]
 
@@ -396,3 +422,122 @@ class TestSoloRegistrationScoping:
             )
         assert r.status_code == 200
         assert r.json() == {}
+
+
+class TestNoWildcardReadForWorkers:
+    """Adversarial-review F1: with the agent-side standalone guards gone,
+    the host ACL is THE read boundary — no create/boot path may leave a
+    worker holding a blackboard_read wildcard (a never-teamed solo must
+    not be WIDER than a team member, whose join strips ``*``)."""
+
+    def _setup(self, tmp_path, monkeypatch):
+        import src.cli.config as cli_cfg
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("OPENLEGION_TEAMS_DB", str(tmp_path / "teams.db"))
+        perms_file = tmp_path / "permissions.json"
+        perms_file.write_text(json.dumps({"permissions": {}}))
+        agents_file = tmp_path / "agents.yaml"
+        agents_file.write_text(yaml.dump({"agents": {"newbie": {"role": "x"}}}))
+        monkeypatch.setattr(cli_cfg, "PERMISSIONS_FILE", perms_file)
+        monkeypatch.setattr(cli_cfg, "AGENTS_FILE", agents_file)
+        monkeypatch.setattr(cli_cfg, "CONFIG_FILE", tmp_path / "mesh.yaml")
+        return cli_cfg, perms_file
+
+    def test_fresh_create_has_no_wildcard_read(self, tmp_path, monkeypatch):
+        """The REAL create path (base + coordination merge) — the shape the
+        solo_app fixture claims to reproduce — carries no ``*`` read."""
+        cli_cfg, perms_file = self._setup(tmp_path, monkeypatch)
+        cli_cfg._add_agent_permissions(
+            "newbie",
+            permissions=cli_cfg._DEFAULT_AGENT_COORDINATION_PERMS,
+        )
+        p = json.loads(perms_file.read_text())["permissions"]["newbie"]
+        assert p["blackboard_read"] == ["teams/newbie/*"]
+        assert "*" not in p["blackboard_write"]
+        assert "teams/newbie/*" in p["blackboard_write"]
+
+    def test_template_wildcard_read_is_stripped(self, tmp_path, monkeypatch):
+        """Defense in depth: even a template shipping ``*`` cannot hand a
+        worker fleet-wide reads."""
+        cli_cfg, perms_file = self._setup(tmp_path, monkeypatch)
+        cli_cfg._add_agent_permissions(
+            "newbie",
+            permissions={"blackboard_read": ["*", "research/*"]},
+        )
+        p = json.loads(perms_file.read_text())["permissions"]["newbie"]
+        assert "*" not in p["blackboard_read"]
+        assert "research/*" in p["blackboard_read"]
+
+    def test_boot_narrows_untouched_default_wildcard(self, tmp_path, monkeypatch):
+        """A teamless worker still holding the pre-#5 default read shape
+        (["*"] or ["*"] + self) is narrowed at boot; a human-customized
+        list is left alone."""
+        cli_cfg, perms_file = self._setup(tmp_path, monkeypatch)
+        perms_file.write_text(
+            json.dumps(
+                {
+                    "permissions": {
+                        "olddefault": {"blackboard_read": ["*"], "blackboard_write": []},
+                        "olddefault2": {
+                            "blackboard_read": ["*", "teams/olddefault2/*"],
+                            "blackboard_write": [],
+                        },
+                        "custom": {
+                            "blackboard_read": ["*", "research/*"],
+                            "blackboard_write": [],
+                        },
+                    },
+                }
+            )
+        )
+        import yaml as _yaml
+
+        (tmp_path / "agents.yaml").write_text(
+            _yaml.dump(
+                {
+                    "agents": {
+                        "olddefault": {"role": "x"},
+                        "olddefault2": {"role": "y"},
+                        "custom": {"role": "z"},
+                    }
+                }
+            )
+        )
+
+        cli_cfg._ensure_all_agent_permissions()
+
+        perms = json.loads(perms_file.read_text())["permissions"]
+        assert perms["olddefault"]["blackboard_read"] == ["teams/olddefault/*"]
+        assert perms["olddefault2"]["blackboard_read"] == ["teams/olddefault2/*"]
+        # Human-customized pattern lists are never NARROWED (the wildcard
+        # stays) — the self pattern is still added ("self always").
+        assert sorted(perms["custom"]["blackboard_read"]) == ["*", "research/*", "teams/custom/*"]
+
+
+class TestSelfNamespaceCarveOut:
+    """Review F1/F3: the resolution-time carve-out — every agent can
+    always touch its OWN teams/{id}/ namespace even with no ACL entry
+    at all (ephemeral spawn agents resolve via the deny-all default
+    record), and never anyone else's."""
+
+    def test_unknown_agent_can_use_own_namespace_only(self):
+        from src.host.permissions import PermissionMatrix
+
+        pm = PermissionMatrix.__new__(PermissionMatrix)
+        pm.permissions = {}  # no entries at all — spawn-agent posture
+        assert pm.can_read_blackboard("spawn-abc123", "teams/spawn-abc123/notes/x") is True
+        assert pm.can_write_blackboard("spawn-abc123", "teams/spawn-abc123/notes/x") is True
+        # Zero shared reach: other namespaces stay denied.
+        assert pm.can_read_blackboard("spawn-abc123", "teams/other-agent/notes/x") is False
+        assert pm.can_write_blackboard("spawn-abc123", "teams/team-x/plan") is False
+        assert pm.can_read_blackboard("spawn-abc123", "tasks/anything") is False
+
+    def test_segment_boundary(self):
+        from src.host.permissions import PermissionMatrix
+
+        pm = PermissionMatrix.__new__(PermissionMatrix)
+        pm.permissions = {}
+        # "dev" must not match "teams/dev-lead/..."
+        assert pm.can_read_blackboard("dev", "teams/dev-lead/notes") is False
+        assert pm.can_read_blackboard("dev", "teams/dev/notes") is True
