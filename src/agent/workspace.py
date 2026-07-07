@@ -92,6 +92,11 @@ _MAX_INSTRUCTIONS = 12_000
 _MAX_SOUL = 4_000
 _MAX_USER = 4_000
 _MAX_MEMORY = 16_000
+# TEAM.md rides EVERY member's prompt budget (plan A.2 hazard: it was the
+# one uncapped bootstrap file, so a growing shared team doc would flood the
+# whole team's context). The brief endpoint caps individual sections at
+# 2,000 chars; 8,000 total ≈ four full sections before truncation.
+_MAX_TEAM = 8_000
 
 # MEMORY.md "compiled truth + timeline" structure. The compiled head
 # (delimited by these markers) PLUS a bounded slice of the NEWEST log entries
@@ -112,13 +117,17 @@ _MEMORY_RECENT_LOG_CHARS = 5_000
 _MEMORY_HEAD_BUDGET = max(0, _MAX_MEMORY - _MEMORY_RECENT_LOG_CHARS - 32)
 
 
-# Public mapping for external consumers (tool response, dashboard).
-# Files not listed have no per-file bootstrap cap.
+# Public mapping for external consumers (tool response, dashboard) AND the
+# injection loop in get_bootstrap_content (single source of truth — do not
+# re-declare inline). Files not listed have no per-file bootstrap cap.
+# TEAM.md is listed for the cap value only; its injection is special-cased
+# (prepended first, canonical TEAM.md with dashboard-pushed team.md fallback).
 BOOTSTRAP_CAPS: dict[str, int] = {
     "INSTRUCTIONS.md": _MAX_INSTRUCTIONS,
     "SOUL.md": _MAX_SOUL,
     "USER.md": _MAX_USER,
     "MEMORY.md": _MAX_MEMORY,
+    "TEAM.md": _MAX_TEAM,
 }
 
 _CORRECTION_SIGNALS = frozenset({
@@ -680,19 +689,23 @@ class WorkspaceManager:
         ):
             return cached
 
-        caps = {
-            "INSTRUCTIONS.md": _MAX_INSTRUCTIONS,
-            "SOUL.md": _MAX_SOUL,
-            "USER.md": _MAX_USER,
-            "MEMORY.md": _MAX_MEMORY,
-        }
+        # Single source of truth for per-file caps (TEAM.md handled below).
+        caps = {k: v for k, v in BOOTSTRAP_CAPS.items() if k != "TEAM.md"}
 
         parts: list[str] = []
 
-        # TEAM.md (canonical) / team.md (dashboard-pushed) come first.
+        # TEAM.md (canonical) / team.md (dashboard-pushed) come first —
+        # capped like every other bootstrap file (plan A.2: it rides every
+        # member's prompt, so an uncapped shared doc would flood the whole
+        # team's context).
         team = self._read_file("TEAM.md") or self._read_file("team.md")
         if team and team.strip():
-            parts.append(_maybe_add_header("TEAM.md", team.strip()))
+            team = team.strip()
+            if len(team) > _MAX_TEAM:
+                team = team[:_MAX_TEAM] + (
+                    "\n\n... (truncated, use memory_search for full content)"
+                )
+            parts.append(_maybe_add_header("TEAM.md", team))
         # Note: missing TEAM.md is normal for solo agents (not in a
         # team). No warning — the dashboard pushes TEAM.md only for
         # agents assigned to a team.

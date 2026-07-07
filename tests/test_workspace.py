@@ -305,6 +305,39 @@ class TestBootstrapContent:
         content = ws.get_bootstrap_content()
         assert len(content) <= 48_000 + 100  # small margin for truncation text
 
+    def test_bootstrap_caps_team_md(self):
+        """TEAM.md is capped like every other bootstrap file (plan A.2:
+        it rides EVERY member's prompt — a growing shared team doc must
+        not flood the whole team's context)."""
+        from src.agent.workspace import BOOTSTRAP_CAPS
+
+        root = Path(self._tmpdir)
+        cap = BOOTSTRAP_CAPS["TEAM.md"]
+        (root / "TEAM.md").write_text("T" * (cap + 5_000))
+        ws = WorkspaceManager(workspace_dir=self._tmpdir)
+        content = ws.get_bootstrap_content()
+        # The injected TEAM.md section is cut at the cap with the notice.
+        team_section = content.split("---")[0]
+        assert "truncated" in team_section
+        assert team_section.count("T" * 100) * 100 <= cap + 100
+
+    def test_bootstrap_team_md_under_cap_not_truncated(self):
+        root = Path(self._tmpdir)
+        (root / "TEAM.md").write_text("We are building a fleet.")
+        ws = WorkspaceManager(workspace_dir=self._tmpdir)
+        content = ws.get_bootstrap_content()
+        assert "We are building a fleet." in content
+        assert "truncated" not in content.split("---")[0]
+
+    def test_bootstrap_caps_single_source(self):
+        """The injection loop reads BOOTSTRAP_CAPS — the public mapping
+        and the enforced caps can never diverge again."""
+        from src.agent import workspace as ws_mod
+
+        assert set(ws_mod.BOOTSTRAP_CAPS) == {
+            "INSTRUCTIONS.md", "SOUL.md", "USER.md", "MEMORY.md", "TEAM.md",
+        }
+
     def test_bootstrap_skips_empty_files(self):
         root = Path(self._tmpdir)
         (root / "INSTRUCTIONS.md").write_text("")

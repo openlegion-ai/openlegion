@@ -703,28 +703,60 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   pseudo-team roster resolution, operator carve-outs, and hand_off riders all
   verified clean by both reviewers.
 
-### YOU ARE HERE → next phase
-Foundation (#1180/#1181/#1183/#1184) and the rename (#1185) are merged. Phase 0's removal
-column is fully done. Next, in order:
-1. **Phase-0 residuals** (two small independent PRs):
-   (a) **per-call model tiering hook** — widen `_enforce_model_pin` + thread `model=`
-   through agent-side heartbeat/summary call sites (A.C4). Together with the
-   **coordination-vs-work spend split** this GATES Phase 3 (B2 / ratified #3).
-   (b) **agent-server bearer auth** (§4 closed-regardless / B7) — wire the mesh→agent
-   token through `transport._resolve_headers` + every direct caller in the same change;
-   keep `GET /status` exempt.
-2. **Phase 1 — team as first-class**: real Team store (delete the `_load_teams()` YAML
-   glob per C.1 row 1), durable pre-flight team budget envelope (B4 semantics: unset/0 =
-   unlimited), solo = team-of-one (ratified #5: self-scoped blackboard). Decide C.3-b
-   (goals home) first. Fold in: cap TEAM.md via `BOOTSTRAP_CAPS` (A.2 hazard) and the
-   B-pre #3 explicit budget default. Personnel-file *import* needs B-pre #2's config
-   file-lock first.
-3. **Then Phases 2–5** as sequenced in §6 (decide C.3-a and C.3-e before Phase 2;
-   B1 reframe for Phase 3's "dual lanes"; B3 scope for Phase 5 hibernation).
+- **✅ Landed — Phase-1 unit 4: TEAM.md capped via `BOOTSTRAP_CAPS` (A.2 hazard closed).**
+  `_MAX_TEAM = 8_000` (the brief endpoint caps sections at 2,000 chars → ~four full
+  sections before truncation); TEAM.md added to `BOOTSTRAP_CAPS` and truncated at
+  injection with the standard notice. Bonus cleanup: `get_bootstrap_content`'s inline
+  caps dict (a drifted duplicate of the public constant) deleted — the loop now reads
+  `BOOTSTRAP_CAPS`, pinned by `test_bootstrap_caps_single_source` so the advertised
+  and enforced caps can never diverge again. The `update_workspace` over-cap warning
+  now fires for TEAM.md too (additive — only consumer of the mapping). Review:
+  proportionate direct sweep (single consumer verified, cap+no-truncation+single-source
+  pins added); no findings.
 
-**Handoff note:** this doc is the source of truth — a fresh session can continue from here without
-this session's chat history. Read §5 (keep/refactor/remove), Appendices A–C (surgical manifest +
-regression register + dead-code ledger), and §8 (ratified decisions) before starting the rename.
+### PR ledger — Phase 1 (as of 2026-07-07)
+| PR | Unit | CI |
+|---|---|---|
+| #1186 | post-merge review fixes for the #1180–#1185 stack | green |
+| #1187 | per-call model tiering hook (Phase-0 residual a) | green |
+| #1188 | mesh→agent bearer auth (Phase-0 residual b) | green |
+| #1189 | TeamStore — team as first-class entity (unit 1) | green |
+| #1190 | goals → Team store, blackboard goals/ path deleted (unit 1b) | green |
+| #1191 | team budget envelope, B4 semantics (unit 2) | green |
+| #1192 | solo = team-of-one (unit 3) | green |
+| — | TEAM.md cap (unit 4) + this doc update | this PR |
+
+### YOU ARE HERE → next phase
+**Phase 1 (team as first-class) is COMPLETE**: the Team store is THE team authority
+(YAML glob deleted, C.1 row 1 done), goals live in the store (ratified #7, C.1 row 7
+done — one goals home), the budget envelope is durable + pre-flight enforced with B4
+semantics pinned both ways, solo = team-of-one landed with the B6 isolation posture
+preserved by construction (resolution-time self-namespace carve-out + cross-namespace
+collision guard + no worker read wildcard), and TEAM.md is capped. Phase-exit checklist
+(C.4) verified per unit: every replaced old path is deleted.
+
+Next, in order:
+1. **Phase-2 pre-decisions** (decide BEFORE building, like C.3-b was):
+   (a) **C.3-a — Threads vs the inbox event feed**: does Team Threads REPLACE
+   `inbox/{agent}/task_event/` or coexist? Recommendation stands at replace (one event
+   surface); if replace, delete the blackboard back-edge path and repoint `check_inbox`.
+   (e) **C.3-e — SandboxBackend**: it has no shared-volume analog for Team Drive/Scratch
+   (B-pre #6) — invest in a microVM sync layer, or delete the backend and commit to
+   Docker. Do not leave it half-supporting the flagship feature.
+   Also revisit §8 #1 (raw shared scratch stays deferred; git-Drive-first is the default).
+2. **Phase 2 — collaboration substrate** (§6): Team Drive (git, mesh-mediated),
+   Team Threads (durable store replacing `MessageRouter.message_log`, B-pre #4),
+   `ask_teammate`, provenance tier; blackboard → signals only (respect B8's rider list).
+   The volume lifecycle owner now exists (the TeamStore — A.3 #3 satisfied).
+3. **Then Phases 3–5** as sequenced in §6 (B1 reframe for Phase 3's "dual lanes" —
+   priority steer, NOT parallel; B2 spend split gates the suppression removal;
+   B3 scope for Phase 5 hibernation). Personnel-file *import* still needs B-pre #2's
+   config file-lock first.
+
+**Handoff note:** this doc is the source of truth — a fresh session can continue from here
+without this session's chat history. Read §5 (keep/refactor/remove), Appendices A–C, §8
+(ratified decisions), and the Phase-1 entries above (they record implementation
+corrections and review findings the appendices don't).
 
 ---
 
