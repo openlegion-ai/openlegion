@@ -193,6 +193,7 @@ Every inter-agent operation checks per-agent ACLs defined in `config/permissions
 ```
 
 - **Team-scoped blackboard** -- agents can only access keys under their team's namespace (`teams/{name}/*`). The `MeshClient` auto-prefixes all blackboard keys with the team namespace, so agents use natural keys while isolation is enforced transparently. Solo agents are a team-of-one: they hold exactly their private self pattern (`teams/{agent_id}/*`), which no other worker can reach.
+- **Team Drive wall** -- the per-team git repo (`/mesh/teams/{id}/drive/*`, `src/host/drive.py`) is gated on REAL team membership (cross-team and solo callers are 403'd; operator/loopback-internal pass). Pushes are rate-limited, capped per push (`drive_push_max_mb`), and quota-checked (`drive_quota_mb`); `refs/heads/main` is rejected by a pre-receive hook unless the mesh marks the caller operator-tier (`OL_DRIVE_PRIVILEGED=1`), so integration happens only through reviewed merges or the operator.
 - **Glob patterns** for blackboard paths and credential access
 - **Explicit allowlists** for messaging, pub/sub, API access, and credential access
 - **Default deny** -- if not listed, it's blocked

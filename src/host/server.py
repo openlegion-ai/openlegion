@@ -24,9 +24,10 @@ from collections.abc import Callable, Coroutine
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.responses import StreamingResponse
 
+from src.host import drive as team_drive
 from src.host.change_history import ChangeHistory
 from src.host.credentials import ConnectionRefreshError, is_system_credential
 from src.host.help_requests import HelpRequests
@@ -41,6 +42,7 @@ from src.host.orchestration import (
 )
 from src.host.pending_actions import PendingActions
 from src.host.teams import TeamNotFound, TeamStore
+from src.shared import limits as limits_mod
 from src.shared.limits import (
     MAX_OUTPUT_TOKENS_MAX,
     MAX_OUTPUT_TOKENS_MIN,
@@ -134,11 +136,22 @@ def _upload_route_max_bytes() -> int:
     return max(1, int(mb * 1024 * 1024))
 
 
+def _drive_route_max_bytes() -> int:
+    """Body cap for the Team Drive ``git-receive-pack`` route: the push cap
+    (``drive_push_max_mb``) plus 1 MB of protocol overhead. The endpoint
+    re-checks the DECOMPRESSED size against the same cap (gzip bodies)."""
+    from src.shared import limits as _limits
+
+    return _limits.resolve("drive_push_max_mb") * 1024 * 1024 + 1024 * 1024
+
+
 def _body_cap_for_path(path: str) -> int:
     """Per-route body cap: the higher upload cap for upload routes, else the
     global cap. Never returns "unlimited" — every route keeps an OOM backstop."""
     if path == _UPLOAD_ROUTE_EXACT or path.startswith(_UPLOAD_ROUTE_PREFIX):
         return _upload_route_max_bytes()
+    if path.startswith("/mesh/teams/") and path.endswith("/drive/git-receive-pack"):
+        return _drive_route_max_bytes()
     return _max_body_bytes()
 
 
@@ -1056,6 +1069,10 @@ def create_mesh_app(
         # other forensic write paths; dropped traces only degrade observability,
         # never correctness.
         "trace_ingest": (12000, 60),
+        # Team Drive smart-HTTP transport + review operations. A normal
+        # clone/pull/push is 2 requests; 240/min only catches a git loop
+        # gone feral without throttling a busy team.
+        "drive": (240, 60),
     }
 
     async def _check_rate_limit(endpoint: str, agent_id: str) -> None:
@@ -5761,6 +5778,294 @@ def create_mesh_app(
             "team_name": team_name,
             "team_id": team_name,
         }
+
+    # === Team Drive (Phase-2 unit 1) — mesh-hosted git + reviews ===
+    #
+    # One bare repo per team on the mesh host FS (src/host/drive.py).
+    # Agents speak git smart HTTP through these endpoints, so every byte
+    # crosses the mesh trust boundary: verified-bearer auth, a REAL-
+    # membership permission wall (solo team-of-one namespaces have no
+    # drive), per-agent rate limits, a per-push body cap, and a disk
+    # quota. refs/heads/main is pre-receive-hook protected: only
+    # operator-tier callers and the review-merge integrate path run the
+    # subprocess with OL_DRIVE_PRIVILEGED=1.
+
+    from pathlib import Path as _DrivePath
+
+    _MB = 1024 * 1024
+    # Short-TTL per-repo disk-size cache so push bursts don't os.walk the
+    # object store per request. Closure state on the app, not a module
+    # global (Constraint #8); invalidated after every successful push.
+    _drive_size_cache: dict[str, tuple[float, int]] = {}
+    _DRIVE_SIZE_TTL = 15.0
+    _DRIVE_BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,200}")
+    _DRIVE_REVIEW_STATUSES = ("open", "merged", "rejected", "superseded")
+
+    def _require_drive_access(team_id: str, request: Request) -> tuple[str, bool]:
+        """Verified caller + privilege flag for a drive endpoint.
+
+        Default-deny: operator / loopback-internal pass (Constraint #12
+        coordination surface); a worker passes only when its REAL team
+        membership equals ``team_id``. Solo agents get a directive 403 —
+        the drive is a shared-team feature, not part of the private
+        team-of-one namespace. Missing team → 404.
+        """
+        caller = _extract_verified_agent_id(request)
+        privileged = _caller_is_operator(caller, request) or _is_internal_caller(request)
+        if not teams_store.team_exists(team_id):
+            raise HTTPException(404, f"Team '{team_id}' not found")
+        if privileged:
+            return caller, True
+        member_team = teams_store.team_of(caller)
+        if member_team != team_id:
+            _record_denial("permission", caller=caller, target=team_id, gate="drive:membership")
+            if member_team is None:
+                raise HTTPException(
+                    403,
+                    "You are not on a team — the Team Drive is a team feature. "
+                    "Ask the operator to add you to a team first.",
+                )
+            raise HTTPException(403, f"Agent '{caller}' is not a member of team '{team_id}'")
+        return caller, False
+
+    def _drive_repo(team_id: str) -> "_DrivePath":
+        """Resolve (and self-heal) the team's bare-repo path."""
+        try:
+            ref = teams_store.ensure_drive(team_id)
+        except TeamNotFound:
+            raise HTTPException(404, f"Team '{team_id}' not found")
+        if not ref:
+            raise HTTPException(
+                503,
+                "Team Drive is not provisioned for this team (no drive backend wired) — "
+                "ask the operator to restart the mesh.",
+            )
+        return _DrivePath(ref)
+
+    async def _drive_size(repo: "_DrivePath") -> int:
+        key = str(repo)
+        now = time.monotonic()
+        hit = _drive_size_cache.get(key)
+        if hit and now - hit[0] < _DRIVE_SIZE_TTL:
+            return hit[1]
+        loop = asyncio.get_running_loop()
+        size = await loop.run_in_executor(None, team_drive.repo_size_bytes, repo)
+        _drive_size_cache[key] = (now, size)
+        return size
+
+    async def _drive_rpc_body(request: Request, cap: int) -> bytes:
+        """Request body for a smart-HTTP POST, gunzipped when the client
+        sent ``Content-Encoding: gzip`` (git does for large pushes). The
+        cap applies to the DECOMPRESSED size — a gzip bomb 413s here."""
+        body = await request.body()
+        if request.headers.get("content-encoding", "").lower() == "gzip":
+            try:
+                body = team_drive.gunzip_capped(body, cap)
+            except ValueError:
+                raise HTTPException(413, "decompressed request body exceeds the push cap")
+            except Exception:
+                raise HTTPException(400, "invalid gzip request body")
+        return body
+
+    @app.get("/mesh/teams/{team_id}/drive/info/refs")
+    async def drive_info_refs(team_id: str, request: Request, service: str = "") -> Response:
+        """git smart-HTTP ref advertisement (clone/fetch/push handshake)."""
+        caller, _priv = _require_drive_access(team_id, request)
+        await _check_rate_limit("drive", caller)
+        if service not in team_drive.SMART_SERVICES:
+            raise HTTPException(400, "service must be git-upload-pack or git-receive-pack")
+        repo = _drive_repo(team_id)
+        try:
+            body = await team_drive.advertise_refs(service, repo)
+        except team_drive.DriveError as e:
+            raise HTTPException(500, f"drive advertisement failed: {e}")
+        return Response(
+            content=body,
+            media_type=f"application/x-{service}-advertisement",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    @app.post("/mesh/teams/{team_id}/drive/git-upload-pack")
+    async def drive_upload_pack(team_id: str, request: Request) -> Response:
+        """git fetch/clone data channel (read path)."""
+        caller, _priv = _require_drive_access(team_id, request)
+        await _check_rate_limit("drive", caller)
+        repo = _drive_repo(team_id)
+        body = await _drive_rpc_body(request, _max_body_bytes())
+        try:
+            out = await team_drive.service_rpc("git-upload-pack", repo, body)
+        except team_drive.DriveError as e:
+            raise HTTPException(500, f"upload-pack failed: {e}")
+        return Response(
+            content=out,
+            media_type="application/x-git-upload-pack-result",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    @app.post("/mesh/teams/{team_id}/drive/git-receive-pack")
+    async def drive_receive_pack(team_id: str, request: Request) -> Response:
+        """git push data channel (write path): quota pre-check + push cap.
+
+        The quota check runs BEFORE the pack lands, so a single overshoot
+        is bounded by the per-push cap (documented tradeoff — the repo
+        can end at most one push over quota, then blocks).
+        """
+        caller, privileged = _require_drive_access(team_id, request)
+        await _check_rate_limit("drive", caller)
+        repo = _drive_repo(team_id)
+        push_cap = limits_mod.resolve("drive_push_max_mb") * _MB
+        quota = limits_mod.resolve("drive_quota_mb") * _MB
+        size = await _drive_size(repo)
+        if size > quota:
+            raise HTTPException(
+                413,
+                f"Team Drive quota exceeded ({size // _MB} MB used, quota {quota // _MB} MB). "
+                "Prune large files/history or ask the operator to raise OPENLEGION_DRIVE_QUOTA_MB.",
+            )
+        body = await _drive_rpc_body(request, push_cap)
+        if len(body) > push_cap:
+            raise HTTPException(413, f"push exceeds the {push_cap // _MB} MB per-push cap")
+        try:
+            out = await team_drive.service_rpc("git-receive-pack", repo, body, privileged=privileged)
+        except team_drive.DriveError as e:
+            raise HTTPException(500, f"receive-pack failed: {e}")
+        _drive_size_cache.pop(str(repo), None)
+        blackboard.log_audit(
+            action="drive_push",
+            actor=caller,
+            target=team_id,
+            provenance="agent",
+        )
+        return Response(
+            content=out,
+            media_type="application/x-git-receive-pack-result",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    @app.post("/mesh/teams/{team_id}/drive/reviews")
+    async def drive_submit_review(team_id: str, request: Request) -> dict:
+        """Submit a pushed branch for review (review-before-integrate)."""
+        caller, _priv = _require_drive_access(team_id, request)
+        await _check_rate_limit("drive", caller)
+        body = await request.json()
+        branch = str(body.get("branch", "")).strip()
+        title = sanitize_for_prompt(str(body.get("title", ""))).strip()[:200]
+        summary = sanitize_for_prompt(str(body.get("summary", ""))).strip()[:4000]
+        if not branch or not _DRIVE_BRANCH_RE.fullmatch(branch) or ".." in branch:
+            raise HTTPException(400, "branch must be a valid git branch name")
+        if branch == "main":
+            raise HTTPException(400, "main is the integration target — submit a feature branch")
+        if not title:
+            raise HTTPException(400, "title is required")
+        repo = _drive_repo(team_id)
+        loop = asyncio.get_running_loop()
+        exists = await loop.run_in_executor(None, team_drive.branch_exists, repo, branch)
+        if not exists:
+            raise HTTPException(400, f"branch '{branch}' does not exist on the Team Drive — push it first")
+        review = teams_store.create_review(team_id, branch, caller, title, summary)
+        blackboard.log_audit(
+            action="drive_review_submit",
+            actor=caller,
+            target=team_id,
+            field=branch,
+            after_value=review["id"],
+            provenance="agent",
+        )
+        return {"submitted": True, "review": review}
+
+    @app.get("/mesh/teams/{team_id}/drive/reviews")
+    async def drive_list_reviews(team_id: str, request: Request, status: str = "") -> dict:
+        """List the team's drive reviews, optionally filtered by status."""
+        caller, _priv = _require_drive_access(team_id, request)
+        await _check_rate_limit("drive", caller)
+        if status and status not in _DRIVE_REVIEW_STATUSES:
+            raise HTTPException(400, f"status must be one of {', '.join(_DRIVE_REVIEW_STATUSES)}")
+        return {"reviews": teams_store.list_reviews(team_id, status or None)}
+
+    def _drive_open_review_or_error(team_id: str, review_id: str) -> dict:
+        if not teams_store.team_exists(team_id):
+            raise HTTPException(404, f"Team '{team_id}' not found")
+        review = teams_store.get_review(review_id)
+        if review is None or review["team_id"] != team_id:
+            raise HTTPException(404, f"Review '{review_id}' not found for team '{team_id}'")
+        if review["status"] != "open":
+            raise HTTPException(409, f"Review '{review_id}' is already {review['status']}")
+        return review
+
+    @app.post("/mesh/teams/{team_id}/drive/reviews/{review_id}/merge")
+    async def drive_merge_review(team_id: str, review_id: str, request: Request) -> dict:
+        """Integrate a reviewed branch into main (operator-or-internal).
+
+        Mesh-side ``git merge-tree --write-tree`` + a compare-and-swap
+        ``update-ref`` — content conflicts and CAS races both 409.
+        """
+        _require_operator_or_internal(request)
+        caller = _extract_verified_agent_id(request)
+        await _check_rate_limit("drive", caller)
+        review = _drive_open_review_or_error(team_id, review_id)
+        repo = _drive_repo(team_id)
+        message = (
+            f"Merge review {review_id}: {review['title']} "
+            f"(branch {review['branch']}, by {review['author']})"
+        )
+        try:
+            commit = await team_drive.merge_branch(repo, review["branch"], message=message)
+        except team_drive.MergeConflict as e:
+            raise HTTPException(
+                409,
+                {
+                    "error": "merge_conflict",
+                    "message": str(e),
+                    "files": e.conflict_info[:50],
+                    "hint": (
+                        "Ask the author to merge main into the branch, resolve, "
+                        "push, and resubmit the review."
+                    ),
+                },
+            )
+        except team_drive.RefMoved as e:
+            raise HTTPException(409, str(e))
+        except team_drive.DriveError as e:
+            raise HTTPException(500, f"merge failed: {e}")
+        try:
+            resolved = teams_store.resolve_review(review_id, "merged", reviewer=caller, merge_commit=commit)
+        except ValueError as e:
+            # The ref moved under us via a concurrent resolve — the merge
+            # commit is on main; surface the state honestly.
+            raise HTTPException(409, str(e))
+        _drive_size_cache.pop(str(repo), None)
+        blackboard.log_audit(
+            action="drive_review_merge",
+            actor=caller,
+            target=team_id,
+            field=review["branch"],
+            after_value=commit,
+            provenance="user",
+        )
+        return {"merged": True, "review": resolved, "merge_commit": commit}
+
+    @app.post("/mesh/teams/{team_id}/drive/reviews/{review_id}/reject")
+    async def drive_reject_review(team_id: str, review_id: str, request: Request) -> dict:
+        """Reject an open review (operator-or-internal). The branch stays
+        on the drive for rework; resubmitting supersedes nothing (the
+        rejected row is terminal — a new submit opens a fresh review)."""
+        _require_operator_or_internal(request)
+        caller = _extract_verified_agent_id(request)
+        await _check_rate_limit("drive", caller)
+        _drive_open_review_or_error(team_id, review_id)
+        try:
+            resolved = teams_store.resolve_review(review_id, "rejected", reviewer=caller)
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        blackboard.log_audit(
+            action="drive_review_reject",
+            actor=caller,
+            target=team_id,
+            field=resolved["branch"],
+            after_value=review_id,
+            provenance="user",
+        )
+        return {"rejected": True, "review": resolved}
 
     async def _push_team_md(team_name: str, content: str) -> dict[str, bool]:
         """Push updated TEAM.md content to running team members.

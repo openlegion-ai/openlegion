@@ -774,6 +774,42 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
      (`CostTracker.track(agent, ...)`); no bill-to-other mechanism exists anywhere — "billed to the
      asker" requires a mesh-authoritative attribution seam (never container-supplied headers; the
      container is untrusted).
+- **✅ Landed — Phase-2 unit 1: Team Drive (mesh-hosted git; ratified §8 #1 git-Drive-first,
+  NO scratch volume).** One bare repo per team at `data/team_drives/{team_id}.git`
+  (env `OPENLEGION_TEAM_DRIVES_DIR`), served over git smart HTTP on the mesh
+  (`/mesh/teams/{id}/drive/info/refs|git-upload-pack|git-receive-pack`) so every byte is
+  mesh-mediated: verified-bearer auth, REAL-membership wall (cross-team 403, solo 403 —
+  the drive is NOT part of the team-of-one namespace), `_RATE_LIMITS["drive"]`=(240,60),
+  `drive_push_max_mb` (64) + `drive_quota_mb` (512) in `limits.py` (quota pre-checked
+  before receive-pack — bounded one-push overshoot by design; short-TTL size cache on
+  the app closure). `Content-Encoding: gzip` POST bodies are inflated with a
+  decompressed-size cap (zip-bomb 413). Key decisions: (1) storage = CONCRETE
+  `ensure_team_volume`/`remove_team_volume` on the RuntimeBackend ABC (host-dir git;
+  shared by Docker AND Sandbox backends — C.3-e is thereby MOOT for the Drive: the
+  transport is HTTP, no shared volume/microVM sync layer needed); lifecycle = TeamStore
+  (`set_drive_provisioner` wired in cli/runtime beside `set_team_env_provider`, boot
+  backfill non-destructive, create-path wipe-then-init so delete→recreate never adopts a
+  stale drive, provision failure leaves `drive_ref` NULL without failing create; the
+  drive endpoints self-heal via `ensure_drive`). (2) main is integrate-only: a
+  pre-receive hook (0755, /bin/sh) rejects `refs/heads/main` unless
+  `OL_DRIVE_PRIVILEGED=1`, which the mesh env-injects ONLY for operator-tier callers +
+  the merge path; workers push feature branches. (3) Review-before-integrate is
+  first-class: `drive_reviews` in teams.db (canonical v1, same executescript,
+  user_version stays 1) with same-branch resubmit→supersede; merge is mesh-side
+  `git merge-tree --write-tree` (requires git ≥ 2.38, checked at call time) +
+  two-parent `commit-tree` + `update-ref --stdin` CAS (conflict AND lost-CAS → 409);
+  merge/reject are `_require_operator_or_internal`. (4) Agent surface =
+  `team_drive` tool (clone→/data/drive, pull, branch, sync [never main],
+  submit_review, list_reviews, log, status) with Constraint-#10 failure envelopes;
+  auth via per-invocation `-c http.extraHeader` (token never in .git/config, scrubbed
+  from all tool output); teammate review text sanitized on context entry. Subprocesses:
+  minimal env (PATH/HOME only + the privilege flag), own session, 120s kill-pg timeout,
+  option-injection blocked by full-ref args + branch-name grammar. Plan corrections
+  discovered: A.2's "attach in the volumes dict / thread team id through env_overrides"
+  is obsolete for the Drive (no mount exists — transport-level design); the global 8 MB
+  mesh body cap needed a per-route carve-out for receive-pack
+  (`_body_cap_for_path` → push cap + 1 MB slack). No dashboard UI (rides unit 2);
+  merge/reject reachable via mesh endpoints (dashboard/operator-tool surface deferred).
 
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |

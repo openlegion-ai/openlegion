@@ -2387,6 +2387,10 @@ class TestPolishFixesApplied:
         assert "telemetry.py" in claude_md and "dashboard_telemetry" in claude_md, (
             "CLAUDE.md should document src/dashboard/telemetry.py"
         )
+        # Team Drive module row (Phase-2 unit 1) is documented.
+        assert "src/host/drive.py" in claude_md and "OL_DRIVE_PRIVILEGED" in claude_md, (
+            "CLAUDE.md should document src/host/drive.py (Team Drive)"
+        )
 
     def test_claudemd_documents_tab_id_and_wizard_state_constraints(self):
         """CLAUDE.md gains the tab-ID + wizard-state Known Constraints."""

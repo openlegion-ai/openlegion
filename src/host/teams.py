@@ -40,7 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from src.shared.types import RESERVED_AGENT_IDS
-from src.shared.utils import setup_logging
+from src.shared.utils import generate_id, setup_logging
 
 logger = setup_logging("host.teams")
 
@@ -99,6 +99,12 @@ class TeamStore:
     ) -> None:
         self.db_path = db_path
         self.teams_dir = Path(teams_dir) if teams_dir is not None else None
+        # Team Drive provisioner (Phase-2 unit 1, plan A.3 #3): the store
+        # owns the drive LIFECYCLE, the runtime backend owns the STORAGE.
+        # Wired via set_drive_provisioner in cli/runtime; pure-DB mode
+        # (tests / browser tenant lookup) leaves both None → no-op.
+        self._drive_ensure = None
+        self._drive_remove = None
         self._shared_conn: sqlite3.Connection | None = None
         self._mem_lock = threading.Lock()
         if db_path == ":memory:":
@@ -182,6 +188,26 @@ class TeamStore:
                     updated_at TEXT
                 );
 
+                -- Team Drive review queue (Phase-2 unit 1). One row per
+                -- submitted branch review; resubmitting the same branch
+                -- supersedes the older open row. status:
+                -- open | merged | rejected | superseded.
+                CREATE TABLE IF NOT EXISTS drive_reviews (
+                    id           TEXT PRIMARY KEY,
+                    team_id      TEXT NOT NULL,
+                    branch       TEXT NOT NULL,
+                    author       TEXT NOT NULL,
+                    title        TEXT NOT NULL DEFAULT '',
+                    summary      TEXT NOT NULL DEFAULT '',
+                    status       TEXT NOT NULL DEFAULT 'open',
+                    reviewer     TEXT,
+                    merge_commit TEXT,
+                    created_at   TEXT,
+                    resolved_at  TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_drive_reviews_team
+                    ON drive_reviews(team_id, status);
+
                 PRAGMA user_version = 1;
                 """
             )
@@ -239,6 +265,7 @@ class TeamStore:
             except sqlite3.IntegrityError:
                 raise TeamExists(f"Team '{team_id}' already exists")
         self._scaffold_files(team_id, description)
+        self._provision_drive(team_id, wipe_stale=True)
         return self.get_team(team_id)  # type: ignore[return-value]
 
     def _scaffold_files(self, team_id: str, description: str) -> None:
@@ -325,6 +352,12 @@ class TeamStore:
             if cur.rowcount == 0:
                 raise TeamNotFound(f"Team '{team_id}' not found")
             conn.execute("DELETE FROM team_members WHERE team_id = ?", (team_id,))
+            conn.execute("DELETE FROM drive_reviews WHERE team_id = ?", (team_id,))
+        if self._drive_remove is not None:
+            try:
+                self._drive_remove(team_id)
+            except Exception:
+                logger.exception("Drive removal for team %s failed", team_id)
         if self.teams_dir is not None:
             team_dir = self.teams_dir / validate_team_id(team_id)
             if team_dir.exists():
@@ -475,6 +508,166 @@ class TeamStore:
         with self._conn() as conn:
             cur = conn.execute("DELETE FROM agent_goals WHERE agent_id = ?", (agent_id,))
             return cur.rowcount > 0
+
+    # ── Team Drive lifecycle (Phase-2 unit 1, plan A.3 #3) ────────
+
+    def set_drive_provisioner(self, ensure_fn, remove_fn) -> None:
+        """Wire the drive storage backend (``ensure(team_id) -> ref``,
+        ``remove(team_id)``) — normally ``RuntimeBackend.ensure_team_volume``
+        / ``remove_team_volume``. Until wired, drive provisioning is a
+        silent no-op (pure-DB mode)."""
+        self._drive_ensure = ensure_fn
+        self._drive_remove = remove_fn
+
+    def _set_drive_ref(self, team_id: str, ref: str | None) -> None:
+        with self._conn() as conn:
+            conn.execute("UPDATE teams SET drive_ref = ? WHERE id = ?", (ref, team_id))
+
+    def _provision_drive(self, team_id: str, *, wipe_stale: bool = False) -> str | None:
+        """Provision the team's drive and persist ``drive_ref``.
+
+        ``wipe_stale=True`` (the create_team path) removes any leftover
+        repo dir first — create only runs for a NEW team row, so an
+        existing dir is a stale remnant of a deleted team of the same
+        name (Phase-1 finding #4 precedent: never adopt stale state).
+        Failure is logged and leaves ``drive_ref`` NULL — a drive
+        governor must never take down team management; the boot
+        backfill retries on the next start.
+        """
+        if self._drive_ensure is None:
+            return None
+        try:
+            if wipe_stale and self._drive_remove is not None:
+                self._drive_remove(team_id)
+            ref = self._drive_ensure(team_id)
+        except Exception:
+            logger.exception("Drive provisioning for team %s failed (drive_ref stays NULL)", team_id)
+            return None
+        self._set_drive_ref(team_id, ref)
+        return ref
+
+    def ensure_drive(self, team_id: str) -> str | None:
+        """Return the team's drive_ref, provisioning/repairing on demand.
+
+        Self-healing read path for the mesh drive endpoints: a NULL ref
+        (create-time provision failure) or a ref whose directory is gone
+        (disk wipe) re-provisions when a provisioner is wired. Returns
+        None when the team has no drive and none can be created.
+        """
+        team = self.get_team(team_id)
+        if team is None:
+            raise TeamNotFound(f"Team '{team_id}' not found")
+        ref = team.get("drive_ref")
+        if ref and Path(ref).exists():
+            return ref
+        return self._provision_drive(team_id)
+
+    def backfill_drives(self) -> list[str]:
+        """Provision drives for teams missing one (boot backfill, mirrors
+        the solo-ACL backfill pattern). Non-destructive: a team whose
+        repo dir already exists on disk adopts it via the idempotent
+        ensure — the wipe path is exclusive to create_team."""
+        if self._drive_ensure is None:
+            return []
+        with self._conn() as conn:
+            rows = conn.execute("SELECT id, drive_ref FROM teams").fetchall()
+        provisioned: list[str] = []
+        for team_id, ref in rows:
+            if ref and Path(ref).exists():
+                continue
+            if self._provision_drive(team_id) is not None:
+                provisioned.append(team_id)
+        return provisioned
+
+    # ── Team Drive reviews (review-before-integrate) ─────────────
+
+    _REVIEW_COLS = (
+        "id, team_id, branch, author, title, summary, status, "
+        "reviewer, merge_commit, created_at, resolved_at"
+    )
+
+    @staticmethod
+    def _row_to_review(row: tuple) -> dict:
+        return {
+            "id": row[0],
+            "team_id": row[1],
+            "branch": row[2],
+            "author": row[3],
+            "title": row[4],
+            "summary": row[5],
+            "status": row[6],
+            "reviewer": row[7],
+            "merge_commit": row[8],
+            "created_at": row[9],
+            "resolved_at": row[10],
+        }
+
+    def create_review(self, team_id: str, branch: str, author: str, title: str, summary: str = "") -> dict:
+        """Open a review for ``branch``. Any older OPEN review for the
+        same (team, branch) is marked ``superseded`` in the same
+        transaction — one live review per branch."""
+        review_id = generate_id("rev")
+        now = _now()
+        with self._txn() as conn:
+            if conn.execute("SELECT 1 FROM teams WHERE id = ?", (team_id,)).fetchone() is None:
+                raise TeamNotFound(f"Team '{team_id}' not found")
+            conn.execute(
+                "UPDATE drive_reviews SET status = 'superseded', resolved_at = ? "
+                "WHERE team_id = ? AND branch = ? AND status = 'open'",
+                (now, team_id, branch),
+            )
+            conn.execute(
+                "INSERT INTO drive_reviews (id, team_id, branch, author, title, summary, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'open', ?)",
+                (review_id, team_id, branch, author, title, summary, now),
+            )
+        return self.get_review(review_id)  # type: ignore[return-value]
+
+    def get_review(self, review_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                f"SELECT {self._REVIEW_COLS} FROM drive_reviews WHERE id = ?", (review_id,)
+            ).fetchone()
+        return self._row_to_review(row) if row else None
+
+    def list_reviews(self, team_id: str, status: str | None = None) -> list[dict]:
+        with self._conn() as conn:
+            if status:
+                rows = conn.execute(
+                    f"SELECT {self._REVIEW_COLS} FROM drive_reviews "
+                    "WHERE team_id = ? AND status = ? ORDER BY created_at DESC",
+                    (team_id, status),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"SELECT {self._REVIEW_COLS} FROM drive_reviews WHERE team_id = ? ORDER BY created_at DESC",
+                    (team_id,),
+                ).fetchall()
+        return [self._row_to_review(r) for r in rows]
+
+    def resolve_review(
+        self,
+        review_id: str,
+        status: str,
+        reviewer: str,
+        merge_commit: str | None = None,
+    ) -> dict:
+        """Transition an OPEN review to ``merged``/``rejected``. Raises
+        ValueError if the review is missing or already resolved (the
+        merge endpoint must not double-integrate)."""
+        if status not in ("merged", "rejected"):
+            raise ValueError(f"Invalid review resolution '{status}'")
+        with self._txn() as conn:
+            row = conn.execute("SELECT status FROM drive_reviews WHERE id = ?", (review_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"Review '{review_id}' not found")
+            if row[0] != "open":
+                raise ValueError(f"Review '{review_id}' is already {row[0]}")
+            conn.execute(
+                "UPDATE drive_reviews SET status = ?, reviewer = ?, merge_commit = ?, resolved_at = ? WHERE id = ?",
+                (status, reviewer, merge_commit, _now(), review_id),
+            )
+        return self.get_review(review_id)  # type: ignore[return-value]
 
     # ── files ────────────────────────────────────────────────────
 

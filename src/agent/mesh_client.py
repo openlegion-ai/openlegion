@@ -1708,6 +1708,31 @@ class MeshClient:
         _raise_with_body(response)
         return response.json()
 
+    # ---- Team Drive reviews (Phase-2 unit 1) ----------------------------
+    async def submit_drive_review(self, branch: str, title: str, summary: str = "") -> dict:
+        """Submit a pushed Team Drive branch for review-before-integrate."""
+        if not self.team_name:
+            raise RuntimeError("No team drive available: agent has no team scope")
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/teams/{self.team_name}/drive/reviews",
+            json={"branch": branch, "title": title, "summary": summary},
+            headers=self._trace_headers(),
+        )
+        _raise_with_body(response)
+        return response.json()
+
+    async def list_drive_reviews(self, status: str = "") -> dict:
+        """List this team's Team Drive reviews (optionally by status)."""
+        if not self.team_name:
+            raise RuntimeError("No team drive available: agent has no team scope")
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/teams/{self.team_name}/drive/reviews",
+            params={"status": status} if status else None,
+        )
+        _raise_with_body(response)
+        return response.json()
+
     async def team_summary(self, team_id: str, hours: float = 0) -> dict:
         """Synthesized status summary for a team.
 
