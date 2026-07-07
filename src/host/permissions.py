@@ -254,17 +254,11 @@ class PermissionMatrix:
             return agent_id == "operator"
         if key.startswith("global/output/"):
             return agent_id == "operator" or key.startswith(f"global/output/{agent_id}/")
-        # Self-inbox task_event carve-out: an agent may ALWAYS read its OWN
-        # back-edge task_event inbox (outcomes land at
-        # inbox/{agent}/task_event/ — the only thing ``check_inbox`` reads and
-        # the only producer). Strictly scoped to that one sub-path under the
-        # caller's own verified id — least privilege, narrower than both the
-        # operator carve-out and a whole-inbox grant. Fixes already-provisioned
-        # agents with no ACL re-grant. The trailing slash enforces a full
-        # path-segment boundary so e.g. agent "dev" cannot match
-        # "inbox/dev-lead/task_event/...".
-        if key.startswith(f"inbox/{agent_id}/task_event/"):
-            return True
+        # NOTE: the former self-inbox ``inbox/{agent}/task_event/`` read
+        # carve-out is gone — back-edge task events moved off the
+        # blackboard into the Team Threads store (C.3-a; read path is
+        # ``GET /mesh/agents/{id}/task-events``). Keys named ``inbox/...``
+        # are ordinary blackboard keys now.
         # NOTE: the former self-goals read carve-out is gone — standing
         # goals moved off the blackboard into the Team store (ratified
         # #7 / C.3-b; read path is GET /mesh/agents/{id}/goals). Keys

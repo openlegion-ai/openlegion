@@ -638,17 +638,18 @@ async def test_pending_to_working_to_done_end_to_end(tmp_path):
             )
             assert r2.status_code == 200, r2.text
 
-        # Task closed cleanly + back-edge written.
+        # Task closed cleanly + back-edge recorded on the task's thread.
         fresh = tasks_store.get(task_id)
         assert fresh["status"] == "done"
-        assert bb.read(f"inbox/alpha/task_event/{task_id}") is not None
+        events = app.thread_store.list_events_for("alpha")
+        assert any(e.get("task_id") == task_id for e in events)
     finally:
         _teardown_mesh(bb, tasks_store)
 
 
 @pytest.mark.asyncio
 async def test_terminal_transition_writes_back_edge_for_agent_origin(tmp_path):
-    """origin_kind=='agent' triggers a blackboard back-edge on terminal status."""
+    """origin_kind=='agent' triggers a thread-store back-edge on terminal status."""
     from httpx import ASGITransport, AsyncClient
 
     app, bb, tasks_store, _ = _setup_mesh_app(tmp_path)
@@ -672,17 +673,20 @@ async def test_terminal_transition_writes_back_edge_for_agent_origin(tmp_path):
             )
         assert resp.status_code == 200, resp.text
 
-        entry = bb.read(f"inbox/alpha/task_event/{task_id}")
-        assert entry is not None, "back-edge missing"
-        payload = entry.value
+        events = app.thread_store.list_events_for("alpha")
+        payload = next(
+            (e for e in events if e.get("task_id") == task_id), None,
+        )
+        assert payload is not None, "back-edge missing"
         assert payload["kind"] == "task_completed"
         assert payload["task_id"] == task_id
         assert payload["recipient"] == "beta"
         assert payload["status"] == "done"
         assert payload["summary"] == "all done"
-        # task_completed is an informational back-edge kind → 24h TTL (the
-        # actionable kinds task_failed/task_blocked keep the 7-day window).
-        assert entry.ttl == 86400
+        # The event landed on the task's own thread. (task_completed is
+        # an informational kind → 24h serving window in list_events_for;
+        # the window split itself is pinned in test_threads.py.)
+        assert payload["thread_id"] == f"task:{task_id}"
     finally:
         _teardown_mesh(bb, tasks_store)
 
@@ -720,10 +724,13 @@ async def test_back_edge_tolerates_non_dict_result(tmp_path):
                 headers={"x-mesh-internal": "1"},
             )
         assert resp.status_code == 200, resp.text
-        entry = bb.read(f"inbox/alpha/task_event/{task_id}")
+        events = app.thread_store.list_events_for("alpha")
+        entry = next(
+            (e for e in events if e.get("task_id") == task_id), None,
+        )
         assert entry is not None, "back-edge dropped on non-dict result"
         # Summary defaults to "" — the writer didn't crash extracting it.
-        assert entry.value.get("summary") == ""
+        assert entry.get("summary") == ""
     finally:
         _teardown_mesh(bb, tasks_store)
 
@@ -756,7 +763,8 @@ async def test_terminal_transition_skips_back_edge_for_human_origin(tmp_path):
 
         # No back-edge for any plausible origin_user variant.
         for candidate in ("u_42", "telegram", "alpha", "beta"):
-            assert bb.read(f"inbox/{candidate}/task_event/{task_id}") is None
+            events = app.thread_store.list_events_for(candidate)
+            assert not any(e.get("task_id") == task_id for e in events)
     finally:
         _teardown_mesh(bb, tasks_store)
 
@@ -787,7 +795,8 @@ async def test_terminal_transition_skips_back_edge_for_self(tmp_path):
             )
         assert resp.status_code == 200, resp.text
 
-        assert bb.read(f"inbox/beta/task_event/{task_id}") is None
+        events = app.thread_store.list_events_for("beta")
+        assert not any(e.get("task_id") == task_id for e in events)
     finally:
         _teardown_mesh(bb, tasks_store)
 
@@ -802,18 +811,18 @@ async def test_check_inbox_surfaces_back_edge_events():
     mesh_client = MagicMock()
     mesh_client.agent_id = "alpha"
     mesh_client.list_task_inbox = AsyncMock(return_value=[])
-    # Synthetic back-edge payload as the mesh would write.
-    mesh_client.list_blackboard = AsyncMock(return_value=[{
-        "key": "inbox/alpha/task_event/task_abc",
-        "value": {
-            "kind": "task_completed",
-            "task_id": "task_abc",
-            "recipient": "beta",
-            "title": "Do the thing",
-            "status": "done",
-            "ts": 1700000000,
-            "summary": "finished it",
-        },
+    # Synthetic back-edge envelope as the mesh task-events endpoint
+    # serves it (thread store rows).
+    mesh_client.list_inbox_events = AsyncMock(return_value=[{
+        "kind": "task_completed",
+        "task_id": "task_abc",
+        "recipient": "beta",
+        "title": "Do the thing",
+        "status": "done",
+        "ts": 1700000000,
+        "summary": "finished it",
+        "id": 1,
+        "thread_id": "task:task_abc",
     }])
 
     result = await check_inbox(mesh_client=mesh_client)
@@ -825,26 +834,23 @@ async def test_check_inbox_surfaces_back_edge_events():
     assert ev["kind"] == "task_completed"
     assert ev["task_id"] == "task_abc"
     assert ev["summary"] == "finished it"
-    assert ev["key"] == "inbox/alpha/task_event/task_abc"
+    assert ev["key"] == "task_event/task_abc"
 
-    # The durable task inbox endpoint is called, then the blackboard
-    # back-edge prefix.
+    # The durable task inbox endpoint is called, then the thread-store
+    # back-edge feed.
     mesh_client.list_task_inbox.assert_awaited_once_with("alpha")
-    mesh_client.list_blackboard.assert_awaited_once()
-    call = mesh_client.list_blackboard.await_args
-    assert call.args[0] == "inbox/alpha/task_event/"
-    assert call.kwargs.get("global_scope") is True
+    mesh_client.list_inbox_events.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
 async def test_check_inbox_degrades_when_event_fetch_fails():
-    """A blackboard hiccup must not fail the whole check_inbox call."""
+    """A mesh hiccup must not fail the whole check_inbox call."""
     from src.agent.builtins.coordination_tool import check_inbox
 
     mesh_client = MagicMock()
     mesh_client.agent_id = "alpha"
     mesh_client.list_task_inbox = AsyncMock(return_value=[])
-    mesh_client.list_blackboard = AsyncMock(side_effect=RuntimeError("boom"))
+    mesh_client.list_inbox_events = AsyncMock(side_effect=RuntimeError("boom"))
 
     result = await check_inbox(mesh_client=mesh_client)
 

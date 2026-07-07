@@ -1,26 +1,31 @@
 """Tests for the extracted ``_write_task_event_back_edge`` helper.
 
-The helper writes back-edge events to ``inbox/{origin_user}/task_event/{task_id}``
-on terminal status transitions and — for actionable kinds
-(``task_failed`` / ``task_blocked``) — wakes the originator via the
-lane with a 60s per-task rate limit.
+The helper records back-edge events on the task's thread (ThreadStore,
+``kind='event'``, ``recipient=origin_user``) on terminal status
+transitions and — for actionable kinds (``task_failed`` /
+``task_blocked``) — wakes the originator via the lane with a 60s
+per-task rate limit.
 
 This module builds a minimal mesh app, grabs the closure exposed on
 ``app._write_task_event_back_edge``, and exercises the eligibility /
 wake / rate-limit paths directly. The closure shares state with the
 endpoint that calls it, so this is testing the exact in-process function
-the request handler uses.
+the request handler uses. Wake/eligibility semantics are storage-
+independent — the assertions below are unchanged from the blackboard
+era; only the storage queries moved to the thread store.
 """
 
 from __future__ import annotations
 
 import asyncio
 import importlib
+import time
 
 import pytest
 
 from src.host.mesh import Blackboard, MessageRouter, PubSub
 from src.host.permissions import PermissionMatrix
+from src.host.threads import ThreadStore
 from src.shared.types import AgentPermissions
 
 
@@ -78,18 +83,21 @@ def mesh_app_with_back_edge(tmp_path, monkeypatch):
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
 
+    thread_store = ThreadStore(":memory:")
     app = server_module.create_mesh_app(
         blackboard=blackboard,
         pubsub=pubsub,
         router=router,
         permissions=permissions,
+        thread_store=thread_store,
         lane_manager=lane,  # type: ignore[arg-type]
         dispatch_loop=loop,
     )
-    yield app, blackboard, lane, loop
+    yield app, thread_store, lane, loop
     loop.call_soon_threadsafe(loop.stop)
     thread.join(timeout=2)
     blackboard.close()
+    thread_store.close()
     loop.close()
     monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
     importlib.reload(server_module)
@@ -115,15 +123,29 @@ def _record(task_id: str, **overrides) -> dict:
 def _settle(seconds: float = 0.05) -> None:
     """Wait briefly so ``run_coroutine_threadsafe`` calls land on the
     background dispatch loop."""
-    import time
     time.sleep(seconds)
+
+
+def _events_for(thread_store: ThreadStore, recipient: str) -> list[dict]:
+    """The store-backed replacement for the old
+    ``blackboard.list_by_prefix("inbox/{recipient}/task_event/")``."""
+    return thread_store.list_events_for(recipient)
+
+
+def _age_event(thread_store: ThreadStore, task_id: str, age_seconds: float) -> None:
+    """Backdate the task's event row(s) to test the serving windows."""
+    with thread_store._conn() as conn:
+        conn.execute(
+            "UPDATE thread_messages SET created_at = ? WHERE thread_id = ?",
+            (time.time() - age_seconds, f"task:{task_id}"),
+        )
 
 
 class TestBackEdgeHelperEligibility:
     def test_task_completed_does_not_wake(self, mesh_app_with_back_edge):
-        """``task_completed`` writes inbox + does NOT wake the originator
-        (operator picks up via heartbeat, not interrupt)."""
-        app, blackboard, lane, _loop = mesh_app_with_back_edge
+        """``task_completed`` records the event + does NOT wake the
+        originator (operator picks up via heartbeat, not interrupt)."""
+        app, thread_store, lane, _loop = mesh_app_with_back_edge
         rec = _record("task_done_1", status="done")
 
         app._write_task_event_back_edge(
@@ -132,14 +154,15 @@ class TestBackEdgeHelperEligibility:
         )
         _settle()
 
-        rows = blackboard.list_by_prefix("inbox/scout/task_event/")
-        assert any(r.value.get("task_id") == "task_done_1" for r in rows)
+        events = _events_for(thread_store, "scout")
+        assert any(e.get("task_id") == "task_done_1" for e in events)
         # NO lane wake.
         assert lane.calls == []
 
-    def test_task_failed_writes_inbox_and_wakes(self, mesh_app_with_back_edge):
-        """``task_failed`` writes inbox AND wakes the originator (actionable kind)."""
-        app, blackboard, lane, _loop = mesh_app_with_back_edge
+    def test_task_failed_writes_event_and_wakes(self, mesh_app_with_back_edge):
+        """``task_failed`` records the event AND wakes the originator
+        (actionable kind)."""
+        app, thread_store, lane, _loop = mesh_app_with_back_edge
         rec = _record("task_fail_1", status="failed")
 
         app._write_task_event_back_edge(
@@ -150,13 +173,14 @@ class TestBackEdgeHelperEligibility:
         )
         _settle()
 
-        rows = blackboard.list_by_prefix("inbox/scout/task_event/")
         payload = next(
-            r.value for r in rows
-            if r.value.get("task_id") == "task_fail_1"
+            e for e in _events_for(thread_store, "scout")
+            if e.get("task_id") == "task_fail_1"
         )
         assert payload["kind"] == "task_failed"
         assert payload["error"] == "lane_timeout"
+        # The event landed on the task's own thread.
+        assert payload["thread_id"] == "task:task_fail_1"
         # Wake was scheduled to the originator.
         assert len(lane.calls) == 1
         wake = lane.calls[0]
@@ -188,7 +212,7 @@ class TestBackEdgeHelperEligibility:
     def test_self_handoff_skipped(self, mesh_app_with_back_edge):
         """origin.user == assignee → suppress the back-edge so an
         originating agent's check_inbox stays clean."""
-        app, blackboard, lane, _loop = mesh_app_with_back_edge
+        app, thread_store, lane, _loop = mesh_app_with_back_edge
         rec = _record(
             "task_self_1",
             assignee="scout",
@@ -200,9 +224,9 @@ class TestBackEdgeHelperEligibility:
         )
         _settle()
 
-        rows = blackboard.list_by_prefix("inbox/scout/task_event/")
+        events = _events_for(thread_store, "scout")
         assert not any(
-            r.value.get("task_id") == "task_self_1" for r in rows
+            e.get("task_id") == "task_self_1" for e in events
         )
         assert lane.calls == []
 
@@ -211,10 +235,10 @@ class TestBackEdgeHelperEligibility:
     ):
         """L9 binding: when ``origin.user`` is not the task ``creator``
         (forged origin, or a multi-hop chain whose origin points at a
-        distant root), the back-edge EVENT is still written so the
+        distant root), the back-edge EVENT is still recorded so the
         originator's check_inbox/heartbeat sees it — but the privileged
         wake is skipped so no arbitrary agent is interrupted."""
-        app, blackboard, lane, _loop = mesh_app_with_back_edge
+        app, thread_store, lane, _loop = mesh_app_with_back_edge
         # origin.user="analyst" (claimed) but creator="scout" (real).
         rec = _record(
             "task_mismatch_1",
@@ -228,10 +252,10 @@ class TestBackEdgeHelperEligibility:
         )
         _settle()
 
-        # Event IS written to the claimed origin's inbox (delivery intact).
-        rows = blackboard.list_by_prefix("inbox/analyst/task_event/")
+        # Event IS recorded for the claimed origin (delivery intact).
+        events = _events_for(thread_store, "analyst")
         assert any(
-            r.value.get("task_id") == "task_mismatch_1" for r in rows
+            e.get("task_id") == "task_mismatch_1" for e in events
         )
         # But NO wake — origin_user != creator.
         assert lane.calls == []
@@ -239,7 +263,7 @@ class TestBackEdgeHelperEligibility:
     def test_origin_user_matches_creator_wakes(self, mesh_app_with_back_edge):
         """L9 binding: the legit case (origin.user == creator) still
         wakes the originator — auto-recovery is unaffected."""
-        app, blackboard, lane, _loop = mesh_app_with_back_edge
+        app, thread_store, lane, _loop = mesh_app_with_back_edge
         rec = _record(
             "task_match_1",
             creator="scout",
@@ -252,16 +276,16 @@ class TestBackEdgeHelperEligibility:
         )
         _settle()
 
-        rows = blackboard.list_by_prefix("inbox/scout/task_event/")
-        assert any(r.value.get("task_id") == "task_match_1" for r in rows)
+        events = _events_for(thread_store, "scout")
+        assert any(e.get("task_id") == "task_match_1" for e in events)
         assert len(lane.calls) == 1
         assert lane.calls[0]["args"][0] == "scout"
 
     def test_human_origin_failure_wakes_operator(self, mesh_app_with_back_edge):
         """A2: ``origin.kind=human`` failures don't back-edge the human
         (ChainWatcher informs the user) — they wake the OPERATOR into a
-        recovery turn, with the event written to the operator's inbox."""
-        app, blackboard, lane, _loop = mesh_app_with_back_edge
+        recovery turn, with the event recorded for the operator."""
+        app, thread_store, lane, _loop = mesh_app_with_back_edge
         rec = _record(
             "task_human_1",
             origin={"kind": "human", "channel": "telegram", "user": "9999"},
@@ -274,14 +298,14 @@ class TestBackEdgeHelperEligibility:
         _settle()
 
         # The human user gets no mesh-side back-edge event...
-        rows = blackboard.list_by_prefix("inbox/9999/task_event/")
+        events = _events_for(thread_store, "9999")
         assert not any(
-            r.value.get("task_id") == "task_human_1" for r in rows
+            e.get("task_id") == "task_human_1" for e in events
         )
         # ...but the operator gets the event + a recovery wake.
-        op_rows = blackboard.list_by_prefix("inbox/operator/task_event/")
+        op_events = _events_for(thread_store, "operator")
         assert any(
-            r.value.get("task_id") == "task_human_1" for r in op_rows
+            e.get("task_id") == "task_human_1" for e in op_events
         )
         assert len(lane.calls) == 1
         assert lane.calls[0]["args"][0] == "operator"
@@ -298,7 +322,7 @@ class TestBackEdgeHelperEligibility:
     ):
         """Successful human-origin chains stay quiet — recovery wakes are
         for failed/blocked only."""
-        app, blackboard, lane, _loop = mesh_app_with_back_edge
+        app, thread_store, lane, _loop = mesh_app_with_back_edge
         rec = _record(
             "task_human_2", status="done",
             origin={"kind": "human", "channel": "telegram", "user": "9999"},
@@ -310,9 +334,9 @@ class TestBackEdgeHelperEligibility:
         )
         _settle()
 
-        op_rows = blackboard.list_by_prefix("inbox/operator/task_event/")
+        op_events = _events_for(thread_store, "operator")
         assert not any(
-            r.value.get("task_id") == "task_human_2" for r in op_rows
+            e.get("task_id") == "task_human_2" for e in op_events
         )
         assert lane.calls == []
 
@@ -320,7 +344,7 @@ class TestBackEdgeHelperEligibility:
         self, mesh_app_with_back_edge,
     ):
         """The operator's own failed tasks don't trigger a self-wake."""
-        app, _blackboard, lane, _loop = mesh_app_with_back_edge
+        app, _thread_store, lane, _loop = mesh_app_with_back_edge
         rec = _record(
             "task_human_3", assignee="operator",
             origin={"kind": "human", "channel": "web", "user": "u1"},
@@ -339,7 +363,7 @@ class TestBackEdgeHelperEligibility:
     ):
         """Burst coalescing: lane timeout + sweep retry on the same task
         produce ONE operator wake inside the 60s window."""
-        app, _blackboard, lane, _loop = mesh_app_with_back_edge
+        app, _thread_store, lane, _loop = mesh_app_with_back_edge
         rec = _record(
             "task_human_4",
             origin={"kind": "human", "channel": "web", "user": "u1"},
@@ -367,7 +391,7 @@ class TestBackEdgeTracePropagation:
     def test_agent_origin_back_edge_wake_carries_task_trace(
         self, mesh_app_with_back_edge,
     ):
-        app, _blackboard, lane, _loop = mesh_app_with_back_edge
+        app, _thread_store, lane, _loop = mesh_app_with_back_edge
         rec = _record(
             "task_trace_1",
             creator="scout",
@@ -388,7 +412,7 @@ class TestBackEdgeTracePropagation:
     def test_human_origin_recovery_wake_carries_task_trace(
         self, mesh_app_with_back_edge,
     ):
-        app, _blackboard, lane, _loop = mesh_app_with_back_edge
+        app, _thread_store, lane, _loop = mesh_app_with_back_edge
         rec = _record(
             "task_trace_2",
             origin={"kind": "human", "channel": "telegram", "user": "9999"},
@@ -406,15 +430,17 @@ class TestBackEdgeTracePropagation:
         assert op_wakes[0]["kwargs"].get("trace_id") == "tr_bbbbbbbbbbbb"
 
 
-class TestBackEdgeTTLSplit:
-    """Actionable events keep the 7-day TTL; informational events get a
-    much shorter 24h TTL so they don't pile up for a week and flood the
-    operator's check_inbox / LLM context on every heartbeat."""
+class TestBackEdgeServingWindows:
+    """The old TTL split is now a pair of query windows in
+    ``ThreadStore.list_events_for``: actionable events serve for 7 days,
+    informational events for 24h — so completed-task events can't pile
+    up for a week and flood the operator's check_inbox / LLM context on
+    every heartbeat."""
 
-    def test_completed_event_gets_informational_ttl(
+    def test_completed_event_stops_serving_after_24h(
         self, mesh_app_with_back_edge,
     ):
-        app, blackboard, _lane, _loop = mesh_app_with_back_edge
+        app, thread_store, _lane, _loop = mesh_app_with_back_edge
         rec = _record("task_ttl_done", status="done")
 
         app._write_task_event_back_edge(
@@ -423,16 +449,20 @@ class TestBackEdgeTTLSplit:
         )
         _settle()
 
-        entry = next(
-            r for r in blackboard.list_by_prefix("inbox/scout/task_event/")
-            if r.value.get("task_id") == "task_ttl_done"
+        assert any(
+            e.get("task_id") == "task_ttl_done"
+            for e in _events_for(thread_store, "scout")
         )
-        assert entry.ttl == 86400  # 24 hours
+        _age_event(thread_store, "task_ttl_done", 86_400 + 60)
+        assert not any(
+            e.get("task_id") == "task_ttl_done"
+            for e in _events_for(thread_store, "scout")
+        )
 
-    def test_cancelled_event_gets_informational_ttl(
+    def test_cancelled_event_stops_serving_after_24h(
         self, mesh_app_with_back_edge,
     ):
-        app, blackboard, _lane, _loop = mesh_app_with_back_edge
+        app, thread_store, _lane, _loop = mesh_app_with_back_edge
         rec = _record("task_ttl_cancel", status="cancelled")
 
         app._write_task_event_back_edge(
@@ -440,14 +470,14 @@ class TestBackEdgeTTLSplit:
         )
         _settle()
 
-        entry = next(
-            r for r in blackboard.list_by_prefix("inbox/scout/task_event/")
-            if r.value.get("task_id") == "task_ttl_cancel"
+        _age_event(thread_store, "task_ttl_cancel", 86_400 + 60)
+        assert not any(
+            e.get("task_id") == "task_ttl_cancel"
+            for e in _events_for(thread_store, "scout")
         )
-        assert entry.ttl == 86400  # 24 hours
 
-    def test_failed_event_keeps_actionable_ttl(self, mesh_app_with_back_edge):
-        app, blackboard, _lane, _loop = mesh_app_with_back_edge
+    def test_failed_event_keeps_serving_past_24h(self, mesh_app_with_back_edge):
+        app, thread_store, _lane, _loop = mesh_app_with_back_edge
         rec = _record("task_ttl_fail", status="failed")
 
         app._write_task_event_back_edge(
@@ -456,14 +486,20 @@ class TestBackEdgeTTLSplit:
         )
         _settle()
 
-        entry = next(
-            r for r in blackboard.list_by_prefix("inbox/scout/task_event/")
-            if r.value.get("task_id") == "task_ttl_fail"
+        _age_event(thread_store, "task_ttl_fail", 86_400 + 60)
+        assert any(
+            e.get("task_id") == "task_ttl_fail"
+            for e in _events_for(thread_store, "scout")
         )
-        assert entry.ttl == 604800  # 7 days
+        # ...but not past the 7-day actionable window.
+        _age_event(thread_store, "task_ttl_fail", 604_800 + 60)
+        assert not any(
+            e.get("task_id") == "task_ttl_fail"
+            for e in _events_for(thread_store, "scout")
+        )
 
-    def test_blocked_event_keeps_actionable_ttl(self, mesh_app_with_back_edge):
-        app, blackboard, _lane, _loop = mesh_app_with_back_edge
+    def test_blocked_event_keeps_serving_past_24h(self, mesh_app_with_back_edge):
+        app, thread_store, _lane, _loop = mesh_app_with_back_edge
         rec = _record("task_ttl_block", status="blocked")
 
         app._write_task_event_back_edge(
@@ -472,11 +508,72 @@ class TestBackEdgeTTLSplit:
         )
         _settle()
 
-        entry = next(
-            r for r in blackboard.list_by_prefix("inbox/scout/task_event/")
-            if r.value.get("task_id") == "task_ttl_block"
+        _age_event(thread_store, "task_ttl_block", 86_400 + 60)
+        payload = next(
+            e for e in _events_for(thread_store, "scout")
+            if e.get("task_id") == "task_ttl_block"
         )
-        assert entry.ttl == 604800  # 7 days
+        assert payload["blocker_note"] == "need creds"
+
+
+class TestBackEdgeMultiplicity:
+    """Overwrite semantics restored read-side: the old blackboard
+    back-edge was an upsert per (recipient, task) — one event per task,
+    latest transition wins. The append model must serve the same."""
+
+    def test_blocked_then_done_serves_one_informational(
+        self, mesh_app_with_back_edge,
+    ):
+        app, thread_store, _lane, _loop = mesh_app_with_back_edge
+
+        app._write_task_event_back_edge(
+            _record("task_multi_1", status="blocked"),
+            event_kind="task_blocked",
+            payload_extras={"blocker_note": "stuck"},
+        )
+        app._write_task_event_back_edge(
+            _record("task_multi_1", status="done"),
+            event_kind="task_completed",
+            payload_extras={"summary": "recovered"},
+        )
+        _settle()
+
+        events = [
+            e for e in _events_for(thread_store, "scout")
+            if e.get("task_id") == "task_multi_1"
+        ]
+        # Exactly ONE event — the later informational transition
+        # silences the stale actionable one.
+        assert [e["kind"] for e in events] == ["task_completed"]
+
+        # ...and it ages out on the 24h informational window without
+        # resurfacing the shadowed task_blocked row.
+        _age_event(thread_store, "task_multi_1", 86_400 + 60)
+        assert not any(
+            e.get("task_id") == "task_multi_1"
+            for e in _events_for(thread_store, "scout")
+        )
+
+    def test_repeated_failures_serve_one_task_failed(
+        self, mesh_app_with_back_edge,
+    ):
+        app, thread_store, _lane, _loop = mesh_app_with_back_edge
+
+        for err in ("first", "retry"):
+            app._write_task_event_back_edge(
+                _record("task_multi_2", status="failed"),
+                event_kind="task_failed",
+                payload_extras={"error": err},
+            )
+        _settle()
+
+        events = [
+            e for e in _events_for(thread_store, "scout")
+            if e.get("task_id") == "task_multi_2"
+        ]
+        assert len(events) == 1
+        assert events[0]["kind"] == "task_failed"
+        assert events[0]["error"] == "retry"  # newest transition wins
 
 
 class TestOperatorRecoveryWakeGlobalThrottle:
@@ -485,9 +582,9 @@ class TestOperatorRecoveryWakeGlobalThrottle:
     ):
         """A2 hardening: a provider outage failing many user chains at
         once produces at most _OPERATOR_RECOVERY_WAKE_MAX wakes in the
-        window — every event is still written so the heartbeat's
+        window — every event is still recorded so the heartbeat's
         check_inbox catches up on the suppressed remainder."""
-        app, blackboard, lane, _loop = mesh_app_with_back_edge
+        app, thread_store, lane, _loop = mesh_app_with_back_edge
         n = 8
         for i in range(n):
             rec = _record(
@@ -500,11 +597,10 @@ class TestOperatorRecoveryWakeGlobalThrottle:
             )
         _settle()
 
-        # All 8 events landed in the operator's inbox...
-        op_rows = blackboard.list_by_prefix("inbox/operator/task_event/")
+        # All 8 events landed for the operator...
         storm_ids = {
-            r.value.get("task_id") for r in op_rows
-            if str(r.value.get("task_id", "")).startswith("task_storm_")
+            e.get("task_id") for e in _events_for(thread_store, "operator")
+            if str(e.get("task_id", "")).startswith("task_storm_")
         }
         assert len(storm_ids) == n
         # ...but only the capped number of wakes fired.

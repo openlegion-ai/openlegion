@@ -4702,6 +4702,79 @@
             </div>
           </div>
         </template>
+
+        <!-- ── Threads (Team Threads observability panel) ──
+             Durable conversation record: team channels, per-task event
+             threads, agent↔agent DM traffic. Read-only — this is an
+             observability surface, not a product chat. -->
+        <section class="mt-6" data-testid="workplace-threads-panel">
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="text-sm font-semibold text-gray-200">Threads</h3>
+            <button type="button" @click="loadThreads()"
+              class="text-[11px] px-2 py-1 rounded bg-gray-800 hover:bg-gray-700 text-gray-300 transition-colors">
+              Refresh
+            </button>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <!-- Thread list -->
+            <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-2 max-h-80 overflow-y-auto"
+                 data-testid="threads-list">
+              <template x-if="!threadsList.length">
+                <div class="text-xs text-gray-500 p-2">No threads yet. Channels, task events, and agent messages appear here.</div>
+              </template>
+              <template x-for="t in threadsList" :key="t.id">
+                <button type="button" @click="openThread(t.id)"
+                  class="w-full text-left px-2 py-1.5 rounded hover:bg-gray-700/50 transition-colors"
+                  :class="threadOpen && threadOpen.id === t.id ? 'bg-gray-700/60' : ''">
+                  <div class="flex items-center gap-2 min-w-0">
+                    <span class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded shrink-0"
+                          :class="{
+                            'bg-indigo-500/20 text-indigo-300': t.kind === 'channel',
+                            'bg-amber-500/20 text-amber-300': t.kind === 'task',
+                            'bg-cyan-500/20 text-cyan-300': t.kind === 'dm',
+                          }"
+                          x-text="t.kind"></span>
+                    <span class="text-xs text-gray-200 truncate" x-text="t.title || t.id"></span>
+                  </div>
+                  <div class="text-[10px] text-gray-500 mt-0.5">
+                    <span x-text="t.scope_id"></span> ·
+                    <span x-text="relativeTime(t.updated_at)"></span>
+                  </div>
+                </button>
+              </template>
+            </div>
+            <!-- Message pane -->
+            <div class="md:col-span-2 bg-gray-800/40 border border-gray-700/50 rounded-lg p-3 max-h-80 overflow-y-auto"
+                 data-testid="thread-message-pane">
+              <template x-if="!threadOpen">
+                <div class="text-xs text-gray-500">Select a thread to see its messages.</div>
+              </template>
+              <template x-if="threadOpen && !threadMessages.length">
+                <div class="text-xs text-gray-500">No messages in this thread yet.</div>
+              </template>
+              <template x-for="m in threadMessages" :key="m.id">
+                <div class="mb-2">
+                  <div class="flex items-baseline gap-2">
+                    <span class="text-xs font-medium text-gray-200" x-text="m.sender"></span>
+                    <span class="text-[10px] text-gray-500" x-text="relativeTime(m.created_at)"></span>
+                  </div>
+                  <!-- Events render as small status chips (payload.kind/status) -->
+                  <template x-if="m.kind === 'event'">
+                    <span class="inline-flex items-center gap-1 mt-0.5 text-[10px] px-1.5 py-0.5 rounded"
+                          :class="['task_failed','task_blocked'].includes((m.payload || {}).kind) ? 'bg-red-500/20 text-red-300' : 'bg-emerald-500/20 text-emerald-300'"
+                          data-testid="thread-event-chip">
+                      <span x-text="(m.payload || {}).kind || 'event'"></span>
+                      <span x-text="(m.payload || {}).status ? '· ' + (m.payload || {}).status : ''"></span>
+                    </span>
+                  </template>
+                  <template x-if="m.kind !== 'event'">
+                    <div class="text-xs text-gray-300 break-words" x-text="m.body || ''"></div>
+                  </template>
+                </div>
+              </template>
+            </div>
+          </div>
+        </section>
       </div>
 
       <!-- System (Activity + Costs + Automation + Integrations + API Keys + Wallet + Storage + Audit + Settings) -->

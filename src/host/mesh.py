@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from src.shared.redaction import deep_redact
 from src.shared.sqlite_helpers import open_db
 from src.shared.types import AgentMessage, BlackboardEntry
 from src.shared.utils import dumps_safe, setup_logging
@@ -749,16 +750,21 @@ class MessageRouter:
         agent_registry: dict[str, str],
         trace_store: Any = None,
         team_resolver: Callable[[str], str | None] | None = None,
+        thread_store: Any = None,
     ):
         self.permissions = permissions
         self.agent_registry: dict[str, str] = agent_registry
         self.agent_roles: dict[str, str] = {}
-        self.message_log: deque[dict] = deque(maxlen=10_000)
         self._capabilities_cache: dict[str, list[str]] = {}
         # Resolves agent_id → team_id (None for solo agents). Wired to
         # ``TeamStore.team_of`` by the runtime; None disables the
         # cross-team block entirely (standalone test constructions).
         self.team_resolver: Callable[[str], str | None] | None = team_resolver
+        # Durable Team Threads store (C.1 row 4): routed traffic is
+        # recorded as ``dm`` thread messages, replacing the old
+        # in-memory ``message_log`` deque. None (standalone test
+        # constructions) disables recording entirely.
+        self.thread_store: Any = thread_store
         self._registry_lock = threading.Lock()
         self._client: httpx.AsyncClient | None = None
         self._client_lock: asyncio.Lock | None = None
@@ -812,13 +818,41 @@ class MessageRouter:
         if not target_url:
             return {"error": f"No agent found for target: {message.to}"}
 
-        self.message_log.append({
-            "id": message.id,
-            "from": message.from_agent,
-            "to": message.to,
-            "type": message.type,
-            "timestamp": message.timestamp.isoformat(),
-        })
+        # Durable DM-thread record (replaces the message_log deque).
+        # Best-effort: a thread-store hiccup must never block delivery.
+        if self.thread_store is not None:
+            try:
+                sender_team = self.team_resolver(message.from_agent) if self.team_resolver else None
+                scope = sender_team or message.from_agent
+                # Shared redaction over the payload AND the derived body
+                # preview — routed traffic can quote credential-bearing
+                # headers/URLs that must never persist in the durable
+                # thread record.
+                safe_payload = deep_redact(message.payload or {})
+                preview = _truncate_preview(dumps_safe(safe_payload))
+
+                def _record_dm() -> None:
+                    th = self.thread_store.ensure_dm_thread(scope, message.from_agent, message.to)
+                    self.thread_store.post_message(
+                        th["id"],
+                        message.from_agent,
+                        recipient=message.to,
+                        body=f"[{message.type}] {preview}",
+                        payload={
+                            "type": message.type,
+                            "message_id": message.id,
+                            "payload": safe_payload,
+                        },
+                    )
+
+                # Off-loop: SQLite's busy_timeout (up to 30s under
+                # contention) must never stall the mesh event loop.
+                await asyncio.get_running_loop().run_in_executor(None, _record_dm)
+            except Exception as e:
+                logger.warning(
+                    "thread record for %s->%s failed: %s",
+                    message.from_agent, message.to, e,
+                )
         if self._trace_store:
             from src.shared.trace import current_trace_id
             tid = current_trace_id.get()

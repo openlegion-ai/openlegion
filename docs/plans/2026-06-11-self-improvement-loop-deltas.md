@@ -219,7 +219,8 @@ Branch: `fix/coordination-pushback-docs`. Single file:
 exists end-to-end — `update_status(state="blocked")` persists a
 `blocker_note` (`coordination_tool.py:701-705` →
 `orchestration.py:1580-1587`), the mesh writes a `task_blocked` back-edge to
-`inbox/{creator}/task_event/` and wakes the creator with L9 creator-binding
+`inbox/{creator}/task_event/` (2026-07, Phase 2 unit 2: this blackboard prefix
+was replaced by the Team Threads event feed) and wakes the creator with L9 creator-binding
 (`src/host/server.py:5577-5666`, wake binding `5690-5696`), the creator sees
 it in `check_inbox` `events[]` (`coordination_tool.py:541-601`), and
 human-rooted chains additionally fire an operator recovery wake
@@ -514,7 +515,7 @@ steps. PR 3 requires no migration (new key namespace).
 |---|---|---|
 | Repeat failures | `grep repeat_failure` in journal (A5) | rate falls after A1–A3 |
 | Silent chain breaks | `chain_breaks_24h_count` on `/mesh/system/metrics` | falls after PR 2 |
-| Pushback adoption | `task_blocked` back-edge frequency (blackboard `inbox/*/task_event/*`, audit log) | rises from ~0; blocked tasks get re-hand-offs, not rot |
+| Pushback adoption | `task_blocked` back-edge frequency (the Team Threads event feed — replaced the blackboard `inbox/*/task_event/*` prefix, 2026-07 Phase 2 unit 2 — plus audit log) | rises from ~0; blocked tasks get re-hand-offs, not rot |
 | Goal-driven initiative | heartbeat skip rate (`no_heartbeat_rules`) for agents with goals set | drops to ~0 for those agents |
 | Retro proposals | `notify_user` proposals citing rework patterns | ≥1 sensible proposal per real rework cluster; no proposal spam |
 | Instruction bloat | INSTRUCTIONS.md sizes across fleet (32KB cap distance) | growth ≤ a few hundred bytes/week/agent |

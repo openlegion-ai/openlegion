@@ -693,7 +693,9 @@ The canonical surface is `/dashboard/api/teams/*`.
 | `POST` | `/dashboard/api/channels/{type}/connect` | Connect a messaging channel |
 | `POST` | `/dashboard/api/channels/{type}/disconnect` | Disconnect a messaging channel |
 | `GET` | `/dashboard/api/comms/activity` | Messaging channel activity log |
-| `GET` | `/dashboard/api/messages` | Recent message log |
+| `GET` | `/dashboard/api/messages` | Recent message log (Team Threads store-backed) |
+| `GET` | `/dashboard/api/threads` | List Team Threads, newest activity first (optional `scope`/`kind` filters) |
+| `GET` | `/dashboard/api/threads/{thread_id}/messages` | Page one thread's messages (`before`/`limit`) |
 
 **Network / Proxy**
 
