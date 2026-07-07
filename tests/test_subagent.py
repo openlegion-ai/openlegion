@@ -38,7 +38,6 @@ class TestSpawnSubagentBasic:
         mock_llm = MagicMock()
         mock_mesh = AsyncMock()
         mock_mesh.agent_id = "parent-1"
-        mock_mesh.is_standalone = False
         mock_mesh.write_blackboard = AsyncMock(return_value={"version": 1})
 
         register_parent_llm("parent-1", mock_llm)
@@ -102,7 +101,6 @@ class TestSpawnSubagentConcurrentLimit:
         mock_llm = MagicMock()
         mock_mesh = AsyncMock()
         mock_mesh.agent_id = "busy-parent"
-        mock_mesh.is_standalone = False
         mock_mesh.write_blackboard = AsyncMock(return_value={"version": 1})
 
         register_parent_llm("busy-parent", mock_llm)
@@ -133,7 +131,6 @@ class TestSpawnSubagentPrunesDoneTasks:
         mock_llm = MagicMock()
         mock_mesh = AsyncMock()
         mock_mesh.agent_id = "prune-parent"
-        mock_mesh.is_standalone = False
         mock_mesh.write_blackboard = AsyncMock(return_value={"version": 1})
 
         register_parent_llm("prune-parent", mock_llm)
@@ -172,7 +169,6 @@ class TestSpawnSubagentTTLTimeout:
         mock_llm = MagicMock()
         mock_mesh = AsyncMock()
         mock_mesh.agent_id = "timeout-parent"
-        mock_mesh.is_standalone = False
         mock_mesh.write_blackboard = AsyncMock(return_value={"version": 1})
 
         register_parent_llm("timeout-parent", mock_llm)
@@ -285,7 +281,6 @@ class TestSubagentMemoryIsolation:
         mock_llm = MagicMock()
         mock_mesh = AsyncMock()
         mock_mesh.agent_id = "iso-parent"
-        mock_mesh.is_standalone = False
         mock_mesh.write_blackboard = AsyncMock(return_value={"version": 1})
 
         register_parent_llm("iso-parent", mock_llm)
@@ -451,7 +446,6 @@ class TestWaitForSubagent:
 
         mock_mesh = AsyncMock()
         mock_mesh.agent_id = "bb-fail-parent"
-        mock_mesh.is_standalone = False
         mock_mesh.read_blackboard = AsyncMock(side_effect=Exception("connection lost"))
 
         async def instant():
@@ -474,7 +468,6 @@ class TestWaitForSubagent:
 
         mock_mesh = AsyncMock()
         mock_mesh.agent_id = "bb-none-parent"
-        mock_mesh.is_standalone = False
         mock_mesh.read_blackboard = AsyncMock(return_value=None)
 
         async def instant():

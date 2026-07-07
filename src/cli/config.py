@@ -74,9 +74,11 @@ BROWSER_IMAGE = "openlegion-browser:latest"
 
 # ── Provider data ───────────────────────────────────────────
 
+
 def _get_providers() -> list[dict[str, str]]:
     """Load provider list from the model registry (single source of truth)."""
     from src.shared.models import get_all_providers
+
     return get_all_providers()
 
 
@@ -116,6 +118,7 @@ class _LazyProviderModels:
     def _ensure(self) -> None:
         if self._data is None:
             from src.shared.models import get_provider_models
+
             self._data = {p["name"]: get_provider_models(p["name"]) for p in _PROVIDERS}
 
     def __getitem__(self, key: str) -> list[str]:
@@ -252,7 +255,8 @@ def _save_permissions(perms: dict) -> None:
     content = json.dumps(perms, indent=2) + "\n"
     with _PERMISSIONS_LOCK:
         fd, tmp_path = tempfile.mkstemp(
-            dir=str(PERMISSIONS_FILE.parent), suffix=".tmp",
+            dir=str(PERMISSIONS_FILE.parent),
+            suffix=".tmp",
         )
         try:
             with os.fdopen(fd, "w") as f:
@@ -292,6 +296,7 @@ def _check_docker_running() -> bool:
     """Verify Docker daemon is running and accessible."""
     try:
         import docker
+
         client = docker.from_env()
         client.ping()
         return True
@@ -304,6 +309,7 @@ def _check_docker_image() -> bool:
     """Check if the agent Docker image exists."""
     try:
         import docker
+
         client = docker.from_env()
         client.images.get(DOCKER_IMAGE)
         return True
@@ -322,6 +328,7 @@ def _docker_image_is_stale(
         from datetime import datetime, timezone
 
         import docker
+
         client = docker.from_env()
         image = client.images.get(image_name)
         created_str = image.attrs.get("Created", "")
@@ -363,6 +370,7 @@ def _check_browser_image() -> bool:
     """Check if the browser Docker image exists."""
     try:
         import docker
+
         client = docker.from_env()
         client.images.get(BROWSER_IMAGE)
         return True
@@ -389,9 +397,13 @@ def _build_browser_image() -> None:
     click.echo("  First build downloads Camoufox + KasmVNC (~3 min). Rebuilds are fast.\n")
     proc = subprocess.Popen(
         [
-            "docker", "build",
-            "-t", BROWSER_IMAGE,
-            "-f", "Dockerfile.browser", ".",
+            "docker",
+            "build",
+            "-t",
+            BROWSER_IMAGE,
+            "-f",
+            "Dockerfile.browser",
+            ".",
         ],
         cwd=str(PROJECT_ROOT),
         stdout=subprocess.PIPE,
@@ -418,9 +430,13 @@ def _build_docker_image() -> None:
     click.echo("  First build downloads base image (~1 min). Rebuilds are fast.\n")
     proc = subprocess.Popen(
         [
-            "docker", "build",
-            "-t", DOCKER_IMAGE,
-            "-f", "Dockerfile.agent", ".",
+            "docker",
+            "build",
+            "-t",
+            DOCKER_IMAGE,
+            "-f",
+            "Dockerfile.agent",
+            ".",
         ],
         cwd=str(PROJECT_ROOT),
         stdout=subprocess.PIPE,
@@ -445,7 +461,9 @@ def _build_docker_image() -> None:
 
 
 def _add_agent_to_config(
-    name: str, role: str, model: str,
+    name: str,
+    role: str,
+    model: str,
     initial_instructions: str = "",
     initial_soul: str = "",
     initial_heartbeat: str = "",
@@ -516,24 +534,27 @@ def _add_agent_to_config(
 # created agent. Applied by EVERY human create path (`_create_agent`: setup
 # wizard, REPL, dashboard no-template) AND the operator/mesh create endpoint,
 # so a manually-created agent is no more limited than an operator- or
-# template-created one. The base defaults leave `blackboard_read`/`_write`
-# empty (so templates can scope them); without these grants an agent is locked
-# out of the coordination protocol entirely (and skips the auto-watch setup at
-# /mesh/register, gated on blackboard_read being truthy). Capability toggles
-# (browser/internet/cron/spawn/wallet) live in the base dict, not here. The
-# mesh `create_custom_agent` endpoint imports this same constant rather than
-# duplicating it.
+# template-created one. Capability toggles (browser/internet/cron/spawn/
+# wallet) live in the base dict, not here. The mesh `create_custom_agent`
+# endpoint imports this same constant rather than duplicating it.
+#
+# blackboard_read carries NO wildcard (ratified #5): the base defaults grant
+# the agent's private ``teams/{name}/*`` namespace (which also satisfies the
+# /mesh/register auto-watch gate on blackboard_read being truthy), and team
+# membership adds ``teams/{team}/*`` on join. With the agent-side standalone
+# guards deleted, the host ACL is THE read boundary — a ``*`` here would hand
+# every never-teamed worker fleet-wide blackboard reads, strictly wider than
+# a team member (whose join strips ``*``). can_publish/can_subscribe keep the
+# wildcard because pubsub is additionally prefix-gated host-side per caller.
 _DEFAULT_AGENT_COORDINATION_PERMS: dict = {
-    "blackboard_read":  ["*"],
+    "blackboard_read": [],
     "blackboard_write": ["tasks/*", "context/*", "status/*", "output/*", "artifacts/*"],
-    "can_publish":      ["*"],
-    "can_subscribe":    ["*"],
+    "can_publish": ["*"],
+    "can_subscribe": ["*"],
 }
 
 
-def _add_agent_permissions(
-    name: str, permissions: dict | None = None, *, from_template: bool = False
-) -> None:
+def _add_agent_permissions(name: str, permissions: dict | None = None, *, from_template: bool = False) -> None:
     """Add default permissions for a new agent.
 
     If collaboration mode is enabled in mesh.yaml, agents can message
@@ -553,12 +574,18 @@ def _add_agent_permissions(
     else:
         can_message = []
 
+    # Self pattern: every WORKER always holds ``teams/{name}/*`` on both
+    # blackboard fields — its private team-of-one namespace (ratified #5).
+    # Invariant: "self always; team while member". The operator keeps its
+    # explicit ["*"] grants from _ensure_operator_agent instead.
+    self_patterns = [f"teams/{name}/*"] if name != _OPERATOR_AGENT_ID else []
+
     agent_perms: dict = {
         "can_message": can_message,
         "can_publish": ["*"] if collab else [f"{name}_complete"],
         "can_subscribe": ["*"] if collab else [],
-        "blackboard_read": [],
-        "blackboard_write": [],
+        "blackboard_read": list(self_patterns),
+        "blackboard_write": list(self_patterns),
         "allowed_apis": ["llm", "image_gen"],
         "allowed_credentials": ["*"],
         # Default capability set for every new agent: browser + internet +
@@ -585,14 +612,27 @@ def _add_agent_permissions(
                 existing = set(agent_perms.get(key, []))
                 existing.update(tpl_values)
                 agent_perms[key] = sorted(existing)
+        # Defense in depth (ratified #5): no create path may hand a WORKER a
+        # blackboard wildcard — the host ACL is the read boundary now that
+        # the agent-side standalone guards are gone, and team joins strip
+        # ``*`` anyway (an agent must never start wider than a team member
+        # ends up). The operator's explicit ["*"] comes from
+        # _ensure_operator_agent, not this path.
+        if name != _OPERATOR_AGENT_ID:
+            for key in ("blackboard_read", "blackboard_write"):
+                agent_perms[key] = [p for p in agent_perms.get(key, []) if p != "*"]
         # Boolean flags — template can override defaults. Includes the
         # six control-plane permissions from Task 3 so the operator's
         # explicit grants in ``_ensure_operator_agent`` get persisted to
         # permissions.json instead of being silently dropped.
         for key in (
-            "can_use_browser", "can_use_internet", "can_spawn",
+            "can_use_browser",
+            "can_use_internet",
+            "can_spawn",
             "can_manage_cron",
-            "can_manage_fleet", "can_manage_teams", "can_edit_agent_config",
+            "can_manage_fleet",
+            "can_manage_teams",
+            "can_edit_agent_config",
             "can_view_fleet_metrics",
             "can_request_user_credentials",
             "can_use_wallet",
@@ -609,7 +649,8 @@ def _add_agent_permissions(
                     logger.warning(
                         "Template for agent '%s' tried to grant '%s'=true; "
                         "clamping to false (irreversible-grant ceiling)",
-                        name, key,
+                        name,
+                        key,
                     )
                     value = False
                 agent_perms[key] = value
@@ -641,6 +682,39 @@ def _ensure_all_agent_permissions() -> None:
         for flag, default_val in _AGENT_PERMISSION_DEFAULTS.items():
             if flag not in agent_perms:
                 agent_perms[flag] = default_val
+                changed = True
+
+    # Solo self-pattern default (ratified #5 — solo agent = team-of-one):
+    # every TEAMLESS worker holds its private ``teams/{agent_id}/*``
+    # pattern on both blackboard fields ("self always"). Additive only —
+    # existing patterns are never removed except the untouched pre-#5
+    # default read wildcard (below). The live enforcement is the
+    # resolution-time carve-out in PermissionMatrix._is_own_namespace;
+    # this keeps the FILE state matching the invariant.
+    try:
+        team_map = _open_teams_store().agent_team_map()
+    except Exception:
+        team_map = {}
+    for agent_id, agent_perms in perms.get("permissions", {}).items():
+        if agent_id in ("default", _OPERATOR_AGENT_ID):
+            continue
+        if team_map.get(agent_id):
+            continue
+        self_pattern = f"teams/{agent_id}/*"
+        # Narrow the pre-#5 default read wildcard: a teamless worker whose
+        # blackboard_read is exactly the untouched old default shape
+        # (["*"], or ["*"] + its own self pattern) drops the ``*`` — with
+        # the agent-side standalone guards gone, leaving it would grant
+        # fleet-wide reads no team member has. Any other (human-customized)
+        # pattern list is left alone.
+        reads = agent_perms.get("blackboard_read") or []
+        if set(reads) in ({"*"}, {"*", self_pattern}):
+            agent_perms["blackboard_read"] = [self_pattern]
+            changed = True
+        for field in ("blackboard_read", "blackboard_write"):
+            patterns = agent_perms.get(field) or []
+            if self_pattern not in patterns:
+                agent_perms[field] = [*patterns, self_pattern]
                 changed = True
     if changed:
         _save_permissions(perms)
@@ -678,11 +752,37 @@ def _validate_agent_name(name: str) -> str:
     return name
 
 
+def _reject_agent_team_collision(name: str) -> None:
+    """Cross-namespace collision guard (ratified #5 makes it load-bearing).
+
+    Agents and teams share one namespace downstream (``teams/{id}/*``
+    blackboard prefixes, ``TEAM_NAME`` env): a solo agent's private
+    team-of-one scope is ``teams/{agent_id}/*``, so an agent named after
+    an existing team would silently gain that team's namespace. Reject at
+    every agent-create path; the team-create endpoints enforce the mirror
+    direction. Best-effort on store errors: an unreadable teams DB must
+    not block agent creation (the mirror guard still holds forward).
+    """
+    try:
+        exists = _open_teams_store().team_exists(name)
+    except Exception as e:
+        logger.warning("Team-collision check skipped for '%s': %s", name, e)
+        return
+    if exists:
+        raise ValueError(
+            f"Agent name '{name}' conflicts with an existing team — "
+            "teams and agents share one namespace. Pick a different name."
+        )
+
+
 def _create_agent(
-    name: str, description: str, model: str,
+    name: str,
+    description: str,
+    model: str,
 ) -> None:
     """Create an agent: config, permissions, tools directory."""
     name = _validate_agent_name(name)
+    _reject_agent_team_collision(name)
     _add_agent_to_config(name, description, model)
     # Apply the same coordination defaults the operator/mesh create path uses
     # so a human-created (no-template) agent isn't second-class — empty
@@ -695,11 +795,22 @@ def _create_agent(
 def _suppress_host_logs() -> None:
     """Set host-side loggers to WARNING for clean CLI output."""
     for name in [
-        "host", "host.credentials",
-        "host.mesh", "host.costs", "host.permissions", "host.cron", "host.webhooks",
-        "host.health", "host.lanes", "host.runtime",
-        "channels", "channels.base", "channels.telegram", "channels.discord",
-        "channels.slack", "channels.whatsapp",
+        "host",
+        "host.credentials",
+        "host.mesh",
+        "host.costs",
+        "host.permissions",
+        "host.cron",
+        "host.webhooks",
+        "host.health",
+        "host.lanes",
+        "host.runtime",
+        "channels",
+        "channels.base",
+        "channels.telegram",
+        "channels.discord",
+        "channels.slack",
+        "channels.whatsapp",
     ]:
         logging.getLogger(name).setLevel(logging.WARNING)
     # Silence third-party library internal loggers — channel adapters
@@ -894,15 +1005,20 @@ def _add_team_blackboard_permissions(agent: str, team: str) -> None:
     if agent_perms is None:
         return
     team_pattern = f"teams/{team}/*"
+    self_pattern = f"teams/{agent}/*"
     for field in ("blackboard_read", "blackboard_write"):
         patterns = agent_perms.get(field, [])
         # Strip any wildcard — replaced by the explicit team pattern
         # below. This is the active narrowing for Task 5: an agent that
         # previously had ``["*"]`` and is then added to a team ends
-        # up with ``["teams/{team}/*"]``.
+        # up with its self + team patterns.
         narrowed = [p for p in patterns if p != "*"]
         if team_pattern not in narrowed:
             narrowed.append(team_pattern)
+        # Invariant (ratified #5): "self always; team while member" — the
+        # private team-of-one pattern rides alongside the team pattern.
+        if self_pattern not in narrowed:
+            narrowed.append(self_pattern)
         agent_perms[field] = narrowed
     _save_permissions(perms)
 
@@ -911,27 +1027,30 @@ def _remove_team_blackboard_permissions(agent: str, team: str) -> None:
     """Revoke team blackboard access when an agent leaves a team.
 
     Strips the team namespace pattern AND any pre-existing ``*``
-    wildcard. Leaves an agent with whatever non-wildcard, non-target
-    patterns it had — typically empty for a team member, restoring
-    the agent to a standalone (no-blackboard) state. Wildcard stripping
-    matches the add-side narrowing so an agent that ever had ``*`` does
-    not reacquire fleet-wide reach by being added to and then removed
-    from a team (Task 5).
+    wildcard, then restores the agent's self pattern
+    (``teams/{agent}/*``) so a leaver lands in a working private
+    team-of-one namespace instead of an empty-ACL lockout (ratified #5:
+    "self always; team while member"). Wildcard stripping matches the
+    add-side narrowing so an agent that ever had ``*`` does not
+    reacquire fleet-wide reach by being added to and then removed from
+    a team (Task 5).
     """
     perms = _load_permissions()
     agent_perms = perms.get("permissions", {}).get(agent)
     if agent_perms is None:
         return
     team_pattern = f"teams/{team}/*"
+    self_pattern = f"teams/{agent}/*"
     for field in ("blackboard_read", "blackboard_write"):
         patterns = agent_perms.get(field, [])
         # Drop both the target team pattern and any surviving ``*``.
         # The wildcard strip is the safety net for an agent whose ACL
         # was never re-narrowed (e.g. config-edited directly): once the
         # membership system touches it on remove, the wildcard goes.
-        agent_perms[field] = [
-            p for p in patterns if p != team_pattern and p != "*"
-        ]
+        remaining = [p for p in patterns if p != team_pattern and p != "*"]
+        if self_pattern not in remaining:
+            remaining.append(self_pattern)
+        agent_perms[field] = remaining
     _save_permissions(perms)
 
 
@@ -1044,11 +1163,7 @@ def _validate_agent_template(template: dict) -> list[str]:
         if not isinstance(agent_def, dict):
             continue
         capabilities = agent_def.get("capabilities") or []
-        interface_text = (
-            agent_def.get("initial_interface")
-            or agent_def.get("interface")
-            or ""
-        )
+        interface_text = agent_def.get("initial_interface") or agent_def.get("interface") or ""
         if not capabilities and not interface_text:
             warnings.append(
                 f"template '{tpl_name}' agent '{agent_name}': no "
@@ -1107,6 +1222,11 @@ def _apply_template(
     overrides = agent_overrides or {}
     created: list[str] = []
 
+    # Cross-namespace collision guard — UPFRONT over every slot name so a
+    # collision rejects the whole apply before any agent is created.
+    for slot_name in tpl_agents:
+        _reject_agent_team_collision(_validate_agent_name(slot_name))
+
     # Load existing agents to avoid silent overwrites
     existing_agents: set[str] = set()
     if AGENTS_FILE.exists():
@@ -1117,6 +1237,7 @@ def _apply_template(
     # Lazy import — keeps the CLI-only path from pulling in shared/models
     # at module-import time (template loader runs from setup wizard too).
     from src.shared.models import resolve_slot_model
+
     for agent_name, agent_def in tpl_agents.items():
         agent_name = _validate_agent_name(agent_name)
         if agent_name in existing_agents:
@@ -1130,7 +1251,11 @@ def _apply_template(
         # pass an empty string for that argument; precedence is
         # slot override > template default > config default.
         model = resolve_slot_model(
-            agent_name, agent_def, overrides, "", default_model,
+            agent_name,
+            agent_def,
+            overrides,
+            "",
+            default_model,
         )
         instructions = agent_def.get("instructions", "") or agent_def.get("system_prompt", "")
         if "instructions" in per_agent_override:
@@ -1185,24 +1310,26 @@ def _load_tool_templates() -> list[dict]:
     for tpl_name, tpl in templates.items():
         tpl_desc = tpl.get("description", "")
         for agent_name, agent_def in tpl.get("agents", {}).items():
-            result.append({
-                "id": f"{tpl_name}/{agent_name}",
-                "name": agent_name,
-                "source": tpl_name,
-                "source_description": tpl_desc,
-                "role": agent_def.get("role", agent_name),
-                "has_instructions": bool(
-                    agent_def.get("instructions") or agent_def.get("system_prompt")
-                ),
-                "has_soul": bool(agent_def.get("soul")),
-                "has_heartbeat": bool(agent_def.get("heartbeat")),
-                "thinking": agent_def.get("thinking", ""),
-            })
+            result.append(
+                {
+                    "id": f"{tpl_name}/{agent_name}",
+                    "name": agent_name,
+                    "source": tpl_name,
+                    "source_description": tpl_desc,
+                    "role": agent_def.get("role", agent_name),
+                    "has_instructions": bool(agent_def.get("instructions") or agent_def.get("system_prompt")),
+                    "has_soul": bool(agent_def.get("soul")),
+                    "has_heartbeat": bool(agent_def.get("heartbeat")),
+                    "thinking": agent_def.get("thinking", ""),
+                }
+            )
     return result
 
 
 def _create_agent_from_template(
-    name: str, template_id: str, model: str,
+    name: str,
+    template_id: str,
+    model: str,
 ) -> None:
     """Create an agent applying a tool template's config.
 
@@ -1221,6 +1348,7 @@ def _create_agent_from_template(
         raise ValueError(f"Agent '{tpl_agent}' not found in template '{tpl_source}'")
 
     name = _validate_agent_name(name)
+    _reject_agent_team_collision(name)
     cfg = _load_config()
     default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
     # P1.2 — coerce explicit ``model: null`` (None) to the config
@@ -1240,6 +1368,7 @@ def _create_agent_from_template(
         model_not_compatible_message,
         resolve_provider_for_model,
     )
+
     provider = resolve_provider_for_model(resolved_model)
     if provider:
         available = get_available_providers()
@@ -1254,6 +1383,7 @@ def _create_agent_from_template(
     # mesh process — this path is CLI-side at fleet apply time.
     try:
         from src.host.credentials import CredentialVault
+
         _vault = CredentialVault()
         _vault._load_credentials()
         _compatible, _reason = _vault.is_model_compatible(resolved_model)
@@ -1383,7 +1513,8 @@ def _edit_agent_interactive(
 
     if choice == 1:  # model
         new_model = _pick_model_interactive(
-            current_model, label="current",
+            current_model,
+            label="current",
             credential_vault=credential_vault,
         )
         if new_model == current_model:
@@ -1459,9 +1590,12 @@ _OPERATOR_AGENT_ID = "operator"
 
 _OPERATOR_ALLOWED_TOOLS: list[str] = [
     # Monitoring + heartbeat
-    "get_system_status", "notify_user",
-    "inspect_agents", "inspect_teams",
-    "list_agent_queue", "get_team_outputs",
+    "get_system_status",
+    "notify_user",
+    "inspect_agents",
+    "inspect_teams",
+    "list_agent_queue",
+    "get_team_outputs",
     "summarize_team_progress",
     # Composes and persists a work summary card for the Work tab.
     # Backed by ``WorkSummariesStore``; the daily cron invokes this
@@ -1471,27 +1605,37 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     # config surface before mutating. Pair with list_peer_artifacts /
     # read_peer_artifact for deeper inspection of peer-written files.
     "read_agent_config",
-    "list_peer_artifacts", "read_peer_artifact",
+    "list_peer_artifacts",
+    "read_peer_artifact",
     # Peer FILE reads — full /data volume, not just artifacts/. Lets the
     # operator locate + relay a worker's deliverable (CSV, data.md) the
     # user asked for, instead of reporting it unreachable.
-    "list_peer_files", "read_peer_file",
+    "list_peer_files",
+    "read_peer_file",
     # Observation log of agent→user notifications — PULL-only, NOT a
     # message channel (agents can't address the operator). Lets the
     # operator answer "what's blocking?" from what workers already told
     # the human. Sanitized + display_only at the tool boundary.
     "read_user_notifications",
     # Coordination + chat
-    "list_templates", "apply_template", "hand_off", "check_inbox",
+    "list_templates",
+    "apply_template",
+    "hand_off",
+    "check_inbox",
     # Skill-pack discovery (SKILL.md procedures) — read-only, so the
     # operator can see which skills its workers can draw on. install_skill /
     # remove_skill are operator-gated + user-origin-gated mutations.
-    "skills_list", "skill_view", "install_skill", "remove_skill",
-    "list_skill_assignments", "assign_skill",
+    "skills_list",
+    "skill_view",
+    "install_skill",
+    "remove_skill",
+    "list_skill_assignments",
+    "assign_skill",
     # Workflow awareness — operator-only chain inspection + single-task
     # blocking primitive (see _HEARTBEAT_TOOLS in src/agent/loop.py for
     # the heartbeat surface; both tools self-reject for non-operators).
-    "workflow_snapshot", "await_task_event",
+    "workflow_snapshot",
+    "await_task_event",
     # Per-task execution diagnostics (B5) — answers "why did this come
     # out shallow/wrong": thinking level, token/LLM-call counts, trace
     # errors, status timeline. Pairs with rate_delivery on rework.
@@ -1499,16 +1643,20 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     # Configuration edits — edit_agent applies every field immediately
     # and emits an undo receipt (5min for soft fields, 30min for hard).
     # undo_change lets the operator self-revert within the TTL.
-    "edit_agent", "undo_change",
+    "edit_agent",
+    "undo_change",
     # Credential-aware model discovery — operator calls this BEFORE
     # edit_agent / create_agent so it doesn't have to memorize which
     # models are usable with the active credential setup (OAuth-allowed
     # subsets vs full API-key catalog). See Fix 2 in the seam follow-up.
     "list_available_models",
     # Creation
-    "create_agent", "create_team",
+    "create_agent",
+    "create_team",
     # Team membership + context
-    "add_agents_to_team", "remove_agents_from_team", "update_team_context",
+    "add_agents_to_team",
+    "remove_agents_from_team",
+    "update_team_context",
     # P2 — section-scoped TEAM.md updates (fleet-wide knowledge
     # propagation; canonical use: '## User Preferences').
     "update_team_brief",
@@ -1532,42 +1680,71 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     # writes + auto-rework spawn).
     "rate_delivery",
     # Lifecycle (consolidated archive/delete)
-    "manage_team", "manage_agent", "manage_task",
+    "manage_team",
+    "manage_agent",
+    "manage_task",
     # Self-cleanup — operator can clear stale pending actions and prune
     # the audit log without waiting for TTL. ``list_pending`` lets the
     # operator find the nonce before calling cancel_pending_action.
-    "list_pending", "cancel_pending_action", "archive_audit_before",
+    "list_pending",
+    "cancel_pending_action",
+    "archive_audit_before",
     # Credential + browser handoff. ``vault_list`` returns names only
     # (never values) so the operator can check what credentials already
     # exist before calling request_credential.
-    "vault_list", "request_credential", "request_browser_login",
+    "vault_list",
+    "request_credential",
+    "request_browser_login",
     # Operator self-notes + workspace management. Workspace file caps
     # already enforce safety on writes; write_file is intentionally NOT
     # granted (operator orchestrates, doesn't author arbitrary files).
-    "memory_save", "memory_search", "memory_think",
-    "update_workspace", "read_file",
+    "memory_save",
+    "memory_search",
+    "memory_think",
+    "update_workspace",
+    "read_file",
     # Internet access (gated by ``can_use_internet`` permission — the
     # agent's runtime filters these out of the effective allowlist when
     # the Operator Settings → Internet access toggle is OFF).
-    "http_request", "web_search",
+    "http_request",
+    "web_search",
     # Browser access (gated by ``can_use_browser`` permission — the
     # agent's runtime filters these out of the effective allowlist when
     # the Operator Settings → Browser access toggle is OFF). Mirrors the
     # full worker browser surface from ``builtins/browser_tool.py`` so
     # the operator can navigate the web directly. ``request_browser_login``
     # (above) remains the delegation path for landing a worker's cookies.
-    "browser_navigate", "browser_warmup", "browser_get_elements",
-    "browser_wait_for", "browser_screenshot", "browser_click",
-    "browser_click_xy", "browser_type", "browser_hover", "browser_scroll",
-    "browser_reset", "browser_press_key", "browser_go_back",
-    "browser_go_forward", "browser_switch_tab", "browser_find_text",
-    "browser_fill_form", "browser_open_tab", "browser_inspect_requests",
-    "browser_detect_captcha", "browser_upload_file", "browser_solve_captcha",
+    "browser_navigate",
+    "browser_warmup",
+    "browser_get_elements",
+    "browser_wait_for",
+    "browser_screenshot",
+    "browser_click",
+    "browser_click_xy",
+    "browser_type",
+    "browser_hover",
+    "browser_scroll",
+    "browser_reset",
+    "browser_press_key",
+    "browser_go_back",
+    "browser_go_forward",
+    "browser_switch_tab",
+    "browser_find_text",
+    "browser_fill_form",
+    "browser_open_tab",
+    "browser_inspect_requests",
+    "browser_detect_captcha",
+    "browser_upload_file",
+    "browser_solve_captcha",
     "browser_download",
-    "browser_set_dialog_policy", "browser_drag",
-    "browser_grant_permissions", "browser_set_geolocation",
-    "browser_right_click", "browser_read_clipboard",
-    "browser_write_clipboard", "browser_wait_for_network_idle",
+    "browser_set_dialog_policy",
+    "browser_drag",
+    "browser_grant_permissions",
+    "browser_set_geolocation",
+    "browser_right_click",
+    "browser_read_clipboard",
+    "browser_write_clipboard",
+    "browser_wait_for_network_idle",
 ]
 
 # Grouped Tool Search bridge — pulls a deferred capability group's full schemas
@@ -1584,15 +1761,20 @@ _OPERATOR_ALLOWED_TOOLS.append("execute_code")
 # operator HEARTBEAT.md prompt) to take effect.
 _OPERATOR_HEARTBEAT_TOOLS: list[str] = [
     # v1 baseline (read-only)
-    "list_agents", "get_agent_profile", "get_system_status",
+    "list_agents",
+    "get_agent_profile",
+    "get_system_status",
     "notify_user",
     # v2 workflow-awareness — back-edge events + chain inspection +
     # single-task blocking so the heartbeat can drive multi-stage
     # chains without dropping out to a full /chat turn.
-    "check_inbox", "workflow_snapshot", "await_task_event",
+    "check_inbox",
+    "workflow_snapshot",
+    "await_task_event",
     # v3 Work-tab rewrite — heartbeat grades up to 10 oldest unrated
     # done tasks per cycle and stewards goal staleness.
-    "rate_delivery", "manage_goals",
+    "rate_delivery",
+    "manage_goals",
     # v4 — ``inspect_agents`` was already prompted in step 5 of the
     # heartbeat procedure but missing from this allowlist; added so
     # the runtime gate stops denying the prompted call.
@@ -1830,11 +2012,9 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
         # fixed in #1110). Both keys must be rolled forward together.
         existing_initial = op_entry.get("initial_heartbeat") or ""
         from src.shared.types import HEARTBEAT_SENTINELS
+
         latest_sentinel = HEARTBEAT_SENTINELS[-1] if HEARTBEAT_SENTINELS else None
-        new_has_latest = (
-            latest_sentinel is not None
-            and f"<!-- {latest_sentinel} -->" in _OPERATOR_HEARTBEAT
-        )
+        new_has_latest = latest_sentinel is not None and f"<!-- {latest_sentinel} -->" in _OPERATOR_HEARTBEAT
         # Current only when BOTH copies carry the latest marker — a stale
         # ``initial_heartbeat`` next to a current ``heartbeat`` still needs
         # the refresh (that exact split is what the consumed-key gap left
@@ -1857,37 +2037,30 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
         # operator can manually clear `heartbeat:` in agents.yaml to
         # opt in to the fresh template on next startup. We log a
         # warn so the situation is visible.
-        old_has_any_sentinel = any(
-            f"<!-- {s} -->" in existing_heartbeat for s in HEARTBEAT_SENTINELS
-        )
+        old_has_any_sentinel = any(f"<!-- {s} -->" in existing_heartbeat for s in HEARTBEAT_SENTINELS)
         # An EMPTY heartbeat is the operator's documented opt-in path
         # for re-bootstrap (the WARN below for no-sentinel files
         # instructs operators to clear the field; the refresh has to
         # actually fire when they do). Treated as "fresh install" and
         # rewritten from the canonical template.
         existing_is_empty = not existing_heartbeat.strip()
-        if new_has_latest and (
-            (not old_has_latest and old_has_any_sentinel)
-            or existing_is_empty
-        ):
+        if new_has_latest and ((not old_has_latest and old_has_any_sentinel) or existing_is_empty):
             op_entry["heartbeat"] = _OPERATOR_HEARTBEAT
             op_entry["initial_heartbeat"] = _OPERATOR_HEARTBEAT
             agents_cfg["agents"][_OPERATOR_AGENT_ID] = op_entry
             AGENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
             with open(AGENTS_FILE, "w") as f:
                 yaml.dump(
-                    agents_cfg, f, default_flow_style=False, sort_keys=False,
+                    agents_cfg,
+                    f,
+                    default_flow_style=False,
+                    sort_keys=False,
                 )
             logger.info(
                 "Refreshed operator heartbeat to versioned template%s",
                 " (was empty — bootstrapped)" if existing_is_empty else "",
             )
-        elif (
-            new_has_latest
-            and not old_has_latest
-            and not old_has_any_sentinel
-            and not existing_is_empty
-        ):
+        elif new_has_latest and not old_has_latest and not old_has_any_sentinel and not existing_is_empty:
             logger.warning(
                 "operator heartbeat carries no known sentinel — "
                 "treating as user-customised and skipping refresh. "
@@ -1910,41 +2083,29 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
         # still appends to the live INSTRUCTIONS.md, so the operator's
         # self-evolved content is never rewritten.
         from src.shared.types import PLAYBOOK_SENTINELS
+
         existing_instructions = op_entry.get("initial_instructions") or ""
         pb_latest = PLAYBOOK_SENTINELS[-1] if PLAYBOOK_SENTINELS else None
-        pb_new_has_latest = (
-            pb_latest is not None
-            and f"<!-- {pb_latest} -->" in _OPERATOR_CORE
-        )
-        pb_old_has_latest = (
-            pb_latest is not None
-            and f"<!-- {pb_latest} -->" in existing_instructions
-        )
-        pb_old_has_any = any(
-            f"<!-- {s} -->" in existing_instructions
-            for s in PLAYBOOK_SENTINELS
-        )
+        pb_new_has_latest = pb_latest is not None and f"<!-- {pb_latest} -->" in _OPERATOR_CORE
+        pb_old_has_latest = pb_latest is not None and f"<!-- {pb_latest} -->" in existing_instructions
+        pb_old_has_any = any(f"<!-- {s} -->" in existing_instructions for s in PLAYBOOK_SENTINELS)
         pb_existing_empty = not existing_instructions.strip()
-        if pb_new_has_latest and (
-            (not pb_old_has_latest and pb_old_has_any) or pb_existing_empty
-        ):
+        if pb_new_has_latest and ((not pb_old_has_latest and pb_old_has_any) or pb_existing_empty):
             op_entry["initial_instructions"] = _OPERATOR_CORE
             agents_cfg["agents"][_OPERATOR_AGENT_ID] = op_entry
             AGENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
             with open(AGENTS_FILE, "w") as f:
                 yaml.dump(
-                    agents_cfg, f, default_flow_style=False, sort_keys=False,
+                    agents_cfg,
+                    f,
+                    default_flow_style=False,
+                    sort_keys=False,
                 )
             logger.info(
                 "Refreshed operator instructions payload to versioned playbook%s",
                 " (was empty — bootstrapped)" if pb_existing_empty else "",
             )
-        elif (
-            pb_new_has_latest
-            and not pb_old_has_latest
-            and not pb_old_has_any
-            and not pb_existing_empty
-        ):
+        elif pb_new_has_latest and not pb_old_has_latest and not pb_old_has_any and not pb_existing_empty:
             logger.warning(
                 "operator instructions payload carries no known sentinel — "
                 "treating as user-customised and skipping refresh. To opt "

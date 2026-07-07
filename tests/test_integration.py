@@ -59,7 +59,9 @@ def mesh_components(tmp_path, monkeypatch):
             agent_id="research",
             can_message=["mesh"],
             can_publish=["research_complete"],
-            can_subscribe=["new_lead"],
+            # Scoped: a teamless worker is a team-of-one, so runtime
+            # subscriptions carry its own teams/{id}/ prefix (ratified #5).
+            can_subscribe=["teams/research/new_lead"],
             blackboard_read=["context/*", "tasks/*"],
             blackboard_write=["context/research_*", "context/prospect_*"],
             allowed_apis=["anthropic", "brave_search"],
@@ -217,11 +219,14 @@ def test_blackboard_list_by_prefix(mesh_components):
 
 def test_subscribe(mesh_components):
     client = mesh_components["client"]
-    response = client.post("/mesh/subscribe", params={"topic": "new_lead", "agent_id": "research"})
+    response = client.post(
+        "/mesh/subscribe",
+        params={"topic": "teams/research/new_lead", "agent_id": "research"},
+    )
     assert response.status_code == 200
     assert response.json()["subscribed"] is True
 
-    subs = mesh_components["pubsub"].get_subscribers("new_lead")
+    subs = mesh_components["pubsub"].get_subscribers("teams/research/new_lead")
     assert "research" in subs
 
 
@@ -458,7 +463,9 @@ def authed_components(tmp_path):
             agent_id="research",
             can_message=["mesh"],
             can_publish=["research_complete"],
-            can_subscribe=["new_lead"],
+            # Scoped: a teamless worker is a team-of-one, so runtime
+            # subscriptions carry its own teams/{id}/ prefix (ratified #5).
+            can_subscribe=["teams/research/new_lead"],
             blackboard_read=["context/*"],
             blackboard_write=["context/research_*"],
             allowed_apis=["anthropic"],
@@ -1166,8 +1173,10 @@ def test_subscribe_project_isolation(tmp_path):
     bb.close()
 
 
-def test_standalone_agent_no_project_restriction(tmp_path):
-    """Standalone agents (no project) can publish/subscribe to raw topics."""
+def test_solo_agent_prefix_locked_to_own_namespace(tmp_path):
+    """Solo agents = team-of-one (ratified #5): a teamless worker is
+    prefix-locked to ``teams/{its-own-id}/`` instead of skipping the
+    team-prefix gate — raw topics are 403, its own namespace works."""
     bb = Blackboard(db_path=str(tmp_path / "bb.db"))
     pubsub = PubSub()
     perms = PermissionMatrix.__new__(PermissionMatrix)
@@ -1180,7 +1189,8 @@ def test_standalone_agent_no_project_restriction(tmp_path):
         ),
     }
     router = MessageRouter(permissions=perms, agent_registry={})
-    # solo is not in any team — the app's empty store resolves None.
+    # solo is not in any team — the app's empty store resolves None, so
+    # the effective team falls back to the agent's own id.
     app = create_mesh_app(bb, pubsub, router, perms)
     client = TestClient(app)
 
@@ -1189,10 +1199,23 @@ def test_standalone_agent_no_project_restriction(tmp_path):
         "source": "solo",
         "payload": {},
     })
+    assert resp.status_code == 403
+
+    resp = client.post("/mesh/publish", json={
+        "topic": "teams/solo/research_done",
+        "source": "solo",
+        "payload": {},
+    })
     assert resp.status_code == 200
 
     resp = client.post("/mesh/subscribe", params={
         "topic": "updates",
+        "agent_id": "solo",
+    })
+    assert resp.status_code == 403
+
+    resp = client.post("/mesh/subscribe", params={
+        "topic": "teams/solo/updates",
         "agent_id": "solo",
     })
     assert resp.status_code == 200

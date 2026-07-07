@@ -1960,9 +1960,14 @@ def create_mesh_app(
         event.source = _resolve_agent_id(event.source, request)
         await _check_rate_limit("publish", event.source)
 
-        # Enforce team isolation: topic must match the publisher's team prefix
-        source_team = teams_store.team_of(event.source)
-        if source_team:
+        # Enforce team isolation: topic must match the publisher's
+        # EFFECTIVE team prefix — its real team, else its own agent id
+        # (solo = team-of-one, ratified #5: a solo worker is prefix-locked
+        # to its private ``teams/{agent_id}/`` namespace instead of
+        # skipping the gate). Operator + the trusted internal ``mesh``
+        # identity stay exempt, exactly as before (trust tier).
+        if event.source != "mesh" and not _caller_is_operator(event.source, request):
+            source_team = teams_store.team_of(event.source) or event.source
             expected_prefix = f"teams/{source_team}/"
             if not event.topic.startswith(expected_prefix):
                 _record_denial(
@@ -2023,9 +2028,12 @@ def create_mesh_app(
         """Subscribe an agent to an event topic."""
         agent_id = _resolve_agent_id(agent_id, request)
 
-        # Enforce team isolation: topic must match the subscriber's team prefix
-        sub_team = teams_store.team_of(agent_id)
-        if sub_team:
+        # Enforce team isolation: topic must match the subscriber's
+        # EFFECTIVE team prefix — real team, else the agent's own private
+        # team-of-one namespace (ratified #5). Operator + internal
+        # ``mesh`` stay exempt, mirroring the publish gate.
+        if agent_id != "mesh" and not _caller_is_operator(agent_id, request):
+            sub_team = teams_store.team_of(agent_id) or agent_id
             expected_prefix = f"teams/{sub_team}/"
             if not topic.startswith(expected_prefix):
                 _record_denial(
@@ -2812,12 +2820,17 @@ def create_mesh_app(
 
         router.register_agent(agent_id, url, capabilities)
         agent_perms = permissions.get_permissions(agent_id)
+        # Effective team for scoping: real team, else the worker's own
+        # private team-of-one namespace (ratified #5). Only the operator
+        # keeps unscoped subscriptions/watches (trust-tier carve-out).
         reg_team = teams_store.team_of(agent_id)
+        if agent_id != "operator":
+            reg_team = reg_team or agent_id
         for topic in agent_perms.can_subscribe:
             scoped = f"teams/{reg_team}/{topic}" if reg_team else topic
             pubsub.subscribe(scoped, agent_id)
-        # Auto-watch task inbox (coordination protocol).
-        # Only for agents with blackboard access (skip standalone agents).
+        # Auto-watch task inbox (coordination protocol) for agents with
+        # blackboard access — solo workers watch their own namespace.
         if agent_perms.blackboard_read:
             inbox_pattern = f"teams/{reg_team}/tasks/{agent_id}/*" if reg_team else f"tasks/{agent_id}/*"
             blackboard.add_watch(agent_id, inbox_pattern)
@@ -3433,10 +3446,18 @@ def create_mesh_app(
             return entry
 
         if team:
-            if not teams_store.team_exists(team):
+            if teams_store.team_exists(team):
+                members = {a for a, t in _team_map.items() if t == team}
+            elif team in router.agent_registry or team in _agents_cfg_listing:
+                # Pseudo-team (ratified #5): a solo worker's effective team
+                # is its own agent id, and its mesh client sends that as
+                # the ``team`` filter. Resolve to a team-of-one so solo
+                # agents keep discovering themselves (+ the operator,
+                # appended below) instead of getting an empty roster.
+                members = {team}
+            else:
                 logger.warning("list_agents: unknown team %r", team)
                 return {}
-            members = {a for a, t in _team_map.items() if t == team}
 
             # Task 5: only members of the requested team (or global
             # callers) may scope by it. Under warn mode, log but allow;
@@ -3929,6 +3950,17 @@ def create_mesh_app(
         if not tpl_agents:
             raise HTTPException(400, f"Template '{template_name}' has no agents")
 
+        # Cross-namespace collision guard (ratified #5), UPFRONT over every
+        # slot so a collision rejects the whole apply before any agent is
+        # created (mirrors the per-slot check in cli.config._apply_template).
+        _colliding_slots = sorted(n for n in tpl_agents if teams_store.team_exists(n))
+        if _colliding_slots:
+            raise HTTPException(
+                400,
+                f"Template slot name(s) {_colliding_slots} conflict with "
+                "existing team(s) — teams and agents share one namespace.",
+            )
+
         import os as _os
 
         max_agents = int(_os.environ.get("OPENLEGION_MAX_AGENTS", "0"))
@@ -4419,6 +4451,17 @@ def create_mesh_app(
             name = _validate_agent_name(name)
         except Exception as e:
             raise HTTPException(400, f"Invalid agent name: {e}") from e
+
+        # Cross-namespace collision guard (ratified #5): a solo agent's
+        # blackboard scope is ``teams/{agent_id}/*``, so an agent named
+        # after an existing team would silently inherit that team's
+        # namespace. The team-create endpoints enforce the mirror.
+        if teams_store.team_exists(name):
+            raise HTTPException(
+                400,
+                f"Agent name '{name}' conflicts with an existing team — "
+                "teams and agents share one namespace. Pick a different name.",
+            )
 
         # Check if agent already exists
         from src.cli.config import _load_config
@@ -5558,6 +5601,16 @@ def create_mesh_app(
             raise HTTPException(400, "members must be a list")
         cfg = _load_config()
         known_agents = set(cfg.get("agents", {}).keys())
+        # Cross-namespace collision guard (ratified #5): a solo agent's
+        # blackboard scope is ``teams/{agent_id}/*``, so a team named
+        # after an existing agent would collide with that agent's
+        # private namespace. The agent-create paths enforce the mirror.
+        if name in known_agents or name in router.agent_registry:
+            raise HTTPException(
+                400,
+                f"Team name '{name}' conflicts with an existing agent — "
+                "teams and agents share one namespace. Pick a different name.",
+            )
         unknown = [m for m in members if m not in known_agents]
         if unknown:
             raise HTTPException(400, f"Unknown agents: {', '.join(unknown)}")
@@ -5588,6 +5641,11 @@ def create_mesh_app(
                 if old and old != name:
                     _remove_team_blackboard_permissions(agent, old)
                 _add_team_blackboard_permissions(agent, name)
+            if members:
+                # ACL writes land on disk; refresh the LIVE matrix so the
+                # new members' team patterns apply to the very next
+                # blackboard/pubsub call (not at the next mesh restart).
+                permissions.reload()
         # Real-time cron lifecycle: schedule the daily work-summary
         # fire on team creation so the operator doesn't have to wait
         # for the next mesh restart for the reconcile to pick it up.
@@ -5645,6 +5703,7 @@ def create_mesh_app(
         if old and old != team_name:
             _remove_team_blackboard_permissions(agent, old)
         _add_team_blackboard_permissions(agent, team_name)
+        permissions.reload()
         return {"added": True, "team_id": team_name, "team_name": team_name, "agent": agent}
 
     @app.delete("/mesh/teams/{team_name}/members/{agent}")
@@ -5659,6 +5718,7 @@ def create_mesh_app(
             raise HTTPException(400, f"Team '{team_name}' not found")
         teams_store.remove_member(team_name, agent)
         _remove_team_blackboard_permissions(agent, team_name)
+        permissions.reload()
         return {"removed": True, "team_id": team_name, "team_name": team_name, "agent": agent}
 
     @app.delete("/mesh/teams/{team_name}")
@@ -5675,6 +5735,8 @@ def create_mesh_app(
             raise HTTPException(404, str(e))
         for agent in former_members:
             _remove_team_blackboard_permissions(agent, team_name)
+        if former_members:
+            permissions.reload()
         # Real-time cron lifecycle: drop the daily work-summary cron
         # for the deleted team. This is the mesh DIRECT-delete path
         # (distinct from the propose/confirm flow, which also cleans
@@ -7664,7 +7726,10 @@ def create_mesh_app(
         except TeamNotFound:
             raise HTTPException(404, f"Team '{team_name}' not found")
         _emit_team_event(
-            event_bus, "team_updated", agent="operator", name=team_name,
+            event_bus,
+            "team_updated",
+            agent="operator",
+            name=team_name,
             extra={"field": "budget"},
         )
         return {
@@ -8222,6 +8287,8 @@ def create_mesh_app(
                 raise HTTPException(404, f"Team '{target_id}' no longer exists")
             for agent in former_members:
                 _remove_team_blackboard_permissions(agent, target_id)
+            if former_members:
+                permissions.reload()
             # Real-time cron lifecycle (codex r1 P2): delete the
             # daily work-summary cron when the team itself is
             # deleted. Symmetric to the archive path; archive already

@@ -38,53 +38,77 @@ logger = setup_logging("host.permissions")
 # mesh recognizes them. Agents gain access to them automatically; operators
 # who want to restrict specific actions do so per-template via
 # `AgentPermissions.browser_actions`.
-KNOWN_BROWSER_ACTIONS: frozenset[str] = frozenset({
-    # Legacy 16 — present pre-Phase 1 refactor.
-    "navigate", "snapshot", "click", "type", "hover",
-    "screenshot", "reset", "focus", "status", "detect_captcha", "scroll",
-    "wait_for", "press_key", "go_back", "go_forward", "switch_tab",
-    # Phase 1.5 file-transfer actions. Reserved here so the mesh input
-    # validation accepts the action names even before Phase 1.5's
-    # endpoints land in `src/browser/server.py`. If a caller invokes
-    # these before 1.5 is deployed, the browser service returns a clean
-    # 404 on the unknown URL instead of the mesh rejecting the action
-    # name as unknown — avoids a cross-PR merge-order dependency.
-    "upload_file", "download",
-    # Phase 5 §8.5 / §8.6 default-allow read-only / nav-equivalent actions.
-    "find_text", "open_tab",
-    # Phase 6 §9.4 compound find-text+type with CAPTCHA-mid-flow partial success
-    "fill_form",
-    # Phase 6 §9.3 coordinate-based click with overlay pre-check.
-    "click_xy",
-    # Phase 6 §9.1 read-only network inspection.
-    "inspect_requests",
-    # Phase 8 §11.14 explicit-trigger captcha-handling tools. Default-allow
-    # alongside the other browser actions; operators who want to forbid
-    # solver spend per-template can still add ``solve_captcha`` to a
-    # narrowed ``browser_actions`` denylist (or set
-    # ``CAPTCHA_DISABLED=true`` fleet-wide via flags.py).
-    "solve_captcha", "request_captcha_help",
-    # Phase 8 §11.14 + browser-login handoff.  Both endpoints emit a
-    # dashboard handoff card — ``request_browser_login`` for VNC-driven
-    # interactive login, ``request_captcha_help`` for human captcha
-    # assistance — and both are now permission-gated at the dedicated
-    # mesh endpoints (``/mesh/browser-login-request``,
-    # ``/mesh/browser-captcha-help-request``).  Without these names in
-    # the validator set, an operator who narrows ``browser_actions`` to
-    # exclude the handoff would still see the second-call-to-dedicated-
-    # endpoint succeed, defeating permission narrowing.
-    "request_browser_login",
-    # Human-parity actions: native JS dialog policy (alert/confirm/prompt/
-    # beforeunload), Firefox-scoped permission grants + geolocation, and
-    # trusted-X11 drag-and-drop. Default-allow like every other known
-    # action; operators narrow via ``AgentPermissions.browser_actions``.
-    "set_dialog_policy", "grant_permissions", "set_geolocation", "drag",
-    # P2 human-parity actions: trusted right-click / native context menu,
-    # secure-context clipboard read + write, and an explicit network-idle
-    # wait. Default-allow like every other known action; operators narrow
-    # via ``AgentPermissions.browser_actions``.
-    "right_click", "read_clipboard", "write_clipboard", "wait_for_network_idle",
-})
+KNOWN_BROWSER_ACTIONS: frozenset[str] = frozenset(
+    {
+        # Legacy 16 — present pre-Phase 1 refactor.
+        "navigate",
+        "snapshot",
+        "click",
+        "type",
+        "hover",
+        "screenshot",
+        "reset",
+        "focus",
+        "status",
+        "detect_captcha",
+        "scroll",
+        "wait_for",
+        "press_key",
+        "go_back",
+        "go_forward",
+        "switch_tab",
+        # Phase 1.5 file-transfer actions. Reserved here so the mesh input
+        # validation accepts the action names even before Phase 1.5's
+        # endpoints land in `src/browser/server.py`. If a caller invokes
+        # these before 1.5 is deployed, the browser service returns a clean
+        # 404 on the unknown URL instead of the mesh rejecting the action
+        # name as unknown — avoids a cross-PR merge-order dependency.
+        "upload_file",
+        "download",
+        # Phase 5 §8.5 / §8.6 default-allow read-only / nav-equivalent actions.
+        "find_text",
+        "open_tab",
+        # Phase 6 §9.4 compound find-text+type with CAPTCHA-mid-flow partial success
+        "fill_form",
+        # Phase 6 §9.3 coordinate-based click with overlay pre-check.
+        "click_xy",
+        # Phase 6 §9.1 read-only network inspection.
+        "inspect_requests",
+        # Phase 8 §11.14 explicit-trigger captcha-handling tools. Default-allow
+        # alongside the other browser actions; operators who want to forbid
+        # solver spend per-template can still add ``solve_captcha`` to a
+        # narrowed ``browser_actions`` denylist (or set
+        # ``CAPTCHA_DISABLED=true`` fleet-wide via flags.py).
+        "solve_captcha",
+        "request_captcha_help",
+        # Phase 8 §11.14 + browser-login handoff.  Both endpoints emit a
+        # dashboard handoff card — ``request_browser_login`` for VNC-driven
+        # interactive login, ``request_captcha_help`` for human captcha
+        # assistance — and both are now permission-gated at the dedicated
+        # mesh endpoints (``/mesh/browser-login-request``,
+        # ``/mesh/browser-captcha-help-request``).  Without these names in
+        # the validator set, an operator who narrows ``browser_actions`` to
+        # exclude the handoff would still see the second-call-to-dedicated-
+        # endpoint succeed, defeating permission narrowing.
+        "request_browser_login",
+        # Human-parity actions: native JS dialog policy (alert/confirm/prompt/
+        # beforeunload), Firefox-scoped permission grants + geolocation, and
+        # trusted-X11 drag-and-drop. Default-allow like every other known
+        # action; operators narrow via ``AgentPermissions.browser_actions``.
+        "set_dialog_policy",
+        "grant_permissions",
+        "set_geolocation",
+        "drag",
+        # P2 human-parity actions: trusted right-click / native context menu,
+        # secure-context clipboard read + write, and an explicit network-idle
+        # wait. Default-allow like every other known action; operators narrow
+        # via ``AgentPermissions.browser_actions``.
+        "right_click",
+        "read_clipboard",
+        "write_clipboard",
+        "wait_for_network_idle",
+    }
+)
 
 
 class PermissionMatrix:
@@ -113,9 +137,7 @@ class PermissionMatrix:
         vault is built so ``can_access_credential`` can deny by LOADED
         TIER, not just by name shape (L10).
         """
-        self._system_credential_names = frozenset(
-            n.lower() for n in (names or [])
-        )
+        self._system_credential_names = frozenset(n.lower() for n in (names or []))
 
     def reload(self) -> None:
         """Reload permissions from disk (e.g. after adding an agent at runtime)."""
@@ -139,9 +161,9 @@ class PermissionMatrix:
             # not crash boot and must NOT leave stale grants in place — clear
             # to deny-all, exactly like the missing-file branch above.
             logger.error(
-                "Permissions file %s is corrupt or unreadable (%s); "
-                "falling back to deny-all defaults",
-                config_path, e,
+                "Permissions file %s is corrupt or unreadable (%s); falling back to deny-all defaults",
+                config_path,
+                e,
             )
             self.permissions.clear()
             return
@@ -231,10 +253,7 @@ class PermissionMatrix:
         if key.startswith("global/tasks/operator/"):
             return agent_id == "operator"
         if key.startswith("global/output/"):
-            return (
-                agent_id == "operator"
-                or key.startswith(f"global/output/{agent_id}/")
-            )
+            return agent_id == "operator" or key.startswith(f"global/output/{agent_id}/")
         # Self-inbox task_event carve-out: an agent may ALWAYS read its OWN
         # back-edge task_event inbox (outcomes land at
         # inbox/{agent}/task_event/ — the only thing ``check_inbox`` reads and
@@ -250,8 +269,28 @@ class PermissionMatrix:
         # goals moved off the blackboard into the Team store (ratified
         # #7 / C.3-b; read path is GET /mesh/agents/{id}/goals). Keys
         # named ``goals/...`` are ordinary blackboard keys now.
+        if self._is_own_namespace(agent_id, key):
+            return True
         perms = self.get_permissions(agent_id)
         return any(fnmatch.fnmatch(key, pattern) for pattern in perms.blackboard_read)
+
+    @staticmethod
+    def _is_own_namespace(agent_id: str, key: str) -> bool:
+        """Team-of-one carve-out (ratified #5): an agent can ALWAYS
+        read/write its OWN private ``teams/{agent_id}/`` namespace,
+        regardless of ACL file state.
+
+        Enforced at resolution time rather than as persisted patterns so
+        every worker class is covered by construction: ephemeral spawn
+        agents (no permissions.json entry — resolve via the deny-all
+        "default" record), legacy teamless agents whose entries predate
+        the self-pattern default, and a just-removed team member whose
+        entry is mid-rewrite. Grants ZERO shared reach: the cross-
+        namespace collision guard (team ids may not equal agent ids)
+        means ``teams/{agent_id}/`` can only ever be this agent's own
+        space. The trailing slash enforces a path-segment boundary.
+        """
+        return bool(agent_id) and key.startswith(f"teams/{agent_id}/")
 
     def can_write_blackboard(self, agent_id: str, key: str) -> bool:
         if self._is_trusted(agent_id):
@@ -271,6 +310,8 @@ class PermissionMatrix:
         # the operator-gated PUT /mesh/agents/{id}/goals endpoint), so
         # no prompt-injected surface is named "goals" anymore. Keys
         # named ``goals/...`` are ordinary blackboard keys now.
+        if self._is_own_namespace(agent_id, key):
+            return True
         perms = self.get_permissions(agent_id)
         return any(fnmatch.fnmatch(key, pattern) for pattern in perms.blackboard_write)
 

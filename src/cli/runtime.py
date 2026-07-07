@@ -44,7 +44,7 @@ logger = logging.getLogger("cli")
 # maps them to the right SYSTEM API key with no extra config.
 _EMBEDDING_PROVIDER_LADDER: list[tuple[str, str, int]] = [
     ("openai", "text-embedding-3-small", 1536),
-    ("voyage", "voyage/voyage-3.5", 1024),        # Anthropic's recommended embedder
+    ("voyage", "voyage/voyage-3.5", 1024),  # Anthropic's recommended embedder
     ("gemini", "gemini/text-embedding-004", 768),
     ("cohere", "cohere/embed-english-v3.0", 1024),
 ]
@@ -326,7 +326,7 @@ class RuntimeContext:
             self.cron_scheduler.stop()
         if self.runtime:
             self.runtime.stop_all()
-            if hasattr(self.runtime, 'stop_browser_service'):
+            if hasattr(self.runtime, "stop_browser_service"):
                 self.runtime.stop_browser_service()
         if self.cost_tracker:
             self.cost_tracker.close()
@@ -344,16 +344,18 @@ class RuntimeContext:
         # Close shared httpx clients on the dispatch loop — close all
         # concurrently so one slow close doesn't block the others.
         if self._dispatch_loop:
+
             async def _close_clients():
                 async def _close_one(name, closeable):
-                    if closeable is None or not hasattr(closeable, 'close'):
+                    if closeable is None or not hasattr(closeable, "close"):
                         return
                     try:
                         result = closeable.close()
-                        if hasattr(result, '__await__'):
+                        if hasattr(result, "__await__"):
                             await asyncio.wait_for(result, timeout=3)
                     except Exception as e:
                         logger.debug("Error closing %s: %s", name, e)
+
                 closeables = {
                     "transport": self.transport,
                     "router": self.router,
@@ -363,6 +365,7 @@ class RuntimeContext:
                     *(_close_one(n, c) for n, c in closeables.items()),
                     return_exceptions=True,
                 )
+
             try:
                 future = asyncio.run_coroutine_threadsafe(_close_clients(), self._dispatch_loop)
                 future.result(timeout=10)
@@ -392,10 +395,14 @@ class RuntimeContext:
         if trace_id:
             return trace_id
         from src.shared.trace import current_trace_id, new_trace_id
+
         return current_trace_id.get() or new_trace_id()
 
     def dispatch(
-        self, agent: str, message: str, mode: str = "followup",
+        self,
+        agent: str,
+        message: str,
+        mode: str = "followup",
         trace_id: str | None = None,
         origin: "MessageOrigin | None" = None,
         auto_notify: bool = False,
@@ -409,8 +416,12 @@ class RuntimeContext:
         trace_id = self._resolve_dispatch_trace_id(trace_id)
         future = asyncio.run_coroutine_threadsafe(
             self.lane_manager.enqueue(
-                agent, message, mode=mode, trace_id=trace_id,
-                origin=origin, auto_notify=auto_notify,
+                agent,
+                message,
+                mode=mode,
+                trace_id=trace_id,
+                origin=origin,
+                auto_notify=auto_notify,
                 system_note=system_note,
             ),
             self._dispatch_loop,
@@ -418,7 +429,10 @@ class RuntimeContext:
         return future.result()
 
     async def async_dispatch(
-        self, agent: str, message: str, mode: str = "followup",
+        self,
+        agent: str,
+        message: str,
+        mode: str = "followup",
         trace_id: str | None = None,
         origin: "MessageOrigin | None" = None,
         auto_notify: bool = False,
@@ -428,8 +442,12 @@ class RuntimeContext:
         trace_id = self._resolve_dispatch_trace_id(trace_id)
         future = asyncio.run_coroutine_threadsafe(
             self.lane_manager.enqueue(
-                agent, message, mode=mode, trace_id=trace_id,
-                origin=origin, auto_notify=auto_notify,
+                agent,
+                message,
+                mode=mode,
+                trace_id=trace_id,
+                origin=origin,
+                auto_notify=auto_notify,
                 system_note=system_note,
             ),
             self._dispatch_loop,
@@ -470,7 +488,8 @@ class RuntimeContext:
 
         mesh_port = self.cfg["mesh"]["port"]
         self.runtime = select_backend(
-            mesh_host_port=mesh_port, project_root=str(PROJECT_ROOT),
+            mesh_host_port=mesh_port,
+            project_root=str(PROJECT_ROOT),
             use_sandbox=self.use_sandbox,
         )
         self._is_sandbox = isinstance(self.runtime, SandboxBackend)
@@ -509,6 +528,7 @@ class RuntimeContext:
         # Ensure collaborative permissions are up to date before loading
         if self.cfg.get("collaboration", False):
             from src.cli.config import _set_collaborative_permissions
+
             _set_collaborative_permissions()
 
         self.event_bus = EventBus()
@@ -518,27 +538,23 @@ class RuntimeContext:
             _trace_retention = int(os.environ.get("OPENLEGION_TRACE_RETENTION_HOURS", "168"))
         except ValueError:
             _trace_retention = 168
-        self.trace_store = TraceStore(
-            max_age_hours=_trace_retention if _trace_retention > 0 else None
-        )
+        self.trace_store = TraceStore(max_age_hours=_trace_retention if _trace_retention > 0 else None)
         # Durable verbatim-intent store (Phase 2, session observability).
         # Captures the FULL inbound message centrally, keyed by trace_id +
         # origin, so intent survives container wipes / resets / deploys
         # (container-local chat_transcript.jsonl rotates and dies with the
         # container). Append-only with a 90-day time-based GC.
         from src.host.intent import IntentStore
-        self.intent_store = IntentStore(
-            db_path=os.environ.get("OPENLEGION_INTENT_DB", "data/intent.db")
-        )
+
+        self.intent_store = IntentStore(db_path=os.environ.get("OPENLEGION_INTENT_DB", "data/intent.db"))
         # External infra-event markers (host restart / deploy / OOM). Emitted
         # out-of-band by the provisioner or an operator runbook via the
         # internal-only POST /mesh/system/lifecycle_event endpoint and
         # interleaved by wall-clock into the session-reader timeline. Append-
         # only with a 90-day time-based GC (mirrors the intent store).
         from src.host.lifecycle import LifecycleStore
-        self.lifecycle_store = LifecycleStore(
-            db_path=os.environ.get("OPENLEGION_LIFECYCLE_DB", "data/lifecycle.db")
-        )
+
+        self.lifecycle_store = LifecycleStore(db_path=os.environ.get("OPENLEGION_LIFECYCLE_DB", "data/lifecycle.db"))
         self.blackboard = Blackboard(event_bus=self.event_bus)
         self.pubsub = PubSub(db_path="pubsub.db")
         self.permissions = PermissionMatrix()
@@ -563,6 +579,7 @@ class RuntimeContext:
         # which agents run which MCP servers. The runtime reads it at
         # every agent (re)start; the dashboard Connectors page manages it.
         from src.host.connectors import ConnectorStore
+
         self.connector_store = ConnectorStore()
         self.runtime.set_connector_store(self.connector_store)
         # THE team authority (identity, metadata, membership, standing
@@ -570,6 +587,7 @@ class RuntimeContext:
         # scaffold; every consumer — mesh app, dashboard, router,
         # agent-start env — reads through this instance.
         from src.host.teams import TeamStore
+
         self.teams_store = TeamStore(
             db_path=os.environ.get("OPENLEGION_TEAMS_DB", "data/teams.db"),
             teams_dir=TEAMS_DIR,
@@ -577,8 +595,29 @@ class RuntimeContext:
         # Team budget envelope (plan B4): the cost tracker resolves each
         # caller's team + envelope through the store at pre-flight time.
         self.cost_tracker.set_team_store(self.teams_store)
+
+        # Team env resolver, injected at the RUNTIME-BACKEND level (like
+        # LLM_UTILITY_MODEL) so EVERY start path — initial boot, REPL
+        # /restart, health-monitor restart, dashboard restart, ephemeral
+        # spawn — resolves the agent's effective team without per-caller
+        # plumbing. Workers always get TEAM_NAME (real team, or their own
+        # id as the private team-of-one namespace, ratified #5);
+        # TEAM_MD_PATH only for real teams; the operator stays unscoped.
+        def _team_env_for(agent_id: str) -> dict[str, str]:
+            from src.cli.config import _OPERATOR_AGENT_ID
+
+            if agent_id == _OPERATOR_AGENT_ID:
+                return {}
+            team = self.teams_store.team_of(agent_id)
+            env = {"TEAM_NAME": team or agent_id}
+            if team:
+                env["TEAM_MD_PATH"] = str(TEAMS_DIR / team / "team.md")
+            return env
+
+        self.runtime.set_team_env_provider(_team_env_for)
         self.router = MessageRouter(
-            self.permissions, self.agent_urls,
+            self.permissions,
+            self.agent_urls,
             trace_store=self.trace_store,
             team_resolver=self.teams_store.team_of,
         )
@@ -601,7 +640,9 @@ class RuntimeContext:
         self._pending_chain_pushes: set = set()
 
         self.health_monitor = HealthMonitor(
-            runtime=self.runtime, transport=self.transport, router=self.router,
+            runtime=self.runtime,
+            transport=self.transport,
+            router=self.router,
             event_bus=self.event_bus,
             blackboard=self.blackboard,
         )
@@ -612,17 +653,20 @@ class RuntimeContext:
         # but the mesh-proxy boundary erases exception types so the
         # mesh-side recording must be the authoritative trigger.
         if self.credential_vault is not None:
+
             def _record_auth(agent_id: str, provider: str, model: str, http_status: int) -> None:
                 try:
                     self.health_monitor.record_auth_failure(
-                        agent_id, provider=provider, model=model,
+                        agent_id,
+                        provider=provider,
+                        model=model,
                         http_status=http_status,
                     )
                 except Exception as e:
                     logger.warning(
-                        "HealthMonitor.record_auth_failure failed for "
-                        "agent='%s': %s",
-                        agent_id, e,
+                        "HealthMonitor.record_auth_failure failed for agent='%s': %s",
+                        agent_id,
+                        e,
                     )
 
             self.credential_vault.set_auth_failure_recorder(_record_auth)
@@ -630,6 +674,7 @@ class RuntimeContext:
     def _start_browser_service(self) -> None:
         """Start the shared browser service container."""
         from src.host.runtime import DockerBackend
+
         if isinstance(self.runtime, DockerBackend):
             try:
                 self.runtime.start_browser_service()
@@ -665,7 +710,6 @@ class RuntimeContext:
             _embedding_providers_with_keys(),
         )
         mesh_port = self.cfg["mesh"]["port"]
-        agent_teams = self.teams_store.agent_team_map()
 
         # Respect plan limits on startup — only start up to max_agents.
         # Prevents OOM on downsized servers after a plan downgrade.
@@ -675,7 +719,9 @@ class RuntimeContext:
         if max_agents > 0 and len(non_operator) > max_agents:
             logger.warning(
                 "Agent limit is %d but %d agents configured — only starting first %d",
-                max_agents, len(non_operator), max_agents,
+                max_agents,
+                len(non_operator),
+                max_agents,
             )
             trimmed = dict(list(non_operator.items())[:max_agents])
             if _OPERATOR_AGENT_ID in agents_cfg:
@@ -687,12 +733,12 @@ class RuntimeContext:
         if embedding_model and embedding_model.lower() != "none":
             logger.info(
                 "Semantic memory: ON — embedding model %s (dim %d)",
-                embedding_model, embedding_dim,
+                embedding_model,
+                embedding_dim,
             )
         else:
             logger.info(
-                "Semantic memory: OFF (keyword-only) — no embedding-capable "
-                "provider key configured",
+                "Semantic memory: OFF (keyword-only) — no embedding-capable provider key configured",
             )
 
         # Inject dashboard system settings as env vars for agent containers
@@ -700,6 +746,7 @@ class RuntimeContext:
         if settings_path.exists():
             try:
                 import json
+
                 sys_settings = json.loads(settings_path.read_text())
                 for env_key, cfg_key in {
                     "OPENLEGION_MAX_ITERATIONS": "max_iterations",
@@ -714,12 +761,11 @@ class RuntimeContext:
 
         for agent_id, agent_cfg in agents_cfg.items():
             if agent_id in RESERVED_AGENT_IDS and agent_id != _OPERATOR_AGENT_ID:
-                raise click.ClickException(
-                    f"Agent ID '{agent_id}' is reserved for internal use"
-                )
+                raise click.ClickException(f"Agent ID '{agent_id}' is reserved for internal use")
             budget = agent_cfg.get("budget", {})
             if budget:
                 from src.host.costs import DEFAULT_DAILY_BUDGET_USD, DEFAULT_MONTHLY_BUDGET_USD
+
                 self.cost_tracker.set_budget(
                     agent_id,
                     daily_usd=budget.get("daily_usd", DEFAULT_DAILY_BUDGET_USD),
@@ -759,6 +805,7 @@ class RuntimeContext:
             # Per-agent output-token cap → LLM_MAX_TOKENS (survives restart).
             set_llm_max_tokens_env(agent_env, agent_cfg)
             from src.shared.limits import set_llm_limits_env
+
             set_llm_limits_env(agent_env, agent_cfg)
             if agent_id == _OPERATOR_AGENT_ID:
                 agent_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
@@ -774,9 +821,15 @@ class RuntimeContext:
                 # matches the operator-by-default UX.
                 try:
                     from src.cli.config import _load_permissions
-                    _op_perms = _load_permissions().get(
-                        "permissions", {},
-                    ).get(_OPERATOR_AGENT_ID, {})
+
+                    _op_perms = (
+                        _load_permissions()
+                        .get(
+                            "permissions",
+                            {},
+                        )
+                        .get(_OPERATOR_AGENT_ID, {})
+                    )
                     agent_env["OL_INTERNET_ACCESS_ENABLED"] = (
                         "true" if _op_perms.get("can_use_internet", True) else "false"
                     )
@@ -787,12 +840,10 @@ class RuntimeContext:
                     agent_env["OL_INTERNET_ACCESS_ENABLED"] = "true"
                     agent_env["OL_BROWSER_ACCESS_ENABLED"] = "true"
 
-            # Team env vars
-            team_name = agent_teams.get(agent_id)
-            if team_name:
-                team_md = TEAMS_DIR / team_name / "team.md"
-                agent_env["TEAM_MD_PATH"] = str(team_md)
-                agent_env["TEAM_NAME"] = team_name
+            # Team env vars (TEAM_NAME/TEAM_MD_PATH) are injected by the
+            # runtime backend's team env provider (set_team_env_provider)
+            # so restart/spawn paths resolve them identically — no
+            # per-start plumbing here.
 
             # Proxy env injection
             proxy_url = resolve_agent_proxy(
@@ -825,6 +876,7 @@ class RuntimeContext:
                     saved_extra_env = self.runtime.extra_env
                     self.runtime.stop_all()
                     from src.host.runtime import _should_use_host_network
+
                     self.runtime = DockerBackend(
                         mesh_host_port=mesh_port,
                         use_host_network=_should_use_host_network(),
@@ -872,7 +924,9 @@ class RuntimeContext:
                 self.health_monitor.register(agent_id)
 
     async def _close_task_on_dispatch_error(
-        self, task_id: str, exc: BaseException,
+        self,
+        task_id: str,
+        exc: BaseException,
     ) -> None:
         """Close a durable task after its mesh→agent dispatch raised.
 
@@ -916,18 +970,15 @@ class RuntimeContext:
             note = _build_dispatch_error_note(exc)
         loop = asyncio.get_running_loop()
         try:
-            pre = await loop.run_in_executor(
-                None, lambda: tasks_store.get(task_id)
-            )
+            pre = await loop.run_in_executor(None, lambda: tasks_store.get(task_id))
         except Exception as pre_err:
             logger.debug(
                 "Dispatch-error pre-check for task %s failed: %s",
-                task_id, pre_err,
+                task_id,
+                pre_err,
             )
             pre = None
-        if pre is not None and pre.get("status") in (
-            "done", "failed", "cancelled", "blocked"
-        ):
+        if pre is not None and pre.get("status") in ("done", "failed", "cancelled", "blocked"):
             # Already terminal (assignee or lane watchdog beat us) — do not
             # clobber the real status/note. ``blocked`` is included because
             # ``blocked → failed`` is a *valid* transition: a dispatch
@@ -935,8 +986,9 @@ class RuntimeContext:
             # ``blocked`` status (and its meaningful blocker_note) with a
             # generic dispatch note.
             logger.info(
-                "Dispatch error: task %s already terminal (status=%s) — "
-                "skipping close", task_id, pre.get("status"),
+                "Dispatch error: task %s already terminal (status=%s) — skipping close",
+                task_id,
+                pre.get("status"),
             )
             return
         # Infra interrupts ride the recoverable error code so the dashboard /
@@ -957,13 +1009,15 @@ class RuntimeContext:
         except InvalidStatusTransition as race_err:
             # Benign race: task went terminal between pre-check and UPDATE.
             logger.info(
-                "Dispatch-error close race: task %s went terminal (%s) — "
-                "skipping", task_id, race_err,
+                "Dispatch-error close race: task %s went terminal (%s) — skipping",
+                task_id,
+                race_err,
             )
         except Exception as close_err:
             logger.warning(
                 "Dispatch-error failed to close task %s: %s",
-                task_id, close_err,
+                task_id,
+                close_err,
             )
 
     def _setup_dispatch(self) -> None:
@@ -988,7 +1042,8 @@ class RuntimeContext:
         # lane manager is wired.
 
         async def _direct_dispatch(
-            agent_name: str, message: str,
+            agent_name: str,
+            message: str,
             origin: "MessageOrigin | None" = None,
             task_id: str | None = None,
             system_note: bool = False,
@@ -1014,8 +1069,11 @@ class RuntimeContext:
             tid = current_trace_id.get() or new_trace_id()
             if self.trace_store:
                 self.trace_store.record(
-                    trace_id=tid, source="dispatch", agent=agent_name,
-                    event_type="chat", detail=message[:200],
+                    trace_id=tid,
+                    source="dispatch",
+                    agent=agent_name,
+                    event_type="chat",
+                    detail=message[:200],
                     meta={"message_length": len(message)},
                 )
             # Phase 2 (session observability): capture the FULL verbatim
@@ -1039,6 +1097,7 @@ class RuntimeContext:
                 except Exception as _intent_err:
                     logger.debug("intent capture failed: %s", _intent_err)
             import time as _time
+
             t0 = _time.time()
             extra_headers: dict[str, str] = {"x-trace-id": tid}
             extra_headers.update(origin_header(origin))
@@ -1059,7 +1118,10 @@ class RuntimeContext:
             )
             try:
                 result = await self.transport.request(
-                    agent_name, "POST", "/chat", json={"message": message},
+                    agent_name,
+                    "POST",
+                    "/chat",
+                    json={"message": message},
                     headers=extra_headers or None,
                     timeout=effective_cap + 60,
                 )
@@ -1076,32 +1138,41 @@ class RuntimeContext:
                     duration_ms = int((_time.time() - t0) * 1000)
                     logger.warning(
                         "Dispatch to '%s' failed: %s (status_code=%s)",
-                        agent_name, err, result.get("status_code"),
+                        agent_name,
+                        err,
+                        result.get("status_code"),
                     )
                     if tid and self.trace_store:
                         self.trace_store.record(
-                            trace_id=tid, source="dispatch", agent=agent_name,
-                            event_type="chat_response", duration_ms=duration_ms,
+                            trace_id=tid,
+                            source="dispatch",
+                            agent=agent_name,
+                            event_type="chat_response",
+                            duration_ms=duration_ms,
                             status="error",
-                            meta={"error": err[:200],
-                                  "status_code": result.get("status_code")},
+                            meta={"error": err[:200], "status_code": result.get("status_code")},
                         )
                     from src.shared.types import SILENT_REPLY_TOKEN
+
                     return SILENT_REPLY_TOKEN
                 response = result.get("response", "(no response)")
                 duration_ms = int((_time.time() - t0) * 1000)
                 if tid and self.trace_store:
                     self.trace_store.record(
-                        trace_id=tid, source="dispatch", agent=agent_name,
-                        event_type="chat_response", duration_ms=duration_ms,
+                        trace_id=tid,
+                        source="dispatch",
+                        agent=agent_name,
+                        event_type="chat_response",
+                        duration_ms=duration_ms,
                         status="ok",
-                        meta={"response_length": len(response),
-                              "response_preview": response[:200]},
+                        meta={"response_length": len(response), "response_preview": response[:200]},
                     )
                 if self.event_bus:
-                    self.event_bus.emit("message_sent", agent=agent_name,
-                        data={"message": message[:200], "response_length": len(response),
-                              "source": "dispatch"})
+                    self.event_bus.emit(
+                        "message_sent",
+                        agent=agent_name,
+                        data={"message": message[:200], "response_length": len(response), "source": "dispatch"},
+                    )
                     # Lane-dispatched turn (wake/cron/webhook) finished
                     # OUTSIDE any dashboard stream — the reply is already
                     # in the transcript but no open chat view knows.
@@ -1110,7 +1181,8 @@ class RuntimeContext:
                     # finalize logic; never bypass the 5s debounce — a
                     # wake burst must not stampede full refetches).
                     self.event_bus.emit(
-                        "chat_done", agent=agent_name,
+                        "chat_done",
+                        agent=agent_name,
                         data={"source": "dispatch"},
                     )
                 return response
@@ -1123,9 +1195,13 @@ class RuntimeContext:
                 duration_ms = int((_time.time() - t0) * 1000)
                 if tid and self.trace_store:
                     self.trace_store.record(
-                        trace_id=tid, source="dispatch", agent=agent_name,
-                        event_type="chat_response", duration_ms=duration_ms,
-                        status="error", error=str(e),
+                        trace_id=tid,
+                        source="dispatch",
+                        agent=agent_name,
+                        event_type="chat_response",
+                        duration_ms=duration_ms,
+                        status="error",
+                        error=str(e),
                     )
                 # RC-2 fix: a transport/agent error used to be returned as a
                 # bare ``f"Error: {e}"`` string. The lane recorded that as a
@@ -1146,7 +1222,9 @@ class RuntimeContext:
                 return note
 
         async def _direct_steer(
-            agent_name: str, message: str, system_note: bool = False,
+            agent_name: str,
+            message: str,
+            system_note: bool = False,
         ) -> dict:
             try:
                 # Same marker as _direct_dispatch: a system-composed steer
@@ -1155,20 +1233,21 @@ class RuntimeContext:
                 # a "[steer]" user bubble.
                 headers = {"x-system-wake": "1"} if system_note else None
                 return await self.transport.request(
-                    agent_name, "POST", "/chat/steer", json={"message": message},
+                    agent_name,
+                    "POST",
+                    "/chat/steer",
+                    json={"message": message},
                     headers=headers,
                 )
             except Exception as e:
                 return {"injected": False, "error": str(e)}
 
         self.lane_manager = LaneManager(
-            dispatch_fn=_direct_dispatch, steer_fn=_direct_steer,
+            dispatch_fn=_direct_dispatch,
+            steer_fn=_direct_steer,
             trace_store=self.trace_store,
             notify_fn=self._handle_notify_origin,
-            quarantine_check=(
-                self.health_monitor.is_quarantined
-                if self.health_monitor is not None else None
-            ),
+            quarantine_check=(self.health_monitor.is_quarantined if self.health_monitor is not None else None),
         )
         # Bug 1: hand the lane queue-depth lookup to the health monitor so
         # the staleness check (reachable+busy+no-tick → unhealthy) has
@@ -1191,13 +1270,15 @@ class RuntimeContext:
         sys.stdout.write(f"\n{notification}\n")
         sys.stdout.flush()
         if self._active_channels:
-            await asyncio.gather(*(
-                ch.send_notification(notification)
-                for ch in self._active_channels
-            ), return_exceptions=True)
+            await asyncio.gather(
+                *(ch.send_notification(notification) for ch in self._active_channels), return_exceptions=True
+            )
 
     async def _handle_notify_origin(
-        self, origin: "MessageOrigin", message: str, agent_name: str = "",
+        self,
+        origin: "MessageOrigin",
+        message: str,
+        agent_name: str = "",
     ) -> bool:
         """Route a completed task result back to the originating channel+user.
 
@@ -1228,7 +1309,8 @@ class RuntimeContext:
         if ch is None:
             logger.debug(
                 "Origin channel %s not connected — dropping notification to %s",
-                channel_type, user,
+                channel_type,
+                user,
             )
             return False
 
@@ -1238,7 +1320,8 @@ class RuntimeContext:
         try:
             if channel_loop is not None and channel_loop.is_running():
                 concurrent_fut = asyncio.run_coroutine_threadsafe(
-                    ch.send_to_user(user, labelled), channel_loop,
+                    ch.send_to_user(user, labelled),
+                    channel_loop,
                 )
                 await asyncio.wrap_future(concurrent_fut)
             else:
@@ -1246,12 +1329,18 @@ class RuntimeContext:
             return True
         except Exception as e:
             logger.warning(
-                "send_to_user(%s, %s) failed: %s", channel_type, user, e,
+                "send_to_user(%s, %s) failed: %s",
+                channel_type,
+                user,
+                e,
             )
             return False
 
     async def _deliver_chain_outcome(
-        self, root: dict, kind: str, summary: str,
+        self,
+        root: dict,
+        kind: str,
+        summary: str,
     ) -> bool:
         """Deliver one terminal outcome for a user chain to its originator.
 
@@ -1285,10 +1374,7 @@ class RuntimeContext:
             body = summary or "Your request finished."
         elif kind == "stall":
             title = "⏳ Taking longer than expected"
-            body = (
-                f"No progress on '{root_title}' for a while — it may be stuck. "
-                "Want me to check in?"
-            )
+            body = f"No progress on '{root_title}' for a while — it may be stuck. Want me to check in?"
         else:
             title = "⚠️ Task failed"
             body = summary or "Your request hit a failure and stopped."
@@ -1305,12 +1391,17 @@ class RuntimeContext:
         note_text = f"{title}\n{body}"
         try:
             result = await self.transport.request(
-                "operator", "POST", "/chat/note",
-                json={"message": note_text}, timeout=15,
+                "operator",
+                "POST",
+                "/chat/note",
+                json={"message": note_text},
+                timeout=15,
             )
         except Exception as e:
             logger.warning(
-                "chain outcome note write failed for %s: %s", root_id, e,
+                "chain outcome note write failed for %s: %s",
+                root_id,
+                e,
             )
             return False
         if not isinstance(result, dict) or result.get("error") or not result.get("ok"):
@@ -1324,11 +1415,14 @@ class RuntimeContext:
                     "— the operator agent image predates this endpoint. "
                     "Rebuild it (docker build -t openlegion-agent:latest "
                     "-f Dockerfile.agent .) and restart; delivery retries "
-                    "until then.", root_id,
+                    "until then.",
+                    root_id,
                 )
             else:
                 logger.warning(
-                    "chain outcome note rejected for %s: %s", root_id, result,
+                    "chain outcome note rejected for %s: %s",
+                    root_id,
+                    result,
                 )
             return False
         # Live surface — the chat UI renders this as the amber
@@ -1338,7 +1432,8 @@ class RuntimeContext:
         if self.event_bus is not None:
             try:
                 self.event_bus.emit(
-                    "notification", agent="operator",
+                    "notification",
+                    agent="operator",
                     data={
                         "message": note_text,
                         "root_task_id": root_id,
@@ -1371,12 +1466,17 @@ class RuntimeContext:
         if channel and channel != "dashboard" and user:
             try:
                 from src.shared.types import MessageOrigin
+
                 origin_obj = MessageOrigin(
-                    kind="human", channel=channel, user=user,
+                    kind="human",
+                    channel=channel,
+                    user=user,
                 )
                 push = asyncio.create_task(
                     self._channel_push_with_retry(
-                        origin_obj, f"{title}\n{body}", assignee,
+                        origin_obj,
+                        f"{title}\n{body}",
+                        assignee,
                     )
                 )
                 # Retain a strong ref until it completes (asyncio only holds a
@@ -1385,7 +1485,8 @@ class RuntimeContext:
                 push.add_done_callback(self._pending_chain_pushes.discard)
             except Exception as e:
                 logger.debug(
-                    "chain outcome channel push schedule failed: %s", e,
+                    "chain outcome channel push schedule failed: %s",
+                    e,
                 )
         return True
 
@@ -1418,8 +1519,7 @@ class RuntimeContext:
                 text = (
                     f"🔌 {label} connection '{conn}' needs reconnecting\n"
                     "Token refresh was rejected by the provider — open the "
-                    "Connectors page and reconnect."
-                    + (f" ({err[:200]})" if err else "")
+                    "Connectors page and reconnect." + (f" ({err[:200]})" if err else "")
                 )
             elif etype == "health_change":
                 if (data.get("current") or "") != "quarantined":
@@ -1438,13 +1538,18 @@ class RuntimeContext:
             if self._dispatch_loop is None or self.transport is None:
                 return
             asyncio.run_coroutine_threadsafe(
-                self._operator_note_with_retry(text), self._dispatch_loop,
+                self._operator_note_with_retry(text),
+                self._dispatch_loop,
             )
         except Exception as e:
             logger.debug("system signal reroute failed: %s", e)
 
     async def _operator_note_with_retry(
-        self, text: str, *, attempts: int = 3, backoff_s: float = 3.0,
+        self,
+        text: str,
+        *,
+        attempts: int = 3,
+        backoff_s: float = 3.0,
     ) -> None:
         """Write a system-signal note to the operator transcript, retrying
         transient failures, then emit the live notification event. Same
@@ -1454,20 +1559,20 @@ class RuntimeContext:
             try:
                 result = await asyncio.wait_for(
                     self.transport.request(
-                        "operator", "POST", "/chat/note",
-                        json={"message": text}, timeout=15,
+                        "operator",
+                        "POST",
+                        "/chat/note",
+                        json={"message": text},
+                        timeout=15,
                     ),
                     timeout=30,
                 )
-                if (
-                    isinstance(result, dict)
-                    and result.get("ok")
-                    and not result.get("error")
-                ):
+                if isinstance(result, dict) and result.get("ok") and not result.get("error"):
                     if self.event_bus is not None:
                         try:
                             self.event_bus.emit(
-                                "notification", agent="operator",
+                                "notification",
+                                agent="operator",
                                 data={"message": text},
                             )
                         except Exception as e:
@@ -1480,12 +1585,19 @@ class RuntimeContext:
                 await asyncio.sleep(backoff_s * (i + 1))
         logger.warning(
             "operator note for system signal gave up after %d attempts: %s",
-            attempts, text.splitlines()[0][:120],
+            attempts,
+            text.splitlines()[0][:120],
         )
 
     async def _channel_push_with_retry(
-        self, origin: "MessageOrigin", message: str, agent_name: str,
-        *, attempts: int = 3, backoff_s: float = 3.0, timeout_s: float = 30.0,
+        self,
+        origin: "MessageOrigin",
+        message: str,
+        agent_name: str,
+        *,
+        attempts: int = 3,
+        backoff_s: float = 3.0,
+        timeout_s: float = 30.0,
     ) -> None:
         """Deliver a chain-outcome push to a chat channel, retrying transient
         failures. Best-effort: the operator-thread transcript note is the
@@ -1514,9 +1626,10 @@ class RuntimeContext:
         logger.warning(
             "chain outcome channel push to %s/%s gave up after %d attempts "
             "(operator-thread note delivered as fallback)",
-            origin.channel, origin.user, attempts,
+            origin.channel,
+            origin.user,
+            attempts,
         )
-
 
     # Verification-wake rate cap: at most N wakes per sliding window.
     # Mirrors the mesh-side recovery-wake storm guard (same numbers) —
@@ -1526,7 +1639,10 @@ class RuntimeContext:
     _VERIFY_WAKE_WINDOW_S = 600.0
 
     def _maybe_wake_operator_verification(
-        self, root: dict, root_id: str, root_title: str,
+        self,
+        root: dict,
+        root_id: str,
+        root_title: str,
     ) -> None:
         """Wake the operator once to verify a COMPLETED user chain.
 
@@ -1540,21 +1656,19 @@ class RuntimeContext:
         if self.lane_manager is None or self._dispatch_loop is None:
             return
         now = time.time()
-        while (
-            self._verify_wake_times
-            and now - self._verify_wake_times[0] > self._VERIFY_WAKE_WINDOW_S
-        ):
+        while self._verify_wake_times and now - self._verify_wake_times[0] > self._VERIFY_WAKE_WINDOW_S:
             self._verify_wake_times.popleft()
         if len(self._verify_wake_times) >= self._VERIFY_WAKE_MAX:
             logger.warning(
-                "verification wake for chain %s suppressed: cap (%d/%ds) "
-                "reached — the heartbeat rating step covers it",
-                root_id, self._VERIFY_WAKE_MAX,
+                "verification wake for chain %s suppressed: cap (%d/%ds) reached — the heartbeat rating step covers it",
+                root_id,
+                self._VERIFY_WAKE_MAX,
                 int(self._VERIFY_WAKE_WINDOW_S),
             )
             return
         self._verify_wake_times.append(now)
         from src.shared.utils import sanitize_for_prompt
+
         msg = (
             f"User chain {root_id} ('{sanitize_for_prompt(root_title)}') "
             "completed and the user was ALREADY notified of the result — "
@@ -1569,6 +1683,7 @@ class RuntimeContext:
         origin_dict = root.get("origin") or {}
         try:
             from src.shared.types import MessageOrigin
+
             wake_origin = MessageOrigin(
                 kind="human",
                 channel=str(origin_dict.get("channel") or ""),
@@ -1576,15 +1691,20 @@ class RuntimeContext:
             )
             asyncio.run_coroutine_threadsafe(
                 self.lane_manager.enqueue(
-                    "operator", msg, mode="followup",
-                    origin=wake_origin, auto_notify=False,
+                    "operator",
+                    msg,
+                    mode="followup",
+                    origin=wake_origin,
+                    auto_notify=False,
                     system_note=True,
                 ),
                 self._dispatch_loop,
             )
         except Exception as e:
             logger.warning(
-                "verification wake for chain %s failed: %s", root_id, e,
+                "verification wake for chain %s failed: %s",
+                root_id,
+                e,
             )
 
     def _start_mesh_server(self) -> None:
@@ -1636,19 +1756,27 @@ class RuntimeContext:
         self._wallet_ref = wallet_ref
 
         from src.host.api_keys import ApiKeyManager
+
         self._api_key_manager = ApiKeyManager()
 
         # Mesh-side gateway for remote (http) MCP connectors — holds no
         # state beyond a discovery cache; auth resolves from the vault
         # per call (tokens never enter containers).
         from src.host.mcp_gateway import MCPGateway
+
         self.mcp_gateway = MCPGateway(
-            self.connector_store, self.credential_vault,
+            self.connector_store,
+            self.credential_vault,
         )
 
         app = create_mesh_app(
-            self.blackboard, self.pubsub, self.router, self.permissions,
-            self.credential_vault, self.cron_scheduler, self.runtime,
+            self.blackboard,
+            self.pubsub,
+            self.router,
+            self.permissions,
+            self.credential_vault,
+            self.cron_scheduler,
+            self.runtime,
             self.transport,
             auth_tokens=self.runtime.auth_tokens,
             trace_store=self.trace_store,
@@ -1698,6 +1826,7 @@ class RuntimeContext:
         if self.lane_manager is not None:
             try:
                 from src.cli.config import _load_config as _load_cfg_for_lanes
+
                 _cfg = _load_cfg_for_lanes()
                 _agents_cfg = _cfg.get("agents", {}) or {}
                 for aid, entry in _agents_cfg.items():
@@ -1711,12 +1840,14 @@ class RuntimeContext:
                         self.lane_manager.set_agent_timeout(aid, int(ttl))
                     except (TypeError, ValueError):
                         logger.warning(
-                            "Invalid watchdog_ttl_seconds for %s: %r — "
-                            "ignored", aid, ttl,
+                            "Invalid watchdog_ttl_seconds for %s: %r — ignored",
+                            aid,
+                            ttl,
                         )
             except Exception as e:
                 logger.warning(
-                    "Per-agent watchdog override wiring failed: %s", e,
+                    "Per-agent watchdog override wiring failed: %s",
+                    e,
                 )
 
         self._init_channel_manager()
@@ -1787,20 +1918,19 @@ class RuntimeContext:
                 time.sleep(0.5)
 
         if not mesh_ready:
-            echo_fail(
-                f"Mesh server failed to start on port {mesh_port}. "
-                f"Port may be in use. Try: openlegion stop"
-            )
+            echo_fail(f"Mesh server failed to start on port {mesh_port}. Port may be in use. Try: openlegion stop")
             self.runtime.stop_all()
             sys.exit(1)
 
         # Wait for agents (results displayed later in _print_ready)
         agents_cfg = self.cfg.get("agents", {})
         if agents_cfg:
+
             async def _wait_all_agents():
                 async def _wait_one(aid):
                     ready = await self.runtime.wait_for_agent(aid, timeout=60)
                     return aid, ready
+
                 return await asyncio.gather(*[_wait_one(aid) for aid in agents_cfg])
 
             self._agent_results = asyncio.run(_wait_all_agents())
@@ -1813,9 +1943,11 @@ class RuntimeContext:
             # distinguish a scheduled tick from a human-initiated wake.
             from src.shared.trace import new_trace_id
             from src.shared.types import MessageOrigin
+
             origin = MessageOrigin(kind="cron", channel="cron", user="")
             result = await self.async_dispatch(
-                agent_name, message,
+                agent_name,
+                message,
                 trace_id=new_trace_id(),
                 origin=origin,
                 system_note=True,
@@ -1825,7 +1957,10 @@ class RuntimeContext:
         async def fetch_heartbeat_context(agent_name: str) -> dict:
             try:
                 return await self.transport.request(
-                    agent_name, "GET", "/heartbeat-context", timeout=10,
+                    agent_name,
+                    "GET",
+                    "/heartbeat-context",
+                    timeout=10,
                 )
             except Exception as e:
                 logger.debug("Failed to fetch heartbeat context for '%s': %s", agent_name, e)
@@ -1834,7 +1969,9 @@ class RuntimeContext:
         async def invoke_tool(agent_name: str, tool_name: str, params: dict) -> dict:
             try:
                 return await self.transport.request(
-                    agent_name, "POST", "/invoke",
+                    agent_name,
+                    "POST",
+                    "/invoke",
                     json={"tool": tool_name, "params": params},
                     timeout=30,
                 )
@@ -1843,7 +1980,10 @@ class RuntimeContext:
                 return {"error": str(e)}
 
         async def heartbeat_dispatch(
-            agent_name: str, message: str, *, force_llm: bool = False,
+            agent_name: str,
+            message: str,
+            *,
+            force_llm: bool = False,
         ) -> dict:
             """Dispatch heartbeat via dedicated /heartbeat endpoint.
 
@@ -1861,6 +2001,7 @@ class RuntimeContext:
             """
             from src.shared.trace import origin_header, trace_headers
             from src.shared.types import MessageOrigin
+
             origin = MessageOrigin(kind="heartbeat", channel="heartbeat", user="")
             headers = trace_headers()
             headers.update(origin_header(origin))
@@ -1868,7 +2009,9 @@ class RuntimeContext:
                 headers["x-force-llm"] = "true"
             try:
                 return await self.transport.request(
-                    agent_name, "POST", "/heartbeat",
+                    agent_name,
+                    "POST",
+                    "/heartbeat",
                     json={"message": message},
                     timeout=120,
                     headers=headers,
@@ -1895,9 +2038,11 @@ class RuntimeContext:
             return
         from src.cli.config import _OPERATOR_AGENT_ID
         from src.host.cron import CronScheduler
+
         agents_cfg = self.cfg.get("agents", {})
         schedule = self.cfg.get("mesh", {}).get(
-            "heartbeat_schedule", CronScheduler.DEFAULT_HEARTBEAT_SCHEDULE,
+            "heartbeat_schedule",
+            CronScheduler.DEFAULT_HEARTBEAT_SCHEDULE,
         )
         for agent_id in agents_cfg:
             # Operator heartbeat is faster than the fleet default so
@@ -1959,10 +2104,13 @@ class RuntimeContext:
             schedule = settings.get("summary_schedule")
             try:
                 existing_before = self.cron_scheduler.find_summary_job(
-                    "team", name,
+                    "team",
+                    name,
                 )
                 job = self.cron_scheduler.ensure_summary_job(
-                    scope_kind="team", scope_id=name, schedule=schedule,
+                    scope_kind="team",
+                    scope_id=name,
+                    schedule=schedule,
                 )
                 # Schedule-drift sync. ``ensure_summary_job`` only
                 # creates when absent; if a per-team metadata edit
@@ -1982,9 +2130,11 @@ class RuntimeContext:
                     )
                     if validation_error:
                         logger.warning(
-                            "team %s has invalid summary_schedule %r: %s — "
-                            "keeping existing schedule %r",
-                            name, desired, validation_error, job.schedule,
+                            "team %s has invalid summary_schedule %r: %s — keeping existing schedule %r",
+                            name,
+                            desired,
+                            validation_error,
+                            job.schedule,
                         )
                     else:
                         previous = job.schedule
@@ -1993,16 +2143,21 @@ class RuntimeContext:
                         self.cron_scheduler._save()
                         logger.info(
                             "rescheduled work-summary cron for team %s: %s → %s",
-                            name, previous, desired,
+                            name,
+                            previous,
+                            desired,
                         )
             except Exception as e:
                 logger.warning(
-                    "ensure_summary_job for team %s failed: %s", name, e,
+                    "ensure_summary_job for team %s failed: %s",
+                    name,
+                    e,
                 )
         # Prune orphan summary jobs for teams that no longer exist
         # (renamed, deleted, archived). Tool jobs whose tool_params we
         # can't parse are left alone — they're not ours to manage.
         import json as _json
+
         for job in list(self.cron_scheduler.jobs.values()):
             if job.tool_name != "compose_work_summary":
                 continue
@@ -2023,7 +2178,8 @@ class RuntimeContext:
                 except Exception as e:
                     logger.debug(
                         "failed to prune orphan summary cron %s: %s",
-                        job.id, e,
+                        job.id,
+                        e,
                     )
 
     def _start_background(self) -> None:
@@ -2053,8 +2209,10 @@ class RuntimeContext:
         # release instead of block-watching a multi-hop pipeline.
         if self._tasks_store_ref is not None and self.transport is not None:
             from src.host.chain_watcher import ChainWatcher
+
             self.chain_watcher = ChainWatcher(
-                self._tasks_store_ref, self._deliver_chain_outcome,
+                self._tasks_store_ref,
+                self._deliver_chain_outcome,
             )
 
             def run_chain_watcher():
@@ -2066,6 +2224,7 @@ class RuntimeContext:
 
     def _init_channel_manager(self) -> None:
         """Create the ChannelManager with callbacks (but don't start channels yet)."""
+
         # Channel callback helpers
         def _channel_status(agent_name: str) -> dict | None:
             try:
@@ -2087,18 +2246,25 @@ class RuntimeContext:
 
         async def stream_dispatch_to_agent(agent_name: str, message: str):
             if self.event_bus:
-                self.event_bus.emit("message_received", agent=agent_name,
-                    data={"message": message[:200], "source": "channel_stream"})
+                self.event_bus.emit(
+                    "message_received", agent=agent_name, data={"message": message[:200], "source": "channel_stream"}
+                )
             if self.trace_store:
                 from src.shared.trace import new_trace_id
+
                 self.trace_store.record(
-                    trace_id=new_trace_id(), source="channel_stream",
-                    agent=agent_name, event_type="chat",
+                    trace_id=new_trace_id(),
+                    source="channel_stream",
+                    agent=agent_name,
+                    event_type="chat",
                     detail=message[:120],
                 )
             async for event in self.transport.stream_request(
-                agent_name, "POST", "/chat/stream",
-                json={"message": message}, timeout=120,
+                agent_name,
+                "POST",
+                "/chat/stream",
+                json={"message": message},
+                timeout=120,
             ):
                 # Liveness sentinel from the transport keepalive-forwarding —
                 # drop it so it never lands in a channel's assembled response.
@@ -2107,8 +2273,9 @@ class RuntimeContext:
                 if self.event_bus and isinstance(event, dict):
                     etype = event.get("type", "")
                     if etype in ("tool_start", "tool_result"):
-                        self.event_bus.emit(etype, agent=agent_name,
-                            data={k: v for k, v in event.items() if k != "type"})
+                        self.event_bus.emit(
+                            etype, agent=agent_name, data={k: v for k, v in event.items() if k != "type"}
+                        )
                 yield event
 
         def _channel_addkey(service: str, key: str) -> None:
@@ -2116,11 +2283,14 @@ class RuntimeContext:
                 SYSTEM_CREDENTIAL_PROVIDERS,
                 is_system_credential,
             )
+
             # Normalize bare provider names (defense-in-depth, caller may also normalize)
             if service.lower() in SYSTEM_CREDENTIAL_PROVIDERS and not service.lower().endswith("_api_key"):
                 service = f"{service}_api_key"
             self.credential_vault.add_credential(
-                service, key, system=is_system_credential(service),
+                service,
+                key,
+                system=is_system_credential(service),
             )
 
         def _channel_steer(agent: str, msg: str) -> None:
@@ -2137,7 +2307,9 @@ class RuntimeContext:
             return self.trace_store.list_recent(10)
 
         self.channel_manager = ChannelManager(
-            self.cfg, self.async_dispatch, self.router.agent_registry,
+            self.cfg,
+            self.async_dispatch,
+            self.router.agent_registry,
             status_fn=_channel_status,
             costs_fn=_channel_costs,
             reset_fn=_channel_reset,
@@ -2166,7 +2338,7 @@ class RuntimeContext:
         # ── Services ──
         echo_header("OpenLegion")
         echo_ok(f"Dashboard: http://localhost:{mesh_port}")
-        if hasattr(self.runtime, 'browser_service_url') and self.runtime.browser_service_url:
+        if hasattr(self.runtime, "browser_service_url") and self.runtime.browser_service_url:
             echo_ok(f"Browser service: {self.runtime.browser_service_url}")
         if self._cron_job_count:
             echo_ok(f"Cron: {self._cron_job_count} job{'s' if self._cron_job_count != 1 else ''}")

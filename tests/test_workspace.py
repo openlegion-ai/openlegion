@@ -831,19 +831,13 @@ class TestGenerateSystemMd:
         result = generate_system_md({}, "agent_0")
         assert len(result) <= _MAX_SYSTEM + 20
 
-    def test_standalone_omits_blackboard(self):
-        """Standalone SYSTEM.md has no blackboard, pub/sub, or coordination sections."""
-        result = generate_system_md({}, "alice", is_standalone=True)
+    def test_single_preamble_includes_blackboard(self):
+        """ONE preamble for every agent (solo = team-of-one, ratified #5):
+        blackboard, pub/sub, and coordination sections are always present —
+        a solo agent's namespace is simply private to itself."""
+        result = generate_system_md({}, "alice")
         assert "# System Architecture" in result
         assert "Credential vault" in result
-        assert "blackboard" not in result.lower()
-        assert "pub/sub" not in result.lower()
-        assert "Coordination Philosophy" not in result
-        assert "403 Forbidden" not in result
-
-    def test_project_includes_blackboard(self):
-        """Project SYSTEM.md includes blackboard, pub/sub, and coordination."""
-        result = generate_system_md({}, "alice", is_standalone=False)
         assert "Blackboard" in result
         assert "Pub/Sub" in result
         assert "Coordination Philosophy" in result

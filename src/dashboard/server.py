@@ -114,7 +114,8 @@ async def _fetch_browser_metrics_upstream(
         }
     if resp.status_code >= 400:
         logger.debug(
-            "Browser metrics fetch returned HTTP %d", resp.status_code,
+            "Browser metrics fetch returned HTTP %d",
+            resp.status_code,
         )
         return {
             "success": False,
@@ -259,6 +260,7 @@ def _parse_positive_float(value: Any, field: str, fallback: float) -> float:
 def _log_cron_task_exception(task: object) -> None:
     """Log unhandled exceptions from fire-and-forget cron tasks."""
     import asyncio
+
     t = task if isinstance(task, asyncio.Task) else None
     if t is None or t.cancelled():
         return
@@ -294,11 +296,12 @@ def _wallet_chain_label(chain_id: str, cfg: dict) -> str:
 #   • IP-literal domains are dropped — Firefox stores them but our SSRF
 #     egress filter would block the requests, so importing is a footgun.
 
-_COOKIE_VALUE_MAX_BYTES = 4 * 1024              # per-cookie value cap
-_COOKIE_PAYLOAD_MAX_BYTES = 256 * 1024          # whole-payload cap (DoS guard)
-_COOKIE_LIST_MAX_LEN = 1000                     # max cookies per import
+_COOKIE_VALUE_MAX_BYTES = 4 * 1024  # per-cookie value cap
+_COOKIE_PAYLOAD_MAX_BYTES = 256 * 1024  # whole-payload cap (DoS guard)
+_COOKIE_LIST_MAX_LEN = 1000  # max cookies per import
 
 _VALID_SAMESITE = {"Lax": "Lax", "Strict": "Strict", "None": "None"}
+
 
 def _is_ip_literal_domain(domain: str) -> bool:
     """True when ``domain`` is a literal IPv4 or IPv6 address."""
@@ -326,7 +329,9 @@ def _cookie_url_host(url: str) -> str | None:
 
 
 def _parse_netscape(
-    text: str, *, malformed: list[str] | None = None,
+    text: str,
+    *,
+    malformed: list[str] | None = None,
 ) -> list[dict]:
     """Parse Netscape ``cookies.txt`` format → Playwright-shaped dicts.
 
@@ -351,7 +356,7 @@ def _parse_netscape(
         http_only = False
         if line.startswith("#HttpOnly_"):
             http_only = True
-            line = line[len("#HttpOnly_"):]
+            line = line[len("#HttpOnly_") :]
         elif line.startswith("#"):
             continue
         # Fields: domain, includeSubdomains, path, secure, expires, name, value
@@ -369,20 +374,24 @@ def _parse_netscape(
             if malformed is not None:
                 malformed.append("expires")
             continue
-        result.append({
-            "name": name,
-            "value": value,
-            "domain": domain,
-            "path": path or "/",
-            "secure": secure.strip().upper() == "TRUE",
-            "httpOnly": http_only,
-            "expires": expires_int,
-        })
+        result.append(
+            {
+                "name": name,
+                "value": value,
+                "domain": domain,
+                "path": path or "/",
+                "secure": secure.strip().upper() == "TRUE",
+                "httpOnly": http_only,
+                "expires": expires_int,
+            }
+        )
     return result
 
 
 def _validate_cookies(
-    payload: Any, *, fmt: str | None = None,
+    payload: Any,
+    *,
+    fmt: str | None = None,
 ) -> tuple[list[dict], list[dict], str | None]:
     """Validate + normalize an operator cookie payload.
 
@@ -401,9 +410,7 @@ def _validate_cookies(
     items: list[dict] = []
 
     if detected is None:
-        if isinstance(payload, list) and (
-            not payload or isinstance(payload[0], dict)
-        ):
+        if isinstance(payload, list) and (not payload or isinstance(payload[0], dict)):
             detected = "playwright"
         elif isinstance(payload, str) and "\t" in payload:
             detected = "netscape"
@@ -551,11 +558,7 @@ def _validate_cookies(
         # deterministic drop reason rather than an opaque "your import
         # said success but nothing landed". Applies to ALL cookies
         # (not just ``__Secure-``/``__Host-`` prefixed names).
-        if (
-            secure
-            and url
-            and not url.lower().startswith("https://")
-        ):
+        if secure and url and not url.lower().startswith("https://"):
             _drop("secure_non_https_url")
             continue
         normalized: dict = {"name": name, "value": value}
@@ -610,10 +613,7 @@ def _validate_cookies(
             normalized["secure"] = secure
         accepted.append(normalized)
 
-    dropped = [
-        {"reason": reason, "count": count}
-        for reason, count in sorted(drop_counts.items())
-    ]
+    dropped = [{"reason": reason, "count": count} for reason, count in sorted(drop_counts.items())]
     return accepted, dropped, detected
 
 
@@ -685,6 +685,7 @@ def create_dashboard_router(
     """Create the dashboard FastAPI router."""
     if teams_store is None:
         from src.host.teams import TeamStore
+
         teams_store = TeamStore(db_path=":memory:")
     # Lazy-init telemetry sink so callers (mesh CLI, tests) can opt out by
     # passing ``telemetry=None`` after explicitly setting it. We keep the
@@ -692,6 +693,7 @@ def create_dashboard_router(
     # missing entirely. Tests that need an in-memory DB pass their own.
     if telemetry is None:
         from src.dashboard.telemetry import DashboardTelemetry as _DashboardTelemetry
+
         try:
             telemetry = _DashboardTelemetry()
         except Exception as _e:
@@ -704,6 +706,7 @@ def create_dashboard_router(
     if opened_conversations_store is None:
         try:
             from src.dashboard.conversations import OpenedConversationsStore
+
             opened_conversations_store = OpenedConversationsStore()
         except Exception as e:
             logger.warning("Failed to instantiate OpenedConversationsStore: %s", e)
@@ -714,9 +717,7 @@ def create_dashboard_router(
     # Plan-tier cap — when OPENLEGION_MAX_TEAMS is set to 0, team
     # creation is disabled entirely.
     _max_teams = int(os.environ.get("OPENLEGION_MAX_TEAMS", "0"))
-    _teams_disabled = (
-        _max_teams == 0 and "OPENLEGION_MAX_TEAMS" in os.environ
-    )
+    _teams_disabled = _max_teams == 0 and "OPENLEGION_MAX_TEAMS" in os.environ
 
     def _emit_team_event(event_type: str, agent: str, data: dict) -> None:
         """Emit a team lifecycle event (``team_*``) on the bus.
@@ -764,6 +765,7 @@ def create_dashboard_router(
 
     # ── OAuth integrations (connect/callback) state + helpers ───────────
     from src.host.oauth_state import OAuthStateStore
+
     _oauth_state_store = OAuthStateStore()
 
     def _oauth_session_hash(request: Request) -> str:
@@ -789,11 +791,7 @@ def create_dashboard_router(
         if explicit:
             return explicit.rstrip("/")
         proto = request.headers.get("x-forwarded-proto") or request.url.scheme
-        host = (
-            request.headers.get("x-forwarded-host")
-            or request.headers.get("host")
-            or request.url.netloc
-        )
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
         return f"{proto}://{host}"
 
     def _oauth_redirect_uri(request: Request, provider_key: str) -> str:
@@ -804,6 +802,7 @@ def create_dashboard_router(
         if not url:
             return ""
         from urllib.parse import urlparse, urlunparse
+
         try:
             parsed = urlparse(url)
             if parsed.username:
@@ -820,6 +819,7 @@ def create_dashboard_router(
         try:
             from src.cli.config import _load_config
             from src.cli.proxy import parse_proxy_url, resolve_agent_proxy
+
             _cfg = _load_config()
             proxy_url = resolve_agent_proxy(agent_id, _cfg.get("agents", {}), _cfg.get("network", {}))
             if proxy_url:
@@ -836,7 +836,8 @@ def create_dashboard_router(
                 headers["Authorization"] = f"Bearer {svc_token}"
             resp = await _dashboard_browser_client.put(
                 f"{runtime.browser_service_url}/browser/{agent_id}/proxy",
-                json=body, headers=headers,
+                json=body,
+                headers=headers,
             )
             if resp.status_code >= 400:
                 logger.warning("Browser proxy push for %s returned %d", agent_id, resp.status_code)
@@ -855,6 +856,7 @@ def create_dashboard_router(
     # GET endpoint can still return an empty snapshot rather than
     # 500'ing.
     from src.dashboard.platform_success import PlatformSuccessAggregator
+
     platform_success = PlatformSuccessAggregator()
     if event_bus is not None:
         event_bus.add_listener(platform_success.handle_event)
@@ -892,6 +894,7 @@ def create_dashboard_router(
     @api_router.get("/", response_class=HTMLResponse)
     async def dashboard_index() -> HTMLResponse:
         from src.shared.models import KEYLESS_PROVIDERS, get_all_providers
+
         all_providers = get_all_providers()
         template = jinja_env.get_template("index.html")
         html = template.render(
@@ -901,26 +904,31 @@ def create_dashboard_router(
             providers=[p for p in all_providers if p["name"] not in KEYLESS_PROVIDERS],
             all_providers=all_providers,
         )
-        return HTMLResponse(html, headers={
-            "Cache-Control": "no-store",
-            # M18: frame-ancestors 'self' + X-Frame-Options SAMEORIGIN guard
-            # against clickjacking. MUST be 'self'/SAMEORIGIN, NOT 'none'/DENY:
-            # the dashboard embeds the per-agent VNC viewer in a same-origin
-            # iframe via /agent-vnc/, so 'none' would break the viewer.
-            "X-Frame-Options": "SAMEORIGIN",
-            "Content-Security-Policy": (
-                "default-src 'self'; "
-                "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
-                "style-src 'self' 'unsafe-inline'; "
-                "connect-src 'self'; "
-                "frame-src 'self'; "
-                "frame-ancestors 'self'; "
-                "object-src 'none'"
-            ),
-        })
+        return HTMLResponse(
+            html,
+            headers={
+                "Cache-Control": "no-store",
+                # M18: frame-ancestors 'self' + X-Frame-Options SAMEORIGIN guard
+                # against clickjacking. MUST be 'self'/SAMEORIGIN, NOT 'none'/DENY:
+                # the dashboard embeds the per-agent VNC viewer in a same-origin
+                # iframe via /agent-vnc/, so 'none' would break the viewer.
+                "X-Frame-Options": "SAMEORIGIN",
+                "Content-Security-Policy": (
+                    "default-src 'self'; "
+                    "script-src 'self' 'unsafe-inline' 'unsafe-eval' "
+                    "https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
+                    "style-src 'self' 'unsafe-inline'; "
+                    "connect-src 'self'; "
+                    "frame-src 'self'; "
+                    "frame-ancestors 'self'; "
+                    "object-src 'none'"
+                ),
+            },
+        )
 
     def _browser_vnc_url_for_request(
-        request: Request, agent_id: str,
+        request: Request,
+        agent_id: str,
     ) -> str | None:
         """Build the agent-scoped browser VNC URL.
 
@@ -952,9 +960,7 @@ def create_dashboard_router(
             "&quality=7"
             "&enable_perf_stats=0"
         )
-        return (
-            f"{scheme}://{host}/agent-vnc/{agent_id}/index.html?{query}"
-        )
+        return f"{scheme}://{host}/agent-vnc/{agent_id}/index.html?{query}"
 
     async def _fetch_active_browser_agents() -> set[str]:
         """Return the set of agent_ids whose browser is currently up.
@@ -974,6 +980,7 @@ def create_dashboard_router(
             return set()
         token = getattr(runtime, "browser_auth_token", "")
         import httpx
+
         try:
             async with httpx.AsyncClient(timeout=2) as client:
                 resp = await client.get(
@@ -991,6 +998,7 @@ def create_dashboard_router(
     @api_router.get("/api/agents")
     async def api_agents(request: Request) -> dict:
         from src.cli.config import _load_config
+
         cfg = _load_config()
         agents_cfg = cfg.get("agents", {})
         default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
@@ -1090,6 +1098,7 @@ def create_dashboard_router(
         return {"agents": agents}
 
     import httpx as _httpx
+
     _dashboard_browser_client = _httpx.AsyncClient(timeout=10)
 
     async def _push_browser_settings() -> None:
@@ -1099,7 +1108,7 @@ def create_dashboard_router(
         survive container restarts.  Failures are silently logged —
         the browser service will simply use its defaults.
         """
-        if not runtime or not getattr(runtime, 'browser_service_url', ''):
+        if not runtime or not getattr(runtime, "browser_service_url", ""):
             return
         settings = _load_settings()
         payload: dict = {}
@@ -1112,7 +1121,7 @@ def create_dashboard_router(
         if not payload:
             return
         try:
-            browser_auth = getattr(runtime, 'browser_auth_token', '')
+            browser_auth = getattr(runtime, "browser_auth_token", "")
             headers = {}
             if browser_auth:
                 headers["Authorization"] = f"Bearer {browser_auth}"
@@ -1127,10 +1136,10 @@ def create_dashboard_router(
     @api_router.post("/api/browser/{agent_id}/focus")
     async def api_browser_focus(agent_id: str, request: Request) -> dict:
         """Tell the browser service to bring this agent's browser to foreground."""
-        if not runtime or not hasattr(runtime, 'browser_service_url') or not runtime.browser_service_url:
+        if not runtime or not hasattr(runtime, "browser_service_url") or not runtime.browser_service_url:
             raise HTTPException(503, "Browser service not available")
         try:
-            browser_auth = getattr(runtime, 'browser_auth_token', '')
+            browser_auth = getattr(runtime, "browser_auth_token", "")
             headers = {}
             if browser_auth:
                 headers["Authorization"] = f"Bearer {browser_auth}"
@@ -1148,11 +1157,11 @@ def create_dashboard_router(
     @api_router.post("/api/browser/{agent_id}/control")
     async def api_browser_control(agent_id: str, request: Request) -> dict:
         """Toggle user browser control — pauses agent X11 input."""
-        if not runtime or not hasattr(runtime, 'browser_service_url') or not runtime.browser_service_url:
+        if not runtime or not hasattr(runtime, "browser_service_url") or not runtime.browser_service_url:
             raise HTTPException(503, "Browser service not available")
         body = await request.json()
         try:
-            browser_auth = getattr(runtime, 'browser_auth_token', '')
+            browser_auth = getattr(runtime, "browser_auth_token", "")
             headers: dict[str, str] = {}
             if browser_auth:
                 headers["Authorization"] = f"Bearer {browser_auth}"
@@ -1172,10 +1181,10 @@ def create_dashboard_router(
         """Reset an agent's browser session (close and relaunch with current config)."""
         if agent_id not in agent_registry:
             raise HTTPException(404, "Agent not found")
-        if not runtime or not hasattr(runtime, 'browser_service_url') or not runtime.browser_service_url:
+        if not runtime or not hasattr(runtime, "browser_service_url") or not runtime.browser_service_url:
             raise HTTPException(503, "Browser service not available")
         try:
-            browser_auth = getattr(runtime, 'browser_auth_token', '')
+            browser_auth = getattr(runtime, "browser_auth_token", "")
             headers = {}
             if browser_auth:
                 headers["Authorization"] = f"Bearer {browser_auth}"
@@ -1202,7 +1211,8 @@ def create_dashboard_router(
     _cookie_import_lock = threading.Lock()
 
     def _cookie_import_check_rate_limit(
-        operator: str, agent_id: str,
+        operator: str,
+        agent_id: str,
     ) -> tuple[bool, int]:
         """Sliding-window rate limit. Returns (allowed, retry_after_ms).
 
@@ -1210,6 +1220,7 @@ def create_dashboard_router(
         the time until the oldest event in the window expires.
         """
         import time as _time
+
         now = _time.time()
         cutoff = now - _COOKIE_IMPORT_WINDOW_S
         key = (operator, agent_id)
@@ -1220,7 +1231,8 @@ def create_dashboard_router(
             if len(bucket) >= _COOKIE_IMPORT_LIMIT:
                 oldest = bucket[0]
                 retry_after_ms = max(
-                    1, int((oldest + _COOKIE_IMPORT_WINDOW_S - now) * 1000),
+                    1,
+                    int((oldest + _COOKIE_IMPORT_WINDOW_S - now) * 1000),
                 )
                 return False, retry_after_ms
             bucket.append(now)
@@ -1229,16 +1241,15 @@ def create_dashboard_router(
             # only sweep when the table grows past a threshold; the
             # sliding window is the only state we need to retain.
             if len(_cookie_import_buckets) > 1024:
-                stale = [
-                    k for k, b in _cookie_import_buckets.items()
-                    if not b or b[-1] <= cutoff
-                ]
+                stale = [k for k, b in _cookie_import_buckets.items() if not b or b[-1] <= cutoff]
                 for k in stale:
                     _cookie_import_buckets.pop(k, None)
             return True, 0
 
     def _cookie_envelope_err(
-        code: str, message: str, retry_after_ms: int | None = None,
+        code: str,
+        message: str,
+        retry_after_ms: int | None = None,
     ) -> dict:
         """Build a §2.3 error envelope for cookie-import responses."""
         return {
@@ -1266,7 +1277,8 @@ def create_dashboard_router(
 
     @api_router.post("/api/agents/{agent_id}/browser/import_cookies")
     async def api_browser_import_cookies(
-        agent_id: str, request: Request,
+        agent_id: str,
+        request: Request,
     ) -> dict:
         """Phase 6 §9.2 — operator-only cookie/session import.
 
@@ -1334,7 +1346,8 @@ def create_dashboard_router(
             raise HTTPException(
                 400,
                 detail=_cookie_envelope_err(
-                    "invalid_input", "request body is not valid JSON",
+                    "invalid_input",
+                    "request body is not valid JSON",
                 ),
             )
 
@@ -1367,12 +1380,14 @@ def create_dashboard_router(
             raise HTTPException(
                 400,
                 detail=_cookie_envelope_err(
-                    "invalid_input", "missing 'cookies' field",
+                    "invalid_input",
+                    "missing 'cookies' field",
                 ),
             )
 
         accepted, dropped, detected_fmt = _validate_cookies(
-            payload, fmt=explicit_fmt,
+            payload,
+            fmt=explicit_fmt,
         )
         if detected_fmt is None:
             raise HTTPException(
@@ -1404,11 +1419,14 @@ def create_dashboard_router(
         domains = sorted({c["domain"] for c in accepted if c.get("domain")})
         names = sorted({c["name"] for c in accepted if c.get("name")})
         _cookie_audit_logger.info(
-            "cookie_import operator=%s agent_id=%s count=%d domains=%s "
-            "names=%s format=%s dropped=%s",
-            operator, agent_id, len(accepted),
-            json.dumps(domains), json.dumps(names),
-            detected_fmt, json.dumps(dropped),
+            "cookie_import operator=%s agent_id=%s count=%d domains=%s names=%s format=%s dropped=%s",
+            operator,
+            agent_id,
+            len(accepted),
+            json.dumps(domains),
+            json.dumps(names),
+            detected_fmt,
+            json.dumps(dropped),
         )
         if blackboard is not None:
             try:
@@ -1417,12 +1435,14 @@ def create_dashboard_router(
                     target=agent_id,
                     actor=operator,
                     field=detected_fmt,
-                    after_value=json.dumps({
-                        "count": len(accepted),
-                        "domains": domains,
-                        "names": names,
-                        "dropped": dropped,
-                    }),
+                    after_value=json.dumps(
+                        {
+                            "count": len(accepted),
+                            "domains": domains,
+                            "names": names,
+                            "dropped": dropped,
+                        }
+                    ),
                 )
             except Exception as e:
                 logger.warning("Failed to write cookie_import audit row: %s", e)
@@ -1432,7 +1452,8 @@ def create_dashboard_router(
             raise HTTPException(
                 503,
                 detail=_cookie_envelope_err(
-                    "service_unavailable", "Browser service not available",
+                    "service_unavailable",
+                    "Browser service not available",
                 ),
             )
         try:
@@ -1496,7 +1517,8 @@ def create_dashboard_router(
 
     @api_router.get("/api/agents/{agent_id}/browser/metrics")
     async def api_agent_browser_metrics(
-        agent_id: str, since: int = 0,
+        agent_id: str,
+        since: int = 0,
     ) -> dict:
         """Return per-agent browser-metrics history (Phase 7 §10.1).
 
@@ -1518,11 +1540,7 @@ def create_dashboard_router(
         """
         if agent_id not in agent_registry:
             raise HTTPException(404, "Agent not found")
-        if (
-            not runtime
-            or not hasattr(runtime, "browser_service_url")
-            or not runtime.browser_service_url
-        ):
+        if not runtime or not hasattr(runtime, "browser_service_url") or not runtime.browser_service_url:
             # Service unavailable rather than 404 — the agent exists, the
             # browser service is just not configured / reachable. Use the
             # error envelope so the panel can render a "service down" state.
@@ -1554,9 +1572,7 @@ def create_dashboard_router(
         # ``current_seq`` is preserved as the high-water mark so pagination
         # works even when no new payloads belong to this agent.
         all_metrics = data.get("metrics") or []
-        agent_metrics = [
-            p for p in all_metrics if p.get("agent_id") == agent_id
-        ]
+        agent_metrics = [p for p in all_metrics if p.get("agent_id") == agent_id]
         return {
             "success": True,
             "current_seq": int(data.get("current_seq", since_seq)),
@@ -1579,11 +1595,7 @@ def create_dashboard_router(
         """
         if agent_id not in agent_registry:
             raise HTTPException(404, "Agent not found")
-        if (
-            not runtime
-            or not hasattr(runtime, "browser_service_url")
-            or not runtime.browser_service_url
-        ):
+        if not runtime or not hasattr(runtime, "browser_service_url") or not runtime.browser_service_url:
             return {
                 "success": False,
                 "error": {
@@ -1633,11 +1645,7 @@ def create_dashboard_router(
         """
         if agent_id not in agent_registry:
             raise HTTPException(404, "Agent not found")
-        if (
-            not runtime
-            or not hasattr(runtime, "browser_service_url")
-            or not runtime.browser_service_url
-        ):
+        if not runtime or not hasattr(runtime, "browser_service_url") or not runtime.browser_service_url:
             return {
                 "success": False,
                 "error": {
@@ -1689,11 +1697,7 @@ def create_dashboard_router(
         """
         if agent_id not in agent_registry:
             raise HTTPException(404, "Agent not found")
-        if (
-            not runtime
-            or not hasattr(runtime, "browser_service_url")
-            or not runtime.browser_service_url
-        ):
+        if not runtime or not hasattr(runtime, "browser_service_url") or not runtime.browser_service_url:
             return {
                 "success": False,
                 "error": {
@@ -1745,11 +1749,7 @@ def create_dashboard_router(
         """
         if agent_id not in agent_registry:
             raise HTTPException(404, "Agent not found")
-        if (
-            not runtime
-            or not hasattr(runtime, "browser_service_url")
-            or not runtime.browser_service_url
-        ):
+        if not runtime or not hasattr(runtime, "browser_service_url") or not runtime.browser_service_url:
             return {
                 "success": False,
                 "error": {
@@ -1865,13 +1865,15 @@ def create_dashboard_router(
                     last_ts = float(health_monitor.agents[agent_id].last_check or 0)
                 except Exception:
                     last_ts = 0.0
-            workers.append({
-                "agent_id": agent_id,
-                "role": "worker",
-                "last_message_ts": last_ts,
-                "unread_count": 0,
-                "pinned": False,
-            })
+            workers.append(
+                {
+                    "agent_id": agent_id,
+                    "role": "worker",
+                    "last_message_ts": last_ts,
+                    "unread_count": 0,
+                    "pinned": False,
+                }
+            )
 
         return {"operator": operator_entry, "workers": workers}
 
@@ -1890,7 +1892,8 @@ def create_dashboard_router(
         if opened_conversations_store is not None:
             try:
                 opened_conversations_store.open(
-                    _conversations_session_id(request), agent_id,
+                    _conversations_session_id(request),
+                    agent_id,
                 )
             except Exception as e:
                 logger.warning("OpenedConversationsStore.open failed: %s", e)
@@ -1909,7 +1912,8 @@ def create_dashboard_router(
         if opened_conversations_store is not None:
             try:
                 opened_conversations_store.close_conversation(
-                    _conversations_session_id(request), agent_id,
+                    _conversations_session_id(request),
+                    agent_id,
                 )
             except Exception as e:
                 logger.warning("OpenedConversationsStore.close failed: %s", e)
@@ -1919,21 +1923,25 @@ def create_dashboard_router(
     async def api_agent_templates() -> list:
         """Return available tool templates for creating new agents."""
         from src.cli.config import _load_tool_templates
+
         return _load_tool_templates()
 
     @api_router.get("/api/fleet/templates")
     async def api_fleet_templates(request: Request) -> dict:
         """Return available fleet templates."""
         from src.cli.config import _load_templates
+
         templates = _load_templates()
         result = []
         for name, tpl in templates.items():
-            result.append({
-                "name": name,
-                "description": tpl.get("description", ""),
-                "agent_count": len(tpl.get("agents", {})),
-                "agents": list(tpl.get("agents", {}).keys()),
-            })
+            result.append(
+                {
+                    "name": name,
+                    "description": tpl.get("description", ""),
+                    "agent_count": len(tpl.get("agents", {})),
+                    "agents": list(tpl.get("agents", {}).keys()),
+                }
+            )
         return {"templates": result}
 
     def _clean_skill_names(value) -> list[str]:
@@ -1966,11 +1974,10 @@ def create_dashboard_router(
         packs as inherited (on for all agents, not per-agent toggleable).
         """
         from src.agent.skills import SkillStore
+
         root = getattr(runtime, "project_root", None) if runtime else None
         store = (
-            SkillStore(bundled_dir=root / "skills", installed_dir=root / "skills_installed")
-            if root
-            else SkillStore()
+            SkillStore(bundled_dir=root / "skills", installed_dir=root / "skills_installed") if root else SkillStore()
         )
         fleet = set(getattr(permissions, "fleet_skills", []) or []) if permissions else set()
         per_agent: set[str] = set()
@@ -1998,6 +2005,7 @@ def create_dashboard_router(
         body = await request.json()
         skills = _clean_skill_names(body.get("skills", []))
         from src.cli.config import _load_permissions, _save_permissions
+
         perms = _load_permissions()
         perms["fleet_skills"] = skills
         _save_permissions(perms)
@@ -2011,6 +2019,7 @@ def create_dashboard_router(
         import asyncio as _asyncio
 
         from src import marketplace
+
         body = await request.json()
         repo_url = str(body.get("repo_url", "")).strip()
         if not repo_url:
@@ -2019,7 +2028,9 @@ def create_dashboard_router(
         if skills_installed is None:
             raise HTTPException(503, "Skills directory not available")
         result = await _asyncio.to_thread(
-            marketplace.install_skill, repo_url, skills_installed,
+            marketplace.install_skill,
+            repo_url,
+            skills_installed,
             str(body.get("ref", "")).strip(),
         )
         if "error" in result:
@@ -2033,6 +2044,7 @@ def create_dashboard_router(
         import asyncio as _asyncio
 
         from src import marketplace
+
         body = await request.json()
         name = str(body.get("name", "")).strip()
         if not name:
@@ -2059,6 +2071,7 @@ def create_dashboard_router(
     def _expand_assignment(agents: list[str]) -> list[str]:
         """Concrete running agent ids for an ``agents`` field."""
         from src.shared.types import CONNECTOR_ALL_AGENTS
+
         if CONNECTOR_ALL_AGENTS in agents:
             return sorted(agent_registry.keys())
         return sorted(a for a in agents if a in agent_registry)
@@ -2071,6 +2084,7 @@ def create_dashboard_router(
         connection contents live in the vault and never appear in any
         GET response."""
         from src.shared.types import HttpConnector
+
         if isinstance(c, HttpConnector):
             shaped: dict = {
                 "name": c.name,
@@ -2093,16 +2107,19 @@ def create_dashboard_router(
         """Audit-row serialization, per transport. stdio env redacted
         via the existing helper; http carries names only by shape."""
         from src.shared.types import HttpConnector
+
         if isinstance(c, HttpConnector):
-            return [{
-                "name": c.name,
-                "transport": "http",
-                "url": c.url,
-                "auth_kind": c.auth.kind,
-                "auth_cred": c.auth.cred,
-                "auth_connection": c.auth.connection,
-                "agents": list(c.agents),
-            }]
+            return [
+                {
+                    "name": c.name,
+                    "transport": "http",
+                    "url": c.url,
+                    "auth_kind": c.auth.kind,
+                    "auth_cred": c.auth.cred,
+                    "auth_connection": c.auth.connection,
+                    "agents": list(c.agents),
+                }
+            ]
         return _redact_mcp_env_for_audit(
             [{**c.server_dict(), "agents": c.agents}],
         )
@@ -2114,21 +2131,14 @@ def create_dashboard_router(
             raise HTTPException(503, "Connector catalog not available")
         all_agents = sorted(agent_registry.keys())
         return {
-            "connectors": [
-                _connector_to_api(c) for c in connector_store.list()
-            ],
+            "connectors": [_connector_to_api(c) for c in connector_store.list()],
             # The store may retain stamps for agents that no longer
             # exist; only live agents are actionable here.
-            "pending_restart": [
-                a for a in connector_store.pending_restart()
-                if a in agent_registry
-            ],
+            "pending_restart": [a for a in connector_store.pending_restart() if a in agent_registry],
             # Agent-tier vault credential names for the stdio env-row
             # picker AND the remote bearer picker (names only, never
             # values).
-            "available_credentials": sorted(
-                credential_vault.list_agent_credential_names()
-            ) if credential_vault else [],
+            "available_credentials": sorted(credential_vault.list_agent_credential_names()) if credential_vault else [],
             "agents": all_agents,
         }
 
@@ -2150,13 +2160,15 @@ def create_dashboard_router(
         body_name = body.get("name")
         if body_name is not None and str(body_name).lower() != name.lower():
             raise HTTPException(
-                400, "Connector name in body does not match URL path",
+                400,
+                "Connector name in body does not match URL path",
             )
         from src.shared.types import (
             CONNECTOR_ADAPTER,
             HttpConnector,
             MCPConnector,
         )
+
         previous = connector_store.get(name)
         raw = dict(body)
         raw["name"] = previous.name if previous is not None else name
@@ -2169,24 +2181,14 @@ def create_dashboard_router(
         # 400 (or, with stdio fields, a silent http→stdio morph). A
         # cross-transport replace must say so explicitly.
         if "transport" not in body and previous is not None:
-            raw["transport"] = (
-                "http" if isinstance(previous, HttpConnector) else "stdio"
-            )
+            raw["transport"] = "http" if isinstance(previous, HttpConnector) else "stdio"
         # Absent = preserve: a partial PUT must not silently wipe the
         # persisted env / auth / assignment. Guarded per transport —
         # a cross-transport replace (same name, stdio↔http) preserves
         # nothing transport-specific.
-        if (
-            "env" not in body
-            and isinstance(previous, MCPConnector)
-            and raw.get("transport", "stdio") == "stdio"
-        ):
+        if "env" not in body and isinstance(previous, MCPConnector) and raw.get("transport", "stdio") == "stdio":
             raw["env"] = previous.env
-        if (
-            "auth" not in body
-            and isinstance(previous, HttpConnector)
-            and raw.get("transport") == "http"
-        ):
+        if "auth" not in body and isinstance(previous, HttpConnector) and raw.get("transport") == "http":
             raw["auth"] = previous.auth.model_dump()
         if "agents" not in body and previous is not None:
             raw["agents"] = previous.agents
@@ -2204,13 +2206,16 @@ def create_dashboard_router(
                 loc = [str(p) for p in e.get("loc", ())]
                 if loc and loc[0] in ("stdio", "http"):
                     loc = loc[1:]
-                safe_errors.append({
-                    "loc": loc,
-                    "msg": e.get("msg", ""),
-                    "type": e.get("type", ""),
-                })
+                safe_errors.append(
+                    {
+                        "loc": loc,
+                        "msg": e.get("msg", ""),
+                        "type": e.get("type", ""),
+                    }
+                )
             raise HTTPException(
-                400, detail={"field": "connector", "errors": safe_errors},
+                400,
+                detail={"field": "connector", "errors": safe_errors},
             )
 
         # ── PUT-time $CRED check: existence + per-agent permission ──
@@ -2230,20 +2235,14 @@ def create_dashboard_router(
             for env_val in (connector.env or {}).values():
                 handles.update(CRED_HANDLE_RE.findall(env_val))
             for cred_name in sorted(handles):
-                if (
-                    credential_vault is not None
-                    and credential_vault.resolve_credential(cred_name) is None
-                ):
+                if credential_vault is not None and credential_vault.resolve_credential(cred_name) is None:
                     raise HTTPException(
                         400,
                         f"Credential {cred_name!r} does not exist in the vault. "
                         "Store it via the credentials surface first.",
                     )
                 if permissions is not None:
-                    blocked = [
-                        a for a in check_agents
-                        if not permissions.can_access_credential(a, cred_name)
-                    ]
+                    blocked = [a for a in check_agents if not permissions.can_access_credential(a, cred_name)]
                     if blocked:
                         raise HTTPException(
                             400,
@@ -2256,11 +2255,7 @@ def create_dashboard_router(
             # per-agent can_access_credential (plan D14) — the token is
             # mesh-held and injected by the gateway; agents never see
             # it, so per-agent grants would be exposure, not safety.
-            if (
-                credential_vault is not None
-                and credential_vault.resolve_credential(connector.auth.cred)
-                is None
-            ):
+            if credential_vault is not None and credential_vault.resolve_credential(connector.auth.cred) is None:
                 raise HTTPException(
                     400,
                     f"Credential {connector.auth.cred!r} does not exist in "
@@ -2280,10 +2275,7 @@ def create_dashboard_router(
                     and (connector.env or None) == (previous.env or None)
                 )
             else:
-                same_record = (
-                    connector.url == previous.url
-                    and connector.auth == previous.auth
-                )
+                same_record = connector.url == previous.url and connector.auth == previous.auth
             if same_record and set(connector.agents) == set(previous.agents):
                 return {
                     "connector": _connector_to_api(previous),
@@ -2309,8 +2301,10 @@ def create_dashboard_router(
         # agent-visible change. The gateway cache invalidates for every
         # auth edit either way.
         import asyncio as _asyncio
+
         restart_relevant = await _asyncio.to_thread(
-            connector_store.upsert, connector,
+            connector_store.upsert,
+            connector,
         )
         auth_mode_changed = (
             not restart_relevant
@@ -2356,6 +2350,7 @@ def create_dashboard_router(
             raise HTTPException(404, "Connector not found")
         affected = _expand_assignment(previous.agents)
         import asyncio as _asyncio
+
         await _asyncio.to_thread(connector_store.remove, name)
         connector_store.mark_dirty(affected)
         if mcp_gateway is not None:
@@ -2414,7 +2409,9 @@ def create_dashboard_router(
                 except Exception as e:
                     detail = e.detail if isinstance(e, HTTPException) else e
                     logger.error(
-                        "Batch restart of %r failed: %s", agent_id, detail,
+                        "Batch restart of %r failed: %s",
+                        agent_id,
+                        detail,
                     )
                 finally:
                     _restart_batch_inflight.discard(agent_id)
@@ -2455,6 +2452,7 @@ def create_dashboard_router(
         _restart_batch_inflight.update(started)
         if started:
             import asyncio as _asyncio
+
             _asyncio.get_running_loop().create_task(
                 _run_restart_batch(started),
             )
@@ -2483,6 +2481,7 @@ def create_dashboard_router(
         # Limit based on running agents (resource usage), not config definitions.
         # A stopped agent frees a slot. Operator is excluded from the count.
         from src.cli.config import _OPERATOR_AGENT_ID
+
         non_operator_count = sum(1 for a in agent_registry if a != _OPERATOR_AGENT_ID)
         if _max_agents > 0 and non_operator_count >= _max_agents:
             raise HTTPException(
@@ -2513,6 +2512,7 @@ def create_dashboard_router(
 
         if not model:
             from src.cli.config import _load_config
+
             default = _load_config().get("llm", {}).get("default_model", "openai/gpt-4o-mini")
             # Only use the configured default if its provider has credentials
             default_provider = default.split("/")[0] if "/" in default else ""
@@ -2541,6 +2541,7 @@ def create_dashboard_router(
                 _load_config,
                 _update_agent_field,
             )
+
             if template:
                 try:
                     _create_agent_from_template(name, template, model)
@@ -2584,6 +2585,7 @@ def create_dashboard_router(
                 agent_registry[name] = url
             if transport is not None:
                 from src.host.transport import HttpTransport
+
                 if isinstance(transport, HttpTransport):
                     transport.register(name, url)
             if health_monitor is not None:
@@ -2602,6 +2604,7 @@ def create_dashboard_router(
                         _remove_team_blackboard_permissions,
                     )
                     from src.host.teams import TeamNotFound
+
                     try:
                         old = teams_store.add_member(team, name)
                     except (TeamNotFound, ValueError):
@@ -2611,9 +2614,9 @@ def create_dashboard_router(
                         if old and old != team:
                             _remove_team_blackboard_permissions(name, old)
                         _add_team_blackboard_permissions(name, team)
+                        permissions.reload()
             if event_bus is not None:
-                event_bus.emit("agent_state", agent=name,
-                    data={"state": "added", "role": role, "ready": ready})
+                event_bus.emit("agent_state", agent=name, data={"state": "added", "role": role, "ready": ready})
             return {
                 "created": True,
                 "agent": name,
@@ -2648,6 +2651,7 @@ def create_dashboard_router(
             agent_registry.pop(agent_id, None)
         if transport is not None:
             from src.host.transport import HttpTransport
+
             if isinstance(transport, HttpTransport):
                 transport._urls.pop(agent_id, None)
         if health_monitor is not None:
@@ -2670,10 +2674,13 @@ def create_dashboard_router(
         if connector_store is not None:
             try:
                 import asyncio as _asyncio
+
                 await _asyncio.to_thread(connector_store.remove_agent, agent_id)
             except Exception as e:
                 logger.warning(
-                    "Connector cleanup for '%s' failed: %s", agent_id, e,
+                    "Connector cleanup for '%s' failed: %s",
+                    agent_id,
+                    e,
                 )
 
         # Clean up per-agent data: blackboard, costs, traces, wallet
@@ -2702,11 +2709,13 @@ def create_dashboard_router(
         # Clean up proxy credential if exists
         try:
             from src.cli.config import _load_config as _load_cfg_for_delete
+
             _del_cfg = _load_cfg_for_delete()
             _del_agent_cfg = _del_cfg.get("agents", {}).get(agent_id, {})
             _del_proxy = _del_agent_cfg.get("proxy", {})
             if _del_proxy.get("credential"):
                 from src.host.credentials import _remove_from_env
+
                 _cred_env_key = f"OPENLEGION_CRED_{_del_proxy['credential']}"
                 _remove_from_env(_cred_env_key)
                 os.environ.pop(_cred_env_key, None)
@@ -2735,8 +2744,7 @@ def create_dashboard_router(
             logger.warning(f"Failed to clean config for {agent_id}: {e}")
 
         if event_bus is not None:
-            event_bus.emit("agent_state", agent=agent_id,
-                data={"state": "removed"})
+            event_bus.emit("agent_state", agent=agent_id, data={"state": "removed"})
 
         return {"removed": True, "agent": agent_id}
 
@@ -2782,6 +2790,7 @@ def create_dashboard_router(
         from fnmatch import fnmatch
 
         from src.cli.config import _load_config
+
         cfg = _load_config()
         agent_cfg = cfg.get("agents", {}).get(agent_id, {})
         default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
@@ -2791,13 +2800,10 @@ def create_dashboard_router(
 
         # Compute credential visibility for the dashboard UI
         agent_cred_names = credential_vault.list_agent_credential_names() if credential_vault else []
-        system_cred_names = sorted(
-            credential_vault.list_system_credential_names()
-        ) if credential_vault else []
-        resolved = sorted(
-            c for c in agent_cred_names
-            if any(fnmatch(c, p) for p in allowed_creds)
-        ) if allowed_creds else []
+        system_cred_names = sorted(credential_vault.list_system_credential_names()) if credential_vault else []
+        resolved = (
+            sorted(c for c in agent_cred_names if any(fnmatch(c, p) for p in allowed_creds)) if allowed_creds else []
+        )
 
         # Capability flags from permissions
         agent_perms = permissions.get_permissions(agent_id) if permissions else None
@@ -2813,14 +2819,8 @@ def create_dashboard_router(
             # the edit form shows what the agent actually runs with when no
             # explicit per-agent override is set.
             "max_output_tokens": agent_cfg.get("max_output_tokens", 16384) or 16384,
-            "max_tool_rounds": (
-                agent_cfg.get("max_tool_rounds")
-                or _limits.resolve("task_max_tool_rounds")
-            ),
-            "llm_timeout_seconds": (
-                agent_cfg.get("llm_timeout_seconds")
-                or _limits.resolve("llm_timeout_seconds")
-            ),
+            "max_tool_rounds": (agent_cfg.get("max_tool_rounds") or _limits.resolve("task_max_tool_rounds")),
+            "llm_timeout_seconds": (agent_cfg.get("llm_timeout_seconds") or _limits.resolve("llm_timeout_seconds")),
             "allowed_credentials": allowed_creds,
             "available_credentials": sorted(agent_cred_names),
             "system_credentials": system_cred_names,
@@ -2830,9 +2830,7 @@ def create_dashboard_router(
             "can_spawn": agent_perms.can_spawn if agent_perms else False,
             "can_manage_cron": agent_perms.can_manage_cron if agent_perms else False,
             "can_use_wallet": agent_perms.can_use_wallet if agent_perms else False,
-            "wallet_allowed_chains": (
-                agent_perms.wallet_allowed_chains if agent_perms else []
-            ),
+            "wallet_allowed_chains": (agent_perms.wallet_allowed_chains if agent_perms else []),
         }
         # Wallet: available chains + derived addresses
         _ws_ref_local = wallet_service_ref or [None]
@@ -2850,7 +2848,8 @@ def create_dashboard_router(
                 evm_addr = await ws.get_address(agent_id, "evm:ethereum")
                 sol_addr = await ws.get_address(agent_id, "solana:mainnet")
                 cfg_result["wallet_addresses"] = {
-                    "evm": evm_addr, "solana": sol_addr,
+                    "evm": evm_addr,
+                    "solana": sol_addr,
                 }
             except Exception:
                 cfg_result["wallet_addresses"] = None
@@ -2867,6 +2866,7 @@ def create_dashboard_router(
             proxy_info["url"] = _mask_proxy_url(raw) if raw else ""
             if raw:
                 from urllib.parse import urlparse as _urlparse
+
                 _p = _urlparse(raw)
                 proxy_info["host"] = f"{_p.hostname}:{_p.port}" if _p.hostname and _p.port else (_p.hostname or "")
                 proxy_info["scheme"] = _p.scheme or "http"
@@ -2896,7 +2896,11 @@ def create_dashboard_router(
             return False
         try:
             result = await transport.request(
-                agent_id, "POST", "/config", json=payload, timeout=10,
+                agent_id,
+                "POST",
+                "/config",
+                json=payload,
+                timeout=10,
             )
         except Exception as e:
             logger.warning("Hot-reload runtime config for '%s' failed: %s", agent_id, e)
@@ -2904,7 +2908,8 @@ def create_dashboard_router(
         if isinstance(result, dict) and "error" in result:
             logger.warning(
                 "Hot-reload runtime config for '%s' returned error: %s",
-                agent_id, result["error"],
+                agent_id,
+                result["error"],
             )
             return False
         return True
@@ -2917,6 +2922,7 @@ def create_dashboard_router(
         if not isinstance(body, dict):
             raise HTTPException(status_code=400, detail="Body must be a JSON object")
         from src.cli.config import _load_config, _update_agent_field
+
         cfg = _load_config()
         agent_cfg = cfg.get("agents", {}).get(agent_id, {})
         default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
@@ -2976,23 +2982,25 @@ def create_dashboard_router(
 
                     current = cost_tracker.check_budget(agent_id)
                     daily = _parse_positive_float(
-                        raw_daily, "daily_usd", current.get("daily_limit", DEFAULT_DAILY_BUDGET_USD),
+                        raw_daily,
+                        "daily_usd",
+                        current.get("daily_limit", DEFAULT_DAILY_BUDGET_USD),
                     )
                     monthly = _parse_positive_float(
-                        raw_monthly, "monthly_usd", current.get("monthly_limit", DEFAULT_MONTHLY_BUDGET_USD),
+                        raw_monthly,
+                        "monthly_usd",
+                        current.get("monthly_limit", DEFAULT_MONTHLY_BUDGET_USD),
                     )
                     budget_apply = {"daily_usd": daily, "monthly_usd": monthly}
 
         if "thinking" in body:
             thinking_val = body["thinking"]
             from src.agent.llm import LLMClient
+
             if thinking_val not in LLMClient.VALID_THINKING_LEVELS:
                 raise HTTPException(
                     status_code=400,
-                    detail=(
-                        "thinking must be one of: "
-                        f"{sorted(LLMClient.VALID_THINKING_LEVELS)}"
-                    ),
+                    detail=(f"thinking must be one of: {sorted(LLMClient.VALID_THINKING_LEVELS)}"),
                 )
             pending_writes.append(("thinking", thinking_val))
             runtime_payload["thinking"] = thinking_val
@@ -3071,6 +3079,7 @@ def create_dashboard_router(
 
         # Phase 2: apply writes now that every field validated.
         updated: list[str] = []
+
         def _audit(field: str, old_value: object, new_value: object) -> None:
             """Log a dashboard-initiated edit. Never raises — a broken audit
             sink must not block the caller's config change, but silent
@@ -3081,14 +3090,8 @@ def create_dashboard_router(
                     action="edit_agent",
                     target=agent_id,
                     field=field,
-                    before_value=(
-                        old_value if isinstance(old_value, str)
-                        else json.dumps(old_value)
-                    ),
-                    after_value=(
-                        new_value if isinstance(new_value, str)
-                        else json.dumps(new_value)
-                    ),
+                    before_value=(old_value if isinstance(old_value, str) else json.dumps(old_value)),
+                    after_value=(new_value if isinstance(new_value, str) else json.dumps(new_value)),
                     actor="dashboard",
                     provenance="user",
                 )
@@ -3133,12 +3136,14 @@ def create_dashboard_router(
         if event_bus is not None:
             try:
                 event_bus.emit(
-                    "agent_restarting", agent=agent_id,
+                    "agent_restarting",
+                    agent=agent_id,
                     data={"agent_id": agent_id},
                 )
             except Exception as e:
                 logger.debug("agent_restarting emit failed: %s", e)
         import asyncio
+
         # Sentinel ensures SPA always gets a terminal event — covers the
         # path where ``runtime.stop_agent`` / ``start_agent`` blocks
         # indefinitely (e.g. Docker daemon hang) and the ``finally``
@@ -3147,6 +3152,7 @@ def create_dashboard_router(
         fired_terminal = False
         try:
             from src.cli.config import _load_config
+
             cfg = _load_config()
             agent_cfg = cfg.get("agents", {}).get(agent_id, {})
             default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
@@ -3165,6 +3171,7 @@ def create_dashboard_router(
                 _OPERATOR_ALLOWED_TOOLS,
                 _load_permissions,
             )
+
             restart_env: dict[str, str] = {}
             if agent_id == _OPERATOR_AGENT_ID:
                 restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
@@ -3172,9 +3179,14 @@ def create_dashboard_router(
                 # operator's toggle state survives the bounce. Default
                 # True matches the operator-by-default UX.
                 try:
-                    _op_perms = _load_permissions().get(
-                        "permissions", {},
-                    ).get(_OPERATOR_AGENT_ID, {})
+                    _op_perms = (
+                        _load_permissions()
+                        .get(
+                            "permissions",
+                            {},
+                        )
+                        .get(_OPERATOR_AGENT_ID, {})
+                    )
                     restart_env["OL_INTERNET_ACCESS_ENABLED"] = (
                         "true" if _op_perms.get("can_use_internet", True) else "false"
                     )
@@ -3187,10 +3199,13 @@ def create_dashboard_router(
             # Proxy goes in env_overrides (not runtime.extra_env) so
             # concurrent single-agent restarts don't stomp each other.
             _proxy_url = resolve_agent_proxy(
-                agent_id, cfg.get("agents", {}), cfg.get("network", {}),
+                agent_id,
+                cfg.get("agents", {}),
+                cfg.get("network", {}),
             )
             _proxy_env = build_proxy_env_vars(
-                _proxy_url, cfg.get("network", {}).get("no_proxy", ""),
+                _proxy_url,
+                cfg.get("network", {}).get("no_proxy", ""),
             )
             restart_env.update(_proxy_env)
             # Per-agent output-token cap → LLM_MAX_TOKENS so an edit_agent
@@ -3198,6 +3213,7 @@ def create_dashboard_router(
             # live hot-reload). Absent = LLMClient default 16384.
             set_llm_max_tokens_env(restart_env, agent_cfg)
             from src.shared.limits import set_llm_limits_env
+
             set_llm_limits_env(restart_env, agent_cfg)
             url = await asyncio.wait_for(
                 asyncio.to_thread(
@@ -3217,6 +3233,7 @@ def create_dashboard_router(
                 agent_registry[agent_id] = url
             if transport is not None:
                 from src.host.transport import HttpTransport
+
                 if isinstance(transport, HttpTransport):
                     transport.register(agent_id, url)
             # Re-establish health monitoring if this agent had been deregistered
@@ -3233,7 +3250,8 @@ def create_dashboard_router(
             if event_bus is not None:
                 try:
                     event_bus.emit(
-                        "agent_restarted", agent=agent_id,
+                        "agent_restarted",
+                        agent=agent_id,
                         data={"agent_id": agent_id, "ready": ready},
                     )
                     fired_terminal = True
@@ -3249,13 +3267,15 @@ def create_dashboard_router(
             if event_bus is not None:
                 try:
                     event_bus.emit(
-                        "agent_state", agent=agent_id,
+                        "agent_state",
+                        agent=agent_id,
                         data={"state": "restart_failed", "error": "Restart timed out"},
                     )
                     fired_terminal = True
                 except Exception as emit_e:
                     logger.debug(
-                        "agent_state restart_failed emit failed: %s", emit_e,
+                        "agent_state restart_failed emit failed: %s",
+                        emit_e,
                     )
             raise HTTPException(status_code=504, detail="Restart timed out") from e
         except Exception as e:
@@ -3266,13 +3286,15 @@ def create_dashboard_router(
             if event_bus is not None:
                 try:
                     event_bus.emit(
-                        "agent_state", agent=agent_id,
+                        "agent_state",
+                        agent=agent_id,
                         data={"state": "restart_failed", "error": str(e)},
                     )
                     fired_terminal = True
                 except Exception as emit_e:
                     logger.debug(
-                        "agent_state restart_failed emit failed: %s", emit_e,
+                        "agent_state restart_failed emit failed: %s",
+                        emit_e,
                     )
             raise HTTPException(status_code=500, detail=str(e))
         finally:
@@ -3284,7 +3306,8 @@ def create_dashboard_router(
             if not fired_terminal and event_bus is not None:
                 try:
                     event_bus.emit(
-                        "agent_state", agent=agent_id,
+                        "agent_state",
+                        agent=agent_id,
                         data={"state": "restart_failed", "error": "Restart did not complete"},
                     )
                 except Exception as emit_e:
@@ -3306,13 +3329,18 @@ def create_dashboard_router(
 
         current = cost_tracker.check_budget(agent_id)
         daily_usd = _parse_positive_float(
-            raw_daily, "daily_usd", current.get("daily_limit", DEFAULT_DAILY_BUDGET_USD),
+            raw_daily,
+            "daily_usd",
+            current.get("daily_limit", DEFAULT_DAILY_BUDGET_USD),
         )
         monthly_usd = _parse_positive_float(
-            raw_monthly, "monthly_usd", current.get("monthly_limit", DEFAULT_MONTHLY_BUDGET_USD),
+            raw_monthly,
+            "monthly_usd",
+            current.get("monthly_limit", DEFAULT_MONTHLY_BUDGET_USD),
         )
         cost_tracker.set_budget(agent_id, daily_usd=daily_usd, monthly_usd=monthly_usd)
         from src.cli.config import _update_agent_field
+
         _update_agent_field(agent_id, "budget", {"daily_usd": daily_usd, "monthly_usd": monthly_usd})
         return {"updated": True, "agent": agent_id, "daily_usd": daily_usd, "monthly_usd": monthly_usd}
 
@@ -3384,6 +3412,7 @@ def create_dashboard_router(
 
         if "no_proxy" in body:
             from src.cli.config import _update_network_config
+
             _update_network_config("no_proxy", body["no_proxy"])
             updated.append("no_proxy")
 
@@ -3499,6 +3528,7 @@ def create_dashboard_router(
             raise HTTPException(status_code=503, detail="Permissions not available")
         body = await request.json()
         from src.cli.config import _load_permissions, _save_permissions
+
         perms_data = _load_permissions()
         agents = perms_data.setdefault("permissions", {})
         # Materialize full effective permissions before a partial write, so an
@@ -3615,11 +3645,11 @@ def create_dashboard_router(
         if not message:
             raise HTTPException(status_code=400, detail="Message is required")
         from src.shared.utils import sanitize_for_prompt
+
         message = sanitize_for_prompt(message)
         chat_session = request.headers.get("x-chat-session", "")
         if event_bus:
-            event_bus.emit("chat_user_message", agent=agent_id,
-                data={"message": message, "session": chat_session})
+            event_bus.emit("chat_user_message", agent=agent_id, data={"message": message, "session": chat_session})
         # Task 2b: stamp dashboard chat as human-origin so downstream
         # authorization gates can distinguish a user-driven chat from
         # an agent-initiated wake.
@@ -3630,6 +3660,7 @@ def create_dashboard_router(
         # the resulting LLM/task/transcript rows were uncorrelatable.
         from src.shared.trace import current_trace_id, new_trace_id, origin_header, trace_headers
         from src.shared.types import MessageOrigin
+
         # Mint + seed, then RESET via token after the awaited outbound call.
         # Without the reset, this minted trace_id stays on the (worker-reused)
         # context and contaminates a later handler that calls trace_headers()
@@ -3665,18 +3696,20 @@ def create_dashboard_router(
                 except Exception as _intent_err:
                     logger.debug("dashboard intent capture failed: %s", _intent_err)
             result = await transport.request(
-                agent_id, "POST", "/chat", json={"message": message}, timeout=120,
+                agent_id,
+                "POST",
+                "/chat",
+                json={"message": message},
+                timeout=120,
                 headers=hdrs,
             )
             response = result.get("response", "(no response)")
             if event_bus:
-                event_bus.emit("chat_done", agent=agent_id,
-                    data={"response": response, "session": chat_session})
+                event_bus.emit("chat_done", agent=agent_id, data={"response": response, "session": chat_session})
             return {"response": response}
         except Exception as e:
             if event_bus:
-                event_bus.emit("chat_done", agent=agent_id,
-                    data={"response": "", "session": chat_session})
+                event_bus.emit("chat_done", agent=agent_id, data={"response": "", "session": chat_session})
             raise HTTPException(status_code=502, detail=str(e))
         finally:
             current_trace_id.reset(_trace_tok)
@@ -3693,13 +3726,13 @@ def create_dashboard_router(
         if not message:
             raise HTTPException(status_code=400, detail="Message is required")
         from src.shared.utils import sanitize_for_prompt
+
         message = sanitize_for_prompt(message)
         chat_session = request.headers.get("x-chat-session", "")
 
         # Broadcast user message so other tabs/devices see it immediately
         if event_bus:
-            event_bus.emit("chat_user_message", agent=agent_id,
-                data={"message": message, "session": chat_session})
+            event_bus.emit("chat_user_message", agent=agent_id, data={"message": message, "session": chat_session})
 
         # Task 2b: stamp dashboard streaming chat as human-origin.
         # Session observability (Phase 1): mint a per-turn trace_id and
@@ -3711,6 +3744,7 @@ def create_dashboard_router(
         # later non-minting handler (e.g. /api/broadcast) would inherit.
         from src.shared.trace import current_trace_id, new_trace_id, origin_header, trace_headers
         from src.shared.types import MessageOrigin
+
         _trace_tok = current_trace_id.set(new_trace_id())
         try:
             _origin = MessageOrigin(
@@ -3743,8 +3777,11 @@ def create_dashboard_router(
             final_response = ""
             try:
                 async for event in transport.stream_request(
-                    agent_id, "POST", "/chat/stream",
-                    json={"message": message}, timeout=120,
+                    agent_id,
+                    "POST",
+                    "/chat/stream",
+                    json={"message": message},
+                    timeout=120,
                     headers=_hdrs,
                 ):
                     if isinstance(event, dict):
@@ -3759,9 +3796,11 @@ def create_dashboard_router(
                         etype = event.get("type", "")
                         if event_bus:
                             if etype in ("tool_start", "tool_result", "text_delta"):
-                                event_bus.emit(etype, agent=agent_id,
-                                    data={k: v for k, v in event.items()
-                                          if k != "type"} | {"session": chat_session})
+                                event_bus.emit(
+                                    etype,
+                                    agent=agent_id,
+                                    data={k: v for k, v in event.items() if k != "type"} | {"session": chat_session},
+                                )
                             if etype == "done":
                                 final_response = event.get("response", "")
                                 break
@@ -3769,10 +3808,10 @@ def create_dashboard_router(
                 yield f"data: {json.dumps({'type': 'error', 'message': friendly_streaming_error(e)})}\n\n"
             # Notify other sessions that the response is complete
             if event_bus:
-                event_bus.emit("chat_done", agent=agent_id,
-                    data={"response": final_response, "session": chat_session})
+                event_bus.emit("chat_done", agent=agent_id, data={"response": final_response, "session": chat_session})
 
         from starlette.responses import StreamingResponse
+
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 
     @api_router.post("/api/broadcast")
@@ -3802,6 +3841,7 @@ def create_dashboard_router(
         # Task 2b: stamp dashboard broadcast as human-origin.
         from src.shared.trace import origin_header, trace_headers
         from src.shared.types import MessageOrigin
+
         bc_origin = MessageOrigin(
             kind="human",
             channel="dashboard",
@@ -3811,15 +3851,21 @@ def create_dashboard_router(
         bc_hdrs.update(origin_header(bc_origin))
 
         results = {}
+
         async def _send(aid: str) -> tuple[str, str]:
             try:
                 data = await transport.request(
-                    aid, "POST", "/chat", json={"message": message}, timeout=120,
+                    aid,
+                    "POST",
+                    "/chat",
+                    json={"message": message},
+                    timeout=120,
                     headers=bc_hdrs,
                 )
                 return aid, data.get("response", "(no response)")
             except Exception as e:
                 return aid, f"Error: {e}"
+
         tasks = [_send(aid) for aid in targets]
         for coro in asyncio.as_completed(tasks):
             aid, resp = await coro
@@ -3855,6 +3901,7 @@ def create_dashboard_router(
         # Task 2b: stamp dashboard streaming broadcast as human-origin.
         from src.shared.trace import origin_header, trace_headers
         from src.shared.types import MessageOrigin
+
         bcs_origin = MessageOrigin(
             kind="human",
             channel="dashboard",
@@ -3869,8 +3916,11 @@ def create_dashboard_router(
             await queue.put({"type": "agent_start", "agent": aid})
             try:
                 async for event in transport.stream_request(
-                    aid, "POST", "/chat/stream",
-                    json={"message": message}, timeout=120,
+                    aid,
+                    "POST",
+                    "/chat/stream",
+                    json={"message": message},
+                    timeout=120,
                     headers=bcs_hdrs,
                 ):
                     if isinstance(event, dict):
@@ -3887,8 +3937,7 @@ def create_dashboard_router(
                         if event_bus:
                             etype = event.get("type", "")
                             if etype in ("tool_start", "tool_result"):
-                                event_bus.emit(etype, agent=aid,
-                                    data={k: v for k, v in tagged.items() if k != "type"})
+                                event_bus.emit(etype, agent=aid, data={k: v for k, v in tagged.items() if k != "type"})
             except Exception as e:
                 await queue.put({"type": "error", "agent": aid, "message": friendly_streaming_error(e)})
             await queue.put({"type": "agent_done", "agent": aid})
@@ -3912,6 +3961,7 @@ def create_dashboard_router(
             yield f"data: {json.dumps({'type': 'all_done'})}\n\n"
 
         from starlette.responses import StreamingResponse
+
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 
     @api_router.post("/api/agents/{agent_id}/steer")
@@ -3925,22 +3975,28 @@ def create_dashboard_router(
         if not message:
             raise HTTPException(status_code=400, detail="Message is required")
         from src.shared.utils import sanitize_for_prompt
+
         message = sanitize_for_prompt(message)
         chat_session = request.headers.get("x-chat-session", "")
         if event_bus:
-            event_bus.emit("chat_user_message", agent=agent_id,
-                data={"message": f"[steer] {message}", "session": chat_session})
+            event_bus.emit(
+                "chat_user_message", agent=agent_id, data={"message": f"[steer] {message}", "session": chat_session}
+            )
         # Task 2b: stamp human origin on dashboard-initiated steer.
         from src.shared.trace import new_trace_id
         from src.shared.types import MessageOrigin
+
         origin = MessageOrigin(
             kind="human",
             channel="dashboard",
             user=_operator_session_id(request),
         )
         result = await lane_manager.enqueue(
-            agent_id, message, mode="steer",
-            trace_id=new_trace_id(), origin=origin,
+            agent_id,
+            message,
+            mode="steer",
+            trace_id=new_trace_id(),
+            origin=origin,
         )
         return {"result": result}
 
@@ -4057,6 +4113,7 @@ def create_dashboard_router(
         from urllib.parse import quote, urlencode
 
         from fastapi.responses import Response
+
         if agent_id not in agent_registry:
             raise HTTPException(status_code=404, detail="Agent not found")
         if transport is None:
@@ -4076,7 +4133,10 @@ def create_dashboard_router(
             qs = urlencode({"offset": offset, "max_bytes": _CHUNK})
             try:
                 result = await transport.request(
-                    agent_id, "GET", f"/files/{safe_path}?{qs}", timeout=60,
+                    agent_id,
+                    "GET",
+                    f"/files/{safe_path}?{qs}",
+                    timeout=60,
                 )
             except Exception as e:
                 raise HTTPException(status_code=502, detail=str(e))
@@ -4147,14 +4207,19 @@ def create_dashboard_router(
 
         # Anthropic OAuth setup-token: validate directly against provider API
         from src.host.credentials import is_oauth_token
+
         if is_oauth_token(key):
             from src.setup_wizard import SetupWizard
+
             fmt_error = SetupWizard._validate_oauth_token_format(key)
             if fmt_error:
                 return {"valid": False, "skipped": False, "reason": fmt_error}
             import asyncio
+
             valid = await asyncio.get_running_loop().run_in_executor(
-                None, SetupWizard._validate_oauth_token_live, key,
+                None,
+                SetupWizard._validate_oauth_token_live,
+                key,
             )
             if valid:
                 return {"valid": True, "skipped": False, "oauth": True}
@@ -4164,6 +4229,7 @@ def create_dashboard_router(
         import json as _json
 
         from src.host.credentials import CredentialVault as _CV
+
         try:
             parsed = _json.loads(key)
             if isinstance(parsed, dict):
@@ -4179,12 +4245,14 @@ def create_dashboard_router(
         # Strip _api_key suffix to get provider name
         provider = service.replace("_api_key", "")
         from src.setup_wizard import _VALIDATION_MODELS
+
         validation_model = _VALIDATION_MODELS.get(provider)
         if not validation_model:
             if base_url:
                 # Custom provider with base URL — attempt OpenAI-compatible validation
                 try:
                     import litellm
+
                     custom_kwargs: dict = {
                         "model": "openai/test",
                         "messages": [{"role": "user", "content": "hi"}],
@@ -4210,6 +4278,7 @@ def create_dashboard_router(
             return {"valid": True, "skipped": True, "reason": "unknown provider"}
         try:
             import litellm
+
             kwargs: dict = {
                 "model": validation_model,
                 "messages": [{"role": "user", "content": "hi"}],
@@ -4230,13 +4299,20 @@ def create_dashboard_router(
             # Some providers wrap auth errors as BadRequest/APIConnection —
             # check message before treating as transient
             emsg = str(e).lower()
-            _auth_keywords = ("invalid api key", "invalid key", "invalid x-api-key",
-                              "authentication fail", "login fail", "unauthorized",
-                              "api key", "api_key", "secret key")
+            _auth_keywords = (
+                "invalid api key",
+                "invalid key",
+                "invalid x-api-key",
+                "authentication fail",
+                "login fail",
+                "unauthorized",
+                "api key",
+                "api_key",
+                "secret key",
+            )
             if any(kw in emsg for kw in _auth_keywords):
                 return {"valid": False, "skipped": False, "reason": "Invalid API key"}
-            if isinstance(e, (litellm.Timeout, litellm.RateLimitError,
-                              litellm.ServiceUnavailableError)):
+            if isinstance(e, (litellm.Timeout, litellm.RateLimitError, litellm.ServiceUnavailableError)):
                 return {"valid": True, "skipped": True, "reason": str(e)[:200]}
             if isinstance(e, litellm.APIConnectionError):
                 return {"valid": True, "skipped": True, "reason": str(e)[:200]}
@@ -4262,6 +4338,7 @@ def create_dashboard_router(
         import json as _json
 
         from src.host.credentials import CredentialVault as _CV
+
         try:
             parsed = _json.loads(key)
             if isinstance(parsed, dict):
@@ -4280,6 +4357,7 @@ def create_dashboard_router(
         # Detect bare Anthropic OAuth setup tokens (sk-ant-oat01-...)
         # Store as structured OAuth so they use the primary OAuth path
         from src.host.credentials import is_oauth_token
+
         if is_oauth_token(key):
             credential_vault.store_anthropic_oauth({"access_token": key})
             # Clear any stale api_key credential to avoid confusion
@@ -4290,6 +4368,7 @@ def create_dashboard_router(
             SYSTEM_CREDENTIAL_PROVIDERS,
             is_system_credential,
         )
+
         if service.lower() in SYSTEM_CREDENTIAL_PROVIDERS and not service.lower().endswith("_api_key"):
             service = f"{service}_api_key"
         # Explicit tier override from request body, then auto-detect
@@ -4353,6 +4432,7 @@ def create_dashboard_router(
         if len(key) > 10_000:
             raise HTTPException(status_code=400, detail="Key value too long (max 10000 chars)")
         from src.host.credentials import is_system_credential
+
         if is_system_credential(service):
             raise HTTPException(
                 status_code=403,
@@ -4372,7 +4452,9 @@ def create_dashboard_router(
         claimed = True
         if request_id and help_requests_store is not None:
             record = help_requests_store.resolve(
-                request_id, expected_kind="credential_request", status="resolved",
+                request_id,
+                expected_kind="credential_request",
+                status="resolved",
             )
             claimed = record is not None
             # Prefer the registry's agent_id (authoritative) over the body's:
@@ -4383,6 +4465,7 @@ def create_dashboard_router(
         if claimed:
             if agent_id and lane_manager is not None and agent_id in agent_registry:
                 from src.shared.trace import new_trace_id
+
                 try:
                     await lane_manager.enqueue(
                         agent_id,
@@ -4419,14 +4502,20 @@ def create_dashboard_router(
         # pops the registry record so the "Needs you" row clears.
         claimed = True
         if request_id and help_requests_store is not None:
-            claimed = help_requests_store.resolve(
-                request_id, expected_kind="browser_login_request", status="resolved",
-            ) is not None
+            claimed = (
+                help_requests_store.resolve(
+                    request_id,
+                    expected_kind="browser_login_request",
+                    status="resolved",
+                )
+                is not None
+            )
         if not claimed:
             return {"completed": True, "agent_id": agent_id, "service": service}
         if agent_id in agent_registry and lane_manager is not None:
             from src.shared.trace import new_trace_id
             from src.shared.utils import sanitize_for_prompt
+
             try:
                 msg = sanitize_for_prompt(
                     f"The user has completed the browser login for {service}. "
@@ -4434,13 +4523,17 @@ def create_dashboard_router(
                     f"You can resume using browser tools to interact with {service}."
                 )
                 await lane_manager.enqueue(
-                    agent_id, msg, mode="steer", trace_id=new_trace_id(),
+                    agent_id,
+                    msg,
+                    mode="steer",
+                    trace_id=new_trace_id(),
                 )
             except Exception:
                 pass
         if event_bus:
             event_bus.emit(
-                "browser_login_completed", agent=agent_id,
+                "browser_login_completed",
+                agent=agent_id,
                 data={"service": service, "request_id": request_id},
             )
         return {"completed": True, "agent_id": agent_id, "service": service}
@@ -4459,14 +4552,20 @@ def create_dashboard_router(
             )
         claimed = True
         if request_id and help_requests_store is not None:
-            claimed = help_requests_store.resolve(
-                request_id, expected_kind="browser_captcha_help_request", status="resolved",
-            ) is not None
+            claimed = (
+                help_requests_store.resolve(
+                    request_id,
+                    expected_kind="browser_captcha_help_request",
+                    status="resolved",
+                )
+                is not None
+            )
         if not claimed:
             return {"completed": True, "agent_id": agent_id, "service": service}
         if agent_id in agent_registry and lane_manager is not None:
             from src.shared.trace import new_trace_id
             from src.shared.utils import sanitize_for_prompt
+
             try:
                 msg = sanitize_for_prompt(
                     f"The user has completed the CAPTCHA challenge for "
@@ -4474,14 +4573,18 @@ def create_dashboard_router(
                     f"page should now be past the captcha."
                 )
                 await lane_manager.enqueue(
-                    agent_id, msg, mode="steer", trace_id=new_trace_id(),
+                    agent_id,
+                    msg,
+                    mode="steer",
+                    trace_id=new_trace_id(),
                 )
             except Exception:
                 pass
         if event_bus:
             event_bus.emit(
                 "browser_captcha_help_completed",
-                agent=agent_id, data={"service": service, "request_id": request_id},
+                agent=agent_id,
+                data={"service": service, "request_id": request_id},
             )
         return {"completed": True, "agent_id": agent_id, "service": service}
 
@@ -4499,6 +4602,7 @@ def create_dashboard_router(
         if agent_id in agent_registry and lane_manager is not None:
             from src.shared.trace import new_trace_id
             from src.shared.utils import sanitize_for_prompt
+
             try:
                 msg = sanitize_for_prompt(
                     f"The user cancelled the CAPTCHA help request for "
@@ -4506,14 +4610,18 @@ def create_dashboard_router(
                     f"retry, escalate to user via notify_user)."
                 )
                 await lane_manager.enqueue(
-                    agent_id, msg, mode="steer", trace_id=new_trace_id(),
+                    agent_id,
+                    msg,
+                    mode="steer",
+                    trace_id=new_trace_id(),
                 )
             except Exception:
                 pass
         if event_bus:
             event_bus.emit(
                 "browser_captcha_help_cancelled",
-                agent=agent_id, data={"service": service},
+                agent=agent_id,
+                data={"service": service},
             )
         return {"cancelled": True, "agent_id": agent_id, "service": service}
 
@@ -4528,13 +4636,17 @@ def create_dashboard_router(
         if agent_id in agent_registry and lane_manager is not None:
             from src.shared.trace import new_trace_id
             from src.shared.utils import sanitize_for_prompt
+
             try:
                 msg = sanitize_for_prompt(
                     f"The user cancelled the browser login for {service}. "
                     f"You may need to find an alternative approach or ask again later."
                 )
                 await lane_manager.enqueue(
-                    agent_id, msg, mode="steer", trace_id=new_trace_id(),
+                    agent_id,
+                    msg,
+                    mode="steer",
+                    trace_id=new_trace_id(),
                 )
             except Exception:
                 pass
@@ -4662,6 +4774,7 @@ def create_dashboard_router(
     async def api_list_integrations(request: Request) -> dict:
         """List providers, whether their client is configured, and connections."""
         from src.host.oauth_providers import OAUTH_PROVIDERS
+
         if credential_vault is None:
             return {"providers": []}
         conns_by_provider: dict[str, list] = {}
@@ -4669,23 +4782,25 @@ def create_dashboard_router(
             conns_by_provider.setdefault(c["provider"], []).append(c)
         providers = []
         for key, p in OAUTH_PROVIDERS.items():
-            providers.append({
-                "key": key,
-                "label": p.label,
-                "configured": credential_vault.has_oauth_client(p),
-                "redirect_uri": _oauth_redirect_uri(request, key),
-                "scope_bundles": [
-                    {"key": b.key, "label": b.label, "description": b.description}
-                    for b in p.scope_bundles
-                ],
-                "connections": conns_by_provider.get(key, []),
-            })
+            providers.append(
+                {
+                    "key": key,
+                    "label": p.label,
+                    "configured": credential_vault.has_oauth_client(p),
+                    "redirect_uri": _oauth_redirect_uri(request, key),
+                    "scope_bundles": [
+                        {"key": b.key, "label": b.label, "description": b.description} for b in p.scope_bundles
+                    ],
+                    "connections": conns_by_provider.get(key, []),
+                }
+            )
         return {"providers": providers}
 
     @api_router.post("/api/integrations/{provider}/setup")
     async def api_setup_integration(provider: str, request: Request) -> dict:
         """Store the operator's OAuth client id/secret for a provider (system-tier)."""
         from src.host.oauth_providers import get_provider
+
         p = get_provider(provider)
         if p is None:
             raise HTTPException(404, f"Unknown provider: {provider}")
@@ -4707,12 +4822,16 @@ def create_dashboard_router(
 
     @api_router.get("/integrations/{provider}/connect")
     async def integration_connect(
-        provider: str, request: Request, name: str = "", scopes: str = "",
+        provider: str,
+        request: Request,
+        name: str = "",
+        scopes: str = "",
     ):
         """Begin the OAuth dance: mint state, redirect to the provider consent."""
         from fastapi.responses import RedirectResponse
 
         from src.host.oauth_providers import generate_pkce, get_provider
+
         p = get_provider(provider)
         if p is None:
             raise HTTPException(404, f"Unknown provider: {provider}")
@@ -4740,20 +4859,27 @@ def create_dashboard_router(
             session_hash=_oauth_session_hash(request),
         )
         url = credential_vault.build_authorize_url(
-            p, redirect_uri=redirect_uri, state=state,
-            scopes=resolved_scopes, code_challenge=challenge,
+            p,
+            redirect_uri=redirect_uri,
+            state=state,
+            scopes=resolved_scopes,
+            code_challenge=challenge,
         )
         return RedirectResponse(url, status_code=302)
 
     @api_router.get("/integrations/{provider}/callback")
     async def integration_callback(
-        provider: str, request: Request,
-        code: str = "", state: str = "", error: str = "",
+        provider: str,
+        request: Request,
+        code: str = "",
+        state: str = "",
+        error: str = "",
     ):
         """Provider redirect target: validate state, exchange code, store conn."""
         from fastapi.responses import RedirectResponse
 
         from src.host.oauth_providers import get_provider
+
         landing = "/dashboard/"
 
         def _back(params: str):
@@ -4765,13 +4891,16 @@ def create_dashboard_router(
         if p is None or credential_vault is None:
             return _back("integration_error=unknown_provider")
         pending = _oauth_state_store.consume(
-            state, session_hash=_oauth_session_hash(request),
+            state,
+            session_hash=_oauth_session_hash(request),
         )
         if pending is None or pending.provider != provider or not code:
             return _back("integration_error=invalid_state")
         try:
             conn = await credential_vault.exchange_oauth_code(
-                p, code=code, redirect_uri=pending.redirect_uri,
+                p,
+                code=code,
+                redirect_uri=pending.redirect_uri,
                 code_verifier=pending.code_verifier,
             )
             # A connection that needs refresh but came back without a refresh
@@ -4788,7 +4917,9 @@ def create_dashboard_router(
             logger.warning("OAuth callback exchange failed for %s: %s", provider, exc)
             return _back("integration_error=exchange_failed")
         logger.info(
-            "Integration connected: %s (%s)", pending.connection_name, provider,
+            "Integration connected: %s (%s)",
+            pending.connection_name,
+            provider,
         )
         _emit_config_changed("integrations", name=pending.connection_name, provider=provider)
         return _back(f"integration_connected={pending.connection_name}")
@@ -4814,15 +4945,13 @@ def create_dashboard_router(
         from src.host.mcp_oauth import MCPOAuthError, discover, register_client
         from src.host.oauth_providers import generate_pkce
         from src.shared.types import HttpConnector
+
         if credential_vault is None or connector_store is None:
             raise HTTPException(503, "Connector catalog or vault not available")
         c = connector_store.get(name)
         if not isinstance(c, HttpConnector):
             raise HTTPException(404, f"Unknown remote connector: {name}")
-        redirect_uri = (
-            f"{_public_base_url(request)}/dashboard/integrations/mcp/"
-            f"{c.name}/callback"
-        )
+        redirect_uri = f"{_public_base_url(request)}/dashboard/integrations/mcp/{c.name}/callback"
         try:
             disco = await discover(c.url)
             if disco.registration_endpoint is None:
@@ -4833,11 +4962,13 @@ def create_dashboard_router(
                     "possible for this server",
                 )
             client_id, client_secret = await register_client(
-                disco.registration_endpoint, redirect_uri,
+                disco.registration_endpoint,
+                redirect_uri,
             )
         except MCPOAuthError as exc:
             raise HTTPException(
-                502, f"OAuth setup failed at {exc.step}: {exc}",
+                502,
+                f"OAuth setup failed at {exc.step}: {exc}",
             ) from exc
         verifier, challenge = generate_pkce()
         conn_name = re.sub(r"[^a-z0-9_]", "_", f"mcp_{c.name.lower()}")[:64]
@@ -4856,24 +4987,31 @@ def create_dashboard_router(
             },
         )
         from urllib.parse import urlencode
-        params = urlencode({
-            "response_type": "code",
-            "client_id": client_id,
-            "redirect_uri": redirect_uri,
-            "state": state,
-            "code_challenge": challenge,
-            "code_challenge_method": "S256",
-            "resource": c.url,  # RFC 8707
-        })
+
+        params = urlencode(
+            {
+                "response_type": "code",
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "state": state,
+                "code_challenge": challenge,
+                "code_challenge_method": "S256",
+                "resource": c.url,  # RFC 8707
+            }
+        )
         sep = "&" if "?" in disco.authorization_endpoint else "?"
         return RedirectResponse(
-            f"{disco.authorization_endpoint}{sep}{params}", status_code=302,
+            f"{disco.authorization_endpoint}{sep}{params}",
+            status_code=302,
         )
 
     @api_router.get("/integrations/mcp/{name}/callback")
     async def mcp_connector_callback(
-        name: str, request: Request,
-        code: str = "", state: str = "", error: str = "",
+        name: str,
+        request: Request,
+        code: str = "",
+        state: str = "",
+        error: str = "",
     ):
         """AS redirect target for a remote MCP connector."""
         from fastapi.responses import RedirectResponse
@@ -4890,13 +5028,10 @@ def create_dashboard_router(
         if credential_vault is None or connector_store is None:
             return _back("integration_error=unavailable")
         pending = _oauth_state_store.consume(
-            state, session_hash=_oauth_session_hash(request),
+            state,
+            session_hash=_oauth_session_hash(request),
         )
-        if (
-            pending is None
-            or pending.provider != f"mcp:{name.lower()}"
-            or not code
-        ):
+        if pending is None or pending.provider != f"mcp:{name.lower()}" or not code:
             return _back("integration_error=invalid_state")
         extra = pending.extra
         try:
@@ -4930,12 +5065,16 @@ def create_dashboard_router(
         c = connector_store.get(name)
         if isinstance(c, HttpConnector):
             first_bind = c.auth.kind != "oauth" or not c.auth.connection
-            bound = c.model_copy(update={
-                "auth": ConnectorAuth(
-                    kind="oauth", connection=pending.connection_name,
-                ),
-            })
+            bound = c.model_copy(
+                update={
+                    "auth": ConnectorAuth(
+                        kind="oauth",
+                        connection=pending.connection_name,
+                    ),
+                }
+            )
             import asyncio as _asyncio
+
             await _asyncio.to_thread(connector_store.upsert, bound)
             if mcp_gateway is not None:
                 mcp_gateway.invalidate(c.name)
@@ -4943,7 +5082,9 @@ def create_dashboard_router(
                 connector_store.mark_dirty(_expand_assignment(bound.agents))
             logger.info(
                 "MCP connector connected: %s → %s (first_bind=%s)",
-                name, pending.connection_name, first_bind,
+                name,
+                pending.connection_name,
+                first_bind,
             )
         else:
             # Connector deleted (or replaced with stdio) mid-flow: the
@@ -4951,9 +5092,9 @@ def create_dashboard_router(
             # the integrations list, removable via disconnect. Say so
             # rather than claiming success silently.
             logger.warning(
-                "MCP OAuth callback for %r: connector no longer exists; "
-                "connection %r stored unbound",
-                name, pending.connection_name,
+                "MCP OAuth callback for %r: connector no longer exists; connection %r stored unbound",
+                name,
+                pending.connection_name,
             )
         _emit_config_changed("connectors", name=name)
         return _back(f"integration_connected={pending.connection_name}")
@@ -5049,6 +5190,7 @@ def create_dashboard_router(
         allowed, retry_ms = telemetry.check_rate_limit(session_id)
         if not allowed:
             from starlette.responses import JSONResponse
+
             return JSONResponse(
                 status_code=429,
                 content={
@@ -5114,6 +5256,7 @@ def create_dashboard_router(
 
         _emit_config_changed("wallet")
         from starlette.responses import JSONResponse
+
         return JSONResponse(
             content={"initialized": True, "seed": words, "sample_addresses": addresses},
             headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
@@ -5147,6 +5290,7 @@ def create_dashboard_router(
         if ws is None:
             try:
                 from src.host.wallet import WalletService
+
                 temp_ws = WalletService()
                 ws = temp_ws
             except Exception as e:
@@ -5161,10 +5305,7 @@ def create_dashboard_router(
 
             for aid in sorted(live_agents):
                 enabled = permissions.can_use_wallet(aid) if permissions else False
-                chains = (
-                    permissions.get_permissions(aid).wallet_allowed_chains
-                    if permissions else []
-                )
+                chains = permissions.get_permissions(aid).wallet_allowed_chains if permissions else []
                 status_entry: dict = {
                     "agent_id": aid,
                     "wallet_enabled": enabled,
@@ -5174,11 +5315,13 @@ def create_dashboard_router(
                     try:
                         evm = await ws.get_address(aid, "evm:ethereum")
                         sol = await ws.get_address(aid, "solana:mainnet")
-                        agents.append({
-                            "agent_id": aid,
-                            "evm_address": evm,
-                            "solana_address": sol,
-                        })
+                        agents.append(
+                            {
+                                "agent_id": aid,
+                                "evm_address": evm,
+                                "solana_address": sol,
+                            }
+                        )
                         status_entry["has_addresses"] = True
                     except Exception:
                         status_entry["has_addresses"] = False
@@ -5231,14 +5374,16 @@ def create_dashboard_router(
         for chain_id, cfg in _CHAINS.items():
             env_key = cfg["rpc_env"]
             custom = os.environ.get(env_key, "")
-            chains.append({
-                "chain_id": chain_id,
-                "label": _wallet_chain_label(chain_id, cfg),
-                "rpc_env": env_key,
-                "rpc_default": cfg["rpc_default"],
-                "rpc_current": custom or cfg["rpc_default"],
-                "is_custom": bool(custom),
-            })
+            chains.append(
+                {
+                    "chain_id": chain_id,
+                    "label": _wallet_chain_label(chain_id, cfg),
+                    "rpc_env": env_key,
+                    "rpc_default": cfg["rpc_default"],
+                    "rpc_current": custom or cfg["rpc_default"],
+                    "is_custom": bool(custom),
+                }
+            )
         return {"chains": chains}
 
     @api_router.put("/api/wallet/rpc")
@@ -5261,7 +5406,8 @@ def create_dashboard_router(
             # Validate URL format
             if not rpc_url.startswith(("http://", "https://")):
                 raise HTTPException(
-                    status_code=400, detail="RPC URL must start with http:// or https://",
+                    status_code=400,
+                    detail="RPC URL must start with http:// or https://",
                 )
             _persist_to_env(env_key, rpc_url)
             os.environ[env_key] = rpc_url
@@ -5341,7 +5487,8 @@ def create_dashboard_router(
 
     @api_router.get("/api/billing/captcha-rollup")
     async def api_billing_captcha_rollup(
-        tenant: str = "", period: str = "monthly",
+        tenant: str = "",
+        period: str = "monthly",
     ):
         """CSV export of per-tenant CAPTCHA spend rollup."""
         from datetime import datetime, timedelta, timezone
@@ -5355,8 +5502,7 @@ def create_dashboard_router(
         if period not in _VALID_BILLING_PERIODS:
             raise HTTPException(
                 400,
-                f"Invalid period {period!r}; "
-                f"expected one of {sorted(_VALID_BILLING_PERIODS)}",
+                f"Invalid period {period!r}; expected one of {sorted(_VALID_BILLING_PERIODS)}",
             )
 
         # Resolve the period_start timestamp — used as the first column
@@ -5365,15 +5511,25 @@ def create_dashboard_router(
         now = datetime.now(timezone.utc)
         if period == "daily":
             period_start = now.replace(
-                hour=0, minute=0, second=0, microsecond=0,
+                hour=0,
+                minute=0,
+                second=0,
+                microsecond=0,
             )
         elif period == "weekly":
             period_start = (now - timedelta(days=7)).replace(
-                hour=0, minute=0, second=0, microsecond=0,
+                hour=0,
+                minute=0,
+                second=0,
+                microsecond=0,
             )
         else:  # monthly
             period_start = now.replace(
-                day=1, hour=0, minute=0, second=0, microsecond=0,
+                day=1,
+                hour=0,
+                minute=0,
+                second=0,
+                microsecond=0,
             )
 
         # Walk per-agent buckets via the new tenant helpers. The
@@ -5388,16 +5544,14 @@ def create_dashboard_router(
         # against month-to-date numbers.
         breakdown = await _ccc.get_tenant_breakdown(tenant)
         total_millicents = await _ccc.get_tenant_total(
-            tenant, since=period_start,
+            tenant,
+            since=period_start,
         )
         # ``monthly_actual`` for monthly (the in-memory state IS the
         # current month, so the number is correct for the requested
         # period); ``current_month_aggregate`` for daily/weekly since
         # we surface month-to-date data with the requested period_start.
-        data_scope = (
-            "monthly_actual" if period == "monthly"
-            else "current_month_aggregate"
-        )
+        data_scope = "monthly_actual" if period == "monthly" else "current_month_aggregate"
 
         # CSV assembly — manual rather than ``csv`` module so we can
         # guarantee the row order (sorted agent_id, then synthetic
@@ -5406,24 +5560,18 @@ def create_dashboard_router(
         # so no quoting is needed for the agent_id column.  ``data_scope``
         # values are static literals — also no quoting needed.
         period_start_iso = period_start.isoformat().replace("+00:00", "Z")
-        lines: list[str] = [
-            "period_start,agent_id,millicents,dollars,data_scope"
-        ]
+        lines: list[str] = ["period_start,agent_id,millicents,dollars,data_scope"]
         for agent_id in sorted(breakdown):
             mc = breakdown[agent_id]
             dollars = mc / 100_000.0
-            lines.append(
-                f"{period_start_iso},{agent_id},{mc},{dollars:.5f},"
-                f"{data_scope}"
-            )
+            lines.append(f"{period_start_iso},{agent_id},{mc},{dollars:.5f},{data_scope}")
         # Synthetic tenant-total row — operators reading the CSV in a
         # spreadsheet immediately see the rolled-up number without
         # having to re-sum. Prefix the agent_id column with double
         # underscores so it sorts after real agent IDs and is visually
         # distinct.
         lines.append(
-            f"{period_start_iso},__tenant_total__,{total_millicents},"
-            f"{total_millicents / 100_000.0:.5f},{data_scope}"
+            f"{period_start_iso},__tenant_total__,{total_millicents},{total_millicents / 100_000.0:.5f},{data_scope}"
         )
         body = "\n".join(lines) + "\n"
         # Sanitize the tenant for the Content-Disposition filename —
@@ -5453,17 +5601,19 @@ def create_dashboard_router(
         sorted_teams = sorted(teams_cfg.items(), key=lambda x: x[1].get("created_at") or "")
         for i, (pname, pdata) in enumerate(sorted_teams):
             is_over = _teams_disabled or (_max_teams > 0 and i >= _max_teams)
-            result.append({
-                "name": pname,
-                "team_name": pname,
-                "description": pdata.get("description", ""),
-                "members": pdata.get("members", []),
-                "created_at": pdata.get("created_at", ""),
-                "over_limit": is_over,
-                # Team goal (set via the operator's set_team_goal tool). Surfaced
-                # so the team hub can show it; null until set.
-                "north_star": pdata.get("north_star"),
-            })
+            result.append(
+                {
+                    "name": pname,
+                    "team_name": pname,
+                    "description": pdata.get("description", ""),
+                    "members": pdata.get("members", []),
+                    "created_at": pdata.get("created_at", ""),
+                    "over_limit": is_over,
+                    # Team goal (set via the operator's set_team_goal tool). Surfaced
+                    # so the team hub can show it; null until set.
+                    "north_star": pdata.get("north_star"),
+                }
+            )
         return {"teams": result}
 
     @api_router.post("/api/teams")
@@ -5486,6 +5636,7 @@ def create_dashboard_router(
             _load_config,
             _remove_team_blackboard_permissions,
         )
+
         body = await request.json()
         name = body.get("name", "").strip()
         description = sanitize_for_prompt(body.get("description", "")).strip()
@@ -5497,6 +5648,18 @@ def create_dashboard_router(
         # Validate that member agents exist in the config
         cfg = _load_config()
         known_agents = set(cfg.get("agents", {}).keys())
+        # Cross-namespace collision guard (ratified #5): a solo agent's
+        # blackboard scope is ``teams/{agent_id}/*``, so a team named after
+        # an existing agent would collide with that agent's private
+        # namespace. Mirrors the mesh /mesh/teams create guard.
+        if name in known_agents or name in agent_registry:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Team name '{name}' conflicts with an existing agent — "
+                    "teams and agents share one namespace. Pick a different name."
+                ),
+            )
         unknown = [m for m in members if m not in known_agents]
         if unknown:
             raise HTTPException(status_code=400, detail=f"Unknown agents: {', '.join(unknown)}")
@@ -5516,6 +5679,10 @@ def create_dashboard_router(
             if old and old != name:
                 _remove_team_blackboard_permissions(agent, old)
             _add_team_blackboard_permissions(agent, name)
+        if members:
+            # Refresh the LIVE matrix so the new members' team patterns
+            # apply immediately (disk writes alone wait for a restart).
+            permissions.reload()
         # Real-time cron lifecycle: schedule the daily work-summary
         # for the newly-created team. Without this, dashboard-created
         # teams went without a live cron until the next mesh restart
@@ -5525,20 +5692,21 @@ def create_dashboard_router(
         if cron_scheduler is not None:
             try:
                 persisted = teams_store.get_team(name) or {}
-                _custom_schedule = (
-                    (persisted.get("settings") or {}).get("summary_schedule")
-                )
+                _custom_schedule = (persisted.get("settings") or {}).get("summary_schedule")
                 cron_scheduler.ensure_summary_job(
-                    scope_kind="team", scope_id=name,
+                    scope_kind="team",
+                    scope_id=name,
                     schedule=_custom_schedule,
                 )
             except Exception as e:
                 logger.warning(
                     "ensure_summary_job on dashboard team-create %s failed: %s",
-                    name, e,
+                    name,
+                    e,
                 )
         _emit_team_event(
-            "team_created", agent="operator",
+            "team_created",
+            agent="operator",
             data={
                 "team_id": name,
                 "name": name,
@@ -5553,12 +5721,15 @@ def create_dashboard_router(
         """Delete a team and release its members."""
         from src.cli.config import _remove_team_blackboard_permissions
         from src.host.teams import TeamNotFound
+
         try:
             former_members = teams_store.delete_team(team_name)
         except TeamNotFound as e:
             raise HTTPException(status_code=404, detail=str(e))
         for agent in former_members:
             _remove_team_blackboard_permissions(agent, team_name)
+        if former_members:
+            permissions.reload()
         # Real-time cron lifecycle: drop the daily work-summary cron
         # for the deleted team. The mesh propose/confirm delete path
         # already does this; the dashboard direct-delete had to mirror
@@ -5572,10 +5743,12 @@ def create_dashboard_router(
             except Exception as e:
                 logger.warning(
                     "remove summary cron on dashboard team-delete %s failed: %s",
-                    team_name, e,
+                    team_name,
+                    e,
                 )
         _emit_team_event(
-            "team_deleted", agent="operator",
+            "team_deleted",
+            agent="operator",
             data={"team_id": team_name, "name": team_name},
         )
         return {"deleted": True, "name": team_name, "team_name": team_name}
@@ -5588,6 +5761,7 @@ def create_dashboard_router(
             _remove_team_blackboard_permissions,
         )
         from src.host.teams import TeamNotFound
+
         body = await request.json()
         agent = body.get("agent", "").strip()
         if not agent:
@@ -5599,6 +5773,7 @@ def create_dashboard_router(
         if old and old != team_name:
             _remove_team_blackboard_permissions(agent, old)
         _add_team_blackboard_permissions(agent, team_name)
+        permissions.reload()
         # Auto-restart the agent so new scope takes effect
         restarted = False
         if transport is not None and agent in agent_registry:
@@ -5608,7 +5783,8 @@ def create_dashboard_router(
             except Exception as e:
                 logger.warning("Failed to restart agent %s after team change: %s", agent, e)
         _emit_team_event(
-            "team_updated", agent="operator",
+            "team_updated",
+            agent="operator",
             data={
                 "team_id": team_name,
                 "name": team_name,
@@ -5627,10 +5803,12 @@ def create_dashboard_router(
     async def api_teams_remove_member(team_name: str, agent: str) -> dict:
         """Remove a member agent from a team."""
         from src.cli.config import _remove_team_blackboard_permissions
+
         if not teams_store.team_exists(team_name):
             raise HTTPException(status_code=400, detail=f"Team '{team_name}' not found")
         teams_store.remove_member(team_name, agent)
         _remove_team_blackboard_permissions(agent, team_name)
+        permissions.reload()
         # Auto-restart the agent so new scope takes effect
         restarted = False
         if transport is not None and agent in agent_registry:
@@ -5640,7 +5818,8 @@ def create_dashboard_router(
             except Exception as e:
                 logger.warning("Failed to restart agent %s after team change: %s", agent, e)
         _emit_team_event(
-            "team_updated", agent="operator",
+            "team_updated",
+            agent="operator",
             data={
                 "team_id": team_name,
                 "name": team_name,
@@ -5661,6 +5840,7 @@ def create_dashboard_router(
         """Validate a team name and return the path to its team.md."""
         from src.cli.config import TEAMS_DIR
         from src.host.teams import validate_team_id
+
         try:
             validate_team_id(team)
         except ValueError:
@@ -5714,8 +5894,11 @@ def create_dashboard_router(
             async def _push(aid: str) -> tuple[str, bool]:
                 try:
                     await transport.request(
-                        aid, "PUT", "/team",
-                        json={"content": content}, timeout=10,
+                        aid,
+                        "PUT",
+                        "/team",
+                        json={"content": content},
+                        timeout=10,
                     )
                     return aid, True
                 except Exception as e:
@@ -5728,7 +5911,8 @@ def create_dashboard_router(
                 push_results[aid] = ok
 
         _emit_team_event(
-            "team_updated", agent="operator",
+            "team_updated",
+            agent="operator",
             data={
                 "team_id": team,
                 "name": team,
@@ -5759,8 +5943,7 @@ def create_dashboard_router(
             parsed = json.loads(data)
             if isinstance(parsed, dict):
                 result["agent"] = parsed.get("source", parsed.get("agent", ""))
-                for f in ("text", "summary", "status", "message",
-                          "description", "name", "result"):
+                for f in ("text", "summary", "status", "message", "description", "name", "result"):
                     if f in parsed and isinstance(parsed[f], str):
                         result["preview"] = parsed[f][:200]
                         break
@@ -5791,8 +5974,7 @@ def create_dashboard_router(
                 ).fetchall()
             else:
                 rows = blackboard.db.execute(
-                    "SELECT event_type, key, agent_id, data, timestamp "
-                    "FROM event_log ORDER BY id DESC LIMIT ?",
+                    "SELECT event_type, key, agent_id, data, timestamp FROM event_log ORDER BY id DESC LIMIT ?",
                     (limit,),
                 ).fetchall()
             for event_type, key, agent_id, data, ts in rows:
@@ -5817,15 +5999,12 @@ def create_dashboard_router(
             try:
                 if team_prefix:
                     rows = pubsub._db.execute(
-                        "SELECT topic, data, created_at "
-                        "FROM events WHERE topic LIKE ? "
-                        "ORDER BY id DESC LIMIT ?",
+                        "SELECT topic, data, created_at FROM events WHERE topic LIKE ? ORDER BY id DESC LIMIT ?",
                         (team_prefix + "%", limit),
                     ).fetchall()
                 else:
                     rows = pubsub._db.execute(
-                        "SELECT topic, data, created_at "
-                        "FROM events ORDER BY id DESC LIMIT ?",
+                        "SELECT topic, data, created_at FROM events ORDER BY id DESC LIMIT ?",
                         (limit,),
                     ).fetchall()
                 for topic, data, ts in rows:
@@ -5890,7 +6069,8 @@ def create_dashboard_router(
         if event_bus is not None:
             try:
                 event_bus.emit(
-                    "blackboard_delete", agent="operator",
+                    "blackboard_delete",
+                    agent="operator",
                     data={"key": key, "deleted_by": "operator"},
                 )
             except Exception as e:
@@ -5928,8 +6108,11 @@ def create_dashboard_router(
             return {"events": [], "total": 0}
         limit = max(1, min(limit, 1000))
         events = trace_store.query(
-            agent=agent, event_type=event_type,
-            since=since, until=until, limit=limit,
+            agent=agent,
+            event_type=event_type,
+            since=since,
+            until=until,
+            limit=limit,
         )
         return {"events": events, "total": len(events)}
 
@@ -5947,13 +6130,17 @@ def create_dashboard_router(
         action_filter = request.query_params.get("action", "")
         since = request.query_params.get("since", "")
         include_archived = request.query_params.get(
-            "include_archived", "",
+            "include_archived",
+            "",
         ).lower() in ("1", "true", "yes", "on")
         if blackboard is None:
             return {"entries": [], "total": 0, "page": page, "per_page": per_page}
         return blackboard.get_audit_log(
-            page=page, per_page=per_page, agent_id=agent_id,
-            action=action_filter, since=since,
+            page=page,
+            per_page=per_page,
+            agent_id=agent_id,
+            action=action_filter,
+            since=since,
             include_archived=include_archived,
         )
 
@@ -5988,6 +6175,7 @@ def create_dashboard_router(
         if not before_date or not isinstance(before_date, str):
             raise HTTPException(400, "before_date is required (ISO 8601 string)")
         import httpx
+
         url = f"http://127.0.0.1:{mesh_port}/mesh/audit/archive"
         try:
             async with httpx.AsyncClient(timeout=30) as client:
@@ -6026,6 +6214,7 @@ def create_dashboard_router(
         initial position.
         """
         import httpx
+
         url = f"http://127.0.0.1:{mesh_port}/mesh/operator/internet-access"
         try:
             async with httpx.AsyncClient(timeout=10) as client:
@@ -6067,6 +6256,7 @@ def create_dashboard_router(
         if not isinstance(enabled, bool):
             raise HTTPException(400, "'enabled' must be a boolean")
         import httpx
+
         url = f"http://127.0.0.1:{mesh_port}/mesh/operator/internet-access"
         try:
             async with httpx.AsyncClient(timeout=15) as client:
@@ -6101,6 +6291,7 @@ def create_dashboard_router(
         Operator Settings UI calls this on mount to render the toggle.
         """
         import httpx
+
         url = f"http://127.0.0.1:{mesh_port}/mesh/operator/browser-access"
         try:
             async with httpx.AsyncClient(timeout=10) as client:
@@ -6137,6 +6328,7 @@ def create_dashboard_router(
         if not isinstance(enabled, bool):
             raise HTTPException(400, "'enabled' must be a boolean")
         import httpx
+
         url = f"http://127.0.0.1:{mesh_port}/mesh/operator/browser-access"
         try:
             async with httpx.AsyncClient(timeout=15) as client:
@@ -6169,9 +6361,14 @@ def create_dashboard_router(
         # Merge with agent registry so all agents appear (even idle ones)
         queues = {}
         for agent_id in agent_registry:
-            queues[agent_id] = lane_status.get(agent_id, {
-                "queued": 0, "pending": 0, "busy": False,
-            })
+            queues[agent_id] = lane_status.get(
+                agent_id,
+                {
+                    "queued": 0,
+                    "pending": 0,
+                    "busy": False,
+                },
+            )
         # Include any lanes for agents not in registry (shouldn't happen, but safe)
         for agent_id, status in lane_status.items():
             if agent_id not in queues:
@@ -6222,6 +6419,7 @@ def create_dashboard_router(
         # immediately.  Agent execution can take minutes; blocking the request
         # made the dashboard Run button appear stuck.
         import asyncio
+
         task = asyncio.create_task(cron_scheduler.run_job(job_id))
         task.add_done_callback(_log_cron_task_exception)
         return {"triggered": True, "job_id": job_id}
@@ -6292,7 +6490,8 @@ def create_dashboard_router(
         _curated_llm_names = set(cred_names) & _llm_key_names  # curated provider keys present
         has_oauth = (
             (credential_vault._has_anthropic_oauth() or credential_vault._has_openai_oauth())
-            if credential_vault else False
+            if credential_vault
+            else False
         )
         has_byok_keys = bool(_curated_llm_names) or has_oauth
 
@@ -6302,10 +6501,7 @@ def create_dashboard_router(
         available_provider_models: dict[str, list[str]] = {}
         if credential_vault:
             active_providers = credential_vault.get_providers_with_credentials()
-            available_provider_models = {
-                p: models for p, models in _PROVIDER_MODELS.items()
-                if p in active_providers
-            }
+            available_provider_models = {p: models for p, models in _PROVIDER_MODELS.items() if p in active_providers}
 
             # Merge custom LLM providers from settings
             settings = _load_settings()
@@ -6321,9 +6517,7 @@ def create_dashboard_router(
                 if discovered:
                     featured = available_provider_models.get("ollama", [])
                     discovered_set = set(discovered)
-                    merged = discovered + [
-                        m for m in featured if m not in discovered_set
-                    ]
+                    merged = discovered + [m for m in featured if m not in discovered_set]
                     available_provider_models["ollama"] = merged
                     has_llm = True
             except Exception:
@@ -6335,6 +6529,7 @@ def create_dashboard_router(
                 ol_models, ol_pricing = await credential_vault.discover_openlegion_models()
                 if ol_models:
                     from src.shared.models import set_gateway_pricing
+
                     set_gateway_pricing(ol_pricing)
                     featured = available_provider_models.get("openlegion", [])
                     featured_set = set(featured)
@@ -6351,6 +6546,7 @@ def create_dashboard_router(
         # same prices that the credit proxy actually charges.
         if "openlegion" in available_provider_models:
             from src.shared.models import get_gateway_pricing
+
             for gw_model, cost in get_gateway_pricing().items():
                 all_costs[f"openlegion/{gw_model}"] = cost
 
@@ -6389,10 +6585,12 @@ def create_dashboard_router(
     def _save_settings(settings: dict) -> None:
         """Persist settings to config/settings.json (atomic write)."""
         import tempfile
+
         _SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
         content = json.dumps(settings, indent=2) + "\n"
         fd, tmp_path = tempfile.mkstemp(
-            dir=str(_SETTINGS_PATH.parent), suffix=".tmp",
+            dir=str(_SETTINGS_PATH.parent),
+            suffix=".tmp",
         )
         try:
             with os.fdopen(fd, "w") as f:
@@ -6469,9 +6667,9 @@ def create_dashboard_router(
             _save_settings(settings)
 
         # Push to browser service immediately
-        if runtime and hasattr(runtime, 'browser_service_url') and runtime.browser_service_url:
+        if runtime and hasattr(runtime, "browser_service_url") and runtime.browser_service_url:
             try:
-                browser_auth = getattr(runtime, 'browser_auth_token', '')
+                browser_auth = getattr(runtime, "browser_auth_token", "")
                 headers = {}
                 if browser_auth:
                     headers["Authorization"] = f"Bearer {browser_auth}"
@@ -6561,10 +6759,7 @@ def create_dashboard_router(
         "health_restart_limit": (int, 0, 20),
         "health_restart_window": (int, 60, 86400),
         # Execution limits sourced from limits.py (default, lo, hi).
-        **{
-            k: (int, _limits.LIMIT_SPECS[k][1], _limits.LIMIT_SPECS[k][2])
-            for k in _LIMIT_KEYS
-        },
+        **{k: (int, _limits.LIMIT_SPECS[k][1], _limits.LIMIT_SPECS[k][2]) for k in _LIMIT_KEYS},
     }
 
     # Settings seeded into agent containers as env vars at launch — they
@@ -6573,12 +6768,17 @@ def create_dashboard_router(
     # one of these changes so the user never has stale config silently
     # in effect. Budgets are per-new-agent defaults and health_* apply
     # live above, so neither needs a restart.
-    _RESTART_REQUIRED_SETTINGS: frozenset[str] = frozenset({
-        "max_iterations", "chat_max_tool_rounds",
-        "chat_max_total_rounds", "tool_timeout",
-        "task_max_tool_rounds", "llm_timeout_seconds",
-        "lane_timeout_seconds",
-    })
+    _RESTART_REQUIRED_SETTINGS: frozenset[str] = frozenset(
+        {
+            "max_iterations",
+            "chat_max_tool_rounds",
+            "chat_max_total_rounds",
+            "tool_timeout",
+            "task_max_tool_rounds",
+            "llm_timeout_seconds",
+            "lane_timeout_seconds",
+        }
+    )
 
     from src.host.costs import DEFAULT_DAILY_BUDGET_USD, DEFAULT_MONTHLY_BUDGET_USD
 
@@ -6602,6 +6802,7 @@ def create_dashboard_router(
     async def api_get_system_settings() -> dict:
         """Return all system settings with defaults."""
         from src.cli.config import _load_config
+
         settings = _load_settings()
         result = {}
         for key, default in _SYSTEM_SETTINGS_DEFAULTS.items():
@@ -6634,20 +6835,14 @@ def create_dashboard_router(
         # claim ON after the key was removed. A "custom" model outside the
         # ladder can't be verified here, so it's trusted.
         on = str(eff_model).lower() != "none"
-        if (
-            on and raw_embed is not None
-            and configured_provider != "custom"
-            and configured_provider not in keyed
-        ):
+        if on and raw_embed is not None and configured_provider != "custom" and configured_provider not in keyed:
             on = False
         result["embedding"] = {
             "configured": raw_embed,
             "configured_provider": configured_provider,
             "effective_model": eff_model,
             "on": on,
-            "available_providers": [
-                p for p, _m, _d in _EMBEDDING_PROVIDER_LADDER if p in keyed
-            ],
+            "available_providers": [p for p, _m, _d in _EMBEDDING_PROVIDER_LADDER if p in keyed],
         }
         return result
 
@@ -6700,6 +6895,7 @@ def create_dashboard_router(
     async def api_set_default_model(request: Request) -> dict:
         """Update the default LLM model in mesh.yaml."""
         import yaml
+
         body = await request.json()
         model = body.get("model", "").strip()
         if not model:
@@ -6749,9 +6945,7 @@ def create_dashboard_router(
         elif value.lower() == "none":
             stored = "none"
         else:
-            model = next(
-                (m for p, m, _d in _EMBEDDING_PROVIDER_LADDER if p == value), None
-            )
+            model = next((m for p, m, _d in _EMBEDDING_PROVIDER_LADDER if p == value), None)
             if model is None:
                 raise HTTPException(400, f"Unknown embedding provider: {value}")
             # Reject a provider with no configured key — persisting it would
@@ -6760,7 +6954,8 @@ def create_dashboard_router(
             # matching the model-allowlist convention used elsewhere.
             if value not in _embedding_providers_with_keys():
                 raise HTTPException(
-                    400, f"No API key configured for embedding provider: {value}",
+                    400,
+                    f"No API key configured for embedding provider: {value}",
                 )
             stored = model
 
@@ -6785,7 +6980,8 @@ def create_dashboard_router(
         # UI reports the new model active.
         if runtime is not None:
             eff_model, eff_dim = _resolve_embedding(
-                stored, _embedding_providers_with_keys(),
+                stored,
+                _embedding_providers_with_keys(),
             )
             runtime.extra_env["EMBEDDING_MODEL"] = eff_model
             runtime.extra_env["EMBEDDING_DIM"] = str(eff_dim)
@@ -6879,9 +7075,14 @@ def create_dashboard_router(
                     # Mirrors the single-agent restart path; default True
                     # matches the operator-by-default UX.
                     try:
-                        _op_perms = _load_permissions().get(
-                            "permissions", {},
-                        ).get(_OPERATOR_AGENT_ID, {})
+                        _op_perms = (
+                            _load_permissions()
+                            .get(
+                                "permissions",
+                                {},
+                            )
+                            .get(_OPERATOR_AGENT_ID, {})
+                        )
                         _restart_env["OL_INTERNET_ACCESS_ENABLED"] = (
                             "true" if _op_perms.get("can_use_internet", True) else "false"
                         )
@@ -6893,13 +7094,15 @@ def create_dashboard_router(
                         _restart_env["OL_BROWSER_ACCESS_ENABLED"] = "true"
                 _proxy_url = resolve_agent_proxy(agent_id, agents_cfg, _network_cfg)
                 _proxy_env = build_proxy_env_vars(
-                    _proxy_url, _network_cfg.get("no_proxy", ""),
+                    _proxy_url,
+                    _network_cfg.get("no_proxy", ""),
                 )
                 _restart_env.update(_proxy_env)
                 # Per-agent output-token cap → LLM_MAX_TOKENS (survives the
                 # dashboard "restart all agents" flow, not just hot-reload).
                 set_llm_max_tokens_env(_restart_env, agent_cfg)
                 from src.shared.limits import set_llm_limits_env
+
                 set_llm_limits_env(_restart_env, agent_cfg)
                 url = await loop.run_in_executor(
                     None,
@@ -6918,6 +7121,7 @@ def create_dashboard_router(
                     agent_registry[agent_id] = url
                 if transport is not None:
                     from src.host.transport import HttpTransport
+
                     if isinstance(transport, HttpTransport):
                         transport.register(agent_id, url)
                 ready = await runtime.wait_for_agent(agent_id, timeout=60)
@@ -6927,9 +7131,7 @@ def create_dashboard_router(
                 logger.error("Failed to restart agent '%s': %s", agent_id, e)
                 return (agent_id, f"error: {e}")
 
-        agent_results = await _asyncio.gather(
-            *[_restart_one(aid) for aid in list(agent_registry.keys())]
-        )
+        agent_results = await _asyncio.gather(*[_restart_one(aid) for aid in list(agent_registry.keys())])
         results = dict(agent_results)
 
         return {"restarted": results}
@@ -6965,10 +7167,7 @@ def create_dashboard_router(
             top = rel.split(os.sep, 1)[0] if rel != "." else ""
 
             # Prune skipped directories so os.walk doesn't descend
-            dirnames[:] = [
-                d for d in dirnames
-                if (d if rel == "." else top) not in _STORAGE_SKIP_DIRS
-            ]
+            dirnames[:] = [d for d in dirnames if (d if rel == "." else top) not in _STORAGE_SKIP_DIRS]
 
             for name in filenames:
                 fpath = os.path.join(dirpath, name)
@@ -7018,11 +7217,14 @@ def create_dashboard_router(
         import asyncio
 
         project_root = (
-            runtime.project_root if runtime and hasattr(runtime, "project_root")
+            runtime.project_root
+            if runtime and hasattr(runtime, "project_root")
             else Path(__file__).resolve().parent.parent.parent
         )
         return await asyncio.get_running_loop().run_in_executor(
-            None, _scan_storage, project_root,
+            None,
+            _scan_storage,
+            project_root,
         )
 
     # ── Database details ─────────────────────────────────────
@@ -7134,9 +7336,7 @@ def create_dashboard_router(
                                             oldest_ts = val
                                     else:
                                         try:
-                                            dt = _dt.fromisoformat(
-                                                str(row[0]).replace(" ", "T")
-                                            )
+                                            dt = _dt.fromisoformat(str(row[0]).replace(" ", "T"))
                                             val = dt.replace(tzinfo=_tz.utc).timestamp()
                                             if oldest_ts is None or val < oldest_ts:
                                                 oldest_ts = val
@@ -7161,11 +7361,14 @@ def create_dashboard_router(
         import asyncio
 
         project_root = (
-            runtime.project_root if runtime and hasattr(runtime, "project_root")
+            runtime.project_root
+            if runtime and hasattr(runtime, "project_root")
             else Path(__file__).resolve().parent.parent.parent
         )
         databases = await asyncio.get_running_loop().run_in_executor(
-            None, _scan_database_details, project_root,
+            None,
+            _scan_database_details,
+            project_root,
         )
         return {"databases": databases}
 
@@ -7190,7 +7393,8 @@ def create_dashboard_router(
             older_than_days = int(older_than_days)
 
         project_root = (
-            runtime.project_root if runtime and hasattr(runtime, "project_root")
+            runtime.project_root
+            if runtime and hasattr(runtime, "project_root")
             else Path(__file__).resolve().parent.parent.parent
         )
 
@@ -7415,19 +7619,26 @@ def create_dashboard_router(
 
     # ── Agent Workspace (proxy to agent) ─────────────────────
 
-    _WORKSPACE_ALLOWLIST = frozenset({
-        "SOUL.md", "HEARTBEAT.md", "USER.md", "INSTRUCTIONS.md", "AGENTS.md", "MEMORY.md",
-        "INTERFACE.md",
-        # NOTE: GOALS.md / GOALS.json are intentionally NOT listed here.
-        # The dashboard exposes goals via the dedicated
-        # ``GET /api/workplace/goals`` read endpoint (which calls
-        # transport.request directly, bypassing this allowlist). The
-        # workspace editor's PUT proxy would inject the mesh-internal
-        # header and let a cookie-authed user write raw JSON to
-        # GOALS.json, bypassing the ``manage_goals`` tool's validation.
-        # The agent-side allowlist keeps both files so the tool's read
-        # path (``/workspace/GOALS.json`` over transport) still works.
-    })
+    _WORKSPACE_ALLOWLIST = frozenset(
+        {
+            "SOUL.md",
+            "HEARTBEAT.md",
+            "USER.md",
+            "INSTRUCTIONS.md",
+            "AGENTS.md",
+            "MEMORY.md",
+            "INTERFACE.md",
+            # NOTE: GOALS.md / GOALS.json are intentionally NOT listed here.
+            # The dashboard exposes goals via the dedicated
+            # ``GET /api/workplace/goals`` read endpoint (which calls
+            # transport.request directly, bypassing this allowlist). The
+            # workspace editor's PUT proxy would inject the mesh-internal
+            # header and let a cookie-authed user write raw JSON to
+            # GOALS.json, bypassing the ``manage_goals`` tool's validation.
+            # The agent-side allowlist keeps both files so the tool's read
+            # path (``/workspace/GOALS.json`` over transport) still works.
+        }
+    )
 
     @api_router.get("/api/agents/{agent_id}/workspace")
     async def api_agent_workspace(agent_id: str) -> dict:
@@ -7450,7 +7661,10 @@ def create_dashboard_router(
             raise HTTPException(status_code=503, detail="Transport not available")
         try:
             return await transport.request(
-                agent_id, "GET", f"/workspace/{filename}", timeout=10,
+                agent_id,
+                "GET",
+                f"/workspace/{filename}",
+                timeout=10,
             )
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
@@ -7477,15 +7691,16 @@ def create_dashboard_router(
         # Gated narrowly to operator + identity files to avoid an
         # audit-write on every dashboard workspace save.
         is_operator_identity_edit = (
-            agent_id == "operator"
-            and filename in ("SOUL.md", "INSTRUCTIONS.md")
-            and blackboard is not None
+            agent_id == "operator" and filename in ("SOUL.md", "INSTRUCTIONS.md") and blackboard is not None
         )
         before_value: str = ""
         if is_operator_identity_edit:
             try:
                 prior = await transport.request(
-                    agent_id, "GET", f"/workspace/{filename}", timeout=10,
+                    agent_id,
+                    "GET",
+                    f"/workspace/{filename}",
+                    timeout=10,
                 )
                 if isinstance(prior, dict):
                     before_value = str(prior.get("content") or "")
@@ -7494,12 +7709,16 @@ def create_dashboard_router(
                 # an empty before_value rather than blocking the edit.
                 logger.warning(
                     "operator workspace pre-fetch failed for %s: %s",
-                    filename, e,
+                    filename,
+                    e,
                 )
         try:
             result = await transport.request(
-                agent_id, "PUT", f"/workspace/{filename}",
-                json={"content": content}, timeout=10,
+                agent_id,
+                "PUT",
+                f"/workspace/{filename}",
+                json={"content": content},
+                timeout=10,
             )
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
@@ -7516,11 +7735,11 @@ def create_dashboard_router(
                 )
             except Exception as e:
                 logger.warning(
-                    "Failed to write operator workspace audit row: %s", e,
+                    "Failed to write operator workspace audit row: %s",
+                    e,
                 )
         if event_bus is not None:
-            event_bus.emit("workspace_updated", agent=agent_id,
-                           data={"message": f"Dashboard updated {filename}"})
+            event_bus.emit("workspace_updated", agent=agent_id, data={"message": f"Dashboard updated {filename}"})
         return result
 
     # ── Agent Workspace Logs + Learnings (proxy to agent) ─────
@@ -7534,7 +7753,10 @@ def create_dashboard_router(
         days = max(1, min(days, 14))
         try:
             return await transport.request(
-                agent_id, "GET", f"/workspace-logs?days={days}", timeout=10,
+                agent_id,
+                "GET",
+                f"/workspace-logs?days={days}",
+                timeout=10,
             )
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
@@ -7547,7 +7769,10 @@ def create_dashboard_router(
             raise HTTPException(status_code=503, detail="Transport not available")
         try:
             return await transport.request(
-                agent_id, "GET", "/workspace-learnings", timeout=10,
+                agent_id,
+                "GET",
+                "/workspace-learnings",
+                timeout=10,
             )
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
@@ -7653,9 +7878,7 @@ def create_dashboard_router(
             "set": True,
             "agent_id": agent_id,
             "count": len(cleaned),
-            "note": (
-                "Takes effect on the agent's next prompt build (<=5 min cache)."
-            ),
+            "note": ("Takes effect on the agent's next prompt build (<=5 min cache)."),
         }
 
     # ── Agent Activity Log ────────────────────────────────────
@@ -7669,7 +7892,10 @@ def create_dashboard_router(
         limit = max(1, min(limit, 500))
         try:
             return await transport.request(
-                agent_id, "GET", f"/activity?limit={limit}", timeout=10,
+                agent_id,
+                "GET",
+                f"/activity?limit={limit}",
+                timeout=10,
             )
         except Exception as e:
             raise HTTPException(status_code=502, detail=str(e))
@@ -7690,7 +7916,7 @@ def create_dashboard_router(
 
         if level:
             level_upper = level.upper()
-            level_pat = re.compile(r'\b' + re.escape(level_upper) + r'\b')
+            level_pat = re.compile(r"\b" + re.escape(level_upper) + r"\b")
             all_lines = [ln for ln in all_lines if level_pat.search(ln.upper())]
 
         result_lines = all_lines[-lines:]
@@ -7713,7 +7939,8 @@ def create_dashboard_router(
 
     def _uploads_dir() -> Path:
         root = (
-            runtime.project_root if runtime and hasattr(runtime, "project_root")
+            runtime.project_root
+            if runtime and hasattr(runtime, "project_root")
             else Path(__file__).resolve().parent.parent.parent
         )
         d = root / ".openlegion" / "uploads"
@@ -7746,6 +7973,7 @@ def create_dashboard_router(
     async def api_list_uploads() -> dict:
         """List all files in the uploads directory."""
         import mimetypes
+
         root = _uploads_dir()
         entries = []
         for f in sorted(root.rglob("*")):
@@ -7754,12 +7982,14 @@ def create_dashboard_router(
             rel = str(f.relative_to(root))
             stat = f.stat()
             mime = mimetypes.guess_type(rel)[0] or "application/octet-stream"
-            entries.append({
-                "name": rel,
-                "size": stat.st_size,
-                "modified": stat.st_mtime,
-                "mime_type": mime,
-            })
+            entries.append(
+                {
+                    "name": rel,
+                    "size": stat.st_size,
+                    "modified": stat.st_mtime,
+                    "mime_type": mime,
+                }
+            )
         return {"uploads": entries}
 
     @api_router.post("/api/uploads/{name:path}")
@@ -7787,6 +8017,7 @@ def create_dashboard_router(
         import mimetypes
 
         from fastapi.responses import Response
+
         path = _safe_upload_path(name)
         if not path.exists() or not path.is_file():
             raise HTTPException(404, f"Upload not found: {name}")
@@ -7836,7 +8067,9 @@ def create_dashboard_router(
         try:
             if assignee:
                 rows = tasks_store.list_inbox(
-                    assignee, team_id=team_id, include_terminal=True,
+                    assignee,
+                    team_id=team_id,
+                    include_terminal=True,
                 )
             elif team_id:
                 rows = tasks_store.list_team(team_id)
@@ -7844,10 +8077,7 @@ def create_dashboard_router(
                 # Fleet-wide listing — operator-only data is acceptable
                 # because the dashboard is operator-authenticated.
                 with tasks_store._conn() as conn:
-                    sql = (
-                        f"SELECT {tasks_store._SELECT_COLS} FROM tasks "
-                        "ORDER BY created_at DESC LIMIT 500"
-                    )
+                    sql = f"SELECT {tasks_store._SELECT_COLS} FROM tasks ORDER BY created_at DESC LIMIT 500"
                     raw = conn.execute(sql).fetchall()
                 rows = [tasks_store._row_to_dict(r) for r in raw]
             if status:
@@ -7872,24 +8102,28 @@ def create_dashboard_router(
             for r in rows:
                 counts[r["status"]] = counts.get(r["status"], 0) + 1
                 if r["status"] == "blocked":
-                    blockers.append({
-                        "task_id": r["id"],
-                        "title": r["title"],
-                        "assignee": r["assignee"],
-                        "blocker_note": r.get("blocker_note") or "",
-                    })
-            result.append({
-                "name": pname,
-                "team_name": pname,
-                "description": pdata.get("description", ""),
-                "members": pdata.get("members", []),
-                "status": pdata.get("status", "active"),
-                "north_star": pdata.get("north_star"),
-                "success_criteria": pdata.get("success_criteria"),
-                "counts": counts,
-                "total": len(rows),
-                "blockers": blockers,
-            })
+                    blockers.append(
+                        {
+                            "task_id": r["id"],
+                            "title": r["title"],
+                            "assignee": r["assignee"],
+                            "blocker_note": r.get("blocker_note") or "",
+                        }
+                    )
+            result.append(
+                {
+                    "name": pname,
+                    "team_name": pname,
+                    "description": pdata.get("description", ""),
+                    "members": pdata.get("members", []),
+                    "status": pdata.get("status", "active"),
+                    "north_star": pdata.get("north_star"),
+                    "success_criteria": pdata.get("success_criteria"),
+                    "counts": counts,
+                    "total": len(rows),
+                    "blockers": blockers,
+                }
+            )
         return {"enabled": True, "teams": result}
 
     @api_router.get("/api/workplace/summaries")
@@ -7913,8 +8147,10 @@ def create_dashboard_router(
         offset = max(0, int(offset or 0))
         try:
             rows = summaries_store.list_recent(
-                scope_kind=scope_kind, scope_id=scope_id,
-                limit=limit, offset=offset,
+                scope_kind=scope_kind,
+                scope_id=scope_id,
+                limit=limit,
+                offset=offset,
             )
             summaries_store._safe_reap()
         except Exception as e:
@@ -7933,7 +8169,8 @@ def create_dashboard_router(
 
     @api_router.post("/api/workplace/summaries/{summary_id}/rating")
     async def api_workplace_summary_rate(
-        summary_id: str, request: Request,
+        summary_id: str,
+        request: Request,
     ) -> dict:
         """Operator persona (dashboard) records the user's rating.
 
@@ -7951,6 +8188,7 @@ def create_dashboard_router(
             RatingLocked,
             SummaryNotFound,
         )
+
         try:
             body = await request.json()
         except (json.JSONDecodeError, ValueError) as e:
@@ -7961,22 +8199,28 @@ def create_dashboard_router(
         feedback = body.get("feedback") or ""
         if rating not in VALID_RATINGS:
             raise HTTPException(
-                400, f"rating must be one of {sorted(VALID_RATINGS)}",
+                400,
+                f"rating must be one of {sorted(VALID_RATINGS)}",
             )
         if not isinstance(feedback, str):
             raise HTTPException(400, "feedback must be a string")
         feedback = feedback.strip()
         if len(feedback) > MAX_FEEDBACK_CHARS:
             raise HTTPException(
-                400, f"feedback exceeds {MAX_FEEDBACK_CHARS} chars",
+                400,
+                f"feedback exceeds {MAX_FEEDBACK_CHARS} chars",
             )
         if rating == "rework" and not feedback:
             raise HTTPException(
-                400, "feedback is required for rating='rework'",
+                400,
+                "feedback is required for rating='rework'",
             )
         try:
             return summaries_store.set_rating(
-                summary_id, rating, feedback or None, actor="operator",
+                summary_id,
+                rating,
+                feedback or None,
+                actor="operator",
             )
         except SummaryNotFound:
             raise HTTPException(404, f"Summary {summary_id!r} not found")
@@ -8002,7 +8246,10 @@ def create_dashboard_router(
             return empty
         try:
             payload = await transport.request(
-                "operator", "GET", "/workspace/GOALS.json", timeout=10,
+                "operator",
+                "GET",
+                "/workspace/GOALS.json",
+                timeout=10,
             )
         except Exception as e:
             # Log the real error for ops; surface a generic message to
@@ -8033,12 +8280,14 @@ def create_dashboard_router(
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
-            cleaned.append({
-                "name": str(entry.get("name", "")),
-                "status": str(entry.get("status", "")),
-                "progress_note": str(entry.get("progress_note", "")),
-                "updated_at": str(entry.get("updated_at", "")),
-            })
+            cleaned.append(
+                {
+                    "name": str(entry.get("name", "")),
+                    "status": str(entry.get("status", "")),
+                    "progress_note": str(entry.get("progress_note", "")),
+                    "updated_at": str(entry.get("updated_at", "")),
+                }
+            )
         return {"enabled": True, "goals": cleaned}
 
     @api_router.get("/api/workplace/blockers")
@@ -8071,8 +8320,9 @@ def create_dashboard_router(
         if tasks_store is None:
             return {"enabled": False, "pipelines": []}
         import time as _t
-        window_s = 24 * 3600   # show in-flight chains from the last day
-        slow_s = 300           # a working stage older than this reads as slow
+
+        window_s = 24 * 3600  # show in-flight chains from the last day
+        slow_s = 300  # a working stage older than this reads as slow
         _terminal = ("done", "failed", "cancelled")
         pipelines: list[dict] = []
         try:
@@ -8096,23 +8346,24 @@ def create_dashboard_router(
                     continue  # wholly terminal — not in-flight
                 stalled = any(
                     s.get("status") == "blocked"
-                    or (s.get("status") == "working"
-                        and (s.get("age_in_state_seconds") or 0) > slow_s)
+                    or (s.get("status") == "working" and (s.get("age_in_state_seconds") or 0) > slow_s)
                     for s in stages
                 )
-                pipelines.append({
-                    "root_task_id": root["id"],
-                    "title": root.get("title") or "",
-                    "assignee": root.get("assignee") or "",
-                    "created_at": root.get("created_at"),
-                    # origin lets the chat tab filter to ITS chains
-                    # (channel == "dashboard") for the watch chips.
-                    "origin": root.get("origin") or {},
-                    "updated_at": root.get("updated_at"),
-                    "stages": stages,
-                    "summary": snap.get("summary", {}),
-                    "stalled": stalled,
-                })
+                pipelines.append(
+                    {
+                        "root_task_id": root["id"],
+                        "title": root.get("title") or "",
+                        "assignee": root.get("assignee") or "",
+                        "created_at": root.get("created_at"),
+                        # origin lets the chat tab filter to ITS chains
+                        # (channel == "dashboard") for the watch chips.
+                        "origin": root.get("origin") or {},
+                        "updated_at": root.get("updated_at"),
+                        "stages": stages,
+                        "summary": snap.get("summary", {}),
+                        "stalled": stalled,
+                    }
+                )
         except Exception as e:
             logger.warning("workplace pipelines listing failed: %s", e)
             return {"enabled": True, "pipelines": []}
@@ -8133,6 +8384,7 @@ def create_dashboard_router(
         verbs; this is a GET so CSRF is not relevant.
         """
         import httpx
+
         url = f"http://127.0.0.1:{mesh_port}/mesh/pending"
         try:
             async with httpx.AsyncClient(timeout=10) as client:
@@ -8159,7 +8411,8 @@ def create_dashboard_router(
 
     @api_router.post("/api/workplace/pending/{nonce}/confirm")
     async def api_workplace_pending_confirm(
-        nonce: str, request: Request,
+        nonce: str,
+        request: Request,
     ) -> dict:
         """Confirm a pending action — backs every dashboard "Confirm" button.
 
@@ -8195,12 +8448,14 @@ def create_dashboard_router(
         payload_digest = body.get("payload_digest")
         from src.shared.trace import origin_header
         from src.shared.types import MessageOrigin
+
         origin = MessageOrigin(
             kind="human",
             channel="dashboard",
             user=_operator_session_id(request),
         )
         import httpx
+
         url = f"http://127.0.0.1:{mesh_port}/mesh/pending/{nonce}/confirm"
         fwd_body: dict = {}
         if payload_digest is not None:
@@ -8220,7 +8475,8 @@ def create_dashboard_router(
             raise HTTPException(502, f"Mesh unreachable: {e}")
         if resp.status_code == 404:
             raise HTTPException(
-                404, "Pending action not found or already expired",
+                404,
+                "Pending action not found or already expired",
             )
         if resp.status_code >= 400:
             try:
@@ -8247,6 +8503,7 @@ def create_dashboard_router(
         is still enforced by the global middleware.
         """
         import httpx
+
         url = f"http://127.0.0.1:{mesh_port}/mesh/pending/{nonce}/cancel"
         try:
             async with httpx.AsyncClient(timeout=10) as client:
@@ -8290,6 +8547,7 @@ def create_dashboard_router(
         (the dashboard is the trusted in-process caller).
         """
         import httpx
+
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.post(
@@ -8365,13 +8623,15 @@ def create_dashboard_router(
         if len(text) > _ARTIFACT_INLINE_CHAR_CAP:
             text = text[:_ARTIFACT_INLINE_CHAR_CAP]
             truncated = True
-        out.update({
-            "kind": "text",
-            "content": text,
-            "content_truncated": truncated,
-            "written_by": entry.written_by,
-            "updated_at": entry.updated_at,
-        })
+        out.update(
+            {
+                "kind": "text",
+                "content": text,
+                "content_truncated": truncated,
+                "written_by": entry.written_by,
+                "updated_at": entry.updated_at,
+            }
+        )
         return out
 
     @api_router.get("/api/workplace/tasks/{task_id}")
@@ -8412,7 +8672,8 @@ def create_dashboard_router(
 
     @api_router.post("/api/workplace/tasks/{task_id}/cancel")
     async def api_workplace_task_cancel(
-        task_id: str, request: Request,
+        task_id: str,
+        request: Request,
     ) -> dict:
         """Cancel a task — backs the [×] button on every kanban card.
 
@@ -8438,6 +8699,7 @@ def create_dashboard_router(
             body = {}
         reason = body.get("reason") or ""
         import httpx
+
         url = f"http://127.0.0.1:{mesh_port}/mesh/tasks/{task_id}/cancel"
         try:
             async with httpx.AsyncClient(timeout=10) as client:
@@ -8469,7 +8731,8 @@ def create_dashboard_router(
 
     @api_router.post("/api/workplace/tasks/{task_id}/outcome")
     async def api_workplace_task_outcome(
-        task_id: str, request: Request,
+        task_id: str,
+        request: Request,
     ) -> dict:
         """Record an operator outcome rating on a completed task.
 
@@ -8487,6 +8750,7 @@ def create_dashboard_router(
             InvalidStatusTransition,
             TaskNotFound,
         )
+
         try:
             body = await request.json()
         except (json.JSONDecodeError, ValueError) as e:
@@ -8505,18 +8769,23 @@ def create_dashboard_router(
         feedback = feedback.strip()
         if len(feedback) > MAX_FEEDBACK_CHARS:
             raise HTTPException(
-                400, f"feedback exceeds {MAX_FEEDBACK_CHARS} chars",
+                400,
+                f"feedback exceeds {MAX_FEEDBACK_CHARS} chars",
             )
         # Rework + reject require a non-empty comment so the agent /
         # audit trail has something to learn from. Accept can be
         # silent (the rating itself is the signal).
         if outcome in ("rework", "rejected") and not feedback:
             raise HTTPException(
-                400, f"feedback is required for outcome={outcome!r}",
+                400,
+                f"feedback is required for outcome={outcome!r}",
             )
         try:
             updated = tasks_store.set_outcome(
-                task_id, outcome, feedback or None, actor="operator",
+                task_id,
+                outcome,
+                feedback or None,
+                actor="operator",
             )
         except TaskNotFound as e:
             raise HTTPException(404, "Task not found") from e
@@ -8528,15 +8797,21 @@ def create_dashboard_router(
         # A1 — push actionable feedback into the rated agent's learnings
         # (best-effort; see src/host/feedback_push.py for the contract).
         from src.host.feedback_push import push_outcome_feedback
+
         push_status = await push_outcome_feedback(
-            transport, updated, outcome, feedback,
+            transport,
+            updated,
+            outcome,
+            feedback,
         )
         if push_status:
             result["feedback_push"] = push_status
         if outcome == "rework":
             try:
                 rework = tasks_store.create_rework_task(
-                    task_id, feedback, actor="operator",
+                    task_id,
+                    feedback,
+                    actor="operator",
                 )
             except (TaskNotFound, ValueError) as e:
                 # The outcome itself committed; surface the rework
@@ -8550,7 +8825,9 @@ def create_dashboard_router(
         return result
 
     async def _proxy_help_cancel(
-        kind: str, request_id: str, body: dict | None,
+        kind: str,
+        request_id: str,
+        body: dict | None,
     ) -> dict:
         """Proxy a Cancel-card click to the matching mesh endpoint.
 
@@ -8560,6 +8837,7 @@ def create_dashboard_router(
         round-trip — both processes are co-located in the runtime.
         """
         import httpx
+
         url = f"http://127.0.0.1:{mesh_port}/mesh/{kind}-request/{request_id}/cancel"
         try:
             async with httpx.AsyncClient(timeout=5) as client:
@@ -8593,11 +8871,13 @@ def create_dashboard_router(
         frontend renders an explicit error state on non-200.
         """
         import httpx
+
         url = f"http://127.0.0.1:{mesh_port}/mesh/help-requests"
         try:
             async with httpx.AsyncClient(timeout=5) as client:
                 resp = await client.get(
-                    url, headers={"x-mesh-internal": "1", "X-Agent-ID": "operator"},
+                    url,
+                    headers={"x-mesh-internal": "1", "X-Agent-ID": "operator"},
                 )
         except Exception as e:
             raise HTTPException(502, f"mesh help-requests proxy failed: {e}")
@@ -8607,7 +8887,8 @@ def create_dashboard_router(
 
     @api_router.post("/api/credential-request/{request_id}/cancel")
     async def api_credential_request_cancel(
-        request_id: str, request: Request,
+        request_id: str,
+        request: Request,
     ) -> dict:
         """Cancel an open credential-request card (PR 3)."""
         try:
@@ -8618,7 +8899,8 @@ def create_dashboard_router(
 
     @api_router.post("/api/browser-login-request/{request_id}/cancel")
     async def api_browser_login_request_cancel(
-        request_id: str, request: Request,
+        request_id: str,
+        request: Request,
     ) -> dict:
         """Cancel an open browser-login-request card (PR 3)."""
         try:
@@ -8629,7 +8911,8 @@ def create_dashboard_router(
 
     @api_router.post("/api/browser-captcha-help-request/{request_id}/cancel")
     async def api_browser_captcha_help_request_cancel(
-        request_id: str, request: Request,
+        request_id: str,
+        request: Request,
     ) -> dict:
         """Cancel an open browser-captcha-help-request card (PR 3)."""
         try:
@@ -8637,7 +8920,9 @@ def create_dashboard_router(
         except Exception:
             body = {}
         return await _proxy_help_cancel(
-            "browser-captcha-help", request_id, body,
+            "browser-captcha-help",
+            request_id,
+            body,
         )
 
     @api_router.get("/static/{file_path:path}")
@@ -8677,29 +8962,36 @@ def create_spa_catchall_router() -> APIRouter:
         if path.startswith(("mesh/", "dashboard/", "ws/", "channels/")):
             raise HTTPException(status_code=404, detail="Not found")
         from src.shared.models import KEYLESS_PROVIDERS, get_all_providers
+
         all_providers = get_all_providers()
         template = env.get_template("index.html")
         html = template.render(
-            ws_path="/ws/events", api_base="/dashboard/api", v=ASSET_VERSION,
+            ws_path="/ws/events",
+            api_base="/dashboard/api",
+            v=ASSET_VERSION,
             providers=[p for p in all_providers if p["name"] not in KEYLESS_PROVIDERS],
             all_providers=all_providers,
         )
-        return HTMLResponse(html, headers={
-            "Cache-Control": "no-store",
-            # M18: frame-ancestors 'self' + X-Frame-Options SAMEORIGIN guard
-            # against clickjacking. MUST be 'self'/SAMEORIGIN, NOT 'none'/DENY:
-            # the dashboard embeds the per-agent VNC viewer in a same-origin
-            # iframe via /agent-vnc/, so 'none' would break the viewer.
-            "X-Frame-Options": "SAMEORIGIN",
-            "Content-Security-Policy": (
-                "default-src 'self'; "
-                "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
-                "style-src 'self' 'unsafe-inline'; "
-                "connect-src 'self'; "
-                "frame-src 'self'; "
-                "frame-ancestors 'self'; "
-                "object-src 'none'"
-            ),
-        })
+        return HTMLResponse(
+            html,
+            headers={
+                "Cache-Control": "no-store",
+                # M18: frame-ancestors 'self' + X-Frame-Options SAMEORIGIN guard
+                # against clickjacking. MUST be 'self'/SAMEORIGIN, NOT 'none'/DENY:
+                # the dashboard embeds the per-agent VNC viewer in a same-origin
+                # iframe via /agent-vnc/, so 'none' would break the viewer.
+                "X-Frame-Options": "SAMEORIGIN",
+                "Content-Security-Policy": (
+                    "default-src 'self'; "
+                    "script-src 'self' 'unsafe-inline' 'unsafe-eval' "
+                    "https://cdn.tailwindcss.com https://cdn.jsdelivr.net; "
+                    "style-src 'self' 'unsafe-inline'; "
+                    "connect-src 'self'; "
+                    "frame-src 'self'; "
+                    "frame-ancestors 'self'; "
+                    "object-src 'none'"
+                ),
+            },
+        )
 
     return catchall

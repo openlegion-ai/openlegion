@@ -243,11 +243,11 @@ the storage prefix is `teams/...`.)
 ### How It Works
 
 - **Blackboard scoping**: The `MeshClient` auto-prefixes all blackboard keys with `teams/{name}/`. An agent writing to `tasks/research_01` on the "sales" team actually writes to `teams/sales/tasks/research_01`. Agents see natural keys — the prefix is stripped on read. This is enforced at both the client (auto-namespacing) and server (permission matrix) layers.
-- **Agent visibility**: `list_agents` returns only team peers for team agents, or only the agent itself for solo agents.
+- **Agent visibility**: `list_agents` returns only team peers for team agents, or itself plus the operator for solo agents.
 - **TEAM.md**: Only team members receive a `TEAM.md` mounted read-only into their container at `/app/TEAM.md`. Solo agents get none.
-- **Permission management on agent create**: `POST /mesh/agents/create` writes defaults of `blackboard_read=["*"]`, `blackboard_write=["tasks/*","context/*","status/*","output/*","artifacts/*"]`, `can_publish=["*"]`, `can_subscribe=["*"]` (`src/host/server.py:4020-4021`). The effective per-team scope comes from the MeshClient's auto-prefix at runtime, not from the on-disk permission file.
-- **Remove from team**: When an agent is removed from a team, `blackboard_read` and `blackboard_write` are cleared to `[]`.
-- **Solo agents**: Agents not assigned to any team have no scoped blackboard prefix, see only themselves in `list_agents`, and receive no `TEAM.md`.
+- **Permission management on agent create**: `POST /mesh/agents/create` writes defaults of `blackboard_read=["teams/{name}/*"]` (the private team-of-one namespace — NO read wildcard; the host ACL is the read boundary and any `*` a template ships is stripped for workers), `blackboard_write=["tasks/*","context/*","status/*","output/*","artifacts/*","teams/{name}/*"]`, `can_publish=["*"]`, `can_subscribe=["*"]` (pubsub is additionally prefix-gated host-side per caller). The MeshClient auto-prefixes keys with the agent's effective team at runtime; the host ACL enforces the matching boundary.
+- **Remove from team**: When an agent is removed from a team, the team pattern is stripped and the agent keeps exactly its private self pattern `teams/{agent_id}/*` — a working team-of-one namespace, never an empty-ACL lockout.
+- **Solo agents = team-of-one** (ratified 2026-07, plan §8 #5): a teamless worker is scoped to its own private `teams/{agent_id}/` namespace — `TEAM_NAME` falls back to the agent id, its ACL always carries the self pattern, and the pubsub prefix gate locks it to its own prefix. Only the agent itself (and the operator trust tier) can touch that namespace; solo agents see themselves plus the operator in `list_agents` and receive no `TEAM.md`. Team and agent names share ONE namespace — create paths reject collisions in both directions.
 - **Cross-team blackboard counter**: `_blackboard_xteam_count` is a process-lifetime observability counter (no enforcement) surfaced on `/mesh/system/metrics` as `blackboard_cross_team_total`.
 
 ### Team Data
@@ -306,5 +306,5 @@ Dockerfiles live at the repo root: `Dockerfile.agent` (python:3.12-slim, non-roo
 6. **Write-then-compact** — facts are flushed to `MEMORY.md` before discarding context.
 7. **Tool-call message grouping** — `assistant(tool_calls)` and `tool(results)` are never separated in context trimming.
 8. **Unicode sanitization** — all untrusted text passes through `sanitize_for_prompt()` before reaching LLM context (user input, tool results, system prompt context).
-9. **Team isolation** — blackboard keys are auto-namespaced under `teams/{name}/`, agent visibility is scoped to team peers, and solo agents have no scoped blackboard prefix.
+9. **Team isolation** — blackboard keys are auto-namespaced under `teams/{name}/`, agent visibility is scoped to team peers, and solo agents are scoped to their own private `teams/{agent_id}/` team-of-one namespace.
 10. **MessageOrigin propagation** — every cross-agent path that produces work reads `current_origin` once and forwards it to both `wake_agent` and `create_task` so completion notifications reach the originating channel/user.

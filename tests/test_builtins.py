@@ -2302,36 +2302,63 @@ class TestArtifactPathTraversal:
             shutil.rmtree(ws.root, ignore_errors=True)
 
 
-# ── Standalone agent blackboard guards ───────────────────────────
+# ── Solo agent blackboard self-scope (solo = team-of-one, ratified #5) ──
 
 
-class TestStandaloneBlackboardGuards:
-    """Standalone agents (no project) get clear errors from blackboard tools."""
+class TestSoloBlackboardSelfScope:
+    """Solo workers use the blackboard tools self-scoped: their MeshClient
+    carries ``team_name == agent_id`` so every op lands in their private
+    ``teams/{agent_id}/`` namespace (isolation enforced host-side by the
+    per-agent ACL + pubsub prefix gate). The old standalone tool blocks
+    are gone. The operator (team_name=None) keeps its global-scope reads."""
 
-    def _standalone_client(self):
+    def _solo_client(self, agent_id="solo-a"):
         from src.agent.mesh_client import MeshClient
         mc = MagicMock(spec=MeshClient)
-        mc.is_standalone = True
+        mc.agent_id = agent_id
+        mc.team_name = agent_id  # team-of-one scope
         return mc
 
-    def _project_client(self):
+    def _operator_client(self):
         from src.agent.mesh_client import MeshClient
         mc = MagicMock(spec=MeshClient)
-        mc.is_standalone = False
+        mc.agent_id = "operator"
+        mc.team_name = None  # the only unscoped identity
         return mc
 
     @pytest.mark.asyncio
-    async def test_read_blackboard_blocked_for_standalone(self):
+    async def test_read_blackboard_works_self_scoped(self):
         from src.agent.builtins.mesh_tool import read_blackboard
-        result = await read_blackboard(key="foo", mesh_client=self._standalone_client())
-        assert "error" in result
-        assert "not assigned to a team" in result["error"]
+        mc = self._solo_client()
+        mc.read_blackboard = AsyncMock(return_value={"key": "foo", "value": "bar"})
+        result = await read_blackboard(key="foo", mesh_client=mc)
+        assert "error" not in result
+        assert result["exists"] is True
+        # Worker reads stay scoped (the client prefixes teams/{agent_id}/).
+        mc.read_blackboard.assert_awaited_once_with("foo", global_scope=False)
+
+    @pytest.mark.asyncio
+    async def test_write_blackboard_works_self_scoped(self):
+        from src.agent.builtins.mesh_tool import write_blackboard
+        mc = self._solo_client()
+        mc.write_blackboard = AsyncMock(return_value={"version": 1})
+        result = await write_blackboard(key="foo", value="bar", mesh_client=mc)
+        assert result.get("written") is True
+        mc.write_blackboard.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_list_blackboard_works_self_scoped(self):
+        from src.agent.builtins.mesh_tool import list_blackboard
+        mc = self._solo_client()
+        mc.list_blackboard = AsyncMock(return_value=[])
+        result = await list_blackboard(prefix="", mesh_client=mc)
+        assert "error" not in result
+        mc.list_blackboard.assert_awaited_once_with("", global_scope=False)
 
     @pytest.mark.asyncio
     async def test_operator_can_read_global_handoff_output(self):
         from src.agent.builtins.mesh_tool import read_blackboard
-        mc = self._standalone_client()
-        mc.agent_id = "operator"
+        mc = self._operator_client()
         mc.read_blackboard = AsyncMock(return_value={
             "key": "global/output/scout/ho_1",
             "value": {"result": "done"},
@@ -2351,13 +2378,10 @@ class TestStandaloneBlackboardGuards:
     @pytest.mark.asyncio
     async def test_operator_can_read_any_key_globally(self):
         """The operator is fleet-global and trusted (host authorizes it for
-        every blackboard op). Its read tool must NOT block on a non-global
-        key — it reads ANY key in global scope so it can monitor team data
-        — otherwise it hits a misleading "not assigned to a team" error
-        and can loop."""
+        every blackboard op). It reads ANY key in global scope so it can
+        monitor team data."""
         from src.agent.builtins.mesh_tool import read_blackboard
-        mc = self._standalone_client()
-        mc.agent_id = "operator"
+        mc = self._operator_client()
         mc.read_blackboard = AsyncMock(return_value={
             "key": "teams/social-media/status/social-publisher",
             "value": {"state": "working"},
@@ -2377,10 +2401,9 @@ class TestStandaloneBlackboardGuards:
     @pytest.mark.asyncio
     async def test_operator_can_list_any_prefix_globally(self):
         """The operator lists across every team (global scope), not just
-        its own (non-existent) project scope."""
+        its own (non-existent) team scope."""
         from src.agent.builtins.mesh_tool import list_blackboard
-        mc = self._standalone_client()
-        mc.agent_id = "operator"
+        mc = self._operator_client()
         mc.list_blackboard = AsyncMock(return_value=[])
 
         result = await list_blackboard(prefix="status/", mesh_client=mc)
@@ -2390,11 +2413,10 @@ class TestStandaloneBlackboardGuards:
 
     @pytest.mark.asyncio
     async def test_operator_write_not_blocked(self):
-        """The operator is not treated as a standalone-blocked worker on
-        writes either (it is host-authorized for the full blackboard)."""
+        """The operator's writes pass through unscoped (host-authorized for
+        the full blackboard)."""
         from src.agent.builtins.mesh_tool import write_blackboard
-        mc = self._standalone_client()
-        mc.agent_id = "operator"
+        mc = self._operator_client()
         mc.write_blackboard = AsyncMock(return_value={"version": 1})
 
         result = await write_blackboard(
@@ -2405,36 +2427,23 @@ class TestStandaloneBlackboardGuards:
         assert "error" not in result
 
     @pytest.mark.asyncio
-    async def test_write_blackboard_blocked_for_standalone(self):
-        from src.agent.builtins.mesh_tool import write_blackboard
-        result = await write_blackboard(
-            key="foo", value="bar", mesh_client=self._standalone_client(),
-        )
-        assert "error" in result
-        assert "not assigned to a team" in result["error"]
-
-    @pytest.mark.asyncio
-    async def test_list_blackboard_blocked_for_standalone(self):
-        from src.agent.builtins.mesh_tool import list_blackboard
-        result = await list_blackboard(prefix="", mesh_client=self._standalone_client())
-        assert "error" in result
-        assert "not assigned to a team" in result["error"]
-
-    @pytest.mark.asyncio
-    async def test_save_artifact_skips_blackboard_for_standalone(self, tmp_path):
-        """Standalone agents can save artifacts locally but skip blackboard."""
+    async def test_save_artifact_registers_for_solo(self, tmp_path):
+        """Solo agents register saved artifacts on the blackboard too —
+        the write lands in their private team-of-one namespace."""
         from src.agent.builtins.mesh_tool import save_artifact
         ws = MagicMock()
         ws.root = str(tmp_path)
-        mc = self._standalone_client()
-        mc.write_blackboard = AsyncMock()
+        mc = self._solo_client(agent_id="solo-a")
+        mc.write_blackboard = AsyncMock(return_value={"version": 1})
         result = await save_artifact(
             name="report.txt", content="hello",
             workspace_manager=ws, mesh_client=mc,
         )
         assert result.get("saved") is True
         assert (tmp_path / "artifacts" / "report.txt").read_text() == "hello"
-        mc.write_blackboard.assert_not_awaited()
+        mc.write_blackboard.assert_awaited_once()
+        key = mc.write_blackboard.await_args.args[0]
+        assert key == "artifacts/solo-a/report.txt"
 
     @pytest.mark.asyncio
     async def test_save_artifact_blackboard_failure_is_graceful(self, tmp_path):
@@ -2446,7 +2455,6 @@ class TestStandaloneBlackboardGuards:
         workspace_manager.root = str(tmp_path)
 
         mesh_client = MagicMock()
-        mesh_client.is_standalone = False
         mesh_client.agent_id = "test-agent"
         mesh_client.write_blackboard = AsyncMock(
             side_effect=PermissionError("Agent cannot write to artifacts/*")
@@ -2471,33 +2479,36 @@ class TestStandaloneBlackboardGuards:
         )
 
     @pytest.mark.asyncio
-    async def test_read_blackboard_allowed_for_project_agent(self):
-        """Project agents are NOT blocked by the standalone guard."""
+    async def test_read_blackboard_allowed_for_team_agent(self):
+        """Team agents read through their team scope."""
         from src.agent.builtins.mesh_tool import read_blackboard
-        mc = self._project_client()
+        mc = self._solo_client()
+        mc.team_name = "alpha"
         mc.read_blackboard = AsyncMock(return_value={"key": "foo", "value": "bar"})
         result = await read_blackboard(key="foo", mesh_client=mc)
-        assert "not assigned" not in result.get("error", "")
+        assert "error" not in result
         mc.read_blackboard.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_write_blackboard_allowed_for_project_agent(self):
-        """Project agents can write to blackboard."""
+    async def test_write_blackboard_allowed_for_team_agent(self):
+        """Team agents can write to the blackboard."""
         from src.agent.builtins.mesh_tool import write_blackboard
-        mc = self._project_client()
-        mc.write_blackboard = AsyncMock(return_value=True)
+        mc = self._solo_client()
+        mc.team_name = "alpha"
+        mc.write_blackboard = AsyncMock(return_value={"version": 1})
         result = await write_blackboard(key="k", value="v", mesh_client=mc)
-        assert "not assigned" not in result.get("error", "")
+        assert "error" not in result
         mc.write_blackboard.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_list_blackboard_allowed_for_project_agent(self):
-        """Project agents can list blackboard entries."""
+    async def test_list_blackboard_allowed_for_team_agent(self):
+        """Team agents can list blackboard entries."""
         from src.agent.builtins.mesh_tool import list_blackboard
-        mc = self._project_client()
+        mc = self._solo_client()
+        mc.team_name = "alpha"
         mc.list_blackboard = AsyncMock(return_value=[])
         result = await list_blackboard(prefix="", mesh_client=mc)
-        assert "not assigned" not in result.get("error", "")
+        assert "error" not in result
         mc.list_blackboard.assert_awaited_once()
 
 
@@ -2509,7 +2520,6 @@ class TestBlackboardSanitization:
 
     def _project_client(self):
         mc = AsyncMock()
-        mc.is_standalone = False
         return mc
 
     @pytest.mark.asyncio
@@ -2661,14 +2671,15 @@ class TestListAgentsProjectScope:
         assert "agent_id" not in call_kwargs.kwargs.get("params", {})
 
     @pytest.mark.asyncio
-    async def test_list_agents_standalone_sees_all(self):
-        """Standalone agents see all registered agents (no filtering)."""
+    async def test_list_agents_operator_sees_all(self):
+        """The operator (the only unscoped identity, team_name=None) sends
+        no filters and sees all registered agents."""
         from src.agent.mesh_client import MeshClient
-        client = MeshClient("http://mesh:8420", "solo", team_name=None)
+        client = MeshClient("http://mesh:8420", "operator", team_name=None)
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.json.return_value = {
-            "solo": {"url": "...", "role": ""},
+            "operator": {"url": "...", "role": ""},
             "other": {"url": "...", "role": "helper"},
         }
         mock_response.raise_for_status = MagicMock()
@@ -2682,7 +2693,7 @@ class TestListAgentsProjectScope:
         http_client.get.assert_called_once()
         call_kwargs = http_client.get.call_args
         params = call_kwargs.kwargs.get("params", {})
-        # Standalone agents send no filters — see all agents
+        # The unscoped operator sends no filters — sees all agents
         assert "agent_id" not in params
         assert "team" not in params
         assert "other" in result
@@ -2960,21 +2971,22 @@ class TestPublishEventTool:
         from src.agent.builtins.mesh_tool import publish_event
 
         mock_client = AsyncMock()
-        mock_client.is_standalone = False
         mock_client.publish_event = AsyncMock(return_value={"published": True})
         result = await publish_event(topic="research_complete", data='{"done": true}', mesh_client=mock_client)
         assert result["published"] is True
         assert result["topic"] == "research_complete"
 
     @pytest.mark.asyncio
-    async def test_publish_event_standalone(self):
+    async def test_publish_event_works_for_solo(self):
+        """Solo = team-of-one: publish works self-scoped (the client
+        prefixes teams/{agent_id}/; the host prefix gate enforces it)."""
         from src.agent.builtins.mesh_tool import publish_event
 
         mock_client = AsyncMock()
-        mock_client.is_standalone = True
+        mock_client.publish_event = AsyncMock(return_value={"published": True})
         result = await publish_event(topic="test", mesh_client=mock_client)
-        assert "error" in result
-        assert "not assigned" in result["error"]
+        assert result["published"] is True
+        mock_client.publish_event.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_publish_event_no_mesh_client(self):
@@ -2990,7 +3002,6 @@ class TestSubscribeEventTool:
         from src.agent.builtins.mesh_tool import subscribe_event
 
         mock_client = AsyncMock()
-        mock_client.is_standalone = False
         mock_client.subscribe_topic = AsyncMock(return_value={"subscribed": True})
         result = await subscribe_event(topic="research_complete", mesh_client=mock_client)
         assert result["subscribed"] is True
@@ -2998,14 +3009,15 @@ class TestSubscribeEventTool:
         mock_client.subscribe_topic.assert_awaited_once_with("research_complete")
 
     @pytest.mark.asyncio
-    async def test_subscribe_event_standalone(self):
+    async def test_subscribe_event_works_for_solo(self):
+        """Solo = team-of-one: subscribe works self-scoped."""
         from src.agent.builtins.mesh_tool import subscribe_event
 
         mock_client = AsyncMock()
-        mock_client.is_standalone = True
+        mock_client.subscribe_topic = AsyncMock(return_value={"subscribed": True})
         result = await subscribe_event(topic="test", mesh_client=mock_client)
-        assert "error" in result
-        assert "not assigned" in result["error"]
+        assert result["subscribed"] is True
+        mock_client.subscribe_topic.assert_awaited_once_with("test")
 
     @pytest.mark.asyncio
     async def test_subscribe_event_no_mesh_client(self):
@@ -3019,7 +3031,6 @@ class TestSubscribeEventTool:
         from src.agent.builtins.mesh_tool import subscribe_event
 
         mock_client = AsyncMock()
-        mock_client.is_standalone = False
         mock_client.subscribe_topic = AsyncMock(side_effect=RuntimeError("fail"))
         result = await subscribe_event(topic="test", mesh_client=mock_client)
         assert "error" in result
@@ -3031,7 +3042,6 @@ class TestWatchBlackboardTool:
         from src.agent.builtins.mesh_tool import watch_blackboard
 
         mock_client = AsyncMock()
-        mock_client.is_standalone = False
         mock_client.watch_blackboard = AsyncMock(return_value={"watching": True})
         result = await watch_blackboard(pattern="tasks/*", mesh_client=mock_client)
         assert result["watching"] is True
@@ -3039,14 +3049,15 @@ class TestWatchBlackboardTool:
         mock_client.watch_blackboard.assert_awaited_once_with("tasks/*")
 
     @pytest.mark.asyncio
-    async def test_watch_blackboard_standalone(self):
+    async def test_watch_blackboard_works_for_solo(self):
+        """Solo = team-of-one: watches work self-scoped."""
         from src.agent.builtins.mesh_tool import watch_blackboard
 
         mock_client = AsyncMock()
-        mock_client.is_standalone = True
+        mock_client.watch_blackboard = AsyncMock(return_value={"watching": True})
         result = await watch_blackboard(pattern="tasks/*", mesh_client=mock_client)
-        assert "error" in result
-        assert "not assigned" in result["error"]
+        assert result["watching"] is True
+        mock_client.watch_blackboard.assert_awaited_once_with("tasks/*")
 
     @pytest.mark.asyncio
     async def test_watch_blackboard_no_mesh_client(self):
@@ -3062,7 +3073,6 @@ class TestClaimTaskTool:
         from src.agent.builtins.mesh_tool import claim_task
 
         mock_client = AsyncMock()
-        mock_client.is_standalone = False
         mock_client.read_blackboard = AsyncMock(return_value={
             "key": "tasks/t1", "value": {"status": "pending"}, "version": 1,
         })
@@ -3082,7 +3092,6 @@ class TestClaimTaskTool:
         from src.agent.builtins.mesh_tool import claim_task
 
         mock_client = AsyncMock()
-        mock_client.is_standalone = False
         mock_client.read_blackboard = AsyncMock(return_value={
             "key": "tasks/t1", "value": {"status": "pending"}, "version": 1,
         })
@@ -3100,7 +3109,6 @@ class TestClaimTaskTool:
         from src.agent.builtins.mesh_tool import claim_task
 
         mock_client = AsyncMock()
-        mock_client.is_standalone = False
         mock_client.read_blackboard = AsyncMock(return_value=None)
         result = await claim_task(
             key="tasks/nope",
@@ -3111,17 +3119,23 @@ class TestClaimTaskTool:
         assert "does not exist" in result["reason"]
 
     @pytest.mark.asyncio
-    async def test_claim_task_standalone(self):
+    async def test_claim_task_works_for_solo(self):
+        """Solo = team-of-one: CAS claims work self-scoped."""
         from src.agent.builtins.mesh_tool import claim_task
 
         mock_client = AsyncMock()
-        mock_client.is_standalone = True
+        mock_client.read_blackboard = AsyncMock(return_value={
+            "key": "tasks/t1", "value": {"status": "pending"}, "version": 1,
+        })
+        mock_client.claim_blackboard = AsyncMock(return_value={
+            "key": "tasks/t1", "version": 2,
+        })
         result = await claim_task(
             key="tasks/t1",
             claim_value='{"status": "claimed"}',
             mesh_client=mock_client,
         )
-        assert "error" in result
+        assert result["claimed"] is True
 
     @pytest.mark.asyncio
     async def test_claim_task_no_mesh_client(self):
@@ -3140,7 +3154,6 @@ class TestClaimTaskTool:
         from src.agent.builtins.mesh_tool import claim_task
 
         mock_client = AsyncMock()
-        mock_client.is_standalone = False
         mock_client.read_blackboard = AsyncMock(return_value={
             "key": "tasks/t1", "value": {"status": "pending"}, "version": 1,
         })

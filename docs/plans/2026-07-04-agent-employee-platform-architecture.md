@@ -609,6 +609,100 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   parameterization, OAuth skip, single prod construction site for the wiring, and the
   `get_team_spend` None-limit shape (no `.toFixed`/`:.2f` consumer exists).
 
+- **✅ Landed — Phase-1 unit 3: solo agent = team-of-one (ratified §8 #5; B6 risk closed
+  by construction).** Pure code-path merge: for SCOPING surfaces a worker's effective
+  team = its real team, else its own agent id; messaging/visibility keep REAL membership
+  — **(i) reachability is unchanged**: `_caller_teams`, `_is_team_member`, the
+  MessageRouter cross-team block, summaries auth, dashboard "Solo" listings/broadcast
+  targeting, and the REPL "Solo:" display are all untouched. What changed: (1) workers
+  ALWAYS get `TEAM_NAME` (`team_of(agent) or agent_id`) at container start
+  (`cli/runtime.py`) with an agent-side fallback in `agent/__main__.py` covering the
+  mesh-side create/template start paths, plus the loop's introspect team-sync deriving
+  the same effective team — a worker can never run unscoped; the operator alone keeps
+  `team_name=None`. `TEAM_MD_PATH` still only for real teams (solo agents have no
+  TEAM.md — the workspace's existing optional-file handling covers it). (2) The entire
+  agent-side standalone layer is DELETED: `MeshClient.is_standalone`, mesh_tool's
+  `_STANDALONE_ERROR` + all seven guards + the `save_artifact` registration skip,
+  subagent_tool's result-passing skips, workspace's `_SYSTEM_MD_PREAMBLE_STANDALONE` +
+  the `generate_system_md(is_standalone=)` param, `heartbeat_context.is_standalone`,
+  cron's standalone heartbeat-rules branch (one 5-rule set — the blackboard rule is
+  accurate: it's their private board), AND (beyond the unit spec, which missed it)
+  `loop.py`'s whole `is_standalone` surface: the `_BLACKBOARD_TOOLS` exclusion set, the
+  standalone task/chat/heartbeat prompt branches, and the roster-fetch skips. (3)
+  Host-side self-scope enforcement: the pubsub publish/subscribe team-prefix gates now
+  prefix-lock EVERY non-operator/non-`mesh` caller to `teams/{effective}/` (a solo
+  worker no longer skips the gate); registration auto-watch/auto-subscribe scope to
+  `teams/{agent_id}/…` for solo workers. (4) Permission invariant "self always; team
+  while member": `_add_agent_permissions` grants `teams/{name}/*` in the base defaults
+  (operator excluded — it keeps `["*"]`), join keeps it alongside the team pattern,
+  leave restores it (a leaver lands in a working private namespace, never the old
+  empty-ACL lockout), and **(iii) `_ensure_all_agent_permissions` backfills the self
+  pattern at boot** for teamless workers with BOTH blackboard fields empty (existing
+  defaults mechanism, not a shim; agents with any pattern untouched). (5) **(ii)
+  Cross-namespace collision guard** (makes self-scoping sound): team-create paths (mesh
+  `POST /mesh/teams` + dashboard `POST /api/teams`) 400 on a name matching an existing
+  agent (agents.yaml + live registry); agent-create paths (`create_custom_agent`, CLI
+  `_create_agent`, `_create_agent_from_template`, `_apply_template` per-slot upfront +
+  the mesh `fleet/apply` upfront sweep) 400/ValueError on `team_exists`. **(iv)
+  `scope_kind="solo"` in summaries/cron is KEPT** — a reporting dimension, not a code
+  fork. Isolation pins in `tests/test_solo_team_of_one.py` (17, HTTP-level): solo A
+  read/writes `teams/{A}/…` but 403s on `teams/{B}/…` and a real team's namespace; a
+  team member 403s on solo A's namespace; the operator trust tier still reaches in;
+  solo publish/subscribe outside own prefix 403; collision guard both directions;
+  join→leave lands on exactly the self pattern; boot backfill; solo registration
+  watches/subscriptions scoped. **Judgment calls:** (a) skills_tool — "standalone sees
+  the full catalog" became `_is_team_of_one` (`team_name == agent_id`), which preserves
+  today's outcome exactly and is SOUND only because of the collision guard; (b) the
+  operator now gets the full SYSTEM.md preamble + team-style prompt rules (it ran the
+  standalone variants before) — intended, the coordination text is accurate for its
+  full access; (c) `params["team"]` passthrough finding: a solo client sends
+  `?team={agent_id}` to `/mesh/agents`; the host previously returned `{}` for unknown
+  teams — it now resolves a pseudo-team matching a registered/configured agent to a
+  team-of-one roster (self + operator appended, exactly what the pre-merge unscoped
+  path returned for solo callers); scoping by ANOTHER agent's pseudo-team stays `{}`
+  under enforce. No other host path validates the pseudo-team (tasks `team_id` is
+  free-string; `get_team_spend`/introspect budget read real membership only). (d)
+  Teamless multi-agent constellations (e.g. Basic-plan template fleets that skip
+  `create_team`) lose SHARED blackboard riders — each member now writes its private
+  namespace; durable-task handoff (`hand_off` → tasks/lanes, inline brief in the wake
+  message) is unaffected, and that is the ratified posture (isolation over teamless
+  sharing). Similarly, an operator→solo `hand_off` `data` blob lands unscoped
+  (`output/operator/…`) and is unreadable by the solo recipient — equivalent to
+  pre-merge (the read tool was blocked outright); the inline brief remains the
+  functioning channel. CLAUDE.md (teams.py row + blackboard tradeoff bullet) and
+  docs/architecture.md + docs/security.md updated in lockstep.
+  **Adversarial review (security + correctness lenses) — 5 findings, all fixed pre-PR:**
+  (1) [security, MEDIUM] fresh no-template creates carried `blackboard_read: ["*"]`
+  from `_DEFAULT_AGENT_COORDINATION_PERMS` — with the client-side guards deleted, a
+  never-teamed solo held HOST-level fleet-wide reads (strictly wider than a team
+  member, whose join strips `*`; the isolation test fixture masked it by hand-writing
+  narrowed ACLs). Fixed three ways: the default no longer ships a read wildcard, the
+  create merge strips `*` from workers' blackboard fields (defense vs future
+  templates), and the boot backfill narrows the untouched pre-#5 default shapes
+  (["*"] / ["*"]+self) while never touching human-customized lists; fixture rewritten
+  to pin the REAL create-path posture. (2) [correctness, MEDIUM] ephemeral `spawn-*`
+  agents (no permissions.json entry → deny-all default record) got working blackboard
+  TOOLS but 403-only ACLs. Fixed structurally: the self namespace is now a
+  RESOLUTION-TIME carve-out (`PermissionMatrix._is_own_namespace` — an agent can
+  always touch `teams/{its-own-id}/`, sound because of the collision guard, zero
+  shared reach), covering spawn agents, legacy rows, and mid-rewrite windows by
+  construction; the boot backfill became additive ("self always" without narrowing
+  custom patterns), also closing (3) [MEDIUM-LOW] legacy teamless template agents
+  with non-empty pre-#5 ACLs that the empty-only backfill skipped. (4) [MEDIUM]
+  membership ACL rewires were disk-only — no `permissions.reload()` on any of the
+  nine mesh/dashboard membership endpoints, so a leaver kept live old-team access
+  until mesh restart; all nine now refresh the live matrix (pinned by a live-matrix
+  HTTP test). (5) [LOW] health-monitor/dashboard restarts rebuilt env without
+  TEAM_NAME → silent scope flip to the self namespace on restart; fixed at the
+  RUNTIME-BACKEND level (`set_team_env_provider`, the LLM_UTILITY_MODEL pattern) so
+  every start path — boot, REPL/health/dashboard restarts, spawn — resolves the
+  effective team identically; the per-caller env plumbing in cli/runtime was deleted.
+  Accepted with documentation: unified prompt text says "other agents" to a
+  team-of-one whose board reaches nobody (misdirects the LLM, no data risk — Phase 3's
+  agenda-loop prompt rewrite is the right home for per-audience text); pubsub gates,
+  pseudo-team roster resolution, operator carve-outs, and hand_off riders all
+  verified clean by both reviewers.
+
 ### YOU ARE HERE → next phase
 Foundation (#1180/#1181/#1183/#1184) and the rename (#1185) are merged. Phase 0's removal
 column is fully done. Next, in order:

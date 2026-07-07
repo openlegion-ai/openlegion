@@ -63,7 +63,6 @@ def _make_mock_llm(responses=None):
 def _make_mock_mesh():
     """Create a MagicMock MeshClient."""
     mesh = MagicMock()
-    mesh.is_standalone = False
     mesh.send_system_message = AsyncMock(return_value={})
     mesh.read_blackboard = AsyncMock(return_value=None)
     mesh.list_agents = AsyncMock(return_value={})
@@ -149,15 +148,20 @@ class TestAllowedToolsIntegration:
 
     def test_agentloop_no_allowed_tools_uses_exclude(self):
         """Without allowed_tools, exclude-based filtering applies."""
-        from src.agent.loop import _BLACKBOARD_TOOLS
+        coordination_tools = {
+            "read_blackboard", "write_blackboard", "list_blackboard",
+            "publish_event", "subscribe_event", "watch_blackboard",
+            "claim_task", "hand_off", "check_inbox", "update_status",
+            "complete_task",
+        }
 
         loop = _make_loop(allowed_tools=None)
 
         assert loop._allowed_tools is None
-        # Non-standalone agents exclude no blackboard tools. (The default-off
-        # tool-authoring gate may still exclude create_tool/reload_tools —
-        # orthogonal to this test.)
-        assert not (_BLACKBOARD_TOOLS & (loop._excluded_tools or frozenset()))
+        # Workers never exclude blackboard tools — solo = team-of-one
+        # (ratified #5). (The default-off tool-authoring gate may still
+        # exclude create_tool/reload_tools — orthogonal to this test.)
+        assert not (coordination_tools & (loop._excluded_tools or frozenset()))
 
     def test_tool_filter_kw_includes_allowed(self):
         """_tool_filter_kw should include allowed when set."""

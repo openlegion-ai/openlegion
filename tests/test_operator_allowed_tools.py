@@ -201,7 +201,6 @@ def _make_loop_with_real_registry(allowed_tools=None):
     schema-build-time tool filtering computed in __init__."""
     reg = ToolRegistry(tools_dir=tempfile.mkdtemp())
     mesh = MagicMock()
-    mesh.is_standalone = False
     loop = AgentLoop(
         agent_id="operator" if allowed_tools else "worker",
         role="operator" if allowed_tools else "research",

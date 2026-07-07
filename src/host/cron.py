@@ -569,8 +569,10 @@ class CronScheduler:
                         ]
 
                         # Hardcoded operating rules — always included, cannot be
-                        # overridden by agent-editable HEARTBEAT.md
-                        agent_standalone = ctx.get("is_standalone", False)
+                        # overridden by agent-editable HEARTBEAT.md. One rule
+                        # set for every agent (solo = team-of-one): a solo
+                        # agent's blackboard is its own private namespace, so
+                        # the blackboard rule is accurate for it too.
                         hb_rules = (
                             "## Heartbeat Operating Rules (non-negotiable)\n\n"
                             "1. Be ECONOMICAL. Each heartbeat costs API credits. "
@@ -579,15 +581,10 @@ class CronScheduler:
                             "immediately. Do NOT make unnecessary tool calls.\n"
                             "3. Report what you worked on to the USER via "
                             "notify_user.\n"
-                        )
-                        if not agent_standalone:
-                            hb_rules += (
-                                "4. The blackboard is for sharing data with other "
-                                "agents. Do NOT write status updates or progress "
-                                "reports there.\n"
-                            )
-                        hb_rules += (
-                            f"{'4' if agent_standalone else '5'}. Do NOT change "
+                            "4. The blackboard is for sharing data with other "
+                            "agents. Do NOT write status updates or progress "
+                            "reports there.\n"
+                            "5. Do NOT change "
                             "your heartbeat schedule to run more frequently unless "
                             "the user asked you to. More frequent heartbeats "
                             "waste credits."

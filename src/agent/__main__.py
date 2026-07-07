@@ -76,7 +76,14 @@ def main() -> None:
         default_model=llm_model, embedding_model=embedding_model,
         thinking=thinking, max_output_tokens=max_output_tokens,
     )
+    # Every worker is scoped: its real team, or its own agent id as a
+    # private team-of-one namespace (ratified decision #5). The env is set
+    # by the boot path (cli/runtime.py); the fallback here covers container
+    # starts that predate it (mesh-side create/template paths) so a worker
+    # can never run unscoped. Only the operator runs with team_name=None.
     team_name = os.environ.get("TEAM_NAME", "")
+    if not team_name and agent_id != "operator":
+        team_name = agent_id
     mesh_client = MeshClient(
         mesh_url=mesh_url, agent_id=agent_id, team_name=team_name or None,
     )
@@ -229,9 +236,7 @@ def main() -> None:
             try:
                 from src.agent.workspace import generate_system_md
                 info = await mesh_client.introspect("all")
-                system_md = generate_system_md(
-                    info, agent_id, is_standalone=mesh_client.is_standalone,
-                )
+                system_md = generate_system_md(info, agent_id)
                 Path("/data/workspace").mkdir(parents=True, exist_ok=True)
                 Path("/data/workspace/SYSTEM.md").write_text(system_md)
                 logger.info(f"Generated SYSTEM.md for '{agent_id}'")

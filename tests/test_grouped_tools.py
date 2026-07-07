@@ -256,7 +256,6 @@ def _make_grouped_loop():
     llm.default_model = "test-model"
 
     mesh_client = MagicMock()
-    mesh_client.is_standalone = False
 
     loop = AgentLoop(
         agent_id="operator",
@@ -460,7 +459,6 @@ def _make_worker_loop():
     llm.default_model = "test-model"
 
     mesh_client = MagicMock()
-    mesh_client.is_standalone = False
 
     return AgentLoop(
         agent_id="worker",

@@ -55,7 +55,6 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None, *, real_memory: b
     llm.chat_collect = _chat_collect_delegate
 
     mesh_client = MagicMock()
-    mesh_client.is_standalone = False
     mesh_client.send_system_message = AsyncMock(return_value={})
     mesh_client.read_blackboard = AsyncMock(return_value=None)
     mesh_client.list_agents = AsyncMock(return_value={})
@@ -490,7 +489,6 @@ class TestTaskCheckpointLoop:
         tools.operator_only_tools = MagicMock(return_value=frozenset())
 
         mesh_client = MagicMock()
-        mesh_client.is_standalone = False
         mesh_client.send_system_message = AsyncMock(return_value={})
         mesh_client.read_blackboard = AsyncMock(return_value=None)
         mesh_client.list_agents = AsyncMock(return_value={})

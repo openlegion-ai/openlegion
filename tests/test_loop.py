@@ -16,7 +16,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.agent.loop import (
-    _BLACKBOARD_TOOLS,
     _READ_ONLY_TOOLS,
     HEARTBEAT_MAX_ITERATIONS,
     AgentLoop,
@@ -80,7 +79,8 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None, *, real_memory: b
     llm.chat_collect = _chat_collect_delegate
 
     mesh_client = MagicMock()
-    mesh_client.is_standalone = False
+    # Solo = team-of-one (ratified #5): workers always carry a team scope.
+    mesh_client.team_name = "test_agent"
     mesh_client.send_system_message = AsyncMock(return_value={})
     mesh_client.read_blackboard = AsyncMock(return_value=None)
     # Standing goals live in the Team store — the loop reads them via
@@ -2047,62 +2047,43 @@ class TestFormatRuntimeContext:
         assert "\u200b" not in result
 
 
-# === Standalone Agent Blackboard Isolation ===
+# === Solo Agent Blackboard Surface (solo = team-of-one, ratified #5) ===
 
 
-class TestStandaloneBlackboardIsolation:
-    """Standalone agents should not see blackboard tools or references."""
+class TestSoloBlackboardSurface:
+    """Every worker gets the blackboard/coordination surface — a solo
+    worker's scope is simply its own private ``teams/{agent_id}/``
+    namespace (host-enforced). No standalone tool exclusion remains."""
 
-    def _make_standalone_loop(self):
+    _COORDINATION_TOOLS = {
+        "read_blackboard", "write_blackboard", "list_blackboard",
+        "publish_event", "subscribe_event", "watch_blackboard",
+        "claim_task", "hand_off", "check_inbox", "update_status",
+        "complete_task",
+    }
+
+    def _make_solo_loop(self):
         loop = _make_loop()
-        loop.mesh_client.is_standalone = True
-        # Re-compute excluded tools (normally set in __init__)
-        loop._excluded_tools = _BLACKBOARD_TOOLS
+        loop.mesh_client.team_name = loop.agent_id
         return loop
 
-    def _make_project_loop(self):
-        loop = _make_loop()
-        loop.mesh_client.is_standalone = False
-        loop._excluded_tools = None
-        return loop
-
-    def test_standalone_excludes_blackboard_tools(self):
-        """Standalone agents exclude the blackboard tools (authoring tools may
-        also be excluded by the default-off tool-authoring gate)."""
+    def test_worker_never_excludes_blackboard_tools(self):
+        """Workers (solo or team) never exclude the blackboard tools (the
+        authoring gate may still exclude create_tool/reload_tools —
+        orthogonal to this test)."""
         mesh = MagicMock()
-        mesh.is_standalone = True
+        mesh.team_name = "test"  # solo team-of-one
         loop = AgentLoop(
             agent_id="test", role="helper",
             memory=MagicMock(get_tool_history=MagicMock(return_value=[])),
             tools=MagicMock(), llm=MagicMock(), mesh_client=mesh,
         )
-        assert _BLACKBOARD_TOOLS <= loop._excluded_tools
+        assert not (self._COORDINATION_TOOLS & (loop._excluded_tools or frozenset()))
 
-    def test_project_agent_no_exclusion(self):
-        """Project agents do NOT exclude blackboard tools (the authoring gate
-        may still exclude create_tool/reload_tools — orthogonal to this test)."""
-        mesh = MagicMock()
-        mesh.is_standalone = False
-        loop = AgentLoop(
-            agent_id="test", role="helper",
-            memory=MagicMock(get_tool_history=MagicMock(return_value=[])),
-            tools=MagicMock(), llm=MagicMock(), mesh_client=mesh,
-        )
-        assert not (_BLACKBOARD_TOOLS & (loop._excluded_tools or frozenset()))
-
-    def test_standalone_task_prompt_no_blackboard(self):
-        """Standalone agent task prompt omits blackboard references."""
-        loop = self._make_standalone_loop()
-        assignment = TaskAssignment(
-            workflow_id="wf1", step_id="s1", task_type="research", input_data={},
-        )
-        prompt = loop._build_system_prompt(assignment)
-        assert "blackboard" not in prompt.lower()
-        assert "notify_user to report results" in prompt
-
-    def test_project_task_prompt_has_blackboard(self):
-        """Project agent task prompt includes blackboard references."""
-        loop = self._make_project_loop()
+    def test_solo_task_prompt_has_blackboard(self):
+        """Solo agent task prompt includes the blackboard/promote protocol —
+        one prompt path for every agent."""
+        loop = self._make_solo_loop()
         assignment = TaskAssignment(
             workflow_id="wf1", step_id="s1", task_type="research", input_data={},
         )
@@ -2110,32 +2091,15 @@ class TestStandaloneBlackboardIsolation:
         assert "blackboard" in prompt.lower()
         assert "promote" in prompt.lower()
 
-    def test_standalone_chat_prompt_no_blackboard(self):
-        """Standalone agent chat prompt omits blackboard references."""
-        loop = self._make_standalone_loop()
-        prompt = loop._build_chat_system_prompt()
-        assert "blackboard" not in prompt.lower()
-        assert "notify_user to report results" in prompt
-
-    def test_project_chat_prompt_has_blackboard(self):
-        """Project agent chat prompt includes blackboard references."""
-        loop = self._make_project_loop()
+    def test_solo_chat_prompt_has_blackboard(self):
+        """Solo agent chat prompt includes blackboard references."""
+        loop = self._make_solo_loop()
         prompt = loop._build_chat_system_prompt()
         assert "blackboard" in prompt.lower()
 
-    def test_standalone_task_prompt_no_promote(self):
-        """Standalone task prompt uses simple JSON format without 'promote'."""
-        loop = self._make_standalone_loop()
-        assignment = TaskAssignment(
-            workflow_id="wf1", step_id="s1", task_type="research", input_data={},
-        )
-        prompt = loop._build_system_prompt(assignment)
-        assert "promote" not in prompt.lower()
-
-    def test_standalone_get_status_excludes_blackboard(self):
-        """get_status capabilities list excludes blackboard tools for standalone."""
-        loop = self._make_standalone_loop()
-        # Use a real ToolRegistry-like mock that respects exclude
+    def test_solo_get_status_includes_blackboard(self):
+        """get_status capabilities include blackboard tools for solo agents."""
+        loop = self._make_solo_loop()
         loop.tools.list_tools = MagicMock(
             side_effect=lambda exclude=None: (
                 [n for n in ["memory_save", "read_blackboard", "notify_user"]
@@ -2143,9 +2107,8 @@ class TestStandaloneBlackboardIsolation:
             ),
         )
         status = loop.get_status()
-        assert "read_blackboard" not in status.capabilities
+        assert "read_blackboard" in status.capabilities
         assert "notify_user" in status.capabilities
-        assert "memory_save" in status.capabilities
 
 
 # ---------------------------------------------------------------------------
@@ -2918,7 +2881,6 @@ async def test_heartbeat_includes_fleet_roster():
 
     loop = _make_loop([])
     loop.llm.chat = AsyncMock(side_effect=_capture_llm)
-    loop.mesh_client.is_standalone = False
     loop.mesh_client.introspect = AsyncMock(return_value={})
     loop.mesh_client.list_agents = AsyncMock(return_value={
         "writer": {"role": "content writer"},
@@ -2934,16 +2896,18 @@ async def test_heartbeat_includes_fleet_roster():
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_skips_fleet_for_standalone():
-    """Heartbeat does not call list_agents for standalone agents."""
+async def test_heartbeat_fetches_fleet_for_solo():
+    """Solo = team-of-one: the heartbeat fetches the roster for every agent
+    (a solo worker's resolves to itself plus the operator)."""
     loop = _make_loop([])
     loop.llm.chat = AsyncMock(return_value=LLMResponse(content="ok", tokens_used=10))
-    loop.mesh_client.is_standalone = True
+    loop.mesh_client.team_name = loop.agent_id
     loop.mesh_client.introspect = AsyncMock(return_value={})
+    loop.mesh_client.list_agents = AsyncMock(return_value={})
 
     await loop.execute_heartbeat("wakeup")
 
-    loop.mesh_client.list_agents.assert_not_called()
+    loop.mesh_client.list_agents.assert_called()
 
 
 @pytest.mark.asyncio
@@ -3042,8 +3006,9 @@ async def test_heartbeat_check_inbox_in_system_prompt():
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_standalone_no_check_inbox():
-    """Standalone agents don't get check_inbox() in heartbeat prompt."""
+async def test_heartbeat_solo_gets_check_inbox():
+    """Solo = team-of-one: the check_inbox() heartbeat line is universal —
+    the durable-task inbox works for every agent."""
     captured_system = []
 
     async def _capture_llm(*, system, messages, **kw):
@@ -3051,15 +3016,15 @@ async def test_heartbeat_standalone_no_check_inbox():
         return LLMResponse(content="HEARTBEAT_OK", tokens_used=10)
 
     loop = _make_loop([])
-    loop.mesh_client.is_standalone = True
+    loop.mesh_client.team_name = loop.agent_id
     loop.llm.chat = AsyncMock(side_effect=_capture_llm)
     loop.mesh_client.introspect = AsyncMock(return_value={})
 
     await loop.execute_heartbeat("wakeup")
 
     assert len(captured_system) == 1
-    assert "check_inbox()" not in captured_system[0]
-    assert "goals needs attention" in captured_system[0]
+    assert "check_inbox()" in captured_system[0]
+    assert "goals, or inbox needs attention" in captured_system[0]
 
 
 @pytest.mark.asyncio

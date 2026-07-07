@@ -36,6 +36,7 @@ class _TempConfigMixin:
         self._orig_root = PROJECT_ROOT
         # Monkey-patch module-level paths
         import src.cli.config as cfg_mod
+
         self._agents_path = Path(self._tmpdir) / "config" / "agents.yaml"
         self._perms_path = Path(self._tmpdir) / "config" / "permissions.json"
         self._agents_path.parent.mkdir(parents=True, exist_ok=True)
@@ -48,15 +49,18 @@ class _TempConfigMixin:
         # provider has a key in env (Bug 5). These tests use
         # ``openai/gpt-4o*`` models — give them a placeholder key.
         import os
+
         self._orig_openai_key = os.environ.get("OPENLEGION_SYSTEM_OPENAI_API_KEY")
         os.environ["OPENLEGION_SYSTEM_OPENAI_API_KEY"] = "sk-test-templates"
 
     def teardown_method(self):
         import src.cli.config as cfg_mod
+
         cfg_mod.AGENTS_FILE = self._orig_agents
         cfg_mod.PERMISSIONS_FILE = self._orig_perms
         cfg_mod.PROJECT_ROOT = self._orig_root
         import os
+
         if self._orig_openai_key is None:
             os.environ.pop("OPENLEGION_SYSTEM_OPENAI_API_KEY", None)
         else:
@@ -64,11 +68,14 @@ class _TempConfigMixin:
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def _mock_config(self, *, collab=True):
-        return patch("src.cli.config._load_config", return_value={
-            "llm": {"default_model": "openai/gpt-4o-mini"},
-            "agents": {},
-            "collaboration": collab,
-        })
+        return patch(
+            "src.cli.config._load_config",
+            return_value={
+                "llm": {"default_model": "openai/gpt-4o-mini"},
+                "agents": {},
+                "collaboration": collab,
+            },
+        )
 
 
 class TestAddAgentToConfig(_TempConfigMixin):
@@ -99,15 +106,14 @@ class TestAddAgentToConfig(_TempConfigMixin):
 
     def test_initial_interface(self):
         _add_agent_to_config(
-            "iris", "scout", "openai/gpt-4o",
+            "iris",
+            "scout",
+            "openai/gpt-4o",
             initial_interface="Accepts research, produces notes.",
         )
         with open(self._agents_path) as f:
             cfg = yaml.safe_load(f)
-        assert (
-            cfg["agents"]["iris"]["initial_interface"]
-            == "Accepts research, produces notes."
-        )
+        assert cfg["agents"]["iris"]["initial_interface"] == "Accepts research, produces notes."
 
     def test_thinking(self):
         _add_agent_to_config("eve", "analyst", "openai/gpt-4o", thinking="medium")
@@ -145,7 +151,9 @@ class TestAddAgentToConfig(_TempConfigMixin):
     def test_all_fields_together(self):
         """All optional fields can be set simultaneously."""
         _add_agent_to_config(
-            "full", "full-agent", "openai/gpt-4o",
+            "full",
+            "full-agent",
+            "openai/gpt-4o",
             initial_instructions="Do stuff.",
             initial_soul="Be nice.",
             initial_heartbeat="Check things.",
@@ -168,7 +176,9 @@ class TestAddAgentToConfig(_TempConfigMixin):
     def test_structured_routing_fields_persisted(self):
         """Task 8 — structured fields round-trip through agents.yaml."""
         _add_agent_to_config(
-            "router", "researcher", "openai/gpt-4o",
+            "router",
+            "researcher",
+            "openai/gpt-4o",
             capabilities=["Web research", "File I/O"],
             preferred_inputs=["User questions"],
             expected_outputs=["Research reports"],
@@ -192,8 +202,11 @@ class TestAddAgentToConfig(_TempConfigMixin):
             cfg = yaml.safe_load(f)
         agent = cfg["agents"]["plain"]
         for key in (
-            "capabilities", "preferred_inputs", "expected_outputs",
-            "escalation_to", "forbidden",
+            "capabilities",
+            "preferred_inputs",
+            "expected_outputs",
+            "escalation_to",
+            "forbidden",
         ):
             assert key not in agent, f"unexpected empty key {key!r} in agents.yaml"
 
@@ -209,8 +222,10 @@ class TestCreateAgentParity(_TempConfigMixin):
         with open(self._perms_path) as f:
             perms = json.load(f)
         dana = perms["permissions"]["dana"]
-        # Coordination: full blackboard read + the standard write prefixes.
-        assert dana["blackboard_read"] == ["*"]
+        # Coordination: the private team-of-one read pattern ONLY (ratified
+        # #5 review fix — no worker starts with a read wildcard; the host
+        # ACL is the read boundary) + the standard write prefixes.
+        assert sorted(dana["blackboard_read"]) == ["teams/dana/*"]
         for prefix in ("tasks/*", "context/*", "status/*", "output/*", "artifacts/*"):
             assert prefix in dana["blackboard_write"]
         assert dana["can_publish"] == ["*"]
@@ -238,35 +253,44 @@ class TestCreateAgentParity(_TempConfigMixin):
         with open(self._perms_path) as f:
             perms = json.load(f)
         erin = perms["permissions"]["erin"]
-        assert set(erin["blackboard_read"]) == set(_DEFAULT_AGENT_COORDINATION_PERMS["blackboard_read"])
-        assert set(erin["blackboard_write"]) == set(_DEFAULT_AGENT_COORDINATION_PERMS["blackboard_write"])
+        # Coordination defaults + the base self pattern every worker holds.
+        assert set(erin["blackboard_read"]) == (
+            set(_DEFAULT_AGENT_COORDINATION_PERMS["blackboard_read"]) | {"teams/erin/*"}
+        )
+        assert set(erin["blackboard_write"]) == (
+            set(_DEFAULT_AGENT_COORDINATION_PERMS["blackboard_write"]) | {"teams/erin/*"}
+        )
 
 
 class TestAddAgentPermissions(_TempConfigMixin):
     def test_default_permissions(self):
         """``_add_agent_permissions`` with NO perms keeps the restrictive base
-        (empty blackboard) — only the create paths layer coordination defaults
-        on top. This pins the base so templates can still scope blackboard."""
+        — just the worker's private team-of-one self pattern (ratified #5) —
+        only the create paths layer coordination defaults on top. This pins
+        the base so templates can still scope blackboard."""
         _add_agent_to_config("alice", "researcher", "openai/gpt-4o")
         _add_agent_permissions("alice")
         with open(self._perms_path) as f:
             perms = json.load(f)
         alice = perms["permissions"]["alice"]
         assert alice["allowed_apis"] == ["llm", "image_gen"]
-        assert alice["blackboard_read"] == []
-        assert alice["blackboard_write"] == []
+        assert alice["blackboard_read"] == ["teams/alice/*"]
+        assert alice["blackboard_write"] == ["teams/alice/*"]
         # Internet is on by default even on the bare base.
         assert alice["can_use_internet"] is True
 
     def test_template_permissions_merged(self):
         """Template permissions are merged into defaults."""
         _add_agent_to_config("bob", "engineer", "openai/gpt-4o")
-        _add_agent_permissions("bob", permissions={
-            "blackboard_read": ["tasks/*", "reviews/*"],
-            "blackboard_write": ["tasks/*"],
-            "can_publish": ["task_complete"],
-            "can_subscribe": ["tasks_ready"],
-        })
+        _add_agent_permissions(
+            "bob",
+            permissions={
+                "blackboard_read": ["tasks/*", "reviews/*"],
+                "blackboard_write": ["tasks/*"],
+                "can_publish": ["task_complete"],
+                "can_subscribe": ["tasks_ready"],
+            },
+        )
         with open(self._perms_path) as f:
             perms = json.load(f)
         bob = perms["permissions"]["bob"]
@@ -283,20 +307,30 @@ class TestAddAgentPermissions(_TempConfigMixin):
         must persist the flag so the /mesh/credential-request gate lets
         that worker through. Defaults False when the template omits it."""
         _add_agent_to_config("scraper", "enricher", "openai/gpt-4o")
-        _add_agent_permissions("scraper", permissions={
-            "can_request_user_credentials": True,
-        })
+        _add_agent_permissions(
+            "scraper",
+            permissions={
+                "can_request_user_credentials": True,
+            },
+        )
         _add_agent_to_config("plain", "writer", "openai/gpt-4o")
-        _add_agent_permissions("plain", permissions={
-            "can_publish": ["draft_ready"],
-        })
+        _add_agent_permissions(
+            "plain",
+            permissions={
+                "can_publish": ["draft_ready"],
+            },
+        )
         with open(self._perms_path) as f:
             perms = json.load(f)
         assert perms["permissions"]["scraper"]["can_request_user_credentials"] is True
         # Omitted → falls back to the deny-all default (False).
-        assert perms["permissions"]["plain"].get(
-            "can_request_user_credentials", False,
-        ) is False
+        assert (
+            perms["permissions"]["plain"].get(
+                "can_request_user_credentials",
+                False,
+            )
+            is False
+        )
 
     def test_template_cannot_grant_can_use_wallet(self):
         """L4: a template setting can_use_wallet=true must be clamped to
@@ -304,11 +338,15 @@ class TestAddAgentPermissions(_TempConfigMixin):
         is NO LONGER on the ceiling (it's a default-on capability), so a
         template may set it; other non-ceiling booleans pass through too."""
         _add_agent_to_config("mallory", "engineer", "openai/gpt-4o")
-        _add_agent_permissions("mallory", permissions={
-            "can_spawn": True,        # no longer clamped — passes through
-            "can_use_wallet": True,   # on the ceiling — clamped to False
-            "can_manage_cron": True,  # not on the ceiling — passes through
-        }, from_template=True)
+        _add_agent_permissions(
+            "mallory",
+            permissions={
+                "can_spawn": True,  # no longer clamped — passes through
+                "can_use_wallet": True,  # on the ceiling — clamped to False
+                "can_manage_cron": True,  # not on the ceiling — passes through
+            },
+            from_template=True,
+        )
         with open(self._perms_path) as f:
             perms = json.load(f)
         m = perms["permissions"]["mallory"]
@@ -321,9 +359,12 @@ class TestAddAgentPermissions(_TempConfigMixin):
     def test_template_permissions_merge_with_collab_defaults(self):
         """Template permissions add to collaboration defaults, not replace."""
         _add_agent_to_config("carol", "writer", "openai/gpt-4o")
-        _add_agent_permissions("carol", permissions={
-            "can_publish": ["draft_ready"],
-        })
+        _add_agent_permissions(
+            "carol",
+            permissions={
+                "can_publish": ["draft_ready"],
+            },
+        )
         with open(self._perms_path) as f:
             perms = json.load(f)
         carol = perms["permissions"]["carol"]
@@ -334,17 +375,23 @@ class TestAddAgentPermissions(_TempConfigMixin):
     def test_non_collab_mode_uses_template_permissions(self):
         """When collaboration is off, template permissions are the only source."""
         _add_agent_to_config("dave", "researcher", "openai/gpt-4o")
-        with patch("src.cli.config._load_config", return_value={
-            "llm": {"default_model": "openai/gpt-4o-mini"},
-            "agents": {"dave": {"role": "researcher"}},
-            "collaboration": False,
-        }):
-            _add_agent_permissions("dave", permissions={
-                "blackboard_read": ["data/*"],
-                "blackboard_write": ["results/*"],
-                "can_publish": ["done"],
-                "can_subscribe": ["start"],
-            })
+        with patch(
+            "src.cli.config._load_config",
+            return_value={
+                "llm": {"default_model": "openai/gpt-4o-mini"},
+                "agents": {"dave": {"role": "researcher"}},
+                "collaboration": False,
+            },
+        ):
+            _add_agent_permissions(
+                "dave",
+                permissions={
+                    "blackboard_read": ["data/*"],
+                    "blackboard_write": ["results/*"],
+                    "can_publish": ["done"],
+                    "can_subscribe": ["start"],
+                },
+            )
         with open(self._perms_path) as f:
             perms = json.load(f)
         dave = perms["permissions"]["dave"]
@@ -366,28 +413,34 @@ class TestAddAgentPermissions(_TempConfigMixin):
         with open(self._perms_path) as f:
             perms = json.load(f)
         eve = perms["permissions"]["eve"]
-        assert eve["blackboard_read"] == []
-        assert eve["blackboard_write"] == []
+        assert eve["blackboard_read"] == ["teams/eve/*"]
+        assert eve["blackboard_write"] == ["teams/eve/*"]
 
     def test_empty_template_permission_lists_ignored(self):
         """Empty lists in template permissions don't affect defaults."""
         _add_agent_to_config("fay", "helper", "openai/gpt-4o")
-        _add_agent_permissions("fay", permissions={
-            "blackboard_read": [],
-            "can_publish": [],
-        })
+        _add_agent_permissions(
+            "fay",
+            permissions={
+                "blackboard_read": [],
+                "can_publish": [],
+            },
+        )
         with open(self._perms_path) as f:
             perms = json.load(f)
         fay = perms["permissions"]["fay"]
-        assert fay["blackboard_read"] == []
+        assert fay["blackboard_read"] == ["teams/fay/*"]
 
     def test_invalid_permission_type_ignored(self):
         """Non-list values in template permissions are safely ignored."""
         _add_agent_to_config("gus", "helper", "openai/gpt-4o")
-        _add_agent_permissions("gus", permissions={
-            "blackboard_read": "not-a-list",
-            "can_publish": 42,
-        })
+        _add_agent_permissions(
+            "gus",
+            permissions={
+                "blackboard_read": "not-a-list",
+                "can_publish": 42,
+            },
+        )
         with open(self._perms_path) as f:
             perms = json.load(f)
         gus = perms["permissions"]["gus"]
@@ -407,20 +460,22 @@ class TestAddAgentPermissions(_TempConfigMixin):
         _add_agent_to_config("hank", "helper", "openai/gpt-4o")
         # Same dict the create_custom_agent route now passes.
         default_perms = {
-            "blackboard_read":  ["*"],
+            "blackboard_read": ["*"],
             "blackboard_write": ["tasks/*", "context/*", "status/*", "output/*", "artifacts/*"],
-            "can_publish":      ["*"],
-            "can_subscribe":    ["*"],
-            "can_use_browser":  True,
-            "can_manage_cron":  True,
+            "can_publish": ["*"],
+            "can_subscribe": ["*"],
+            "can_use_browser": True,
+            "can_manage_cron": True,
         }
         _add_agent_permissions("hank", permissions=default_perms)
         with open(self._perms_path) as f:
             perms = json.load(f)
         hank = perms["permissions"]["hank"]
-        # Coordination read access — wildcard so the auto-watch setup at
-        # mesh/register installs the tasks/{agent}/* watcher.
-        assert hank["blackboard_read"] == ["*"]
+        # Coordination read access — the self pattern satisfies the
+        # auto-watch truthiness gate at mesh/register; a legacy ``*`` in
+        # the passed dict is stripped (no worker starts with a read
+        # wildcard, ratified #5 review fix).
+        assert sorted(hank["blackboard_read"]) == ["teams/hank/*"]
         # Coordination write namespaces — must include tasks/* (hand_off)
         # and the other standard prefixes.
         for pattern in ("tasks/*", "context/*", "status/*", "output/*", "artifacts/*"):
@@ -460,10 +515,7 @@ class TestApplyTemplate(_TempConfigMixin):
         assert scout["initial_instructions"] == "Find sources."
         assert scout["initial_soul"] == "You are curious."
         assert scout["initial_heartbeat"] == "Check news."
-        assert (
-            scout["initial_interface"]
-            == "Accepts research requests, produces notes."
-        )
+        assert scout["initial_interface"] == "Accepts research requests, produces notes."
         assert scout["thinking"] == "medium"
         assert scout["budget"]["daily_usd"] == 5.0
 
@@ -471,6 +523,7 @@ class TestApplyTemplate(_TempConfigMixin):
         """At least one bundled template declares initial_interface; applying
         it must persist the contract to agents.yaml so peers can discover it."""
         from src.cli.config import _load_templates
+
         templates = _load_templates()
         candidate = None
         for tpl_name, tpl in templates.items():
@@ -482,8 +535,7 @@ class TestApplyTemplate(_TempConfigMixin):
                 break
 
         assert candidate is not None, (
-            "Expected at least one bundled template to declare "
-            "initial_interface for the pipeline test"
+            "Expected at least one bundled template to declare initial_interface for the pipeline test"
         )
         tpl_name, agent_id, expected_interface = candidate
         full_tpl = templates[tpl_name]
@@ -494,9 +546,7 @@ class TestApplyTemplate(_TempConfigMixin):
         assert agent_id in created
         with open(self._agents_path) as f:
             cfg = yaml.safe_load(f)
-        assert (
-            cfg["agents"][agent_id]["initial_interface"] == expected_interface
-        )
+        assert cfg["agents"][agent_id]["initial_interface"] == expected_interface
 
     def test_resources_written_in_single_pass(self):
         """Resources are included in the same agents.yaml write, not a separate re-read."""
@@ -568,11 +618,14 @@ class TestApplyTemplate(_TempConfigMixin):
                 },
             },
         }
-        with patch("src.cli.config._load_config", return_value={
-            "llm": {"default_model": "anthropic/claude-sonnet-4-6"},
-            "agents": {},
-            "collaboration": True,
-        }):
+        with patch(
+            "src.cli.config._load_config",
+            return_value={
+                "llm": {"default_model": "anthropic/claude-sonnet-4-6"},
+                "agents": {},
+                "collaboration": True,
+            },
+        ):
             _apply_template("test-tpl", tpl)
 
         with open(self._agents_path) as f:
@@ -696,7 +749,8 @@ class TestApplyTemplateAgentOverrides(_TempConfigMixin):
         tpl = self._multi_template()
         with self._mock_config():
             _apply_template(
-                "multi", tpl,
+                "multi",
+                tpl,
                 agent_overrides={"writer": {"model": "anthropic/claude-sonnet-4-6"}},
             )
         with open(self._agents_path) as f:
@@ -753,7 +807,8 @@ class TestApplyTemplateAgentOverrides(_TempConfigMixin):
         tpl = self._multi_template()
         with self._mock_config():
             created = _apply_template(
-                "multi", tpl,
+                "multi",
+                tpl,
                 agent_overrides={"ghost": {"model": "openai/gpt-4o"}},
             )
         # All real agents created with template defaults
@@ -794,7 +849,8 @@ class TestApplyTemplateAgentOverrides(_TempConfigMixin):
         tpl = self._multi_template_with_souls()
         with self._mock_config():
             _apply_template(
-                "multi", tpl,
+                "multi",
+                tpl,
                 agent_overrides={"writer": {"soul": "Custom writer soul."}},
             )
         with open(self._agents_path) as f:
@@ -803,45 +859,35 @@ class TestApplyTemplateAgentOverrides(_TempConfigMixin):
         # Editor untouched
         assert cfg["agents"]["editor"]["initial_soul"] == "Default editor soul."
         # Other fields untouched on writer
-        assert (
-            cfg["agents"]["writer"]["initial_instructions"]
-            == "Default writer instructions."
-        )
+        assert cfg["agents"]["writer"]["initial_instructions"] == "Default writer instructions."
 
     def test_heartbeat_override_persists_to_disk(self):
         """Override ``heartbeat`` for one agent."""
         tpl = self._multi_template_with_souls()
         with self._mock_config():
             _apply_template(
-                "multi", tpl,
+                "multi",
+                tpl,
                 agent_overrides={"writer": {"heartbeat": "Beat every hour."}},
             )
         with open(self._agents_path) as f:
             cfg = yaml.safe_load(f)
         assert cfg["agents"]["writer"]["initial_heartbeat"] == "Beat every hour."
-        assert (
-            cfg["agents"]["editor"]["initial_heartbeat"]
-            == "Default editor heartbeat."
-        )
+        assert cfg["agents"]["editor"]["initial_heartbeat"] == "Default editor heartbeat."
 
     def test_interface_override_persists_to_disk(self):
         """Override ``interface`` for one agent."""
         tpl = self._multi_template_with_souls()
         with self._mock_config():
             _apply_template(
-                "multi", tpl,
+                "multi",
+                tpl,
                 agent_overrides={"writer": {"interface": "Accepts X, produces Y."}},
             )
         with open(self._agents_path) as f:
             cfg = yaml.safe_load(f)
-        assert (
-            cfg["agents"]["writer"]["initial_interface"]
-            == "Accepts X, produces Y."
-        )
-        assert (
-            cfg["agents"]["editor"]["initial_interface"]
-            == "Default editor interface."
-        )
+        assert cfg["agents"]["writer"]["initial_interface"] == "Accepts X, produces Y."
+        assert cfg["agents"]["editor"]["initial_interface"] == "Default editor interface."
 
     def test_all_four_fields_combined_for_one_agent(self):
         """Model + instructions + soul + interface all together for one slot."""
@@ -864,9 +910,7 @@ class TestApplyTemplateAgentOverrides(_TempConfigMixin):
         assert writer["initial_soul"] == "Custom writer soul."
         assert writer["initial_interface"] == "Accepts briefs, produces drafts."
         # Heartbeat NOT overridden — stays on template default
-        assert (
-            writer["initial_heartbeat"] == "Default writer heartbeat."
-        )
+        assert writer["initial_heartbeat"] == "Default writer heartbeat."
         # Editor entirely on template defaults
         editor = cfg["agents"]["editor"]
         assert editor["model"] == "openai/gpt-4o-mini"
@@ -877,6 +921,7 @@ class TestLoadTemplates:
     def test_all_templates_parse(self):
         """All template YAML files in src/templates/ parse without error."""
         from src.cli.config import _load_templates
+
         templates = _load_templates()
         assert len(templates) >= 6  # starter, devteam, content, sales, deep-research, monitor
         for name, tpl in templates.items():
@@ -886,6 +931,7 @@ class TestLoadTemplates:
     def test_templates_have_valid_agent_defs(self):
         """Each agent in each template has at least role and model."""
         from src.cli.config import _load_templates
+
         templates = _load_templates()
         for tpl_name, tpl in templates.items():
             for agent_name, agent_def in tpl.get("agents", {}).items():
@@ -895,6 +941,7 @@ class TestLoadTemplates:
     def test_all_agent_names_are_valid(self):
         """Every agent name in every template passes validation."""
         from src.cli.config import _load_templates
+
         templates = _load_templates()
         for tpl_name, tpl in templates.items():
             for agent_name in tpl.get("agents", {}):
@@ -903,28 +950,25 @@ class TestLoadTemplates:
     def test_starter_has_structured_fields(self):
         """Task 8 — starter template declares the new fields directly."""
         from src.cli.config import _load_templates
+
         templates = _load_templates()
         starter = templates.get("starter") or {}
         assistant = (starter.get("agents") or {}).get("assistant") or {}
-        assert assistant.get("capabilities"), \
-            "starter/assistant must declare structured 'capabilities'"
-        assert assistant.get("preferred_inputs"), \
-            "starter/assistant must declare 'preferred_inputs'"
-        assert assistant.get("expected_outputs"), \
-            "starter/assistant must declare 'expected_outputs'"
+        assert assistant.get("capabilities"), "starter/assistant must declare structured 'capabilities'"
+        assert assistant.get("preferred_inputs"), "starter/assistant must declare 'preferred_inputs'"
+        assert assistant.get("expected_outputs"), "starter/assistant must declare 'expected_outputs'"
 
     def test_devteam_has_structured_fields(self):
         """Task 8 — devteam template declares the new fields directly."""
         from src.cli.config import _load_templates
+
         templates = _load_templates()
         devteam = templates.get("devteam") or {}
         agents = devteam.get("agents") or {}
         for role in ("pm", "engineer", "reviewer"):
             entry = agents.get(role) or {}
-            assert entry.get("capabilities"), \
-                f"devteam/{role} must declare structured 'capabilities'"
-            assert entry.get("preferred_inputs"), \
-                f"devteam/{role} must declare 'preferred_inputs'"
+            assert entry.get("capabilities"), f"devteam/{role} must declare structured 'capabilities'"
+            assert entry.get("preferred_inputs"), f"devteam/{role} must declare 'preferred_inputs'"
         # engineer + reviewer escalate to pm
         assert agents["engineer"].get("escalation_to") == "pm"
         assert agents["reviewer"].get("escalation_to") == "pm"
@@ -932,19 +976,23 @@ class TestLoadTemplates:
     def test_research_has_structured_fields(self):
         """Task 8 — research template declares the new fields directly."""
         from src.cli.config import _load_templates
+
         templates = _load_templates()
         research = templates.get("research") or {}
         researcher = (research.get("agents") or {}).get("researcher") or {}
-        assert researcher.get("capabilities"), \
-            "research/researcher must declare structured 'capabilities'"
+        assert researcher.get("capabilities"), "research/researcher must declare structured 'capabilities'"
+
 
 class TestBackfillCapabilities(_TempConfigMixin):
     def test_lazy_derives_for_legacy_agent(self):
         """Legacy agent entries (no structured fields, only initial_interface)
         get back-filled on first load."""
         from src.cli.config import _backfill_capabilities_for_existing_agents
+
         _add_agent_to_config(
-            "legacy", "researcher", "openai/gpt-4o",
+            "legacy",
+            "researcher",
+            "openai/gpt-4o",
             initial_interface=(
                 "# Interface: legacy\n\n"
                 "## Capabilities\n"
@@ -972,12 +1020,13 @@ class TestBackfillCapabilities(_TempConfigMixin):
     def test_idempotent_with_existing_capabilities(self):
         """Back-fill skips agents that already declare structured capabilities."""
         from src.cli.config import _backfill_capabilities_for_existing_agents
+
         _add_agent_to_config(
-            "already", "x", "openai/gpt-4o",
+            "already",
+            "x",
+            "openai/gpt-4o",
             capabilities=["Hand-curated"],
-            initial_interface=(
-                "## Capabilities\n- Should not overwrite hand-curated\n"
-            ),
+            initial_interface=("## Capabilities\n- Should not overwrite hand-curated\n"),
         )
         _backfill_capabilities_for_existing_agents()
         with open(self._agents_path) as f:
@@ -988,6 +1037,7 @@ class TestBackfillCapabilities(_TempConfigMixin):
         """Agents with neither structured fields nor INTERFACE.md text
         are left alone — back-fill never invents content."""
         from src.cli.config import _backfill_capabilities_for_existing_agents
+
         _add_agent_to_config("bare", "x", "openai/gpt-4o")
         _backfill_capabilities_for_existing_agents()
         with open(self._agents_path) as f:
@@ -998,63 +1048,86 @@ class TestBackfillCapabilities(_TempConfigMixin):
 class TestValidateAgentTemplate:
     def test_warns_on_missing_capabilities_and_no_interface(self):
         from src.cli.config import _validate_agent_template
-        warnings = _validate_agent_template({
-            "name": "thin",
-            "agents": {"a1": {"role": "x", "model": "y"}},
-        })
+
+        warnings = _validate_agent_template(
+            {
+                "name": "thin",
+                "agents": {"a1": {"role": "x", "model": "y"}},
+            }
+        )
         assert any("capabilities" in w for w in warnings)
 
     def test_no_warning_when_capabilities_set(self):
         from src.cli.config import _validate_agent_template
-        warnings = _validate_agent_template({
-            "name": "ok",
-            "agents": {"a1": {
-                "role": "x", "model": "y",
-                "capabilities": ["does things"],
-            }},
-        })
+
+        warnings = _validate_agent_template(
+            {
+                "name": "ok",
+                "agents": {
+                    "a1": {
+                        "role": "x",
+                        "model": "y",
+                        "capabilities": ["does things"],
+                    }
+                },
+            }
+        )
         assert not any("capabilities" in w for w in warnings)
 
     def test_no_warning_when_interface_present(self):
         """Interface text is enough — derivation will fill structured fields."""
         from src.cli.config import _validate_agent_template
-        warnings = _validate_agent_template({
-            "name": "interfaced",
-            "agents": {"a1": {
-                "role": "x", "model": "y",
-                "initial_interface": "## Capabilities\n- X\n",
-            }},
-        })
+
+        warnings = _validate_agent_template(
+            {
+                "name": "interfaced",
+                "agents": {
+                    "a1": {
+                        "role": "x",
+                        "model": "y",
+                        "initial_interface": "## Capabilities\n- X\n",
+                    }
+                },
+            }
+        )
         assert not any("capabilities" in w for w in warnings)
 
     def test_warns_on_unknown_escalation_target(self):
         from src.cli.config import _validate_agent_template
-        warnings = _validate_agent_template({
-            "name": "broken-escalation",
-            "agents": {
-                "a1": {
-                    "role": "x", "model": "y",
-                    "capabilities": ["a"],
-                    "escalation_to": "missing",
+
+        warnings = _validate_agent_template(
+            {
+                "name": "broken-escalation",
+                "agents": {
+                    "a1": {
+                        "role": "x",
+                        "model": "y",
+                        "capabilities": ["a"],
+                        "escalation_to": "missing",
+                    },
+                    "a2": {"role": "y", "model": "y", "capabilities": ["b"]},
                 },
-                "a2": {"role": "y", "model": "y", "capabilities": ["b"]},
-            },
-        })
+            }
+        )
         assert any("escalation_to" in w and "missing" in w for w in warnings)
 
     def test_no_warning_for_known_escalation(self):
         from src.cli.config import _validate_agent_template
-        warnings = _validate_agent_template({
-            "name": "good-escalation",
-            "agents": {
-                "a1": {
-                    "role": "x", "model": "y",
-                    "capabilities": ["a"],
-                    "escalation_to": "a2",
+
+        warnings = _validate_agent_template(
+            {
+                "name": "good-escalation",
+                "agents": {
+                    "a1": {
+                        "role": "x",
+                        "model": "y",
+                        "capabilities": ["a"],
+                        "escalation_to": "a2",
+                    },
+                    "a2": {"role": "y", "model": "y", "capabilities": ["b"]},
                 },
-                "a2": {"role": "y", "model": "y", "capabilities": ["b"]},
-            },
-        })
+            }
+        )
         assert not warnings
 
 
@@ -1209,19 +1282,14 @@ def test_opportunity_finder_artifact_permissions():
     need to discover them. All three must grant artifacts/* on the blackboard
     (read) and the modeler additionally on write.
     """
-    template_path = (
-        Path(__file__).resolve().parent.parent
-        / "src" / "templates" / "opportunity-finder.yaml"
-    )
+    template_path = Path(__file__).resolve().parent.parent / "src" / "templates" / "opportunity-finder.yaml"
     data = yaml.safe_load(template_path.read_text())
     agents = data["agents"]
 
     for agent_id in ("gap-scout", "evaluator", "modeler"):
         perms = agents[agent_id]["permissions"]
         reads = perms.get("blackboard_read", [])
-        assert "artifacts/*" in reads, (
-            f"{agent_id} must be able to read artifacts/* on the blackboard"
-        )
+        assert "artifacts/*" in reads, f"{agent_id} must be able to read artifacts/* on the blackboard"
 
     # Modeler is the one calling save_artifact.
     modeler_writes = agents["modeler"]["permissions"].get("blackboard_write", [])
@@ -1266,8 +1334,7 @@ def test_all_templates_save_artifact_has_permission():
 
             if not has_perm:
                 issues.append(
-                    f"{yaml_file.name}:{agent_id} uses save_artifact but "
-                    f"blackboard_write={writes} lacks artifacts/*"
+                    f"{yaml_file.name}:{agent_id} uses save_artifact but blackboard_write={writes} lacks artifacts/*"
                 )
 
     assert not issues, "\n".join(issues)
@@ -1307,11 +1374,7 @@ def test_multi_handoff_templates_document_task_id():
     from src.cli.config import _load_templates
 
     templates = _load_templates()
-    multi_agent = {
-        name: tpl
-        for name, tpl in templates.items()
-        if len(tpl.get("agents", {}) or {}) > 1
-    }
+    multi_agent = {name: tpl for name, tpl in templates.items() if len(tpl.get("agents", {}) or {}) > 1}
     assert multi_agent, "expected at least one multi-agent template"
 
     missing: list[str] = []
@@ -1326,7 +1389,4 @@ def test_multi_handoff_templates_document_task_id():
         if "task_id" not in combined:
             missing.append(name)
 
-    assert not missing, (
-        "Multi-agent templates missing task_id disambiguation guidance: "
-        + ", ".join(missing)
-    )
+    assert not missing, "Multi-agent templates missing task_id disambiguation guidance: " + ", ".join(missing)

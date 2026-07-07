@@ -73,13 +73,11 @@ class RuntimeBackend(abc.ABC):
     _vault: CredentialVault | None = None
     _permissions: PermissionMatrix | None = None
     _connectors: "ConnectorStore | None" = None
+    _team_env_provider = None
 
     def __init__(self, mesh_host_port: int = 8420, project_root: str | None = None):
         self.mesh_host_port = mesh_host_port
-        self.project_root = (
-            Path(project_root) if project_root
-            else Path(__file__).resolve().parent.parent.parent
-        )
+        self.project_root = Path(project_root) if project_root else Path(__file__).resolve().parent.parent.parent
         self.agents: dict[str, dict] = {}
         self.auth_tokens: dict[str, str] = {}
         self.extra_env: dict[str, str] = {}
@@ -109,6 +107,28 @@ class RuntimeBackend(abc.ABC):
         until wired, agents start with no MCP servers."""
         self._connectors = store
 
+    def set_team_env_provider(self, provider) -> None:
+        """Wire the per-agent team env resolver (``agent_id -> dict``).
+
+        Returns the ``TEAM_NAME``/``TEAM_MD_PATH`` env pairs for a start —
+        injected at the backend level (like ``LLM_UTILITY_MODEL``) so EVERY
+        start path (initial boot, REPL /restart, health-monitor restart,
+        dashboard restart, ephemeral spawn) resolves the agent's effective
+        team without per-caller plumbing. Explicit ``env_overrides`` win.
+        """
+        self._team_env_provider = provider
+
+    def _team_env_for(self, agent_id: str) -> dict[str, str]:
+        provider = getattr(self, "_team_env_provider", None)
+        if provider is None:
+            return {}
+        try:
+            env = provider(agent_id)
+            return env if isinstance(env, dict) else {}
+        except Exception:
+            logger.warning("team env provider failed for %s", agent_id, exc_info=True)
+            return {}
+
     def _utility_model_from_config(self) -> str:
         """Deployment-wide cheap model for coordination/utility LLM traffic
         (``llm.utility_model`` in ``config/mesh.yaml``), injected as the
@@ -125,6 +145,7 @@ class RuntimeBackend(abc.ABC):
         """
         try:
             from src.cli.config import _load_config
+
             value = _load_config().get("llm", {}).get("utility_model", "")
         except Exception:
             logger.debug("utility model: config load failed", exc_info=True)
@@ -145,8 +166,8 @@ class RuntimeBackend(abc.ABC):
             return self._connectors.snapshot_for_agent(agent_id)
         except Exception:
             logger.exception(
-                "Connector catalog unreadable; starting %r without MCP "
-                "servers", agent_id,
+                "Connector catalog unreadable; starting %r without MCP servers",
+                agent_id,
             )
             return [], 0
 
@@ -205,27 +226,34 @@ class RuntimeBackend(abc.ABC):
                 if args:
                     s_copy["args"] = [
                         resolve_cred_handles(
-                            a, vault=self._vault, permissions=self._permissions,
+                            a,
+                            vault=self._vault,
+                            permissions=self._permissions,
                             agent_id=agent_id,
                         )[0]
-                        if isinstance(a, str) else a
+                        if isinstance(a, str)
+                        else a
                         for a in args
                     ]
                 env = s.get("env") or {}
                 if env:
                     s_copy["env"] = {
                         k: resolve_cred_handles(
-                            v, vault=self._vault, permissions=self._permissions,
+                            v,
+                            vault=self._vault,
+                            permissions=self._permissions,
                             agent_id=agent_id,
                         )[0]
-                        if isinstance(v, str) else v
+                        if isinstance(v, str)
+                        else v
                         for k, v in env.items()
                     }
             except ValueError as e:
                 logger.error(
-                    "Dropping MCP connector %r for agent %r — credential "
-                    "resolution failed: %s",
-                    s.get("name", "<?>"), agent_id, e,
+                    "Dropping MCP connector %r for agent %r — credential resolution failed: %s",
+                    s.get("name", "<?>"),
+                    agent_id,
+                    e,
                 )
                 continue
             resolved_servers.append(s_copy)
@@ -280,8 +308,11 @@ class RuntimeBackend(abc.ABC):
     ) -> str:
         """Spawn an ephemeral agent with a TTL for auto-cleanup."""
         url = self.start_agent(
-            agent_id=agent_id, role=role, tools_dir="",
-            system_prompt=system_prompt, model=model,
+            agent_id=agent_id,
+            role=role,
+            tools_dir="",
+            system_prompt=system_prompt,
+            model=model,
             thinking=thinking,
             env_overrides=env_overrides,
         )
@@ -295,10 +326,7 @@ class RuntimeBackend(abc.ABC):
         return info["url"] if info else None
 
     def list_agents(self) -> dict:
-        return {
-            aid: {"url": info["url"], "role": info["role"]}
-            for aid, info in self.agents.items()
-        }
+        return {aid: {"url": info["url"], "role": info["role"]} for aid, info in self.agents.items()}
 
     def stop_all(self) -> None:
         for agent_id in list(self.agents.keys()):
@@ -326,6 +354,7 @@ class DockerBackend(RuntimeBackend):
     ):
         super().__init__(mesh_host_port=mesh_host_port, project_root=project_root)
         import docker
+
         self.client = docker.from_env()
         self.use_host_network = use_host_network
         self._next_port = 8401
@@ -368,6 +397,7 @@ class DockerBackend(RuntimeBackend):
     def _ensure_agent_network(self):
         """Get or create the bridge network for agent containers."""
         import docker
+
         try:
             network = self.client.networks.get(self._network_name)
             # If the network was previously created with internal=True (which
@@ -377,8 +407,7 @@ class DockerBackend(RuntimeBackend):
                     network.remove()
                 except Exception:
                     logger.warning(
-                        "Could not replace internal network '%s' — "
-                        "port publishing may not work",
+                        "Could not replace internal network '%s' — port publishing may not work",
                         self._network_name,
                     )
                     return network
@@ -412,9 +441,7 @@ class DockerBackend(RuntimeBackend):
         while self._next_port in self._reserved_ports:
             self._next_port += 1
         if self._next_port > 65535:
-            raise RuntimeError(
-                f"host port range exhausted (next={self._next_port}); too many containers"
-            )
+            raise RuntimeError(f"host port range exhausted (next={self._next_port}); too many containers")
         port = self._next_port
         self._next_port += 1
         return port
@@ -509,13 +536,15 @@ class DockerBackend(RuntimeBackend):
         mcp_servers, mcp_generation = self._mcp_snapshot_for(agent_id)
         if mcp_servers:
             environment["MCP_SERVERS"] = self._build_mcp_servers_env(
-                mcp_servers, agent_id=agent_id,
+                mcp_servers,
+                agent_id=agent_id,
             )
         if thinking:
             environment["THINKING"] = thinking
         utility_model = self._utility_model_from_config()
         if utility_model:
             environment["LLM_UTILITY_MODEL"] = utility_model
+        environment.update(self._team_env_for(agent_id))
         environment.update(self.extra_env)
         if env_overrides:
             environment.update(env_overrides)
@@ -529,15 +558,14 @@ class DockerBackend(RuntimeBackend):
         if tools_dir:
             # docker-py on Windows needs forward-slash or POSIX paths for bind mounts
             volumes[str(Path(tools_dir).as_posix() if platform.system() == "Windows" else tools_dir)] = {
-                "bind": "/app/tools", "mode": "ro",
+                "bind": "/app/tools",
+                "mode": "ro",
             }
         # Mount team-specific TEAM.md (solo agents get none) at
-        # ``/app/TEAM.md``. Check env_overrides first (per-agent), then
-        # fall back to extra_env (system-wide).
-        team_md_path = (env_overrides or {}).get(
-            "TEAM_MD_PATH",
-            self.extra_env.get("TEAM_MD_PATH", ""),
-        )
+        # ``/app/TEAM.md``. Read the FINAL environment so every source
+        # (team env provider, extra_env, per-start env_overrides) is
+        # honored with the same precedence as the env itself.
+        team_md_path = environment.get("TEAM_MD_PATH", "")
         if team_md_path and Path(team_md_path).exists():
             host_path = team_md_path
             if platform.system() == "Windows":
@@ -704,13 +732,11 @@ class DockerBackend(RuntimeBackend):
                 _solver_provider = (bsettings.get("captcha_solver_provider") or "").strip()
                 _solver_key = (bsettings.get("captcha_solver_key") or "").strip()
                 if _solver_provider and not (
-                    os.environ.get("CAPTCHA_SOLVER_PROVIDER")
-                    or os.environ.get("OPENLEGION_CAPTCHA_SOLVER_PROVIDER")
+                    os.environ.get("CAPTCHA_SOLVER_PROVIDER") or os.environ.get("OPENLEGION_CAPTCHA_SOLVER_PROVIDER")
                 ):
                     os.environ["OPENLEGION_CAPTCHA_SOLVER_PROVIDER"] = _solver_provider
                 if _solver_key and not (
-                    os.environ.get("CAPTCHA_SOLVER_KEY")
-                    or os.environ.get("OPENLEGION_CAPTCHA_SOLVER_KEY")
+                    os.environ.get("CAPTCHA_SOLVER_KEY") or os.environ.get("OPENLEGION_CAPTCHA_SOLVER_KEY")
                 ):
                     os.environ["OPENLEGION_CAPTCHA_SOLVER_KEY"] = _solver_key
             except (json.JSONDecodeError, OSError, ValueError):
@@ -723,8 +749,13 @@ class DockerBackend(RuntimeBackend):
             "IDLE_TIMEOUT_MINUTES": str(idle_timeout_minutes),
         }
 
-        for var in ("BROWSER_PROXY_URL", "BROWSER_PROXY_USER", "BROWSER_PROXY_PASS",
-                    "BROWSER_EGRESS_ALLOWLIST", "BROWSER_EGRESS_DISABLE"):
+        for var in (
+            "BROWSER_PROXY_URL",
+            "BROWSER_PROXY_USER",
+            "BROWSER_PROXY_PASS",
+            "BROWSER_EGRESS_ALLOWLIST",
+            "BROWSER_EGRESS_DISABLE",
+        ):
             if os.environ.get(var):
                 environment[var] = os.environ[var]
 
@@ -748,6 +779,7 @@ class DockerBackend(RuntimeBackend):
             try:
                 import ipaddress
                 from urllib.parse import urlparse
+
                 parsed = urlparse(proxy_url if "://" in proxy_url else f"http://{proxy_url}")
                 host = parsed.hostname or ""
                 # Only act on IP literals — hostnames are intentionally untouched.
@@ -756,10 +788,7 @@ class DockerBackend(RuntimeBackend):
                 except ValueError:
                     ip_obj = None
                 _is_private = ip_obj is not None and (
-                    ip_obj.is_private
-                    or ip_obj.is_loopback
-                    or ip_obj.is_link_local
-                    or ip_obj.is_reserved
+                    ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_link_local or ip_obj.is_reserved
                 )
                 if _is_private:
                     # Parse the allowlist (if any) and verify the proxy IP is
@@ -878,6 +907,7 @@ class DockerBackend(RuntimeBackend):
 
         # Wait for browser service API to be ready
         import httpx as _httpx
+
         browser_ready = False
         for attempt in range(15):
             try:
@@ -925,7 +955,8 @@ class DockerBackend(RuntimeBackend):
                     )
                     logger.info(
                         "Pushed browser settings from disk: speed=%s delay=%s",
-                        _payload.get("speed"), _payload.get("delay"),
+                        _payload.get("speed"),
+                        _payload.get("delay"),
                     )
         except Exception as e:
             logger.debug("Browser settings push skipped: %s", e)
@@ -995,6 +1026,7 @@ class DockerBackend(RuntimeBackend):
 
     async def wait_for_agent(self, agent_id: str, timeout: int = 30) -> bool:
         import httpx
+
         url = self.get_agent_url(agent_id)
         if not url:
             return False
@@ -1007,10 +1039,7 @@ class DockerBackend(RuntimeBackend):
                 is_healthy = await loop.run_in_executor(None, self.health_check, agent_id)
                 if not is_healthy:
                     logs = await loop.run_in_executor(None, self.get_logs, agent_id, 20)
-                    logger.warning(
-                        f"Agent '{agent_id}' container exited during startup. "
-                        f"Logs:\n{logs}"
-                    )
+                    logger.warning(f"Agent '{agent_id}' container exited during startup. Logs:\n{logs}")
                     return False
                 try:
                     resp = await client.get(f"{url}/status")
@@ -1022,10 +1051,7 @@ class DockerBackend(RuntimeBackend):
                     last_error = str(e)
                     logger.debug(f"Unexpected error polling agent '{agent_id}': {e}")
                 await asyncio.sleep(0.5)
-        logger.warning(
-            f"Agent '{agent_id}' did not respond within {timeout}s. "
-            f"URL: {url}, last error: {last_error}"
-        )
+        logger.warning(f"Agent '{agent_id}' did not respond within {timeout}s. URL: {url}, last error: {last_error}")
         return False
 
     def stop_all(self) -> None:
@@ -1070,7 +1096,9 @@ class SandboxBackend(RuntimeBackend):
         try:
             result = subprocess.run(
                 ["docker", "sandbox", "ls", "--format", "json"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if result.returncode != 0:
                 return
@@ -1081,7 +1109,8 @@ class SandboxBackend(RuntimeBackend):
                     if name.startswith("openlegion_"):
                         subprocess.run(
                             ["docker", "sandbox", "rm", "-f", name],
-                            capture_output=True, timeout=15,
+                            capture_output=True,
+                            timeout=15,
                         )
                         logger.debug(f"Removed stale sandbox: {name}")
                 except (json.JSONDecodeError, KeyError):
@@ -1111,10 +1140,11 @@ class SandboxBackend(RuntimeBackend):
         (ws / "data" / "workspace").mkdir(parents=True, exist_ok=True)
 
         # Copy team-specific TEAM.md (solo agents get none) into the
-        # sandbox workspace.
+        # sandbox workspace. Same precedence as the env itself:
+        # env_overrides > extra_env > the team env provider.
         team_md_path = (env_overrides or {}).get(
             "TEAM_MD_PATH",
-            self.extra_env.get("TEAM_MD_PATH", ""),
+            self.extra_env.get("TEAM_MD_PATH", self._team_env_for(agent_id).get("TEAM_MD_PATH", "")),
         )
         if team_md_path and Path(team_md_path).exists():
             shutil.copy2(team_md_path, ws / "TEAM.md")
@@ -1186,13 +1216,15 @@ class SandboxBackend(RuntimeBackend):
             env_cfg["LLM_MODEL"] = model
         if mcp_servers:
             env_cfg["MCP_SERVERS"] = self._build_mcp_servers_env(
-                mcp_servers, agent_id=agent_id,
+                mcp_servers,
+                agent_id=agent_id,
             )
         if thinking:
             env_cfg["THINKING"] = thinking
         utility_model = self._utility_model_from_config()
         if utility_model:
             env_cfg["LLM_UTILITY_MODEL"] = utility_model
+        env_cfg.update(self._team_env_for(agent_id))
         env_cfg.update(self.extra_env)
         if env_overrides:
             env_cfg.update(env_overrides)
@@ -1207,9 +1239,7 @@ class SandboxBackend(RuntimeBackend):
             return v.replace("\r", "").replace("\n", "\\n")
 
         env_file = ws / ".agent.env"
-        env_file.write_text(
-            "\n".join(f"{k}={_sanitize_env_value(v)}" for k, v in env_cfg.items()) + "\n"
-        )
+        env_file.write_text("\n".join(f"{k}={_sanitize_env_value(v)}" for k, v in env_cfg.items()) + "\n")
         env_file.chmod(0o600)
         return ws
 
@@ -1226,43 +1256,60 @@ class SandboxBackend(RuntimeBackend):
         sandbox_name = f"openlegion_{_docker_safe_name(agent_id)}"
         mcp_servers, mcp_generation = self._mcp_snapshot_for(agent_id)
         ws = self._prepare_workspace(
-            agent_id, role, tools_dir, system_prompt, model,
-            mcp_servers=mcp_servers, thinking=thinking,
+            agent_id,
+            role,
+            tools_dir,
+            system_prompt,
+            model,
+            mcp_servers=mcp_servers,
+            thinking=thinking,
             env_overrides=env_overrides,
         )
 
         # Create sandbox with the shell agent type and workspace
         # First creation can be slow (microVM init), allow up to 120s
         create_cmd = [
-            "docker", "sandbox", "create",
-            "--name", sandbox_name,
-            "shell", str(ws),
+            "docker",
+            "sandbox",
+            "create",
+            "--name",
+            sandbox_name,
+            "shell",
+            str(ws),
         ]
         result = subprocess.run(
-            create_cmd, capture_output=True, text=True, timeout=120,
+            create_cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
         if result.returncode != 0:
-            raise RuntimeError(
-                f"Failed to create sandbox for '{agent_id}': {result.stderr.strip()}"
-            )
+            raise RuntimeError(f"Failed to create sandbox for '{agent_id}': {result.stderr.strip()}")
         logger.info(f"Created sandbox '{sandbox_name}'")
 
         # Start the agent process inside the sandbox (detached)
         env_file = ws / ".agent.env"
         start_cmd = [
-            "docker", "sandbox", "exec", "-d",
-            "--env-file", str(env_file),
-            sandbox_name, "--",
-            "python", "-m", "src.agent",
+            "docker",
+            "sandbox",
+            "exec",
+            "-d",
+            "--env-file",
+            str(env_file),
+            sandbox_name,
+            "--",
+            "python",
+            "-m",
+            "src.agent",
         ]
         result = subprocess.run(
-            start_cmd, capture_output=True, text=True, timeout=60,
+            start_cmd,
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
         if result.returncode != 0:
-            logger.warning(
-                f"Agent process start may have failed for '{agent_id}': "
-                f"{result.stderr.strip()}"
-            )
+            logger.warning(f"Agent process start may have failed for '{agent_id}': {result.stderr.strip()}")
 
         # No direct URL -- communication via sandbox exec transport
         url = f"sandbox://{sandbox_name}"
@@ -1290,7 +1337,8 @@ class SandboxBackend(RuntimeBackend):
         try:
             subprocess.run(
                 ["docker", "sandbox", "rm", "-f", sandbox_name],
-                capture_output=True, timeout=15,
+                capture_output=True,
+                timeout=15,
             )
             logger.info(f"Removed sandbox '{sandbox_name}'")
         except Exception as e:
@@ -1312,7 +1360,9 @@ class SandboxBackend(RuntimeBackend):
         try:
             result = subprocess.run(
                 ["docker", "sandbox", "inspect", sandbox_name],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if result.returncode != 0:
                 return False
@@ -1330,10 +1380,18 @@ class SandboxBackend(RuntimeBackend):
         try:
             result = subprocess.run(
                 [
-                    "docker", "sandbox", "exec", sandbox_name, "--",
-                    "tail", f"-{tail}", "/tmp/agent.log",
+                    "docker",
+                    "sandbox",
+                    "exec",
+                    sandbox_name,
+                    "--",
+                    "tail",
+                    f"-{tail}",
+                    "/tmp/agent.log",
                 ],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             return result.stdout if result.returncode == 0 else ""
         except Exception as e:
@@ -1342,6 +1400,7 @@ class SandboxBackend(RuntimeBackend):
 
     async def wait_for_agent(self, agent_id: str, timeout: int = 30) -> bool:
         from src.host.transport import SandboxTransport
+
         transport = SandboxTransport()
         start = time.time()
         loop = asyncio.get_running_loop()
@@ -1365,7 +1424,9 @@ def sandbox_available() -> bool:
     try:
         result = subprocess.run(
             ["docker", "sandbox", "version"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         return result.returncode == 0
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -1410,8 +1471,7 @@ def select_backend(
                 project_root=project_root,
             )
         logger.warning(
-            "Docker Sandbox requested but not available. "
-            "Requires Docker Desktop 4.58+. Falling back to containers."
+            "Docker Sandbox requested but not available. Requires Docker Desktop 4.58+. Falling back to containers."
         )
     use_host_net = _should_use_host_network()
     logger.info("Using Docker container isolation (host_network=%s)", use_host_net)
