@@ -569,6 +569,51 @@ class MeshClient:
         _raise_with_body(response)
         return response.json()
 
+    # === Per-agent standing goals (Team store, ratified #7 / C.3-b) ===
+
+    async def get_my_goals(self) -> dict:
+        """Read this agent's own standing goals record from the mesh.
+
+        Returns ``{agent_id, goals: [...], set_by, updated_at}`` with
+        ``goals: []`` when unset. Self-read is always allowed on the
+        mesh side (goal delivery must never depend on ACL variance).
+        The ``X-Agent-ID`` hint mirrors :meth:`introspect` — in dev/
+        no-auth mode the mesh derives identity from it; with tokens
+        configured the Bearer identity wins.
+        """
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/agents/{self.agent_id}/goals",
+            headers={"X-Agent-ID": self.agent_id},
+        )
+        _raise_with_body(response)
+        return response.json()
+
+    async def set_agent_goals(
+        self, agent_id: str, goals: list[str], set_by: str = "operator",
+    ) -> dict:
+        """Replace a worker's standing goals (operator-gated on the mesh).
+
+        Empty ``goals`` clears the record — same as :meth:`clear_agent_goals`.
+        """
+        client = await self._get_client()
+        response = await client.put(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/goals",
+            json={"goals": goals, "set_by": set_by},
+            headers=self._trace_headers(),
+        )
+        _raise_with_body(response)
+        return response.json()
+
+    async def clear_agent_goals(self, agent_id: str) -> dict:
+        """Clear a worker's standing goals (operator-gated on the mesh)."""
+        client = await self._get_client()
+        response = await client.delete(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/goals",
+            headers=self._trace_headers(),
+        )
+        _raise_with_body(response)
+        return response.json()
+
     # === Vault (credential management) ===
 
     async def request_credential_from_user(

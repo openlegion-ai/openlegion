@@ -532,6 +532,35 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   mandate):** there is NO YAML→SQLite import — pre-existing `config/teams/*/
   metadata.yaml` teams do not carry over; clean-slate deploys only.
 
+- **✅ Landed — Phase-1 unit 1b: per-agent standing goals repointed to the Team store
+  (ratified #7 / C.3-b complete; blackboard `goals/` path DELETED).** New mesh endpoints
+  `GET/PUT/DELETE /mesh/agents/{id}/goals` (GET = self-or-operator-or-internal; writes
+  operator/internal only, validation mirrors the tool: ≤5 goals, ≤300 chars each after
+  `sanitize_for_prompt`, `operator` target rejected, empty list clears, unknown target
+  404 naming available agents). `MeshClient` gained `get_my_goals` /
+  `set_agent_goals` / `clear_agent_goals`; the operator `set_agent_goals` tool keeps its
+  full validation + return shape but calls the endpoints (the list_agents team-resolution
+  step is gone — goals are keyed by agent alone); `AgentLoop._fetch_goals` reads
+  `get_my_goals` (TTL cache / sentinel / stale-on-failure / prompt shape unchanged;
+  `goals: []` maps to None so heartbeat-skip still gates on goals); the dashboard
+  GET **and PUT** repointed to `teams_store.get/set/clear_agent_goals` (one goals home —
+  leaving the dashboard write on the blackboard would have been a dual-home). The
+  `permissions.py` goals carve-outs (self-read exception + `goals/` write-block) deleted
+  as dead policy — keys named `goals/...` are ordinary blackboard keys now (pinned by
+  the rewritten `test_permissions.py` class). Personnel-file export bundles the store
+  record as `goals` (null when unset). New `tests/test_agent_goals_endpoint.py` covers
+  the auth matrix + validation. **Adversarial review: 2 low findings, both fixed
+  pre-PR:** (1) `DELETE .../goals` on an unknown/typo'd agent id silently reported
+  success (the old tool's registry pre-check covered the clear branch too) → DELETE now
+  404s naming the roster + rejects the `operator` target like PUT; (2) the LLM-driven
+  write path lost the audit trail the old blackboard write produced (the human dashboard
+  path logs `edit_goals`/`clear_goals`; the mesh path logged nothing) → both mesh writes
+  now `log_audit` with before/after values (`provenance="mesh"`). Cleared as
+  non-findings: dev-mode `X-Agent-ID` posture (identical to sibling endpoints, fail-
+  closed under enforce), the now-permitted teammate write to a key named
+  `teams/X/goals/Y` (inert — nothing reads such keys into prompts anymore), and
+  `_fetch_goals` semantics (verified behavior-identical at all five prompt consumers).
+
 ### YOU ARE HERE → next phase
 Foundation (#1180/#1181/#1183/#1184) and the rename (#1185) are merged. Phase 0's removal
 column is fully done. Next, in order:

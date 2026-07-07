@@ -1833,13 +1833,24 @@ class AgentLoop:
     _GOALS_NOT_FETCHED = object()  # sentinel distinct from None
 
     async def _fetch_goals(self) -> dict | None:
-        """Read this agent's current goals from the shared blackboard (TTL: 5 min)."""
+        """Read this agent's standing goals from the mesh Team store (TTL: 5 min)."""
         now = time.time()
         if self._goals_cache is not self._GOALS_NOT_FETCHED and (now - self._goals_cache_ts) < _GOALS_TTL:
             return self._goals_cache
         try:
-            entry = await self.mesh_client.read_blackboard(f"goals/{self.agent_id}")
-            self._goals_cache = entry.get("value", entry) if entry else None
+            # The endpoint returns the record directly (no blackboard
+            # envelope): {agent_id, goals: [...], set_by, updated_at}
+            # with goals=[] when unset — mapped to None so the prompt
+            # section and heartbeat-skip logic stay goal-gated.
+            record = await self.mesh_client.get_my_goals()
+            if isinstance(record, dict) and record.get("goals"):
+                self._goals_cache = {
+                    "goals": record.get("goals"),
+                    "set_by": record.get("set_by"),
+                    "updated_at": record.get("updated_at"),
+                }
+            else:
+                self._goals_cache = None
             self._goals_cache_ts = now
         except Exception as e:
             logger.debug("Failed to fetch goals for '%s': %s", self.agent_id, e)

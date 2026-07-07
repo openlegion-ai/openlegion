@@ -246,17 +246,10 @@ class PermissionMatrix:
         # "inbox/dev-lead/task_event/...".
         if key.startswith(f"inbox/{agent_id}/task_event/"):
             return True
-        # Self-goals carve-out: an agent may ALWAYS read its OWN goals key
-        # (raw or team-scoped form) — goal delivery must never depend on
-        # per-template ACL variance. Tight match: exactly goals/{id} or
-        # teams/{team}/goals/{id} — not arbitrary keys that merely end
-        # in /goals/{id}.
-        if key == f"goals/{agent_id}":
-            return True
-        if key.startswith("teams/"):
-            p = key.split("/")
-            if len(p) == 4 and p[2] == "goals" and p[3] == agent_id:
-                return True
+        # NOTE: the former self-goals read carve-out is gone — standing
+        # goals moved off the blackboard into the Team store (ratified
+        # #7 / C.3-b; read path is GET /mesh/agents/{id}/goals). Keys
+        # named ``goals/...`` are ordinary blackboard keys now.
         perms = self.get_permissions(agent_id)
         return any(fnmatch.fnmatch(key, pattern) for pattern in perms.blackboard_read)
 
@@ -272,15 +265,12 @@ class PermissionMatrix:
         # writing agent can place output under their own prefix.
         if key.startswith(f"global/output/{agent_id}/"):
             return True
-        # Goals are standing instructions injected into the target agent's
-        # every prompt. Only the operator (endpoint carve-out in server.py)
-        # or the mesh itself may write them — a teammate's teams/{team}/*
-        # write wildcard must NOT cover a peer's goals key (prompt-injection
-        # channel into persistent context).
-        parts = key.split("/", 2)
-        tail = parts[2] if key.startswith("teams/") and len(parts) == 3 else key
-        if tail.startswith("goals/"):
-            return False
+        # NOTE: the former ``goals/`` write-block (anti-prompt-injection
+        # hardening) is gone — standing goals moved off the blackboard
+        # into the Team store (ratified #7 / C.3-b; writes go through
+        # the operator-gated PUT /mesh/agents/{id}/goals endpoint), so
+        # no prompt-injected surface is named "goals" anymore. Keys
+        # named ``goals/...`` are ordinary blackboard keys now.
         perms = self.get_permissions(agent_id)
         return any(fnmatch.fnmatch(key, pattern) for pattern in perms.blackboard_write)
 

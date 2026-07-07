@@ -83,6 +83,11 @@ def _make_loop(llm_responses: list[LLMResponse] | None = None, *, real_memory: b
     mesh_client.is_standalone = False
     mesh_client.send_system_message = AsyncMock(return_value={})
     mesh_client.read_blackboard = AsyncMock(return_value=None)
+    # Standing goals live in the Team store — the loop reads them via
+    # GET /mesh/agents/{id}/goals. goals=[] means unset.
+    mesh_client.get_my_goals = AsyncMock(
+        return_value={"agent_id": "test_agent", "goals": [], "set_by": None, "updated_at": None},
+    )
     mesh_client.list_agents = AsyncMock(return_value={})
 
     loop = AgentLoop(
@@ -2587,7 +2592,10 @@ async def test_heartbeat_runs_when_empty_rules_but_goals_exist():
     loop = _make_loop()
     loop.llm.chat = AsyncMock(return_value=LLMResponse(content="Done", tokens_used=10))
     loop.mesh_client.introspect = AsyncMock(return_value={})
-    loop.mesh_client.read_blackboard = AsyncMock(return_value={"goal": "Monitor competitors"})
+    loop.mesh_client.get_my_goals = AsyncMock(
+        return_value={"agent_id": "test_agent", "goals": ["Monitor competitors"],
+                      "set_by": "operator", "updated_at": "2026-07-05T00:00:00+00:00"},
+    )
     loop.workspace = MagicMock()
     loop.workspace.get_bootstrap_content = MagicMock(return_value="")
     loop.workspace.get_learnings_context = MagicMock(return_value="")
@@ -2877,7 +2885,7 @@ async def test_heartbeat_error_handling():
 
 @pytest.mark.asyncio
 async def test_heartbeat_includes_goals_in_system_prompt():
-    """Heartbeat system prompt includes goals when they exist on the blackboard."""
+    """Heartbeat system prompt includes goals when they exist in the Team store."""
     captured_system = []
 
     async def _capture_llm(*, system, messages, **kw):
@@ -2887,8 +2895,9 @@ async def test_heartbeat_includes_goals_in_system_prompt():
     loop = _make_loop([])
     loop.llm.chat = AsyncMock(side_effect=_capture_llm)
     loop.mesh_client.introspect = AsyncMock(return_value={})
-    loop.mesh_client.read_blackboard = AsyncMock(
-        return_value={"value": {"primary": "Monitor sales pipeline"}}
+    loop.mesh_client.get_my_goals = AsyncMock(
+        return_value={"agent_id": "test_agent", "goals": ["Monitor sales pipeline"],
+                      "set_by": "operator", "updated_at": "2026-07-05T00:00:00+00:00"},
     )
 
     await loop.execute_heartbeat("wakeup")

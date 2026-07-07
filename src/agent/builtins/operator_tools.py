@@ -3054,16 +3054,15 @@ async def manage_goals(
 
 # ── Per-agent standing goals (operator → worker direction) ───────────
 #
-# Writes the blackboard key every agent loop already reads
-# (``AgentLoop._fetch_goals`` → ``goals/{agent_id}``, 5-min cache) and
-# injects into all its prompts under "## Your Current Goals". Goals are
-# standing instructions in the target's persistent context, so the
-# write side is operator-only: the tool is gated here AND the
-# ``goals/`` namespace is hardened in ``host/permissions.py`` so a
-# worker's blackboard-write wildcard can never cover a peer's goals
-# key (prompt-injection channel). Scope resolution mirrors hand_off:
-# team agents read ``teams/{team}/goals/{id}``, solo/global agents
-# read the raw key.
+# Writes the Team-store record every agent loop already reads
+# (``AgentLoop._fetch_goals`` → ``GET /mesh/agents/{id}/goals``, 5-min
+# cache) and injects into all its prompts under "## Your Current
+# Goals". Goals are standing instructions in the target's persistent
+# context, so the write side is operator-only: the tool is gated here
+# AND the mesh ``PUT/DELETE /mesh/agents/{id}/goals`` endpoints are
+# operator-or-internal only (prompt-injection channel). Goals are
+# keyed by agent alone (ratified #7 / C.3-b) — they follow the agent
+# across team moves, no scope resolution needed.
 
 _MAX_AGENT_GOALS = 5
 _MAX_AGENT_GOAL_CHARS = 300
@@ -3103,7 +3102,7 @@ async def set_agent_goals(
     mesh_client=None,
     **_kw,
 ) -> dict:
-    """Operator-only writer for a worker's ``goals/{agent_id}`` key."""
+    """Operator-only writer for a worker's Team-store goals record."""
     if not _is_operator():
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:
@@ -3140,38 +3139,19 @@ async def set_agent_goals(
             }
         cleaned.append(s)
 
-    # Resolve the target's blackboard scope — mirrors hand_off: team
-    # agents read goals under teams/{team}/, solo and fleet-global
-    # agents (scope == "global") read the raw key.
-    try:
-        registry = await mesh_client.list_agents()
-    except Exception as e:
-        return {"error": f"Cannot set goals: fleet roster unavailable ({e})"}
-    if agent_id not in registry:
-        available = ", ".join(sorted(registry.keys()))
-        return {"error": f"Agent '{agent_id}' not found. Available: {available}"}
-    info = registry.get(agent_id, {})
-    team = info.get("team") if isinstance(info, dict) else None
-
+    # Goals are keyed by agent alone in the Team store — no team-scope
+    # resolution. Unknown targets are rejected mesh-side (HTTP 404 whose
+    # detail names the available agents), surfacing here via the error
+    # envelope.
     if not cleaned:
         try:
-            await mesh_client.delete_blackboard(
-                f"goals/{agent_id}", team=team,
-            )
+            await mesh_client.clear_agent_goals(agent_id)
         except Exception as e:
             return {"error": f"Failed to clear goals for {agent_id}: {e}"}
         return {"cleared": True, "agent_id": agent_id}
 
     try:
-        await mesh_client.write_blackboard(
-            f"goals/{agent_id}",
-            {
-                "goals": cleaned,
-                "set_by": "operator",
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            },
-            team=team,
-        )
+        await mesh_client.set_agent_goals(agent_id, cleaned)
     except Exception as e:
         return {"error": f"Failed to set goals for {agent_id}: {e}"}
     return {
