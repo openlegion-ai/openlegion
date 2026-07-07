@@ -648,6 +648,15 @@ class CredentialVault:
         # path because the mesh-proxy boundary erases exception types
         # before the agent can self-report.
         self._auth_failure_recorder: Callable[[str, str, str, int], None] | None = None
+        # ``_bill_resolver`` (Phase 2 unit 3 — ask_teammate): optional
+        # mesh-held attribution seam, wired post-construction to the
+        # AskBroker (mirrors the ``cost_tracker.set_team_store`` pattern).
+        # Duck-typed: ``active_billing_for(agent_id) -> asker | None`` and
+        # ``note_billed_cost(agent_id, cost_usd)``. When it names an asker
+        # for the verified proxy caller, budget preflight AND usage rows
+        # target the ASKER — mesh-authoritative billing; nothing a
+        # container sends can influence the mapping.
+        self._bill_resolver: object | None = None
         self._load_credentials()
         self._register_handlers()
 
@@ -699,6 +708,18 @@ class CredentialVault:
         propagate quarantine signal across the mesh proxy boundary.
         """
         self._auth_failure_recorder = recorder
+
+    def set_bill_resolver(self, resolver: object | None) -> None:
+        """Wire the ask billing resolver (AskBroker) after construction.
+
+        While ``resolver.active_billing_for(agent_id)`` names an asker,
+        ``execute_api_call`` runs budget preflight against — and records
+        usage rows on — that asker instead of the calling agent (their
+        ledger literally pays for the ask turn). The resolver is keyed
+        by the mesh-VERIFIED caller identity only; container-supplied
+        headers can never redirect billing. Pass ``None`` to disable.
+        """
+        self._bill_resolver = resolver
 
     def _load_credentials(self) -> None:
         """Load credentials from environment variables (two-phase).
@@ -1359,19 +1380,40 @@ class CredentialVault:
                 _is_oauth = bool(_oauth_key and is_oauth_token(_oauth_key))
 
         _needs_budget = (is_llm and not _is_oauth) or request.service == "image_gen"
+
+        # Phase 2 unit 3 (ask_teammate): resolve the bill-to identity ONCE
+        # per call, from mesh-held broker state keyed on the VERIFIED
+        # ``agent_id`` (never from request content). While an ask billing
+        # window is open for this agent, preflight and usage rows target
+        # the ASKER — their ledger pays for the ask turn. Snapshotting at
+        # call start means a window closing mid-call bills this one call
+        # to the asker (bounded by the broker's per-ask cap) and the next
+        # call re-resolves.
+        bill_agent = agent_id
+        if agent_id and _needs_budget and self._bill_resolver is not None:
+            try:
+                _asker = self._bill_resolver.active_billing_for(agent_id)
+            except Exception as _bill_err:  # pragma: no cover - defensive
+                logger.warning("ask bill resolver failed: %s", _bill_err)
+                _asker = None
+            if _asker:
+                bill_agent = _asker
+
         use_budget_lock = bool(self.cost_tracker and agent_id and _needs_budget)
 
         if use_budget_lock:
-            if agent_id not in self._budget_locks:
-                self._budget_locks[agent_id] = asyncio.Lock()
-            lock = self._budget_locks[agent_id]
+            # Lock on the PAYING identity so two concurrent calls billing
+            # the same ledger serialize their check-then-charge.
+            if bill_agent not in self._budget_locks:
+                self._budget_locks[bill_agent] = asyncio.Lock()
+            lock = self._budget_locks[bill_agent]
         else:
             lock = None
 
         async def _execute() -> APIProxyResponse:
             if self.cost_tracker and agent_id and _needs_budget:
                 if request.service == "image_gen":
-                    budget_check = self.cost_tracker.check_budget(agent_id)
+                    budget_check = self.cost_tracker.check_budget(bill_agent)
                     if not budget_check["allowed"]:
                         return APIProxyResponse(
                             success=False,
@@ -1390,7 +1432,7 @@ class CredentialVault:
                     # meaningful per-call estimate; this gates on
                     # already-consumed headroom.
                     envelope = self.cost_tracker.team_envelope_check(
-                        agent_id, request.params.get("model", "unknown"),
+                        bill_agent, request.params.get("model", "unknown"),
                     )
                     if not envelope["allowed"]:
                         return APIProxyResponse(
@@ -1403,7 +1445,7 @@ class CredentialVault:
                         )
                 else:
                     model = request.params.get("model", "unknown")
-                    preflight = self.cost_tracker.preflight_check(agent_id, model)
+                    preflight = self.cost_tracker.preflight_check(bill_agent, model)
                     if not preflight["allowed"]:
                         return APIProxyResponse(
                             success=False,
@@ -1421,7 +1463,7 @@ class CredentialVault:
                     # B4): unset/0 = unlimited; enforced pre-flight at the
                     # same chokepoint so one runaway member can't drain the
                     # whole team's allocation.
-                    envelope = self.cost_tracker.team_envelope_check(agent_id, model)
+                    envelope = self.cost_tracker.team_envelope_check(bill_agent, model)
                     if not envelope["allowed"]:
                         _d = envelope.get("daily_limit")
                         _m = envelope.get("monthly_limit")
@@ -1464,17 +1506,46 @@ class CredentialVault:
                         prompt_tokens = raw_pt if raw_pt else int(tokens_used * 0.7)
                         raw_ct = response.data.get("output_tokens")
                         completion_tokens = raw_ct if raw_ct else (tokens_used - prompt_tokens)
-                        self.cost_tracker.track(
-                            agent_id, model, prompt_tokens, completion_tokens,
+                        tracked = self.cost_tracker.track(
+                            bill_agent, model, prompt_tokens, completion_tokens,
                             bill=not _is_oauth,
                         )
+                        # Ask window accounting: accrue the billed cost so
+                        # the broker can close the window at the per-ask
+                        # cap. Keyed by the RECIPIENT (the verified
+                        # caller) — the broker owns the recipient→asker
+                        # mapping.
+                        if (
+                            bill_agent != agent_id
+                            and self._bill_resolver is not None
+                            and isinstance(tracked, dict)
+                        ):
+                            try:
+                                self._bill_resolver.note_billed_cost(
+                                    agent_id, tracked.get("cost", 0.0),
+                                )
+                            except Exception as _acc_err:  # pragma: no cover
+                                logger.warning(
+                                    "ask billed-cost accrual failed: %s",
+                                    _acc_err,
+                                )
 
                     fixed_cost = response.data.get("fixed_cost_usd")
                     if fixed_cost and fixed_cost > 0:
                         fc_model = response.data.get("model", request.service)
                         self.cost_tracker.track_fixed_cost(
-                            agent_id, fc_model, fixed_cost,
+                            bill_agent, fc_model, fixed_cost,
                         )
+                        if bill_agent != agent_id and self._bill_resolver is not None:
+                            try:
+                                self._bill_resolver.note_billed_cost(
+                                    agent_id, fixed_cost,
+                                )
+                            except Exception as _acc_err:  # pragma: no cover
+                                logger.warning(
+                                    "ask billed-cost accrual failed: %s",
+                                    _acc_err,
+                                )
 
                 return response
             except LLMAuthError as e:

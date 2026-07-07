@@ -338,6 +338,72 @@ class MeshClient:
         _raise_with_body(response)
         return response.json()
 
+    async def ask_teammate(
+        self, to: str, question: str, timeout_seconds: int | None = None,
+    ) -> dict:
+        """Inline teammate question via the mesh ask broker (Phase 2 u3).
+
+        Blocks until the mesh returns an answer or a timeout envelope —
+        the SERVER owns the wait; our HTTP timeout only adds headroom on
+        top of the (clamped) ask timeout so a mesh that resolves the
+        limit differently still gets to answer. Non-200 responses are
+        returned as ``{"http_error": True, "status_code", "detail"}``
+        instead of raising so the tool can shape Constraint-#10 failure
+        envelopes from the structured detail (e.g. the unknown-recipient
+        roster).
+        """
+        from src.shared import limits
+
+        payload: dict = {"to": to, "question": question}
+        if timeout_seconds:
+            timeout_seconds = limits.clamp(
+                "ask_timeout_seconds", int(timeout_seconds),
+            )
+            payload["timeout_seconds"] = timeout_seconds
+        effective = timeout_seconds or limits.resolve("ask_timeout_seconds")
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/ask",
+            json=payload,
+            headers=self._trace_headers(),
+            timeout=effective + 30,
+        )
+        if response.status_code == 200:
+            return response.json()
+        return {
+            "http_error": True,
+            "status_code": response.status_code,
+            "detail": self._error_detail(response),
+        }
+
+    async def answer_ask(self, ask_id: str, answer: str) -> dict:
+        """Deliver an answer for an in-flight ask (single-use)."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/ask/{ask_id}/answer",
+            json={"answer": answer},
+            headers=self._trace_headers(),
+            timeout=30,
+        )
+        if response.status_code == 200:
+            return response.json()
+        return {
+            "http_error": True,
+            "status_code": response.status_code,
+            "detail": self._error_detail(response),
+        }
+
+    @staticmethod
+    def _error_detail(response: httpx.Response):
+        """Best-effort structured FastAPI ``detail`` from an error body."""
+        try:
+            parsed = response.json()
+            if isinstance(parsed, dict) and "detail" in parsed:
+                return parsed["detail"]
+            return parsed
+        except Exception:
+            return response.text[:500]
+
     async def record_trace(
         self,
         event_type: str,

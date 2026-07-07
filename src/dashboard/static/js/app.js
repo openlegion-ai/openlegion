@@ -11217,6 +11217,8 @@ function dashboard() {
         memory_think: 'reasoning over memory',
         memory_save: 'saving to memory',
         hand_off: 'handing off to a teammate',
+        ask_teammate: 'asking a teammate',
+        answer_ask: 'answering a teammate',
         check_inbox: 'checking the inbox',
         update_status: 'updating status',
         complete_task: 'wrapping up a task',

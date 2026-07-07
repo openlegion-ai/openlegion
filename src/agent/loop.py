@@ -213,6 +213,11 @@ _HEARTBEAT_TOOLS = frozenset({
     # procedure silently 403'd. Read-only; workspace path checks still
     # apply inside the tool.
     "read_file",
+    # v7 (Phase 2 unit 3): heartbeat step 1 answers a task_blocked
+    # worker's clarifying question inline via ``ask_teammate`` so the
+    # worker resumes the SAME task instead of the blocked→re-hand_off
+    # dance. Without this entry the prompted call is denied.
+    "ask_teammate",
 })
 
 # Tool calls whose ONLY purpose is to read state — they don't produce

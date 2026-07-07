@@ -915,6 +915,47 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
      (b) DM thread `scope_id` is first-writer-wins (sender's team at first message) —
      observability-only, but `archive_scope` can miss operator-initiated DM threads.
 
+- **✅ Landed — Phase-2 unit 3: ask_teammate (mesh-brokered inline Q&A, asker-billed,
+  steer-delivered).** `src/host/asks.py` `AskBroker` on `app.state`; tools `ask_teammate` /
+  `answer_ask`; endpoints `POST /mesh/ask` + `POST /mesh/ask/{id}/answer` (rate buckets `ask`
+  (20/min) + `ask_answer`). Design decisions of record:
+  - **Busy/idle resolution (recon correction 1 honored).** Delivery probes via the new
+    `LaneManager.try_steer` (injection WITHOUT the followup fallback). BUSY → steer interjection
+    riding the current turn — no task row, no task_id (Constraint-#6-correct, nothing
+    auto-closes), never a second parallel turn (B1); resolution comes only from the `answer_ask`
+    back-edge resolving the mesh-held future. IDLE → a normal followup lane turn of the ask
+    instruction (the recipient's own loop with its workspace/SOUL/INSTRUCTIONS is what "loads
+    recipient expertise"); resolves with FIRST of `answer_ask`, the turn's own inline response
+    (uncooperative-but-answering turns still resolve), timeout.
+  - **Billing window (recon correction 3 honored — mesh-authoritative).**
+    `credentials.set_bill_resolver(broker)`: while a window is open for the verified proxy
+    caller, budget preflight (per-agent AND team envelope) runs against the ASKER and usage rows
+    land on the asker. The window is keyed exclusively off broker state (asker/recipient pair the
+    mesh itself validated) — container headers can never open, extend, or redirect it; a
+    malicious asker is bounded by rate × cap. Opened by the lane's new `QueuedTask.on_start`
+    when the IDLE-path dispatch actually starts (queued unrelated work never bills the asker);
+    closed on future resolution +5s grace or when billed spend crosses `limits.ask_bill_cap_usd`
+    (default $0.50 — after the cap the recipient pays, blocking asker-funded runaways AND
+    recipient-side cost-dumping). Accepted carve-out: BUSY-path interjections are NOT re-billed —
+    the marginal tokens ride the recipient's current (recipient-billed) task.
+  - **In-memory broker is acceptable.** An ask is a live RPC (seconds–minutes); a mesh restart
+    kills the asker's pending HTTP call → the tool surfaces a Constraint-#10 failure envelope, a
+    late `answer_ask` gets the non-fatal unknown-ask envelope. Nothing durable is lost: the Q&A
+    also posts to the team thread store. Thread posting is OPTIONAL wiring (`set_thread_store`,
+    agreed unit-2 API `ensure_dm_thread`/`post_message`) — one line at unit-2 integration:
+    `self.ask_broker.set_thread_store(self.thread_store)` in `cli/runtime.py`.
+  - **Pushback-reissue dance prompt copy removed (§5 Remove).** `hand_off`/`check_inbox`/
+    `update_status` descriptions, operator heartbeat (sentinel `heartbeat_v7_ask_teammate`) and
+    playbook (`playbook_v7_ask_teammate` addendum) now direct: answer a `task_blocked` question
+    inline via `ask_teammate` so the worker resumes the SAME task — never re-hand_off a
+    duplicate; workers ask the creator BEFORE blocking. The blocked-status machinery itself
+    (state machine, blocker_note, back-edges) is untouched.
+  - **Security posture:** question/answer sanitized + capped (4k/8k) on the mesh side; asker
+    return is provenance-tagged "teammate" and framed as semi-trusted input, not instructions
+    (§4); worker→operator asks 403 (Task-2e posture — no worker-injected synchronous prompt in
+    the operator's privileged loop); cross-team block mirrors MessageRouter; every failure path
+    returns `answered=False` + directive `error` + `recovery_hint` (Constraint #10).
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|

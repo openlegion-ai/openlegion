@@ -62,6 +62,11 @@ class QueuedTask:
     auto_notify: bool = False
     task_id: str | None = None
     system_note: bool = False
+    # Optional callback fired by the worker IMMEDIATELY before dispatch
+    # (not at enqueue). Lets a caller observe when queued work actually
+    # starts — the ask billing window (host/asks.py) opens here so the
+    # asker never pays for unrelated work queued ahead of the ask turn.
+    on_start: Callable[[], None] | None = None
     future: asyncio.Future = field(default_factory=asyncio.Future)
 
 
@@ -362,6 +367,7 @@ class LaneManager:
         auto_notify: bool = False,
         task_id: str | None = None,
         system_note: bool = False,
+        on_start: Callable[[], None] | None = None,
     ) -> str:
         """Queue a message for an agent with the specified mode.
 
@@ -384,6 +390,10 @@ class LaneManager:
         ``system`` instead of impersonating the user. Threaded through
         BOTH modes: steer needs it because its idle-agent/error paths
         fall back to a full followup dispatch.
+
+        ``on_start`` (followup only) fires in the worker right before the
+        dispatch call — see ``QueuedTask.on_start``. Steer intentionally
+        ignores it (an injection rides an already-running turn).
         """
         self._ensure_lane(agent)
 
@@ -393,6 +403,7 @@ class LaneManager:
             agent, message, trace_id=trace_id,
             origin=origin, auto_notify=auto_notify,
             task_id=task_id, system_note=system_note,
+            on_start=on_start,
         )
 
     async def _handle_followup(
@@ -401,6 +412,7 @@ class LaneManager:
         auto_notify: bool = False,
         task_id: str | None = None,
         system_note: bool = False,
+        on_start: Callable[[], None] | None = None,
     ) -> str:
         """Standard FIFO enqueue."""
         task = QueuedTask(
@@ -413,6 +425,7 @@ class LaneManager:
             auto_notify=auto_notify,
             task_id=task_id,
             system_note=system_note,
+            on_start=on_start,
         )
         # H7 — non-blocking put so a full lane surfaces backpressure
         # (LaneQueueFull → HTTP 429) instead of silently awaiting forever
@@ -473,6 +486,31 @@ class LaneManager:
         except Exception as e:
             logger.warning(f"Steer to '{agent}' failed, falling back to followup: {e}")
             return await self._handle_followup(agent, message, system_note=system_note)
+
+    async def try_steer(
+        self, agent: str, message: str, *, system_note: bool = False,
+    ) -> bool:
+        """Attempt a steer injection WITHOUT the followup fallback.
+
+        Returns True iff the message was injected into an actively
+        working turn (the busy probe the ask verb needs: busy → the
+        interjection rides the current turn, idle → the caller decides
+        what to do — for asks, a dedicated followup dispatch). Never
+        raises; no steer_fn or a transport error reads as "not injected".
+        The steer-wakeup rate limit is NOT consumed here — this path
+        never wakes an idle agent.
+        """
+        if self._steer_fn is None:
+            return False
+        try:
+            if system_note:
+                result = await self._steer_fn(agent, message, system_note=True)
+            else:
+                result = await self._steer_fn(agent, message)
+        except Exception as e:
+            logger.warning("try_steer to '%s' failed: %s", agent, e)
+            return False
+        return bool(result.get("injected", False)) if isinstance(result, dict) else False
 
     def _check_steer_wakeup_rate(self, agent: str) -> bool:
         """Return True if the agent hasn't exceeded the steer-wakeup rate limit."""
@@ -575,6 +613,17 @@ class LaneManager:
                     dispatch_kwargs["task_id"] = task.task_id
                 if task.system_note:
                     dispatch_kwargs["system_note"] = True
+                # Fire the caller's start hook (ask billing window etc.)
+                # now that this queued item is ACTUALLY dispatching — a
+                # hook error must never wedge the lane.
+                if task.on_start is not None:
+                    try:
+                        task.on_start()
+                    except Exception as hook_err:
+                        logger.warning(
+                            "Lane on_start hook for %s failed: %s",
+                            task.id, hook_err,
+                        )
                 # Bug 4: per-task wall-clock cap. A hung LLM stream or
                 # stuck tool previously blocked the lane forever — every
                 # subsequent task for this agent would queue forever.

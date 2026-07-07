@@ -121,6 +121,7 @@ HEARTBEAT_SENTINELS: tuple[str, ...] = (
     "heartbeat_v4_goal_seeding",
     "heartbeat_v5_fleet_health",
     "heartbeat_v6_agent_retro",
+    "heartbeat_v7_ask_teammate",
 )
 
 # Same contract for the operator's INSTRUCTIONS playbook
@@ -139,6 +140,7 @@ PLAYBOOK_SENTINELS: tuple[str, ...] = (
     "playbook_v4_watch_mode",
     "playbook_v5_verification_wake",
     "playbook_v6_chat_delivery",
+    "playbook_v7_ask_teammate",
 )
 
 # === Inter-Component Messages ===

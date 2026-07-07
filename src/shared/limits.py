@@ -65,6 +65,11 @@ LIMIT_SPECS: dict[str, tuple[int, int, int]] = {
     # window — so a concurrent-push overshoot is bounded to ONE push
     # (drive_push_max_mb), not N simultaneous pushes.
     "drive_quota_mb": (512, 1, 65536),
+    # ask_teammate inline Q&A wait (Phase 2 unit 3). How long the asker's
+    # /mesh/ask call waits for an answer before returning the timeout
+    # envelope. Host-side; the agent tool derives its HTTP timeout from
+    # the same resolution + headroom.
+    "ask_timeout_seconds": (180, 30, 600),
 }
 
 # key -> OPENLEGION_* env var name (the second-lowest precedence source).
@@ -78,6 +83,7 @@ ENV_NAMES: dict[str, str] = {
     "lane_queue_max": "OPENLEGION_LANE_QUEUE_MAX",
     "drive_push_max_mb": "OPENLEGION_DRIVE_PUSH_MAX_MB",
     "drive_quota_mb": "OPENLEGION_DRIVE_QUOTA_MB",
+    "ask_timeout_seconds": "OPENLEGION_ASK_TIMEOUT_SECONDS",
 }
 
 # Per-agent config keys (agents.yaml / edit_agent) -> limits key. Only the
@@ -120,6 +126,46 @@ MAX_OUTPUT_TOKENS_MAX = 200_000
 # list() as needed; ``LLMClient.VALID_THINKING_LEVELS`` derives from
 # this.
 THINKING_LEVELS: tuple[str, ...] = ("off", "low", "medium", "high")
+
+# ask_teammate payload caps. Enforced on BOTH sides of the trust
+# boundary: the agent-side tool truncates before sending, the mesh
+# endpoints truncate again after sanitize (the container is untrusted,
+# so the mesh copy is the one that counts).
+ASK_QUESTION_MAX_CHARS = 4_000
+ASK_ANSWER_MAX_CHARS = 8_000
+
+# Per-ask billed-spend cap (USD). While an ask's billing window is
+# active, the recipient's LLM calls bill the ASKER; once the billed
+# total crosses this cap the window closes and subsequent calls bill
+# the recipient normally — bounding both an asker-funded runaway turn
+# and recipient-side cost-dumping. Float-valued, so it lives outside
+# the int-only ``LIMIT_SPECS`` table with the same env-override +
+# clamp contract.
+ASK_BILL_CAP_USD_DEFAULT = 0.50
+_ASK_BILL_CAP_USD_RANGE = (0.01, 100.0)
+
+
+def ask_bill_cap_usd() -> float:
+    """Resolve the per-ask billed-spend cap (env override, clamped)."""
+    raw = os.environ.get("OPENLEGION_ASK_BILL_CAP_USD")
+    if raw is None:
+        return ASK_BILL_CAP_USD_DEFAULT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid OPENLEGION_ASK_BILL_CAP_USD=%r — using default %.2f",
+            raw, ASK_BILL_CAP_USD_DEFAULT,
+        )
+        return ASK_BILL_CAP_USD_DEFAULT
+    lo, hi = _ASK_BILL_CAP_USD_RANGE
+    clamped = max(lo, min(value, hi))
+    if clamped != value:
+        logger.info(
+            "ask_bill_cap_usd=%s clamped to %s (range %s-%s)",
+            value, clamped, lo, hi,
+        )
+    return clamped
 
 
 def clamp(key: str, value: int) -> int:
