@@ -139,8 +139,10 @@ deliberately relaxed *within* a team where output justifies it.
   (Appendix A.C1). Replace with a **durable, pre-flight enforced team envelope** (mirror the
   persisted per-agent `agent_budgets.json` pattern); the lead allocates per-agent budgets within it.
 - **Lanes** (`src/host/lanes.py`): in-memory queues that strand work on restart → **rehydrate from
-  the durable `tasks` table on boot**; add a **second lane** per agent (deep-work + interactive) so
-  a 4h task no longer head-of-line-blocks a 30-second question.
+  the durable `tasks` table on boot**; ~~add a **second lane** per agent (deep-work + interactive)~~
+  → **priority steer path** per agent (interactive requests steer-inject into the running turn with
+  a reply back-edge — never a concurrent turn; reframed per B1, ratified §8 #10) so a 4h task no
+  longer head-of-line-blocks a 30-second question.
 - **One model per agent → per-call model tiering.** The proxy + failover already accept a per-call
   `model` override; add caller-side policy so coordination traffic (agenda ticks, thread/standup
   digests, summaries) runs on cheap models and deep work on strong ones. Makes the "employees talk"
@@ -255,7 +257,9 @@ and lets teammates actually share work.
 *Benefit:* turns automation nodes into employees with initiative — the difference between "runs when
 pinged" and "owns outcomes."
 - **Build:** **agenda loop** (review plate → prioritize → may self-create goal-directed work);
-  **dual lanes** (deep-work + interactive); **budget-governed initiative** (autonomy bounded by the
+  **priority steer lane** (interactive requests preempt via steer-injection into the running turn
+  with a reply back-edge — reframed from "dual lanes" per B1, ratified §8 #10; never a second
+  parallel turn); **budget-governed initiative** (autonomy bounded by the
   enforced budget, not by muzzling the heartbeat); richer self-scheduling.
 - **Refactor:** heartbeat → agenda loop; deterministic probes retained as cheap pre-checks.
 - **Remove:** LLM-skip suppression logic + babysitting prompt copy.
@@ -397,6 +401,73 @@ Status: **RATIFIED** except items 1 and 4, which stand at their safe defaults pe
    MUST resolve the sandbox story (sync layer vs Docker-only scoping) at the same time. Known
    caveat recorded: sandbox-VM→host HTTP egress is wired but exercised by no test; the Drive lands
    with DockerBackend as the tested path, matching the backend's existing best-effort posture.
+10. ✅ **RATIFIED (2026-07-07) — B1: the Phase-3 "interactive lane" is a PRIORITY STEER LANE, not
+    parallel execution.** The §6 Phase-3 "dual lanes (deep-work + interactive)" bullet is rewritten;
+    Appendix A.2's "Dual lanes" attach-point sketch (a parallel queue keyed `(agent, lane_kind)`)
+    is superseded and must NOT be built. The agent runtime is single-lane by explicit design —
+    `_chat_lock` serializes full turns (`loop.py:425`, held at `3080`/`5094`), and one shared set of
+    `_chat_messages` / `state` / `_loop_detector` / memory-write paths underlies every turn — so a
+    true second parallel worker corrupts state (B1, the plan's most dangerous item). The priority
+    mechanism is **steer-style injection into the running turn**, which `ask_teammate` already
+    exercises end-to-end: `LaneManager.try_steer` (`lanes.py:490` — injection probe, no followup
+    fallback, no wakeup-rate consumption) → `POST /chat/steer` → `inject_steer` → `_steer_queue` →
+    mid-turn drains (`loop.py:3897-3920` after each tool round, `:4162-4180` at final answer, next
+    turn's `_prepare_chat_context` as the catch-all). AskBroker's `_deliver_ask`
+    (`server.py:1877-1933`) is the reference busy/idle fork: BUSY → steer-inject (no task row, no
+    `task_id` — Constraint-#6-correct) with resolution via an answer back-edge; IDLE → a normal
+    followup lane turn. The Phase-3 unit generalizes that fork to interactive chat and closes the
+    three verified gaps plain chat has today: (a) the dashboard chat path calls the agent `/chat`
+    DIRECTLY (`dashboard/server.py:3643-3715`), bypassing the lane and blocking on `_chat_lock`
+    behind a long turn until its 120s timeout; (b) a steered human message gets no reply back-edge
+    (asks solve this with `answer_ask`; chat today returns only "Steered: message injected"); (c)
+    the steer-after-last-drain race (an injection landing after a turn's final drain waits silently
+    for the next turn). What true parallelism would require — per-lane splitting of
+    `_chat_messages`/`state`/`_loop_detector`/memory — is explicitly out of scope for this plan.
+11. ✅ **RATIFIED (2026-07-07) — B2: the coordination-vs-work spend split is MODEL-KEYED at the LLM
+    proxy; it lands BEFORE the heartbeat-suppression removal (ordering per §8 #3).** Design of
+    record, grounded in code recon:
+    - **Classification (mesh-authoritative, never container-supplied):** a call is *coordination*
+      iff the requested model equals the deployment-configured `llm.utility_model` — read mesh-side
+      via the same `_load_config()` seam `_enforce_model_pin` already uses
+      (`server.py:1388-1406`), never from container headers (the container is untrusted). This is
+      the "designated cheap-model tier" §8 #3 ratified: the agent-side coordination call sites
+      (heartbeat/agenda tick `loop.py:2562`, summarize/extract/consolidate `context.py:604/776/1086`)
+      already send that model via `utility_model_kwargs()`, so classification needs no new agent
+      plumbing. *Declined alternative:* window-based attribution (mesh opens a "coordination
+      window" around cron heartbeat dispatch, like the ask billing window) — fuzzier boundaries
+      (turn duration unknown, interleaved traffic), more moving parts, and it would misclassify
+      utility-model summarization inside work turns; model-keyed is exact for the traffic class.
+    - **Ledger:** new `kind` column on the `usage` table (`'work'` default, `'coordination'`),
+      following the existing `trace_id` introspection-migration precedent (`costs.py:177-182`).
+      Work-ledger reads used for ENFORCEMENT — `preflight_check`, `check_budget`,
+      `_check_budget_post_hoc`, and `team_envelope_check`'s `_members_spend_totals` — filter
+      `kind='work'`; REPORTING surfaces (dashboard `/api/costs`, `get_team_spend`, introspect)
+      stay spend-inclusive with coordination broken out (money is money; only the governors split).
+    - **Governor:** coordination calls skip the per-agent work preflight AND the team envelope, and
+      are instead gated by a per-agent daily coordination cap resolved via the `limits.py` float
+      pattern (`ask_bill_cap_usd` precedent, `limits.py:150-174`): `OPENLEGION_COORDINATION_DAILY_CAP_USD`,
+      default $2.00/day, clamped; `0` = coordination tier blocked (an operator kill-switch that
+      restores probe-only ticks). A blocked coordination call fails with a DISTINCT
+      "Coordination budget exceeded" error — work traffic is never touched, which is the entire
+      point of B2. Exposure accepted: an agent deliberately running work on the utility model taps
+      the coordination cap — bounded at the cap, on the cheap model, per day; equivalent-severity
+      to the existing accepted per-agent-lock envelope race.
+    - **Interactions decided now:** (a) ask-billing precedence — coordination classification WINS
+      over an open ask window: utility-model calls never redirect to the asker (keeps the asker's
+      cap for the work they asked for; recipient's coordination ledger absorbs its own compaction);
+      (b) OAuth path unchanged (`bill=False` — tracked at zero cost, no ledger, no split);
+      (c) failover substitution: classification keys on the REQUESTED model (the honest
+      coordination signal), not the post-failover substitute.
+    - **`llm.utility_model` unset = no coordination tier exists.** Idle-tick starvation is closed
+      by the deterministic-probe fast path either way (retained per §6 Phase 3 / B2 mitigation —
+      truly-empty plates never reach the LLM). Goal-directed initiative escalation (a tick with
+      NO actionable items where the agent would work purely toward standing goals) additionally
+      REQUIRES the coordination tier: without a designated cheap model, speculative initiative
+      ticks would bill the work ledger on the strong model — the exact B2 starvation vector — so
+      unset utility_model keeps those ticks probe-only. Actionable items (pending tasks, inbox
+      events, probe alerts) always escalate — that is work responding to work, and pre-B2 behavior
+      already dispatched the LLM on activity/probes. Deployment guidance: set `llm.utility_model`
+      to enable initiative.
 
 Chronological record of what has actually landed on the branch, and any plan
 corrections discovered during implementation. Keeps this doc the source of truth
@@ -991,6 +1062,34 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   cannot read directly (the drive wall is REAL membership) — the operator reads all; same-team is the
   common case; this is an accepted narrowing recorded for adversarial review.
 
+- **✅ Landed — Phase-3 pre-decisions ratified (§8 #10 B1 priority-steer reframe, §8 #11 B2
+  model-keyed spend split).** Recorded BEFORE any Phase-3 build, per the C.3-a/b precedent.
+  Grounded in a four-way code recon (heartbeat/cron dispatch, lanes/steer/chat delivery,
+  cost/budget preflight stack, goals/plate/self-scheduling surfaces); load-bearing facts are cited
+  inline in the §8 entries. Recon corrections worth recording now:
+  1. **✎ Plan correction — the suppression path is TWO sites, not one.** §5/§6 name only the cron
+     skip; the agent side has its own goal-gated skip (`loop.py:2370-2378`: empty HEARTBEAT.md AND
+     no goals → `{"skipped": "no_heartbeat_rules"}`), plus `force_llm` plumbing spanning
+     `CronJob.force_llm` (`cron.py:83`), `_UPDATABLE_FIELDS` (`cron.py:343`), the `x-force-llm`
+     header (`agent/server.py:469-479`), and the `execute_heartbeat(force_llm=)` param. The unit-2
+     deletion must cover both sites and the plumbing.
+  2. There is no `heartbeat_context.py` — the deterministic probes are cron-side
+     (`_run_heartbeat_probes`, `cron.py:691-735`: disk, `signals/{agent}`, `tasks/{agent}`) plus
+     the agent `GET /heartbeat-context` endpoint (`is_default_heartbeat`/`has_recent_activity`).
+     These are the "cheap pre-checks" §6 retains.
+  3. **Standing goals are operator-write-only** (`_require_goals_writer`, `server.py:8928-8936`) —
+     "may self-create goal-directed work" means self-created TASKS toward operator-set goals, not
+     self-edited goals; any goal-self-write carve-out would be a separate, explicit unit-4 decision.
+  4. No first-class self-task tool exists; `hand_off`-to-self is unguarded today (gate is
+     `can_message`, default `["*"]`) and is the natural seam for self-created work.
+  5. `costs.db` has no `PRAGMA user_version` — it uses a file-local introspection-`ALTER` pattern
+     (the `trace_id` precedent, `costs.py:177-182`, pinned by
+     `test_migration_idempotent_on_legacy_db`); the B2 `kind` column follows that file-local
+     pattern rather than the canonical-v1 executescript pattern.
+  6. Budget is ALREADY agent-visible (`introspect(section="budget")` → `check_budget` +
+     `get_team_spend`, surfaced in the heartbeat prompt's runtime-context block) — unit 4's
+     "budget-aware prioritization" is prompt + data-shape work, not a new endpoint.
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|
@@ -1011,6 +1110,11 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
 | #1196 | Team Threads — durable store replacing message_log deque + inbox back-edge feed (unit 2) | green |
 | #1197 | ask_teammate — mesh-brokered inline Q&A, asker-billed, steer-delivered (unit 3) | green |
 | #1198 | blackboard → signals only — hand_off data + artifacts move to the Team Drive (unit 4) | green |
+
+### PR ledger — Phase 3 (as of 2026-07-07)
+| PR | Unit | CI |
+|---|---|---|
+| — | Phase-3 pre-decisions ratified (B1 → §8 #10, B2 → §8 #11) + build order | this PR |
 
 *CI note:* workflow runs on app-authored PRs in this repo require the maintainer's one-click
 approval and did not auto-run; each unit was landed on a green full local suite (the exact
@@ -1038,21 +1142,30 @@ off `main`, each completing its C.1 deletion in-phase (C.4 phase-exit verified p
 unratified) — do not build it without an explicit user decision; any future scratch ratification
 MUST resolve the SandboxBackend story at the same time (recorded in §8 #9).
 
-**Next: Phase-3 pre-decisions (decide BEFORE building, like C.3-a/b were):**
-1. **B1 — reframe "dual lanes" to a PRIORITY STEER lane, NOT parallel execution.** The agent
-   runtime is single-lane by explicit design (`_chat_lock` + shared `_chat_messages`/`state`/
-   `_loop_detector`); a true second parallel worker would corrupt state (B1, the plan's single
-   most dangerous item). The Phase-3 "interactive lane" must be steer-style injection into the
-   running turn (the mechanism `ask_teammate` already exercises), not a concurrent turn. Rewrite
-   the §6 Phase-3 "dual lanes" bullet to "priority steer lane" before building.
-2. **B2 — the coordination-vs-work SPEND SPLIT gates the heartbeat-suppression removal.** Removing
-   the LLM-skip (cron.py idle heartbeat) without a spend split lets agenda ticks exhaust the flat
-   per-agent daily ledger and then HARD-BLOCK real task work (budget is pre-flight enforced). The
-   cheap-model tiering HOOK exists (Phase-0 residual a, `llm.utility_model`); B2 needs the actual
-   split (separate coordination sub-budget, or exempt cheap-tier coordination from the work cap)
-   to land WITH or BEFORE the suppression removal (§8 #3 ratified this ordering). Do not remove
-   the LLM-skip until the split exists.
-Then build Phase 3 (agenda loop, priority steer lane, budget-governed initiative) per §6.
+**Phase-3 pre-decisions: ✅ BOTH RATIFIED (2026-07-07), recorded BEFORE building per the C.3-a/b
+precedent:**
+1. **B1 → §8 #10.** "Dual lanes" is reframed to a **priority steer lane** — steer-style injection
+   into the running turn (the `ask_teammate` mechanism) with a reply back-edge; never a second
+   parallel turn. §6 Phase 3, §5 (lanes row), and Appendix A.2 (dual-lanes sketch superseded) are
+   rewritten accordingly.
+2. **B2 → §8 #11.** The coordination-vs-work spend split is **model-keyed at the LLM proxy**
+   (requested model == deployment `llm.utility_model` → separate coordination ledger + own daily
+   cap; work preflight and team envelope exclude it). It lands as Phase-3 **unit 1**, BEFORE the
+   heartbeat-suppression removal (§8 #3 ordering honored). Full design of record in §8 #11.
+
+**Phase-3 build order (one PR per unit, each green before the next):**
+- **Unit 1 — B2 spend split** (`kind` column on `usage`, proxy classification, coordination cap in
+  `limits.py`, enforcement reads filter `kind='work'`).
+- **Unit 2 — agenda loop** (review plate → prioritize → may self-create goal-directed work) **+ the
+  C.1 row-5 deletion in the same unit**: the cron four-condition LLM-skip (`cron.py:543-554`), the
+  agent-side goal-gated skip (`loop.py:2370-2378`), `force_llm`/`x-force-llm` plumbing, and the
+  "HEARTBEAT_OK / don't increase frequency" prompt copy all go; deterministic probes stay as the
+  cheap pre-check fast path.
+- **Unit 3 — priority steer lane** (per B1/§8 #10: generalize the ask busy/idle fork to interactive
+  chat; reply back-edge for steered messages; dashboard chat path redirected off direct `/chat`).
+- **Unit 4 — budget-governed initiative + richer self-scheduling** (budget-aware agenda prompt via
+  the already-visible introspect budget block; self-created work toward standing goals; the
+  `set_cron` "only if the USER asks" muzzle replaced with budget-governed policy).
 Phase-5 hibernation still needs B3's three-subsystem scoping; Personnel-file *import* still needs
 B-pre #2's config file-lock first.
 
@@ -1164,9 +1277,11 @@ are point-in-time; treat symbol names as the durable anchor.
 - **Hibernation** — build on archive (`server.py:7417` already `stop_agent(remove_data=False)`); add
   auto-restart = `start_agent` + `wait_for_agent` (`runtime.py:980`, ~0.5s poll to 30s) triggered by
   the next task/ask/mention/cron.
-- **Dual lanes** — every structure in `LaneManager` is keyed by `agent` alone (`lanes.py:127-132`);
-  add a parallel interactive queue/worker keyed `(agent, lane_kind)` + a `lane` param on `enqueue`
-  (`:257`) and `_ensure_lane` (`:244`); fan `get_status`/`remove_lane` over both.
+- **Dual lanes** — ✎ **SUPERSEDED by B1 (ratified §8 #10): do NOT build this sketch.** The
+  parallel interactive queue/worker keyed `(agent, lane_kind)` described here would create a second
+  concurrent turn and corrupt shared agent state (see B1). The Phase-3 build is a **priority steer
+  lane**: `try_steer` injection into the running turn + a reply back-edge, generalizing the
+  `ask_teammate` busy/idle fork (`server.py:1877-1933`). Kept for the record of what was considered.
 - **Action-tier engine** absorbs: `pending_actions` delete-confirm (`server.py:7509,7573`),
   undo-receipt TTL tiers (`change_history.py` + `HARD/SOFT_EDIT_FIELDS` `types.py:73/97`), wallet
   `_check_policy` (`wallet.py:1098-1138`), captcha cost caps (`captcha.py:66-77`). Track-record
