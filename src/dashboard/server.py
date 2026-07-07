@@ -46,6 +46,7 @@ from pydantic import ValidationError
 
 from src.cli.proxy import build_proxy_env_vars, resolve_agent_proxy
 from src.dashboard.auth import verify_session_cookie
+from src.host import drive as team_drive
 from src.shared import limits as _limits
 from src.shared.paths import resolve_under_root
 from src.shared.sqlite_helpers import open_db
@@ -8654,23 +8655,67 @@ def create_dashboard_router(
 
     _ARTIFACT_INLINE_CHAR_CAP = 10_000
 
-    def _resolve_artifact(ref: str) -> dict:
+    async def _resolve_drive_artifact(ref: str) -> dict:
+        """Resolve a ``drive://{team}/{path}@{sha}`` ref to inline text.
+
+        Reads the file straight from the team's bare repo (Phase-2 unit 4
+        — handoff payloads + registered artifacts live on the Team Drive
+        now, not the blackboard). Content is sanitized before it reaches
+        the operator's browser. Shape matches ``_resolve_artifact``.
+        """
+        out: dict = {"ref": ref}
+        body = ref[len("drive://"):]
+        team_id, _, remainder = body.partition("/")
+        path, _, sha = remainder.rpartition("@")
+        if not team_id or not path or not sha:
+            out.update({"kind": "error", "error": "malformed drive ref"})
+            return out
+        try:
+            drive_ref = teams_store.ensure_drive(team_id)
+        except Exception as e:
+            out.update({"kind": "error", "error": f"drive unavailable: {e}"})
+            return out
+        if not drive_ref:
+            out.update({"kind": "missing"})
+            return out
+        try:
+            data = await team_drive.read_file(Path(drive_ref), path, ref=sha)
+        except FileNotFoundError:
+            out.update({"kind": "missing"})
+            return out
+        except Exception as e:
+            out.update({"kind": "error", "error": str(e)})
+            return out
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            out.update({"kind": "error", "error": "binary artifact (not inline-renderable)"})
+            return out
+        text = sanitize_for_prompt(text)
+        truncated = False
+        if len(text) > _ARTIFACT_INLINE_CHAR_CAP:
+            text = text[:_ARTIFACT_INLINE_CHAR_CAP]
+            truncated = True
+        out.update({"kind": "text", "content": text, "content_truncated": truncated})
+        return out
+
+    async def _resolve_artifact(ref: str) -> dict:
         """Resolve a task ``artifact_ref`` to an inline-renderable dict.
 
-        Today every artifact_ref is a Blackboard key (the
-        ``output/{agent}/{handoff_id}`` pattern that
-        ``coordination_tool.hand_off`` writes). The dict shape is
+        A ref is either a ``drive://{team}/{path}@{sha}`` Team Drive
+        pointer (Phase-2 unit 4 — the current hand_off / save_artifact
+        home) or a legacy Blackboard key. The dict shape is
         ``{ref, kind, content?, content_truncated?, error?}`` so the
         UI can render text inline (kind=``text``) and surface
         unresolved refs (kind=``missing`` / ``error``) without
-        crashing the whole drill-in. Future storage backends (S3,
-        signed URLs) plug in here by returning ``kind="url"`` with a
-        ``url`` field.
+        crashing the whole drill-in.
         """
         out: dict = {"ref": ref}
         if not ref:
             out.update({"kind": "missing", "error": "empty ref"})
             return out
+        if ref.startswith("drive://"):
+            return await _resolve_drive_artifact(ref)
         try:
             entry = blackboard.read(ref)
         except Exception as e:
@@ -8729,7 +8774,7 @@ def create_dashboard_router(
         except Exception as e:
             logger.warning("workplace task events fetch failed: %s", e)
             events = []
-        artifacts = [_resolve_artifact(ref) for ref in task.get("artifact_refs") or []]
+        artifacts = [await _resolve_artifact(ref) for ref in task.get("artifact_refs") or []]
         return {"task": task, "events": events, "artifacts": artifacts}
 
     @api_router.get("/api/workplace/tasks/{task_id}/events")

@@ -301,7 +301,7 @@ async def test_edit_soft_within_ceiling_permissions_still_succeeds(mesh_app):
                 "field": "permissions",
                 "value": {
                     "can_use_browser": True,
-                    "blackboard_write": ["artifacts/*"],
+                    "blackboard_write": ["status/*"],
                 },
                 "reason": "user_asked",
             },

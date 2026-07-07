@@ -89,7 +89,8 @@ agents:
 
       Competitor reports — one file per competitor:
         save_artifact("competitors/{slug}.md", content)
-        (creates /data/workspace/artifacts/competitors/{slug}.md)
+        (writes /data/workspace/artifacts/competitors/{slug}.md and, on a
+         team, registers it on the Team Drive so teammates can discover it)
 
       Master comparison table — update on every competitor file change:
         save_artifact("competitors/_index.md", content)
@@ -129,8 +130,10 @@ agents:
 
       ## Research Workflow — New Competitor
 
-      1. Check if the artifact already exists via list_blackboard("artifacts/");
-         if yes, read the current version first — build on it, never repeat it
+      1. Check if the competitor already exists via
+         read_blackboard("competitors/_index") (or browse the Team Drive with
+         team_drive('log')); if yes, read the current version first — build on
+         it, never repeat it
       2. web_search: official site, GitHub repo, pricing page, changelog, CVEs
       3. browser: extract content from key pages
       4. Search security: "{name} vulnerability", "{name} CVE 2026"
@@ -214,8 +217,8 @@ agents:
       If nothing requires action, respond HEARTBEAT_OK immediately.
 
     permissions:
-      blackboard_read: ["competitors/*", "artifacts/*", "requests/*", "tasks/*", "output/*", "status/*"]
-      blackboard_write: ["competitors/*", "artifacts/*", "tasks/*", "output/*", "status/*"]
+      blackboard_read: ["competitors/*", "requests/*", "tasks/*", "status/*"]
+      blackboard_write: ["competitors/*", "tasks/*", "status/*"]
       can_publish: ["competitor_updated", "index_updated", "new_competitor_found"]
       can_subscribe: ["research_requested", "competitor_update_requested"]
       # Researches login-gated competitor sources via browser — may need

@@ -202,7 +202,8 @@ async def test_generate_image_empty_slug_prompt(mock_mesh_client, tmp_artifacts)
 
 
 async def test_generate_image_no_team(tmp_artifacts):
-    """Teamless agent should skip blackboard write without error."""
+    """Teamless agent has no Team Drive → skips registration without error
+    (Phase-2 unit 4 — the blackboard artifacts/* pointer is gone)."""
     from src.agent.builtins.image_gen_tool import generate_image
 
     client = AsyncMock()
@@ -216,8 +217,26 @@ async def test_generate_image_no_team(tmp_artifacts):
         workspace_manager=MagicMock(),
     )
     assert result["status"] == "image generated"
-    # write_blackboard should not have been called
-    client.write_blackboard.assert_not_called()
+    # No drive registration for a teamless agent.
+    client.commit_drive_artifact.assert_not_called()
+
+
+async def test_generate_image_registers_on_drive(mock_mesh_client, tmp_artifacts):
+    """A teamed agent's generated image is registered on the Team Drive
+    (base64), not the blackboard."""
+    from src.agent.builtins.image_gen_tool import generate_image
+
+    mock_mesh_client.image_generate = AsyncMock(return_value=_make_success_response())
+    mock_mesh_client.commit_drive_artifact = AsyncMock(return_value={"committed": True, "ref": "drive://test-team/artifacts/test-agent/x.png@abc"})
+
+    result = await generate_image(
+        "a cat", mesh_client=mock_mesh_client, workspace_manager=MagicMock(),
+    )
+    assert result["status"] == "image generated"
+    commit = mock_mesh_client.commit_drive_artifact.call_args
+    assert commit.args[0] == "test-team"
+    assert commit.kwargs["kind"] == "artifact"
+    assert commit.kwargs["encoding"] == "base64"
 
 
 # ── Handler tests (mock httpx) ────────────────────────────────

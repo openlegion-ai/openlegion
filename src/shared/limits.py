@@ -70,6 +70,11 @@ LIMIT_SPECS: dict[str, tuple[int, int, int]] = {
     # envelope. Host-side; the agent tool derives its HTTP timeout from
     # the same resolution + headroom.
     "ask_timeout_seconds": (180, 30, 600),
+    # Team Drive: per-file cap for the direct-commit artifact endpoint
+    # (POST /drive/artifacts) — hand_off data payloads + save_artifact
+    # registration. Larger content degrades gracefully (handoff → inline
+    # brief; artifact → saved-but-unregistered with the workspace path).
+    "drive_artifact_max_mb": (8, 1, 512),
 }
 
 # key -> OPENLEGION_* env var name (the second-lowest precedence source).
@@ -84,6 +89,7 @@ ENV_NAMES: dict[str, str] = {
     "drive_push_max_mb": "OPENLEGION_DRIVE_PUSH_MAX_MB",
     "drive_quota_mb": "OPENLEGION_DRIVE_QUOTA_MB",
     "ask_timeout_seconds": "OPENLEGION_ASK_TIMEOUT_SECONDS",
+    "drive_artifact_max_mb": "OPENLEGION_DRIVE_ARTIFACT_MAX_MB",
 }
 
 # Per-agent config keys (agents.yaml / edit_agent) -> limits key. Only the

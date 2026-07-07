@@ -31,7 +31,7 @@ def _raise_with_body(response: httpx.Response) -> None:
     that body — the exception string is just ``"Client error '403
     Forbidden' for url ..."``, leaving the caller to guess which gate
     fired. Wrapping it here means every coordination tool's failure
-    envelope (``wake_failed``, ``create_failed``, ``output_write_failed``,
+    envelope (``wake_failed``, ``create_failed``, ``drive_write_failed``,
     ``update_status_failed``, ``complete_task_failed``) surfaces the
     gate reason in its ``error`` field without changes at the callsites.
     """
@@ -1813,6 +1813,46 @@ class MeshClient:
             f"{self.mesh_url}/mesh/teams/{self.team_name}/drive/reviews",
             params={"status": status} if status else None,
         )
+        _raise_with_body(response)
+        return response.json()
+
+    async def commit_drive_artifact(
+        self, team: str, *, name: str, content: str, kind: str = "artifact",
+        encoding: str = "utf8",
+    ) -> dict:
+        """Commit a deliverable/handoff-data file to a team drive's main.
+
+        Direct-commit registration (Phase-2 unit 4): the mesh records THIS
+        agent as the commit author under ``{handoffs|artifacts}/{me}/{name}``
+        and returns ``{committed, ref: "drive://{team}/{path}@{sha}", ...}``.
+        ``team`` is the SENDER's team scope (the drive that holds the
+        payload). Raises on any non-2xx so callers can build a failure
+        envelope from the mesh's descriptive detail.
+        """
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/teams/{team}/drive/artifacts",
+            json={"kind": kind, "name": name, "content": content, "encoding": encoding},
+            headers=self._trace_headers(),
+        )
+        _raise_with_body(response)
+        return response.json()
+
+    async def read_drive_file(
+        self, team: str, path: str, *, ref: str = "main",
+    ) -> dict:
+        """Read one file from a team drive without a clone.
+
+        Returns ``{path, ref, content, encoding, size}`` (content is
+        base64 when the file is binary). RAW — the caller sanitizes before
+        surfacing into an LLM prompt. Returns ``None`` on 404.
+        """
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/teams/{team}/drive/file",
+            params={"path": path, "ref": ref},
+        )
+        if response.status_code == 404:
+            return None
         _raise_with_body(response)
         return response.json()
 

@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 
 from src.agent.tools import tool
+from src.shared import limits
 from src.shared.paths import resolve_under_root
 from src.shared.utils import setup_logging
 
@@ -129,21 +130,25 @@ async def generate_image(
         logger.error("Failed to save image: %s", e)
         return {"error": f"Image generated but failed to save: {e}"}
 
-    # Register as artifact on blackboard if possible
-    if workspace_manager and mesh_client.team_name:
-        try:
-            await mesh_client.write_blackboard(
-                f"artifacts/{filename}",
-                {
-                    "type": "image",
-                    "path": str(filepath),
-                    "prompt": prompt[:200],
-                    "provider": provider,
-                    "agent": mesh_client.agent_id,
-                },
-            )
-        except Exception as e:
-            logger.debug("Blackboard registration skipped: %s", e)
+    # Register the image on the Team Drive so teammates can discover it
+    # (Phase-2 unit 4 — the blackboard artifacts/* pointer is gone). Best-
+    # effort: the image is already saved to the workspace, so a solo agent,
+    # an oversize image, or a drive failure just skips registration. Only a
+    # REAL team has a drive (team-of-one team_name==agent_id does not).
+    sender_team = getattr(mesh_client, "team_name", None)
+    if sender_team and sender_team != mesh_client.agent_id:
+        image_bytes = base64.b64decode(image_base64)
+        max_bytes = limits.resolve("drive_artifact_max_mb") * 1024 * 1024
+        if len(image_bytes) > max_bytes:
+            logger.debug("Image %s exceeds the drive artifact cap; left local only", filename)
+        else:
+            try:
+                await mesh_client.commit_drive_artifact(
+                    sender_team, name=filename, content=image_base64,
+                    kind="artifact", encoding="base64",
+                )
+            except Exception as e:
+                logger.debug("Drive registration skipped: %s", e)
 
     return {
         "status": "image generated",

@@ -147,8 +147,8 @@ agents:
         product_slug: your-product
 
     permissions:
-      blackboard_read: ["reviews/*", "tasks/*", "output/*", "status/*", "artifacts/*"]
-      blackboard_write: ["reviews/*", "tasks/*", "output/*", "status/*"]
+      blackboard_read: ["reviews/*", "tasks/*", "status/*"]
+      blackboard_write: ["reviews/*", "tasks/*", "status/*"]
       can_publish: ["new_review", "negative_review"]
       can_subscribe: []
       # Scrapes login-gated review platforms via browser — may need to ask
@@ -337,8 +337,8 @@ agents:
       - Call update_status() with your current state
 
     permissions:
-      blackboard_read: ["reviews/*", "tasks/*", "output/*", "status/*", "artifacts/*"]
-      blackboard_write: ["reviews/*/draft", "tasks/*", "output/*", "status/*", "artifacts/*"]
+      blackboard_read: ["reviews/*", "tasks/*", "status/*"]
+      blackboard_write: ["reviews/*/draft", "tasks/*", "status/*"]
       can_publish: ["response_drafted"]
       can_subscribe: ["negative_review"]
     resources:

@@ -365,11 +365,15 @@ class TestCreateCustomAgent:
         assert agent_perms["blackboard_read"] == ["teams/freshie/*"]
         assert "*" not in agent_perms["blackboard_read"]
 
-        # Blackboard writes — five coordination namespaces.
+        # Blackboard writes — the signal coordination namespaces. Phase-2
+        # unit 4 removed output/* + artifacts/* (payloads moved to the Team
+        # Drive; the blackboard is signals-only).
         write = set(agent_perms["blackboard_write"])
         assert {
-            "tasks/*", "context/*", "status/*", "output/*", "artifacts/*",
+            "tasks/*", "context/*", "status/*",
         }.issubset(write), f"missing namespaces from {write!r}"
+        assert "output/*" not in write
+        assert "artifacts/*" not in write
 
         # Pubsub.
         assert "*" in agent_perms["can_publish"]

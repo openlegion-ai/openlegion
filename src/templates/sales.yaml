@@ -56,8 +56,8 @@ agents:
       You focus on information that helps qualify and personalize outreach:
       company size, tech decisions, recent changes, and named contacts.
     permissions:
-      blackboard_read: ["leads/*", "tasks/*", "output/*", "status/*", "artifacts/*"]
-      blackboard_write: ["leads/*/research", "tasks/*", "output/*", "status/*"]
+      blackboard_read: ["leads/*", "tasks/*", "status/*"]
+      blackboard_write: ["leads/*/research", "tasks/*", "status/*"]
       can_publish: ["research_complete"]
       can_subscribe: ["lead_added"]
       # Researches login-gated company/contact sources (e.g. LinkedIn) —
@@ -126,8 +126,8 @@ agents:
       You explain your reasoning clearly. You flag missing information
       rather than guessing. A disqualified lead saves everyone time.
     permissions:
-      blackboard_read: ["leads/*", "tasks/*", "output/*", "status/*", "artifacts/*"]
-      blackboard_write: ["leads/*/qualification", "tasks/*", "output/*", "status/*"]
+      blackboard_read: ["leads/*", "tasks/*", "status/*"]
+      blackboard_write: ["leads/*/qualification", "tasks/*", "status/*"]
       can_publish: ["qualified", "disqualified"]
       can_subscribe: ["research_complete"]
     resources:
@@ -194,8 +194,8 @@ agents:
       details from the research — never generic claims. You are concise,
       respectful of the recipient's time, and focused on value.
     permissions:
-      blackboard_read: ["leads/*", "tasks/*", "output/*", "status/*", "artifacts/*"]
-      blackboard_write: ["leads/*/outreach", "tasks/*", "output/*", "status/*", "artifacts/*"]
+      blackboard_read: ["leads/*", "tasks/*", "status/*"]
+      blackboard_write: ["leads/*/outreach", "tasks/*", "status/*"]
       can_publish: ["outreach_ready"]
       can_subscribe: ["qualified"]
     resources:

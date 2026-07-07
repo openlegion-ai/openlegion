@@ -564,6 +564,158 @@ class TestDriveAuthMatrix:
                 assert needle in str(resp.json()["detail"])
 
 
+class TestDriveArtifactEndpoints:
+    """Direct-commit artifact store + file read (Phase-2 unit 4).
+
+    hand_off data payloads and save_artifact registration commit STRAIGHT
+    to main here (deliberate — deliverable registration, not reviewed
+    source). Same member-or-operator wall as the rest of the drive.
+    """
+
+    async def _commit(self, app, team, agent, body):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            return await c.post(
+                f"/mesh/teams/{team}/drive/artifacts", json=body, headers=_headers(agent),
+            )
+
+    async def _read(self, app, team, agent, params):
+        headers = _headers(agent) if agent else {}
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            return await c.get(f"/mesh/teams/{team}/drive/file", params=params, headers=headers)
+
+    @pytest.mark.asyncio
+    async def test_member_commit_and_read_round_trip(self, drive_env):
+        app = drive_env["app"]
+        resp = await self._commit(
+            app, "team-x", "member1",
+            {"kind": "handoff", "name": "ho_1.json", "content": '{"x": 1}'},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["committed"] is True
+        assert body["path"] == "handoffs/member1/ho_1.json"
+        ref = body["ref"]
+        assert ref.startswith("drive://team-x/handoffs/member1/ho_1.json@")
+        # Read it back at the committed sha.
+        read = await self._read(
+            app, "team-x", "member2",
+            {"path": "handoffs/member1/ho_1.json", "ref": body["short_sha"]},
+        )
+        assert read.status_code == 200, read.text
+        rj = read.json()
+        assert rj["encoding"] == "utf8"
+        assert rj["content"] == '{"x": 1}'
+
+    @pytest.mark.asyncio
+    async def test_artifact_kind_path(self, drive_env):
+        resp = await self._commit(
+            drive_env["app"], "team-x", "member1",
+            {"kind": "artifact", "name": "report.md", "content": "# Report"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["path"] == "artifacts/member1/report.md"
+
+    @pytest.mark.asyncio
+    async def test_base64_encoding_round_trip(self, drive_env):
+        import base64 as _b64
+        raw = b"\xff\xfe\x00\x01PNG\x89"  # not valid UTF-8 → returned base64
+        resp = await self._commit(
+            drive_env["app"], "team-x", "member1",
+            {"kind": "artifact", "name": "blob.bin",
+             "content": _b64.b64encode(raw).decode(), "encoding": "base64"},
+        )
+        assert resp.status_code == 200
+        read = await self._read(
+            drive_env["app"], "team-x", "member1",
+            {"path": "artifacts/member1/blob.bin", "ref": resp.json()["short_sha"]},
+        )
+        assert read.status_code == 200
+        assert read.json()["encoding"] == "base64"
+        assert _b64.b64decode(read.json()["content"]) == raw
+
+    @pytest.mark.asyncio
+    async def test_commit_cross_team_403(self, drive_env):
+        resp = await self._commit(
+            drive_env["app"], "team-x", "outsider",
+            {"kind": "handoff", "name": "x.json", "content": "{}"},
+        )
+        assert resp.status_code == 403
+        assert "not a member" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_commit_solo_403(self, drive_env):
+        resp = await self._commit(
+            drive_env["app"], "team-x", "solo-a",
+            {"kind": "handoff", "name": "x.json", "content": "{}"},
+        )
+        assert resp.status_code == 403
+        assert "not on a team" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_commit_operator_ok(self, drive_env):
+        resp = await self._commit(
+            drive_env["app"], "team-x", "operator",
+            {"kind": "artifact", "name": "op.md", "content": "hi"},
+        )
+        assert resp.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_commit_unauthenticated_401(self, drive_env):
+        async with AsyncClient(transport=ASGITransport(app=drive_env["app"]), base_url="http://t") as c:
+            resp = await c.post(
+                "/mesh/teams/team-x/drive/artifacts",
+                json={"kind": "artifact", "name": "x", "content": "y"},
+            )
+        assert resp.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_commit_bad_kind_400(self, drive_env):
+        resp = await self._commit(
+            drive_env["app"], "team-x", "member1",
+            {"kind": "bogus", "name": "x", "content": "y"},
+        )
+        assert resp.status_code == 400
+        assert "kind" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_commit_traversal_name_400(self, drive_env):
+        resp = await self._commit(
+            drive_env["app"], "team-x", "member1",
+            {"kind": "artifact", "name": "../../escape.md", "content": "y"},
+        )
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_commit_oversize_413(self, drive_env, monkeypatch):
+        monkeypatch.setenv("OPENLEGION_DRIVE_ARTIFACT_MAX_MB", "1")
+        resp = await self._commit(
+            drive_env["app"], "team-x", "member1",
+            {"kind": "artifact", "name": "big.md", "content": "x" * (2 * 1024 * 1024)},
+        )
+        assert resp.status_code == 413
+
+    @pytest.mark.asyncio
+    async def test_read_missing_path_404(self, drive_env):
+        resp = await self._read(
+            drive_env["app"], "team-x", "member1", {"path": "nope/missing.txt"},
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_read_cross_team_403(self, drive_env):
+        resp = await self._read(
+            drive_env["app"], "team-x", "outsider", {"path": "README.md"},
+        )
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_read_bad_path_400(self, drive_env):
+        resp = await self._read(
+            drive_env["app"], "team-x", "member1", {"path": "../etc/passwd"},
+        )
+        assert resp.status_code == 400
+
+
 # ── Real git smart-HTTP round trip (live uvicorn) ────────────────────
 
 

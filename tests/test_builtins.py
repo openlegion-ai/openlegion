@@ -2427,28 +2427,55 @@ class TestSoloBlackboardSelfScope:
         assert "error" not in result
 
     @pytest.mark.asyncio
-    async def test_save_artifact_registers_for_solo(self, tmp_path):
-        """Solo agents register saved artifacts on the blackboard too —
-        the write lands in their private team-of-one namespace."""
+    async def test_save_artifact_solo_stays_local(self, tmp_path):
+        """Solo agents have no Team Drive, so a saved artifact stays local:
+        registered=False + a note with the workspace path, no drive commit
+        (Phase-2 unit 4 — the blackboard artifacts/* pointer is gone)."""
         from src.agent.builtins.mesh_tool import save_artifact
         ws = MagicMock()
         ws.root = str(tmp_path)
         mc = self._solo_client(agent_id="solo-a")
-        mc.write_blackboard = AsyncMock(return_value={"version": 1})
+        mc.commit_drive_artifact = AsyncMock()
         result = await save_artifact(
             name="report.txt", content="hello",
             workspace_manager=ws, mesh_client=mc,
         )
         assert result.get("saved") is True
         assert (tmp_path / "artifacts" / "report.txt").read_text() == "hello"
-        mc.write_blackboard.assert_awaited_once()
-        key = mc.write_blackboard.await_args.args[0]
-        assert key == "artifacts/solo-a/report.txt"
+        mc.commit_drive_artifact.assert_not_called()
+        assert result["registered"] is False
+        assert "note" in result and "local" in result["note"].lower()
 
     @pytest.mark.asyncio
-    async def test_save_artifact_blackboard_failure_is_graceful(self, tmp_path):
-        """If file write succeeds but blackboard registration fails, the file
-        is still saved and the result reports registered=False with the error."""
+    async def test_save_artifact_teamed_registers_on_drive(self, tmp_path):
+        """A teamed agent's saved artifact is committed to the Team Drive
+        and the result carries the drive:// ref."""
+        from src.agent.builtins.mesh_tool import save_artifact
+        ws = MagicMock()
+        ws.root = str(tmp_path)
+        mc = MagicMock()
+        mc.agent_id = "analyst"
+        mc.team_name = "research"
+        mc.commit_drive_artifact = AsyncMock(return_value={
+            "committed": True,
+            "ref": "drive://research/artifacts/analyst/report.txt@abcdef1234",
+        })
+        result = await save_artifact(
+            name="report.txt", content="hello",
+            workspace_manager=ws, mesh_client=mc,
+        )
+        assert result["saved"] is True
+        assert result["registered"] is True
+        assert result["drive_ref"] == "drive://research/artifacts/analyst/report.txt@abcdef1234"
+        commit = mc.commit_drive_artifact.call_args
+        assert commit.args[0] == "research"
+        assert commit.kwargs["kind"] == "artifact"
+        assert commit.kwargs["name"] == "report.txt"
+
+    @pytest.mark.asyncio
+    async def test_save_artifact_drive_failure_is_graceful(self, tmp_path):
+        """If the file write succeeds but the drive registration fails, the
+        file is still saved and the result reports registered=False + error."""
         from src.agent.builtins.mesh_tool import save_artifact
 
         workspace_manager = MagicMock()
@@ -2456,8 +2483,9 @@ class TestSoloBlackboardSelfScope:
 
         mesh_client = MagicMock()
         mesh_client.agent_id = "test-agent"
-        mesh_client.write_blackboard = AsyncMock(
-            side_effect=PermissionError("Agent cannot write to artifacts/*")
+        mesh_client.team_name = "research"
+        mesh_client.commit_drive_artifact = AsyncMock(
+            side_effect=PermissionError("drive unreachable")
         )
 
         result = await save_artifact(
@@ -2473,10 +2501,7 @@ class TestSoloBlackboardSelfScope:
         assert (tmp_path / "artifacts" / "test.md").read_text() == "test content"
         # Registration should be marked as failed
         assert result["registered"] is False
-        assert (
-            "artifacts/*" in result["registration_error"]
-            or "Permission" in result["registration_error"]
-        )
+        assert "drive unreachable" in result["registration_error"]
 
     @pytest.mark.asyncio
     async def test_read_blackboard_allowed_for_team_agent(self):

@@ -242,11 +242,16 @@ async def test_wake_message_skips_brief_when_description_is_title(wake_app):
 
 @pytest.mark.asyncio
 async def test_wake_message_lists_artifact_refs(wake_app):
-    """Data-payload pointers ride the wake so the recipient knows to fetch."""
+    """Drive-payload pointers ride the wake so the recipient knows to fetch.
+
+    Handoff payloads live on the sender's Team Drive now (Phase-2 unit 4),
+    so a ``drive://`` ref points the recipient at team_drive, not the
+    blackboard."""
     app, lane, tasks_store = wake_app
+    ref = "drive://research/handoffs/scout/ho_123.json@abcdef1234"
     rec = tasks_store.create(
         creator="scout", assignee="writer", title="stage work",
-        artifact_refs=["output/scout/ho_123"],
+        artifact_refs=[ref],
     )
 
     async with AsyncClient(
@@ -260,8 +265,8 @@ async def test_wake_message_lists_artifact_refs(wake_app):
     _settle()
 
     lane_msg = lane.calls[0]["args"][1]
-    assert "read_blackboard" in lane_msg
-    assert "output/scout/ho_123" in lane_msg
+    assert "Team Drive" in lane_msg
+    assert ref in lane_msg
 
 
 @pytest.mark.asyncio

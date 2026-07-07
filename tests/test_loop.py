@@ -3343,7 +3343,7 @@ class TestChatHandoffFailureEnforcement:
     """``AgentLoop._chat_result_failure_reason`` scans ``tool_outputs`` for
     ``hand_off`` results and forces a failure reason when the downstream
     chain didn't land (``handed_off=False`` or any of ``create_failed`` /
-    ``wake_failed`` / ``output_write_failed``). The previous design trusted
+    ``wake_failed`` / ``drive_write_failed``). The previous design trusted
     the LLM to surface those failures in its text; models ignored the
     directive across three repro cycles, so enforcement is now system-side.
     These tests pin the contract on the pure staticmethod — no async needed.
@@ -3391,7 +3391,7 @@ class TestChatHandoffFailureEnforcement:
         assert reason.startswith("handoff_failed:")
         assert "wake_failed" in reason or "handoff_failed:" in reason
 
-    def test_output_write_failed_handoff_fails_task(self):
+    def test_drive_write_failed_handoff_fails_task(self):
         result = {
             "response": "All good",
             "tool_outputs": [
@@ -3400,9 +3400,9 @@ class TestChatHandoffFailureEnforcement:
                     "input": {"to": "dave"},
                     "output": {
                         "handed_off": False,
-                        "output_write_failed": True,
+                        "drive_write_failed": True,
                         "to": "dave",
-                        "error": "output_write_failed: disk full",
+                        "error": "drive_write_failed: drive unreachable",
                     },
                 },
             ],
@@ -3410,7 +3410,7 @@ class TestChatHandoffFailureEnforcement:
         reason = AgentLoop._chat_result_failure_reason(result)
         assert reason is not None
         assert reason.startswith("handoff_failed:")
-        assert "output_write_failed" in reason or "dave" in reason
+        assert "drive_write_failed" in reason or "dave" in reason
 
     def test_handed_off_false_alone_fails_task(self):
         """No specific failure flag, just ``handed_off=False`` — still

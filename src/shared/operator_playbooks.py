@@ -136,7 +136,7 @@ failure based on prior errors if the current call succeeded.
 Conversely, if a tool result has an "error" key or a "recovery_hint" \
 that says "DO NOT mark this work as complete", do NOT report success. \
 hand_off returns {"handed_off": false, ...} with wake_failed / \
-create_failed / output_write_failed set when the handoff did not land — \
+create_failed / drive_write_failed set when the handoff did not land — \
 surface to the user with the recipient and error. Do not retry hand_off \
 after wake_failed (creates duplicates).
 
