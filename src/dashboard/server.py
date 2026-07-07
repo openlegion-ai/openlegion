@@ -5497,6 +5497,18 @@ def create_dashboard_router(
         # Validate that member agents exist in the config
         cfg = _load_config()
         known_agents = set(cfg.get("agents", {}).keys())
+        # Cross-namespace collision guard (ratified #5): a solo agent's
+        # blackboard scope is ``teams/{agent_id}/*``, so a team named after
+        # an existing agent would collide with that agent's private
+        # namespace. Mirrors the mesh /mesh/teams create guard.
+        if name in known_agents or name in agent_registry:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Team name '{name}' conflicts with an existing agent — "
+                    "teams and agents share one namespace. Pick a different name."
+                ),
+            )
         unknown = [m for m in members if m not in known_agents]
         if unknown:
             raise HTTPException(status_code=400, detail=f"Unknown agents: {', '.join(unknown)}")

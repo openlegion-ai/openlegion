@@ -209,8 +209,9 @@ class TestCreateAgentParity(_TempConfigMixin):
         with open(self._perms_path) as f:
             perms = json.load(f)
         dana = perms["permissions"]["dana"]
-        # Coordination: full blackboard read + the standard write prefixes.
-        assert dana["blackboard_read"] == ["*"]
+        # Coordination: full blackboard read + the standard write prefixes,
+        # plus the always-present private team-of-one pattern (ratified #5).
+        assert sorted(dana["blackboard_read"]) == ["*", "teams/dana/*"]
         for prefix in ("tasks/*", "context/*", "status/*", "output/*", "artifacts/*"):
             assert prefix in dana["blackboard_write"]
         assert dana["can_publish"] == ["*"]
@@ -238,23 +239,29 @@ class TestCreateAgentParity(_TempConfigMixin):
         with open(self._perms_path) as f:
             perms = json.load(f)
         erin = perms["permissions"]["erin"]
-        assert set(erin["blackboard_read"]) == set(_DEFAULT_AGENT_COORDINATION_PERMS["blackboard_read"])
-        assert set(erin["blackboard_write"]) == set(_DEFAULT_AGENT_COORDINATION_PERMS["blackboard_write"])
+        # Coordination defaults + the base self pattern every worker holds.
+        assert set(erin["blackboard_read"]) == (
+            set(_DEFAULT_AGENT_COORDINATION_PERMS["blackboard_read"]) | {"teams/erin/*"}
+        )
+        assert set(erin["blackboard_write"]) == (
+            set(_DEFAULT_AGENT_COORDINATION_PERMS["blackboard_write"]) | {"teams/erin/*"}
+        )
 
 
 class TestAddAgentPermissions(_TempConfigMixin):
     def test_default_permissions(self):
         """``_add_agent_permissions`` with NO perms keeps the restrictive base
-        (empty blackboard) — only the create paths layer coordination defaults
-        on top. This pins the base so templates can still scope blackboard."""
+        — just the worker's private team-of-one self pattern (ratified #5) —
+        only the create paths layer coordination defaults on top. This pins
+        the base so templates can still scope blackboard."""
         _add_agent_to_config("alice", "researcher", "openai/gpt-4o")
         _add_agent_permissions("alice")
         with open(self._perms_path) as f:
             perms = json.load(f)
         alice = perms["permissions"]["alice"]
         assert alice["allowed_apis"] == ["llm", "image_gen"]
-        assert alice["blackboard_read"] == []
-        assert alice["blackboard_write"] == []
+        assert alice["blackboard_read"] == ["teams/alice/*"]
+        assert alice["blackboard_write"] == ["teams/alice/*"]
         # Internet is on by default even on the bare base.
         assert alice["can_use_internet"] is True
 
@@ -366,8 +373,8 @@ class TestAddAgentPermissions(_TempConfigMixin):
         with open(self._perms_path) as f:
             perms = json.load(f)
         eve = perms["permissions"]["eve"]
-        assert eve["blackboard_read"] == []
-        assert eve["blackboard_write"] == []
+        assert eve["blackboard_read"] == ["teams/eve/*"]
+        assert eve["blackboard_write"] == ["teams/eve/*"]
 
     def test_empty_template_permission_lists_ignored(self):
         """Empty lists in template permissions don't affect defaults."""
@@ -379,7 +386,7 @@ class TestAddAgentPermissions(_TempConfigMixin):
         with open(self._perms_path) as f:
             perms = json.load(f)
         fay = perms["permissions"]["fay"]
-        assert fay["blackboard_read"] == []
+        assert fay["blackboard_read"] == ["teams/fay/*"]
 
     def test_invalid_permission_type_ignored(self):
         """Non-list values in template permissions are safely ignored."""
@@ -420,7 +427,7 @@ class TestAddAgentPermissions(_TempConfigMixin):
         hank = perms["permissions"]["hank"]
         # Coordination read access — wildcard so the auto-watch setup at
         # mesh/register installs the tasks/{agent}/* watcher.
-        assert hank["blackboard_read"] == ["*"]
+        assert sorted(hank["blackboard_read"]) == ["*", "teams/hank/*"]
         # Coordination write namespaces — must include tasks/* (hand_off)
         # and the other standard prefixes.
         for pattern in ("tasks/*", "context/*", "status/*", "output/*", "artifacts/*"):

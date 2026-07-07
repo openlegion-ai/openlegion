@@ -177,8 +177,9 @@ class TestMeshTeamEndpoints:
         # Only the team-specific pattern is granted.
         perms = json.loads(perms_file.read_text())
         for agent in ("agent1", "agent2"):
-            assert perms["permissions"][agent]["blackboard_read"] == ["teams/my-proj/*"]
-            assert perms["permissions"][agent]["blackboard_write"] == ["teams/my-proj/*"]
+            expected = sorted(["teams/my-proj/*", f"teams/{agent}/*"])
+            assert sorted(perms["permissions"][agent]["blackboard_read"]) == expected
+            assert sorted(perms["permissions"][agent]["blackboard_write"]) == expected
 
     @pytest.mark.asyncio
     async def test_create_with_member_from_other_team_strips_old_acl(self, team_app):
@@ -197,8 +198,9 @@ class TestMeshTeamEndpoints:
         assert store.members("old-proj") == []
         assert store.team_of("agent1") == "new-proj"
         perms = json.loads(perms_file.read_text())
-        assert perms["permissions"]["agent1"]["blackboard_read"] == ["teams/new-proj/*"]
-        assert perms["permissions"]["agent1"]["blackboard_write"] == ["teams/new-proj/*"]
+        expected = sorted(["teams/new-proj/*", "teams/agent1/*"])
+        assert sorted(perms["permissions"]["agent1"]["blackboard_read"]) == expected
+        assert sorted(perms["permissions"]["agent1"]["blackboard_write"]) == expected
 
     @pytest.mark.asyncio
     async def test_create_duplicate_400(self, team_app):
@@ -233,8 +235,9 @@ class TestMeshTeamEndpoints:
         assert r.status_code == 200
         assert store.team_of("agent1") == "proj1"
         perms = json.loads(perms_file.read_text())
-        assert perms["permissions"]["agent1"]["blackboard_read"] == ["teams/proj1/*"]
-        assert perms["permissions"]["agent1"]["blackboard_write"] == ["teams/proj1/*"]
+        expected = sorted(["teams/proj1/*", "teams/agent1/*"])
+        assert sorted(perms["permissions"]["agent1"]["blackboard_read"]) == expected
+        assert sorted(perms["permissions"]["agent1"]["blackboard_write"]) == expected
 
     @pytest.mark.asyncio
     async def test_add_member_idempotent(self, team_app):
@@ -275,8 +278,11 @@ class TestMeshTeamEndpoints:
         assert store.members("proj1") == []
         assert store.team_of("agent1") == "proj2"
         perms = json.loads(perms_file.read_text())
-        assert perms["permissions"]["agent1"]["blackboard_read"] == ["teams/proj2/*"]
-        assert perms["permissions"]["agent1"]["blackboard_write"] == ["teams/proj2/*"]
+        expected = sorted(["teams/proj2/*", "teams/agent1/*"])
+        assert sorted(perms["permissions"]["agent1"]["blackboard_read"]) == expected
+        assert sorted(perms["permissions"]["agent1"]["blackboard_write"]) == expected
+        # And no residue of the old team.
+        assert "teams/proj1/*" not in perms["permissions"]["agent1"]["blackboard_read"]
 
     @pytest.mark.asyncio
     async def test_remove_member_clears_permissions(self, team_app):
@@ -286,9 +292,11 @@ class TestMeshTeamEndpoints:
         r = await _delete(app, "/mesh/teams/proj1/members/agent1")
         assert r.status_code == 200
         assert store.team_of("agent1") is None
+        # Leaver keeps exactly its private team-of-one pattern — never an
+        # empty-ACL lockout, never the old team's pattern (ratified #5).
         perms = json.loads(perms_file.read_text())
-        assert perms["permissions"]["agent1"]["blackboard_read"] == []
-        assert perms["permissions"]["agent1"]["blackboard_write"] == []
+        assert perms["permissions"]["agent1"]["blackboard_read"] == ["teams/agent1/*"]
+        assert perms["permissions"]["agent1"]["blackboard_write"] == ["teams/agent1/*"]
 
     @pytest.mark.asyncio
     async def test_remove_member_unknown_team_400(self, team_app):
@@ -312,9 +320,10 @@ class TestMeshTeamEndpoints:
         assert not store.team_exists("doomed")
         assert not (tmp_path / "teams" / "doomed").exists()
         perms = json.loads(perms_file.read_text())
+        # Former members land in their private team-of-one namespaces.
         for agent in ("agent1", "agent2"):
-            assert perms["permissions"][agent]["blackboard_read"] == []
-            assert perms["permissions"][agent]["blackboard_write"] == []
+            assert perms["permissions"][agent]["blackboard_read"] == [f"teams/{agent}/*"]
+            assert perms["permissions"][agent]["blackboard_write"] == [f"teams/{agent}/*"]
 
     @pytest.mark.asyncio
     async def test_delete_nonexistent_404(self, team_app):
@@ -325,7 +334,8 @@ class TestMeshTeamEndpoints:
 
 class TestBlackboardPermissions:
     def test_add_permissions(self, tmp_path):
-        """Adding team permissions grants only the team namespace pattern."""
+        """Adding team permissions grants the team pattern plus the agent's
+        own team-of-one pattern."""
         perms_file = tmp_path / "permissions.json"
         # Start with empty blackboard (standalone agent)
         perms_file.write_text(
@@ -344,8 +354,10 @@ class TestBlackboardPermissions:
         perms = json.loads(perms_file.read_text())
         read = perms["permissions"]["bot"]["blackboard_read"]
         write = perms["permissions"]["bot"]["blackboard_write"]
-        assert read == ["teams/marketing/*"]
-        assert write == ["teams/marketing/*"]
+        # Team pattern + the agent's own team-of-one pattern (ratified #5:
+        # "self always; team while member").
+        assert sorted(read) == sorted(["teams/marketing/*", "teams/bot/*"])
+        assert sorted(write) == sorted(["teams/marketing/*", "teams/bot/*"])
 
     def test_add_permissions_appends_alongside_existing_patterns(self, tmp_path):
         """``_add_team_blackboard_permissions`` appends the team
@@ -384,7 +396,7 @@ class TestBlackboardPermissions:
         assert "teams/marketing/*" in write
 
     def test_remove_permissions(self, tmp_path):
-        """Removing team permissions clears ALL blackboard access."""
+        """Removing team permissions restores the private self pattern."""
         perms_file = tmp_path / "permissions.json"
         perms_file.write_text(
             json.dumps(
@@ -403,8 +415,10 @@ class TestBlackboardPermissions:
             _remove_team_blackboard_permissions("bot", "marketing")
 
         perms = json.loads(perms_file.read_text())
-        assert perms["permissions"]["bot"]["blackboard_read"] == []
-        assert perms["permissions"]["bot"]["blackboard_write"] == []
+        # Leaver keeps its private team-of-one pattern (ratified #5) —
+        # a working namespace instead of an empty-ACL lockout.
+        assert perms["permissions"]["bot"]["blackboard_read"] == ["teams/bot/*"]
+        assert perms["permissions"]["bot"]["blackboard_write"] == ["teams/bot/*"]
 
     def test_remove_permissions_only_strips_target_project(self, tmp_path):
         """``_remove_team_blackboard_permissions`` is targeted: it strips
@@ -519,7 +533,9 @@ class TestMeshClientKeyScoping:
         assert client._scope_key("context/market") == "teams/alpha/context/market"
         assert client._scope_key("goals/researcher") == "teams/alpha/goals/researcher"
 
-    def test_scope_key_standalone(self):
+    def test_scope_key_unscoped_operator(self):
+        # team_name=None is the operator's posture (workers always carry a
+        # team name since solo = team-of-one, ratified #5).
         from src.agent.mesh_client import MeshClient
 
         client = MeshClient("http://mesh:8420", "bot1", team_name=None)
@@ -611,8 +627,8 @@ class TestMeshClientKeyScoping:
         assert entries[1]["key"] == "context/competitor"
 
     @pytest.mark.asyncio
-    async def test_standalone_blackboard_no_scoping(self):
-        """Standalone agent's blackboard calls use raw keys (no prefix)."""
+    async def test_unscoped_client_blackboard_no_scoping(self):
+        """An unscoped client (team_name=None — the operator) uses raw keys."""
         client, mock_http = self._mock_client(
             None,
             {"key": "context/market", "value": {"data": 1}},
@@ -696,8 +712,9 @@ class TestCrossProjectPermissionIsolation:
         assert not pm.can_read_blackboard("bot1", "tasks/todo")
         assert not pm.can_write_blackboard("bot1", "goals/v1")
 
-    def test_standalone_agent_has_no_blackboard_access(self, tmp_path):
-        """Standalone agent (empty patterns) cannot access any blackboard key."""
+    def test_empty_acl_agent_has_no_blackboard_access(self, tmp_path):
+        """An agent with empty patterns cannot access any blackboard key
+        (deny-all fallback; live solo workers get their self pattern)."""
         from src.host.permissions import PermissionMatrix
 
         perms_file = tmp_path / "perms.json"

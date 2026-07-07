@@ -83,18 +83,13 @@ class MeshClient:
         self._client_lock = asyncio.Lock()
         self._auth_token: str = os.environ.get("MESH_AUTH_TOKEN", "")
 
-    @property
-    def is_standalone(self) -> bool:
-        """True when this agent is not assigned to any team."""
-        return self.team_name is None
-
     def _scope_key(self, key: str) -> str:
         """Prefix a blackboard key with the team namespace.
 
-        Team agents transparently read/write under ``teams/{name}/``.
-        Solo agents (no team) pass keys through unchanged — but they are
-        blocked from the blackboard at both the tool and permission
-        layers.
+        Workers always carry a team name: their real team, or their own
+        agent id when solo (team-of-one, ratified decision #5) — so all
+        their keys live under ``teams/{name}/``. Only the operator runs
+        with ``team_name=None`` and passes keys through unscoped.
         """
         if self.team_name:
             return f"teams/{self.team_name}/{key}"
@@ -103,8 +98,9 @@ class MeshClient:
     def _scope_topic(self, topic: str) -> str:
         """Prefix a pub/sub topic with the team namespace.
 
-        Team agents transparently publish/subscribe under
-        ``teams/{name}/``. Solo agents (no team) use raw topic names.
+        Workers always publish/subscribe under ``teams/{name}/`` (real
+        team, or the private team-of-one namespace when solo). Only the
+        operator uses raw topic names.
         """
         if self.team_name:
             return f"teams/{self.team_name}/{topic}"
@@ -437,9 +433,10 @@ class MeshClient:
     async def list_agents(self) -> dict:
         """List agents visible to this agent.
 
-        Team-scoped agents see only their team's members.
-        Standalone agents see all registered agents so they can
-        coordinate cross-team (e.g. operator handing off work).
+        Team-scoped agents see only their team's members (a solo
+        worker's team-of-one resolves to itself plus the operator).
+        The operator (no team) sees all registered agents so it can
+        coordinate cross-team.
         """
         params: dict[str, str] = {}
         if self.team_name:

@@ -153,13 +153,15 @@ async def _run_subagent(
         _cleanup_depth(subagent_id)
         memory.close()
 
-    # Write result to blackboard (team agents only — standalone has no blackboard)
-    if not getattr(mesh_client, "is_standalone", False):
-        result_key = f"subagent_results/{parent_id}/{subagent_id}"
-        try:
-            await mesh_client.write_blackboard(result_key, result_data)
-        except Exception as e:
-            logger.warning("Failed to write subagent result to blackboard: %s", e)
+    # Write result to the blackboard. Every agent has a scope now — real
+    # team, or its own private team-of-one namespace when solo — so
+    # result passing works for everyone. Best-effort: the in-memory
+    # task result below is the primary channel.
+    result_key = f"subagent_results/{parent_id}/{subagent_id}"
+    try:
+        await mesh_client.write_blackboard(result_key, result_data)
+    except Exception as e:
+        logger.warning("Failed to write subagent result to blackboard: %s", e)
 
     return result_data
 
@@ -319,8 +321,9 @@ async def wait_for_subagent(
     except Exception as e:
         logger.warning("Failed to get subagent result from task: %s", e)
 
-    # Fallback: try reading from blackboard (team agents only)
-    if mesh_client and not getattr(mesh_client, "is_standalone", False):
+    # Fallback: try reading from the blackboard (works for every agent —
+    # solo agents read their own team-of-one namespace).
+    if mesh_client:
         result_key = f"subagent_results/{parent_id}/{subagent_id}"
         try:
             bb = await mesh_client.read_blackboard(result_key)

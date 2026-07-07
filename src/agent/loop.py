@@ -143,13 +143,6 @@ _MAX_STEER_INTERRUPTS = 3  # max times a steer can interrupt a final answer per 
 # ContextVar so tools (e.g. notify_user) can detect heartbeat mode
 _heartbeat_mode: ContextVar[bool] = ContextVar("_heartbeat_mode", default=False)
 
-# Tools that require a team blackboard — excluded for standalone agents.
-_BLACKBOARD_TOOLS = frozenset({
-    "read_blackboard", "write_blackboard", "list_blackboard",
-    "publish_event", "subscribe_event", "watch_blackboard",
-    "claim_task", "hand_off", "check_inbox", "update_status", "complete_task",
-})
-
 # Runtime-toggleable capability gates. Each gate maps to the set of tools
 # hidden from the LLM surface when that capability is switched OFF (via the
 # Operator Settings toggles → agent ``/config`` push, or the boot-time env
@@ -454,10 +447,10 @@ class AgentLoop:
             self._excluded_tools: frozenset[str] | None = None
         else:
             self._allowed_tools = None
-            # Standalone agents have no team blackboard — hide those tools.
-            excluded: set[str] = (
-                set(_BLACKBOARD_TOOLS) if mesh_client.is_standalone else set()
-            )
+            # Every worker has a blackboard scope now (real team, or its
+            # own team-of-one namespace) — the blackboard/coordination
+            # tools are part of every worker's surface.
+            excluded: set[str] = set()
             # Demote agent-authored Python: hide create_tool/reload_tools unless
             # the advanced authoring opt-in is set. Skills are the default path.
             from src.agent.builtins.tool_authoring import tool_authoring_enabled
@@ -834,8 +827,14 @@ class AgentLoop:
                     logger.debug("System metrics fetch failed: %s", e)
             self._introspect_cache = data
             self._introspect_cache_ts = now
-            # Sync team assignment from mesh host (supports runtime add/remove)
+            # Sync team assignment from mesh host (supports runtime
+            # add/remove). Introspect reports REAL membership (None when
+            # teamless); a worker's effective scope falls back to its own
+            # private team-of-one namespace (ratified #5). Only the
+            # operator stays unscoped (team_name=None).
             team = data.get("team")
+            if not self._is_operator:
+                team = team or self.agent_id
             if team != self.mesh_client.team_name:
                 logger.info("Team assignment updated: %s → %s", self.mesh_client.team_name, team)
                 self.mesh_client.team_name = team
@@ -843,10 +842,7 @@ class AgentLoop:
             if self.workspace:
                 try:
                     from src.agent.workspace import generate_system_md
-                    system_md = generate_system_md(
-                        data, self.agent_id,
-                        is_standalone=self.mesh_client.is_standalone,
-                    )
+                    system_md = generate_system_md(data, self.agent_id)
                     (self.workspace.root / "SYSTEM.md").write_text(system_md)
                 except Exception as e:
                     logger.debug("Failed to refresh SYSTEM.md: %s", e)
@@ -2073,7 +2069,6 @@ class AgentLoop:
             if bootstrap:
                 parts.append(bootstrap)  # pre-sanitized by workspace cache
 
-        is_standalone = self.mesh_client.is_standalone
         rules = (
             f"You are the '{self.role}' agent in the OpenLegion multi-agent system.\n"
             f"Your current task: {assignment.task_type}\n\n"
@@ -2088,17 +2083,11 @@ class AgentLoop:
             f"(saved step-by-step procedure) fits, skill_view it and follow it.\n"
             f"- When done, respond with JSON: "
         )
-        if is_standalone:
-            rules += (
-                "{\"result\": {...}}\n"
-                "- Use notify_user to report results to the user.\n"
-            )
-        else:
-            rules += (
-                "{\"result\": {...}, \"promote\": {...}} "
-                "('promote' = data other agents need).\n"
-                "- Use notify_user for the user; blackboard for other agents only.\n"
-            )
+        rules += (
+            "{\"result\": {...}, \"promote\": {...}} "
+            "('promote' = data other agents need).\n"
+            "- Use notify_user for the user; blackboard for other agents only.\n"
+        )
         rules += (
             "- Long-form deliverables (reports, audits, plans, research): "
             "append findings to a working-notes file via write_file AS YOU "
@@ -2392,18 +2381,13 @@ class AgentLoop:
             self.state = "working"
 
             try:
-                # Parallel fetch of goals + introspect + fleet roster
-                is_standalone = self.mesh_client.is_standalone
-                if is_standalone:
-                    goals, introspect_data = await asyncio.gather(
-                        self._fetch_goals(), self._fetch_introspect_cached(),
-                    )
-                    roster: list[dict] = []
-                else:
-                    goals, roster, introspect_data = await asyncio.gather(
-                        self._fetch_goals(), self._fetch_fleet_roster(),
-                        self._fetch_introspect_cached(),
-                    )
+                # Parallel fetch of goals + introspect + fleet roster.
+                # Every agent has a roster now — a solo worker's resolves
+                # to itself plus the operator.
+                goals, roster, introspect_data = await asyncio.gather(
+                    self._fetch_goals(), self._fetch_fleet_roster(),
+                    self._fetch_introspect_cached(),
+                )
 
                 parts: list[str] = []
                 # Heartbeat builds its own system prompt (not via
@@ -2422,11 +2406,8 @@ class AgentLoop:
                         parts.append(bootstrap)  # pre-sanitized by workspace cache
 
                 # 3. Core rules
-                inbox_line = (
-                    "- Call check_inbox() to see if teammates sent you tasks.\n"
-                    if not is_standalone else ""
-                )
-                nothing_clause = "goals, or inbox" if not is_standalone else "goals"
+                inbox_line = "- Call check_inbox() to see if teammates sent you tasks.\n"
+                nothing_clause = "goals, or inbox"
                 parts.append(
                     f"You are the '{self.role}' agent.\n\n"
                     f"## Operating Rules\n"
@@ -3542,18 +3523,13 @@ class AgentLoop:
 
         self._age_operator_playbooks()
 
-        # Parallel fetch: goals, fleet roster (if multi-agent), introspect.
-        # Saves 30-100ms per turn vs sequential requests.
-        if self.mesh_client.is_standalone:
-            goals, introspect_data = await asyncio.gather(
-                self._fetch_goals(), self._fetch_introspect_cached(),
-            )
-            roster: list[dict] = []
-        else:
-            goals, roster, introspect_data = await asyncio.gather(
-                self._fetch_goals(), self._fetch_fleet_roster(),
-                self._fetch_introspect_cached(),
-            )
+        # Parallel fetch: goals, fleet roster, introspect. Saves 30-100ms
+        # per turn vs sequential requests. Every agent has a roster now —
+        # a solo worker's resolves to itself plus the operator.
+        goals, roster, introspect_data = await asyncio.gather(
+            self._fetch_goals(), self._fetch_fleet_roster(),
+            self._fetch_introspect_cached(),
+        )
         # Turn boundary: a new chat turn promotes any load_tools requested on
         # the prior turn (the mid-turn rebuilds in the chat loop pass False).
         system = self._build_chat_system_prompt(
@@ -4880,7 +4856,6 @@ class AgentLoop:
             )
         )
 
-        is_standalone = self.mesh_client.is_standalone
         rules = (
             f"You are the '{self.role}' agent in the OpenLegion fleet.\n\n"
             f"## Operating Rules\n"
@@ -4891,10 +4866,7 @@ class AgentLoop:
             f"- Make decisions with reasonable defaults. Ask only when truly ambiguous.\n"
             f"- Never respond with just text when a tool could make progress.\n"
         )
-        if is_standalone:
-            rules += "- Use notify_user to report results to the user.\n"
-        else:
-            rules += "- Use notify_user for the user; blackboard for other agents only.\n"
+        rules += "- Use notify_user for the user; blackboard for other agents only.\n"
         rules += (
             "- For HANDOFF tasks (dispatched via lane → /chat with an "
             "x-task-id header): either call tools to do the work, OR "

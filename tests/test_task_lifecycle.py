@@ -113,7 +113,6 @@ def _make_loop_with_mocks():
 
     mesh_client = MagicMock()
     mesh_client.agent_id = "test_agent"
-    mesh_client.is_standalone = True
     mesh_client.send_system_message = AsyncMock(return_value={})
     mesh_client.read_blackboard = AsyncMock(return_value=None)
     mesh_client.list_blackboard = AsyncMock(return_value=[])

@@ -23,16 +23,29 @@ def _is_operator() -> bool:
     return os.environ.get("ALLOWED_TOOLS", "") != ""
 
 
+def _is_team_of_one(mesh_client) -> bool:
+    """True for a solo worker scoped to its own private team-of-one namespace.
+
+    Since the solo = team-of-one merge (ratified decision #5) a teamless
+    worker carries ``team_name == agent_id``. The derivation is sound
+    because the cross-namespace collision guard forbids creating a real
+    team named after an existing agent (and vice versa).
+    """
+    team = getattr(mesh_client, "team_name", None)
+    return team is not None and team == getattr(mesh_client, "agent_id", None)
+
+
 async def _allowed_skill_names(mesh_client) -> set[str] | None:
     """Names this agent may see, or ``None`` to mean 'no filter — full catalog'.
 
-    The operator (fleet manager) and standalone single-agent runs see the whole
-    catalog; everyone else sees only their effective assignment (fleet-wide ∪
-    per-agent), fetched fresh from the mesh so operator edits take effect with
-    no restart. A fetch error fails CLOSED (empty set, skills hidden) rather
-    than open — the whole point is to keep agents from seeing skills not theirs.
+    The operator (fleet manager) and solo single-agent runs (team-of-one)
+    see the whole catalog; everyone else sees only their effective
+    assignment (fleet-wide ∪ per-agent), fetched fresh from the mesh so
+    operator edits take effect with no restart. A fetch error fails CLOSED
+    (empty set, skills hidden) rather than open — the whole point is to
+    keep agents from seeing skills not theirs.
     """
-    if mesh_client is None or getattr(mesh_client, "is_standalone", False) or _is_operator():
+    if mesh_client is None or _is_team_of_one(mesh_client) or _is_operator():
         return None
     try:
         return set(await mesh_client.list_my_skills())

@@ -787,12 +787,19 @@ class RuntimeContext:
                     agent_env["OL_INTERNET_ACCESS_ENABLED"] = "true"
                     agent_env["OL_BROWSER_ACCESS_ENABLED"] = "true"
 
-            # Team env vars
+            # Team env vars. Workers ALWAYS get TEAM_NAME: their real team,
+            # or their own agent id as a private team-of-one namespace
+            # (ratified decision #5 — solo agent = team-of-one). TEAM_MD_PATH
+            # only exists for real teams (solo agents have no TEAM.md; the
+            # workspace's optional-file handling covers its absence). The
+            # operator stays unscoped — no TEAM_NAME (trust-tier carve-out).
             team_name = agent_teams.get(agent_id)
             if team_name:
                 team_md = TEAMS_DIR / team_name / "team.md"
                 agent_env["TEAM_MD_PATH"] = str(team_md)
                 agent_env["TEAM_NAME"] = team_name
+            elif agent_id != _OPERATOR_AGENT_ID:
+                agent_env["TEAM_NAME"] = agent_id
 
             # Proxy env injection
             proxy_url = resolve_agent_proxy(

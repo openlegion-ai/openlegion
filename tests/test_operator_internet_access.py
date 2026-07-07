@@ -385,7 +385,6 @@ def _build_loop(monkeypatch, *, allowed_tools=None, internet_env=None):
         monkeypatch.setenv("OL_INTERNET_ACCESS_ENABLED", internet_env)
     from src.agent.loop import AgentLoop
     mesh_client = MagicMock()
-    mesh_client.is_standalone = False
     mesh_client.agent_id = "operator"
     loop = AgentLoop.__new__(AgentLoop)
     # Manually run only the bits we need from __init__ to keep this a

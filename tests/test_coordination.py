@@ -5,20 +5,16 @@ from unittest.mock import AsyncMock, MagicMock, call
 import pytest
 
 
-def _make_mesh_client(agent_id="scout", standalone=False):
+def _make_mesh_client(agent_id="scout", team_name="default"):
     """Create a mock mesh_client with sensible defaults.
 
     All coordination tools now route exclusively through the durable
-    tasks store, so this helper no longer needs a ``v2_enabled`` toggle.
+    tasks store. ``team_name=None`` models the operator (the only
+    unscoped identity since solo = team-of-one, ratified #5).
     """
     mc = MagicMock()
     mc.agent_id = agent_id
-    mc.is_standalone = standalone
-    # Both names are set so coordination_tool (which now reads
-    # ``team_name``) and any back-compat callers that still read
-    # ``team_name`` see the same value.
-    mc.team_name = None if standalone else "default"
-    mc.team_name = None if standalone else "default"
+    mc.team_name = team_name
     mc.list_agents = AsyncMock(return_value={})
     mc.write_blackboard = AsyncMock(return_value={"version": 1})
     mc.read_blackboard = AsyncMock(return_value={"value": {"status": "pending"}})
@@ -87,11 +83,12 @@ class TestHandOff:
         assert "not found" in result["error"]
 
     @pytest.mark.asyncio
-    async def test_hand_off_standalone_fails_closed_on_roster_error(self):
-        """Standalone agent fails handoff when roster lookup errors (can't resolve target team)."""
+    async def test_hand_off_unscoped_fails_closed_on_roster_error(self):
+        """An unscoped sender (operator) fails handoff when the roster lookup
+        errors — it cannot resolve the target's team scope."""
         from src.agent.builtins.coordination_tool import hand_off
 
-        mc = _make_mesh_client(standalone=True)
+        mc = _make_mesh_client(agent_id="operator", team_name=None)
         mc.list_agents.side_effect = RuntimeError("connection refused")
 
         result = await hand_off(

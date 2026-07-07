@@ -553,12 +553,18 @@ def _add_agent_permissions(
     else:
         can_message = []
 
+    # Self pattern: every WORKER always holds ``teams/{name}/*`` on both
+    # blackboard fields — its private team-of-one namespace (ratified #5).
+    # Invariant: "self always; team while member". The operator keeps its
+    # explicit ["*"] grants from _ensure_operator_agent instead.
+    self_patterns = [f"teams/{name}/*"] if name != _OPERATOR_AGENT_ID else []
+
     agent_perms: dict = {
         "can_message": can_message,
         "can_publish": ["*"] if collab else [f"{name}_complete"],
         "can_subscribe": ["*"] if collab else [],
-        "blackboard_read": [],
-        "blackboard_write": [],
+        "blackboard_read": list(self_patterns),
+        "blackboard_write": list(self_patterns),
         "allowed_apis": ["llm", "image_gen"],
         "allowed_credentials": ["*"],
         # Default capability set for every new agent: browser + internet +
@@ -642,6 +648,27 @@ def _ensure_all_agent_permissions() -> None:
             if flag not in agent_perms:
                 agent_perms[flag] = default_val
                 changed = True
+
+    # Solo self-pattern default (ratified #5 — solo agent = team-of-one): a
+    # TEAMLESS worker whose blackboard_read AND blackboard_write are both
+    # empty (the pre-merge "standalone locked out" posture, or a pre-merge
+    # team leaver) gets its private ``teams/{agent_id}/*`` namespace at
+    # boot. Agents with ANY existing pattern are left untouched.
+    try:
+        team_map = _open_teams_store().agent_team_map()
+    except Exception:
+        team_map = {}
+    for agent_id, agent_perms in perms.get("permissions", {}).items():
+        if agent_id in ("default", _OPERATOR_AGENT_ID):
+            continue
+        if team_map.get(agent_id):
+            continue
+        if agent_perms.get("blackboard_read") or agent_perms.get("blackboard_write"):
+            continue
+        self_pattern = f"teams/{agent_id}/*"
+        agent_perms["blackboard_read"] = [self_pattern]
+        agent_perms["blackboard_write"] = [self_pattern]
+        changed = True
     if changed:
         _save_permissions(perms)
 
@@ -678,11 +705,35 @@ def _validate_agent_name(name: str) -> str:
     return name
 
 
+def _reject_agent_team_collision(name: str) -> None:
+    """Cross-namespace collision guard (ratified #5 makes it load-bearing).
+
+    Agents and teams share one namespace downstream (``teams/{id}/*``
+    blackboard prefixes, ``TEAM_NAME`` env): a solo agent's private
+    team-of-one scope is ``teams/{agent_id}/*``, so an agent named after
+    an existing team would silently gain that team's namespace. Reject at
+    every agent-create path; the team-create endpoints enforce the mirror
+    direction. Best-effort on store errors: an unreadable teams DB must
+    not block agent creation (the mirror guard still holds forward).
+    """
+    try:
+        exists = _open_teams_store().team_exists(name)
+    except Exception as e:
+        logger.warning("Team-collision check skipped for '%s': %s", name, e)
+        return
+    if exists:
+        raise ValueError(
+            f"Agent name '{name}' conflicts with an existing team — "
+            "teams and agents share one namespace. Pick a different name."
+        )
+
+
 def _create_agent(
     name: str, description: str, model: str,
 ) -> None:
     """Create an agent: config, permissions, tools directory."""
     name = _validate_agent_name(name)
+    _reject_agent_team_collision(name)
     _add_agent_to_config(name, description, model)
     # Apply the same coordination defaults the operator/mesh create path uses
     # so a human-created (no-template) agent isn't second-class — empty
@@ -894,15 +945,20 @@ def _add_team_blackboard_permissions(agent: str, team: str) -> None:
     if agent_perms is None:
         return
     team_pattern = f"teams/{team}/*"
+    self_pattern = f"teams/{agent}/*"
     for field in ("blackboard_read", "blackboard_write"):
         patterns = agent_perms.get(field, [])
         # Strip any wildcard — replaced by the explicit team pattern
         # below. This is the active narrowing for Task 5: an agent that
         # previously had ``["*"]`` and is then added to a team ends
-        # up with ``["teams/{team}/*"]``.
+        # up with its self + team patterns.
         narrowed = [p for p in patterns if p != "*"]
         if team_pattern not in narrowed:
             narrowed.append(team_pattern)
+        # Invariant (ratified #5): "self always; team while member" — the
+        # private team-of-one pattern rides alongside the team pattern.
+        if self_pattern not in narrowed:
+            narrowed.append(self_pattern)
         agent_perms[field] = narrowed
     _save_permissions(perms)
 
@@ -911,27 +967,32 @@ def _remove_team_blackboard_permissions(agent: str, team: str) -> None:
     """Revoke team blackboard access when an agent leaves a team.
 
     Strips the team namespace pattern AND any pre-existing ``*``
-    wildcard. Leaves an agent with whatever non-wildcard, non-target
-    patterns it had — typically empty for a team member, restoring
-    the agent to a standalone (no-blackboard) state. Wildcard stripping
-    matches the add-side narrowing so an agent that ever had ``*`` does
-    not reacquire fleet-wide reach by being added to and then removed
-    from a team (Task 5).
+    wildcard, then restores the agent's self pattern
+    (``teams/{agent}/*``) so a leaver lands in a working private
+    team-of-one namespace instead of an empty-ACL lockout (ratified #5:
+    "self always; team while member"). Wildcard stripping matches the
+    add-side narrowing so an agent that ever had ``*`` does not
+    reacquire fleet-wide reach by being added to and then removed from
+    a team (Task 5).
     """
     perms = _load_permissions()
     agent_perms = perms.get("permissions", {}).get(agent)
     if agent_perms is None:
         return
     team_pattern = f"teams/{team}/*"
+    self_pattern = f"teams/{agent}/*"
     for field in ("blackboard_read", "blackboard_write"):
         patterns = agent_perms.get(field, [])
         # Drop both the target team pattern and any surviving ``*``.
         # The wildcard strip is the safety net for an agent whose ACL
         # was never re-narrowed (e.g. config-edited directly): once the
         # membership system touches it on remove, the wildcard goes.
-        agent_perms[field] = [
+        remaining = [
             p for p in patterns if p != team_pattern and p != "*"
         ]
+        if self_pattern not in remaining:
+            remaining.append(self_pattern)
+        agent_perms[field] = remaining
     _save_permissions(perms)
 
 
@@ -1107,6 +1168,11 @@ def _apply_template(
     overrides = agent_overrides or {}
     created: list[str] = []
 
+    # Cross-namespace collision guard — UPFRONT over every slot name so a
+    # collision rejects the whole apply before any agent is created.
+    for slot_name in tpl_agents:
+        _reject_agent_team_collision(_validate_agent_name(slot_name))
+
     # Load existing agents to avoid silent overwrites
     existing_agents: set[str] = set()
     if AGENTS_FILE.exists():
@@ -1221,6 +1287,7 @@ def _create_agent_from_template(
         raise ValueError(f"Agent '{tpl_agent}' not found in template '{tpl_source}'")
 
     name = _validate_agent_name(name)
+    _reject_agent_team_collision(name)
     cfg = _load_config()
     default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
     # P1.2 — coerce explicit ``model: null`` (None) to the config

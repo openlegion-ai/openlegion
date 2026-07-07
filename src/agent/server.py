@@ -990,7 +990,6 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
                 "daily_logs": "",
                 "is_default_heartbeat": True,
                 "has_recent_activity": False,
-                "is_standalone": loop.mesh_client.is_standalone,
             }
         rules = loop.workspace.load_heartbeat_rules()
         daily = loop.workspace.load_daily_logs(days=2)
@@ -1006,7 +1005,6 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
             "daily_logs": daily,
             "is_default_heartbeat": is_default,
             "has_recent_activity": bool(daily.strip()),
-            "is_standalone": loop.mesh_client.is_standalone,
         }
 
     # ── Artifact API ─────────────────────────────────────────

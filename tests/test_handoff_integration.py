@@ -53,7 +53,6 @@ async def test_hand_off_creates_task_visible_to_recipient_inbox(monkeypatch):
     # into the durable store.
     mc = MagicMock()
     mc.agent_id = "scout"
-    mc.is_standalone = False
     mc.team_name = "default"
     mc.project_name = "default"
 

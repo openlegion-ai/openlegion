@@ -68,11 +68,11 @@ async def notify_user(message: str, *, mesh_client=None, workspace_manager=None)
 @tool(
     name="list_agents",
     description=(
-        "List agents in your team (or just yourself if standalone). Returns "
-        "each agent's name, role, and capabilities. Use this to discover who "
-        "else is working in your team. For detailed collaboration info "
-        "(what they accept/produce, their status, INTERFACE.md contract), "
-        "follow up with get_agent_profile(agent_id)."
+        "List agents in your team (solo agents see themselves and the "
+        "operator). Returns each agent's name, role, and capabilities. Use "
+        "this to discover who else is working in your team. For detailed "
+        "collaboration info (what they accept/produce, their status, "
+        "INTERFACE.md contract), follow up with get_agent_profile(agent_id)."
     ),
     parameters={},
 )
@@ -93,25 +93,16 @@ async def list_agents(*, mesh_client=None) -> dict:
         return {"error": f"Failed to list agents: {e}"}
 
 
-_STANDALONE_ERROR = (
-    "Not available — this agent is not assigned to a team. "
-    "Use memory_save/memory_search for private storage."
-)
-
-
 def _is_operator(mesh_client) -> bool:
     """True for the fleet operator — the trusted, team-less coordinator.
 
-    The operator runs with ``team_name=None`` (so ``is_standalone`` is
-    True), but unlike an untrusted solo worker it is authorized for every
+    The operator runs with ``team_name=None`` and is authorized for every
     blackboard op on the mesh (``_caller_is_operator`` bypass host-side +
-    ``blackboard_read/write: ["*"]``; CLAUDE.md Constraint #12). Its
-    agent-side tools must mirror that, or the operator hits a misleading
-    "not assigned to a team" error — and can loop — when reading or
-    listing team data it is entitled to monitor. Operator reads/lists run
-    in global scope (raw keys, every team visible); its other blackboard
-    ops pass through unscoped and the mesh applies the real ACL. Workers
-    are unaffected — they stay scoped and standalone-blocked as before.
+    ``blackboard_read/write: ["*"]``; CLAUDE.md Constraint #12). Operator
+    reads/lists run in global scope (raw keys, every team visible); its
+    other blackboard ops pass through unscoped and the mesh applies the
+    real ACL. Workers always run team-scoped: their real team, or their
+    own private team-of-one namespace when solo (ratified decision #5).
     """
     return getattr(mesh_client, "agent_id", "") == "operator"
 
@@ -158,8 +149,6 @@ async def read_blackboard(key: str, *, mesh_client=None) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
     is_operator = _is_operator(mesh_client)
-    if mesh_client.is_standalone and not is_operator:
-        return {"error": _STANDALONE_ERROR}
     try:
         entry = await mesh_client.read_blackboard(key, global_scope=is_operator)
         if entry is None:
@@ -202,8 +191,6 @@ async def read_blackboard(key: str, *, mesh_client=None) -> dict:
 async def write_blackboard(key: str, value: str, *, mesh_client=None) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    if mesh_client.is_standalone and not _is_operator(mesh_client):
-        return {"error": _STANDALONE_ERROR}
     parsed = _parse_json_value(value)
     try:
         result = await mesh_client.write_blackboard(key, parsed)
@@ -235,8 +222,6 @@ async def list_blackboard(prefix: str = "", *, mesh_client=None) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
     is_operator = _is_operator(mesh_client)
-    if mesh_client.is_standalone and not is_operator:
-        return {"error": _STANDALONE_ERROR}
     try:
         entries = await mesh_client.list_blackboard(prefix, global_scope=is_operator)
         items = []
@@ -280,8 +265,6 @@ async def publish_event(
 ) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    if mesh_client.is_standalone and not _is_operator(mesh_client):
-        return {"error": _STANDALONE_ERROR}
     parsed = _parse_json_value(data)
     try:
         result = await mesh_client.publish_event(topic, parsed)
@@ -311,8 +294,6 @@ async def publish_event(
 async def subscribe_event(topic: str, *, mesh_client=None) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    if mesh_client.is_standalone and not _is_operator(mesh_client):
-        return {"error": _STANDALONE_ERROR}
     try:
         result = await mesh_client.subscribe_topic(topic)
         return {"subscribed": True, "topic": topic, **result}
@@ -341,8 +322,6 @@ async def subscribe_event(topic: str, *, mesh_client=None) -> dict:
 async def watch_blackboard(pattern: str, *, mesh_client=None) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    if mesh_client.is_standalone and not _is_operator(mesh_client):
-        return {"error": _STANDALONE_ERROR}
     try:
         result = await mesh_client.watch_blackboard(pattern)
         return {"watching": True, "pattern": pattern, **result}
@@ -372,8 +351,6 @@ async def watch_blackboard(pattern: str, *, mesh_client=None) -> dict:
 async def claim_task(key: str, claim_value: str, *, mesh_client=None) -> dict:
     if mesh_client is None:
         return {"error": "No mesh_client available"}
-    if mesh_client.is_standalone and not _is_operator(mesh_client):
-        return {"error": _STANDALONE_ERROR}
     parsed = _parse_json_value(claim_value)
     try:
         # Read current entry to get its version
@@ -439,7 +416,7 @@ async def save_artifact(
     # than losing the work.
     registered = True
     registration_error: str | None = None
-    if mesh_client and not mesh_client.is_standalone:
+    if mesh_client:
         agent_id = mesh_client.agent_id
         key = f"artifacts/{agent_id}/{name}"
         try:

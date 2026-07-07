@@ -1,9 +1,9 @@
 """Per-agent + fleet-wide skill assignment (PR 5).
 
 Covers ``PermissionMatrix.get_effective_skills`` (fleet ∪ per-agent) and the
-per-agent filtering in the skills_list / skill_view tools (operator + standalone
-see the full catalog; everyone else only their assignment; fetch errors fail
-closed).
+per-agent filtering in the skills_list / skill_view tools (operator + solo
+team-of-one workers see the full catalog; everyone else only their assignment;
+fetch errors fail closed).
 """
 
 from __future__ import annotations
@@ -115,7 +115,9 @@ def test_reload_picks_up_new_assignment(tmp_path):
 # ── skills_list / skill_view per-agent filtering ──────────────────────────
 
 class _FakeMesh:
-    is_standalone = False
+    # A team worker: scoped to a real team (not a team-of-one).
+    agent_id = "worker"
+    team_name = "alpha"
 
     def __init__(self, names):
         self._names = names
@@ -166,14 +168,19 @@ async def test_operator_sees_full_catalog(store_with_three, monkeypatch):
     assert result["count"] == 3
 
 
-async def test_standalone_sees_full_catalog(store_with_three):
-    class Standalone:
-        is_standalone = True
+async def test_solo_team_of_one_sees_full_catalog(store_with_three):
+    """A solo worker (team-of-one: team_name == agent_id, ratified #5)
+    sees the whole catalog without fetching an assignment — preserves the
+    pre-merge standalone behavior. Sound because the collision guard
+    forbids a real team named after an existing agent."""
+    class Solo:
+        agent_id = "solo"
+        team_name = "solo"
 
         async def list_my_skills(self):
-            raise AssertionError("standalone must not fetch assignment")
+            raise AssertionError("a team-of-one must not fetch assignment")
 
-    result = await skills_tool.skills_list(mesh_client=Standalone())
+    result = await skills_tool.skills_list(mesh_client=Solo())
     assert result["count"] == 3
 
 
@@ -184,7 +191,8 @@ async def test_no_mesh_client_sees_full_catalog(store_with_three):
 
 async def test_fetch_error_fails_closed(store_with_three):
     class Boom:
-        is_standalone = False
+        agent_id = "worker"
+        team_name = "alpha"
 
         async def list_my_skills(self):
             raise RuntimeError("mesh down")
