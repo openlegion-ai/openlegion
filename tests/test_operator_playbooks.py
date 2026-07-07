@@ -135,8 +135,11 @@ class TestPlaybookConstants:
         # 6800 → 7800 for watch mode (loop await_task_event + narrate when
         # the user explicitly asks to watch a pipeline live);
         # 7800 → 8400 for the post-completion verification-wake contract
-        # (system wakes you once per completed chain; promise nothing else).
-        assert len(_OPERATOR_CORE) < 8400
+        # (system wakes you once per completed chain; promise nothing else);
+        # 8400 → 9200 for the v7 questions-vs-work rule (ask_teammate for
+        # inline questions / answering task_blocked blockers — never a
+        # duplicate re-hand_off).
+        assert len(_OPERATOR_CORE) < 9200
         assert len(_OPERATOR_CORE) > 1000
 
     def test_playbooks_have_numbered_steps(self):

@@ -77,6 +77,13 @@ heads-up if it gets stuck. Re-engage only to summarize a finished result when \
 asked, or to unstick a real blocker. EXCEPTION: when the user explicitly asks \
 to watch — see "Watching a Pipeline".
 
+**Questions vs work.** hand_off delegates work; ask_teammate asks a question \
+and returns the answer inline. Use ask_teammate to pull a quick fact from a \
+worker instead of creating a task for it. When a worker blocks a task with a \
+question (task_blocked in check_inbox events[]), answer it inline with \
+ask_teammate(to=<recipient>, question='<your answer>') — the worker resumes \
+the SAME task. Never re-hand_off a duplicate to answer a blocker.
+
 Don't do the work yourself. Don't over-explain the routing — just do it.
 
 If the user asks you to do work directly (write content, research something), \
@@ -183,7 +190,8 @@ beyond the in-chat result and this one verification.
 <!-- playbook_v3_handoff_briefs -->
 <!-- playbook_v4_watch_mode -->
 <!-- playbook_v5_verification_wake -->
-<!-- playbook_v6_chat_delivery -->"""
+<!-- playbook_v6_chat_delivery -->
+<!-- playbook_v7_ask_teammate -->"""
 
 # ── v3 addendum (appended to EXISTING operator INSTRUCTIONS.md) ──
 #
@@ -260,6 +268,23 @@ result appear right here. Promise only what the system delivers: the \
 in-chat result and your one post-completion verification.
 
 <!-- playbook_v6_chat_delivery -->"""
+
+# ── v7 addendum (appended to EXISTING operator INSTRUCTIONS.md) ──
+# Same append-only contract as v3-v6.
+
+_PLAYBOOK_V7_ADDENDUM = """\
+
+## Questions vs Work (v7 ask_teammate)
+
+hand_off delegates work; ask_teammate asks a question and returns the \
+answer inline. Use ask_teammate to pull a quick fact from a worker \
+instead of creating a task for it. When a worker blocks a task with a \
+question (task_blocked in check_inbox events[]), answer it inline with \
+ask_teammate(to=<recipient>, question='<your answer>') — the worker \
+resumes the SAME task. Never re-hand_off a duplicate to answer a \
+blocker.
+
+<!-- playbook_v7_ask_teammate -->"""
 
 # ── Boot greeting (seeded once on first operator creation) ────
 

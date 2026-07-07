@@ -395,6 +395,21 @@ class WorkspaceManager:
                 f.write("\n" + _PLAYBOOK_V6_ADDENDUM + "\n")
             logger.info("Appended chat-delivery guidance to operator instructions (v6)")
 
+        # Migration v7 (ask_teammate, Phase 2 unit 3): questions-vs-work
+        # guidance — answer task_blocked questions inline via ask_teammate
+        # instead of the re-hand_off dance. Same append-only contract.
+        if (
+            instructions_file.exists()
+            and self._initial_instructions
+            and "<!-- playbook_v7_ask_teammate -->" in self._initial_instructions
+            and "<!-- playbook_v7_ask_teammate -->"
+            not in instructions_file.read_text(errors="replace")
+        ):
+            from src.shared.operator_playbooks import _PLAYBOOK_V7_ADDENDUM
+            with open(instructions_file, "a") as f:
+                f.write("\n" + _PLAYBOOK_V7_ADDENDUM + "\n")
+            logger.info("Appended ask_teammate guidance to operator instructions (v7)")
+
         for filename, default_content in _SCAFFOLD_FILES.items():
             path = self.root / filename
             if not path.exists():

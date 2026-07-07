@@ -1796,6 +1796,21 @@ class RuntimeContext:
             self.credential_vault,
         )
 
+        # AskBroker (Phase 2 unit 3) — mesh-held inline teammate Q&A.
+        # Constructed here (no module globals), handed to create_mesh_app
+        # which puts it on app.state and wires the vault billing seam.
+        from src.host.asks import AskBroker
+
+        self.ask_broker = AskBroker()
+        # Team Threads (Phase 2 unit 2) integration point: when the
+        # ThreadStore lands, one wiring line connects Q&A thread posting:
+        #   self.ask_broker.set_thread_store(self.thread_store)
+        # Guarded duck-typed lookup so this branch stays green without
+        # threads.py in the tree (unit 2 builds concurrently).
+        _thread_store = getattr(self, "thread_store", None)
+        if _thread_store is not None:
+            self.ask_broker.set_thread_store(_thread_store)
+
         app = create_mesh_app(
             self.blackboard,
             self.pubsub,
@@ -1822,6 +1837,7 @@ class RuntimeContext:
             cfg=self.cfg,
             connector_store=self.connector_store,
             mcp_gateway=self.mcp_gateway,
+            ask_broker=self.ask_broker,
         )
         app.include_router(webhook_manager.create_router())
         self.health_monitor._cleanup_agent = app.cleanup_agent  # type: ignore[attr-defined]

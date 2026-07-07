@@ -1622,6 +1622,12 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "apply_template",
     "hand_off",
     "check_inbox",
+    # Inline teammate Q&A (Phase 2 unit 3). ``ask_teammate`` lets the
+    # operator answer a blocked worker's question inline (the worker
+    # resumes the SAME task — no re-hand_off duplicate) and pull quick
+    # facts from workers; ``answer_ask`` is the reply side.
+    "ask_teammate",
+    "answer_ask",
     # Skill-pack discovery (SKILL.md procedures) — read-only, so the
     # operator can see which skills its workers can draw on. install_skill /
     # remove_skill are operator-gated + user-origin-gated mutations.
@@ -1785,6 +1791,10 @@ _OPERATOR_HEARTBEAT_TOOLS: list[str] = [
     # A5 — the heartbeat procedure says "re-read GOALS.json fresh each
     # cycle"; without read_file the prompted call was denied.
     "read_file",
+    # v7 (Phase 2 unit 3) — step 1 answers a task_blocked worker's
+    # clarifying question inline so it resumes the SAME task (replaces
+    # the blocked→re-hand_off dance).
+    "ask_teammate",
 ]
 
 _OPERATOR_SOUL = """\
@@ -1807,6 +1817,7 @@ _OPERATOR_HEARTBEAT = """\
 <!-- heartbeat_v4_goal_seeding -->
 <!-- heartbeat_v5_fleet_health -->
 <!-- heartbeat_v6_agent_retro -->
+<!-- heartbeat_v7_ask_teammate -->
 You are running an autonomous fleet health check. You have access ONLY to monitoring tools.
 
 Step budget: stay at or under 8 tool calls per cycle (HEARTBEAT_MAX_ITERATIONS=12
@@ -1816,6 +1827,11 @@ in the loop; 8 leaves headroom for the final assistant turn).
    from active workflows are surfaced before you do fleet-wide work. Skim the
    ``events[]`` array:
    - For each task_failed / task_blocked event note the task_id and recipient.
+   - For a task_blocked event whose blocker_note is a clarifying question you
+     can answer from context, answer it inline with
+     ask_teammate(to=<recipient>, question='<your answer / clarification>') —
+     the worker resumes the SAME task. Do NOT re-hand_off a duplicate. If you
+     cannot answer it, surface it via notify_user in step 5.
    - For each event whose task is part of an orchestration you started, drop a
      ``workflow_snapshot(root_task_id)`` call (step 3) to see chain state.
 

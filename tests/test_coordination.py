@@ -1784,10 +1784,38 @@ class TestToolDescriptions:
         return _tool_staging[name]["description"]
 
     def test_update_status_description_mentions_pushback(self):
-        assert "pushback" in self._description("update_status")
+        desc = self._description("update_status")
+        assert "pushback" in desc
+        # Phase 2 unit 3: a quick clarifying question goes through
+        # ask_teammate FIRST — blocked is for real stoppages.
+        assert "ask_teammate" in desc
 
     def test_check_inbox_description_mentions_events(self):
-        assert "events[]" in self._description("check_inbox")
+        desc = self._description("check_inbox")
+        assert "events[]" in desc
+        # Phase 2 unit 3: blocked questions are answered inline via
+        # ask_teammate — the "corrected hand_off" reissue dance is gone.
+        assert "ask_teammate" in desc
+        assert "corrected hand_off" not in desc
 
     def test_hand_off_description_mentions_blocked_followup(self):
-        assert "re-hand-off" in self._description("hand_off")
+        desc = self._description("hand_off")
+        # Phase 2 unit 3: the blocked→re-hand-off dance copy is retired;
+        # creators answer blockers inline via ask_teammate instead.
+        assert "re-hand-off" not in desc
+        assert "ask_teammate" in desc
+        assert "duplicate" in desc
+
+    def test_ask_teammate_description_frames_semi_trusted(self):
+        """The ask verb's return is semi-trusted teammate INPUT, not
+        instructions (plan §4) — the description must say so, and must
+        route work to hand_off."""
+        desc = self._description("ask_teammate")
+        assert "SEMI-TRUSTED" in desc or "semi-trusted" in desc
+        assert "not instructions" in desc
+        assert "hand_off" in desc
+
+    def test_answer_ask_description_mentions_single_use(self):
+        desc = self._description("answer_ask")
+        assert "Single-use" in desc or "single-use" in desc
+        assert "semi-trusted" in desc

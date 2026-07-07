@@ -409,7 +409,10 @@ class TestOperatorConstants:
         #    per-task execution summary so rating decisions are informed.
         #  * v6 (A5 heartbeat consistency): +read_file — the prompted
         #    "re-read GOALS.json each cycle" call was denied without it.
-        assert len(_OPERATOR_HEARTBEAT_TOOLS) == 12
+        #  * v7 (Phase 2 unit 3): +ask_teammate — step 1 answers a
+        #    task_blocked worker's clarifying question inline so it
+        #    resumes the SAME task (no re-hand_off duplicate).
+        assert len(_OPERATOR_HEARTBEAT_TOOLS) == 13
         # The operator-tier heartbeat tools must also be on the main
         # operator allowlist — they're the tools operator can use from
         # both /chat and heartbeat. Two heartbeat entries are
@@ -641,9 +644,7 @@ class TestOperatorConstants:
         )
         from src.shared.types import HEARTBEAT_SENTINELS
 
-        # Roll-forward keys off HEARTBEAT_SENTINELS[-1] — v6 must be the
-        # newest entry or deployed fleets never pick the step up.
-        assert HEARTBEAT_SENTINELS[-1] == "heartbeat_v6_agent_retro"
+        assert "heartbeat_v6_agent_retro" in HEARTBEAT_SENTINELS
         assert "Agent retro" in _OPERATOR_HEARTBEAT
         assert "at most ONE agent per heartbeat" in _OPERATOR_HEARTBEAT
         assert (
@@ -655,6 +656,33 @@ class TestOperatorConstants:
         # The propose-don't-apply boundary: edit_agent must NOT be
         # heartbeat-reachable.
         assert "edit_agent" not in _OPERATOR_HEARTBEAT_TOOLS
+
+    def test_heartbeat_v7_mentions_ask_teammate(self):
+        """v7 (Phase 2 unit 3) — a task_blocked worker's clarifying
+        question is answered INLINE via ask_teammate so it resumes the
+        SAME task; the blocked→re-hand_off dance prompt copy is retired.
+        Roll-forward keys off the [-1] sentinel."""
+        from src.cli.config import (
+            _OPERATOR_HEARTBEAT,
+            _OPERATOR_HEARTBEAT_TOOLS,
+        )
+        from src.shared.operator_playbooks import (
+            _OPERATOR_CORE,
+            _PLAYBOOK_V7_ADDENDUM,
+        )
+        from src.shared.types import HEARTBEAT_SENTINELS, PLAYBOOK_SENTINELS
+
+        assert HEARTBEAT_SENTINELS[-1] == "heartbeat_v7_ask_teammate"
+        assert "<!-- heartbeat_v7_ask_teammate -->" in _OPERATOR_HEARTBEAT
+        assert "ask_teammate" in _OPERATOR_HEARTBEAT
+        assert "Do NOT re-hand_off a duplicate" in _OPERATOR_HEARTBEAT
+        assert "ask_teammate" in _OPERATOR_HEARTBEAT_TOOLS
+        # Playbook side: core copy + append-only addendum both carry the
+        # marker so the config-side refresh AND the workspace append fire.
+        assert PLAYBOOK_SENTINELS[-1] == "playbook_v7_ask_teammate"
+        assert "<!-- playbook_v7_ask_teammate -->" in _OPERATOR_CORE
+        assert "ask_teammate" in _OPERATOR_CORE
+        assert "<!-- playbook_v7_ask_teammate -->" in _PLAYBOOK_V7_ADDENDUM
 
     def test_core_has_key_sections(self):
         from src.shared.operator_playbooks import _OPERATOR_CORE

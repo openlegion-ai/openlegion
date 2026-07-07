@@ -111,6 +111,9 @@ def test_heartbeat_tools_constant():
     * v6 (A5 heartbeat consistency): + ``read_file``. The heartbeat
       prompt says "re-read GOALS.json fresh each cycle" but the
       allowlist denied the prompted call. Read-only.
+    * v7 (Phase 2 unit 3): + ``ask_teammate``. Step 1 answers a
+      task_blocked worker's clarifying question inline so the worker
+      resumes the SAME task — replaces the blocked→re-hand_off dance.
     """
     assert _HEARTBEAT_TOOLS == frozenset({
         "list_agents", "get_agent_profile", "get_system_status",
@@ -118,8 +121,9 @@ def test_heartbeat_tools_constant():
         "check_inbox", "workflow_snapshot", "await_task_event",
         "rate_delivery", "manage_goals",
         "inspect_agents", "inspect_task_run", "read_file",
+        "ask_teammate",
     })
     # v3 main was 9 tools (no save_observations — removed pre-merge);
     # v4 added inspect_agents = 10; v5 added inspect_task_run = 11;
-    # v6 added read_file = 12.
-    assert len(_HEARTBEAT_TOOLS) == 12
+    # v6 added read_file = 12; v7 added ask_teammate = 13.
+    assert len(_HEARTBEAT_TOOLS) == 13
