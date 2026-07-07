@@ -1003,40 +1003,63 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
 | #1192 | solo = team-of-one (unit 3) | green |
 | — | TEAM.md cap (unit 4) + this doc update | this PR |
 
-### YOU ARE HERE → next phase
-**Phase 1 (team as first-class) is COMPLETE**: the Team store is THE team authority
-(YAML glob deleted, C.1 row 1 done), goals live in the store (ratified #7, C.1 row 7
-done — one goals home), the budget envelope is durable + pre-flight enforced with B4
-semantics pinned both ways, solo = team-of-one landed with the B6 isolation posture
-preserved by construction (resolution-time self-namespace carve-out + cross-namespace
-collision guard + no worker read wildcard), and TEAM.md is capped. Phase-exit checklist
-(C.4) verified per unit: every replaced old path is deleted.
+### PR ledger — Phase 2 (as of 2026-07-07)
+| PR | Unit | CI |
+|---|---|---|
+| #1194 | Phase-2 pre-decisions ratified (C.3-a replace, C.3-e keep, §8 #1 reconfirmed) | green |
+| #1195 | Team Drive — mesh-hosted git, smart-HTTP, review-before-integrate, quota (unit 1, incl. review-fix commit) | green |
+| #1196 | Team Threads — durable store replacing message_log deque + inbox back-edge feed (unit 2) | green |
+| #1197 | ask_teammate — mesh-brokered inline Q&A, asker-billed, steer-delivered (unit 3) | green |
+| #1198 | blackboard → signals only — hand_off data + artifacts move to the Team Drive (unit 4) | green |
 
-Next, in order:
-1. **Phase-2 pre-decisions** (decide BEFORE building, like C.3-b was):
-   (a) ~~**C.3-a — Threads vs the inbox event feed**: does Team Threads REPLACE
-   `inbox/{agent}/task_event/` or coexist?~~ **DONE** — ratified REPLACE (§8 #8,
-   2026-07-07) and executed in Phase-2 unit 2 (blackboard back-edge path deleted,
-   `check_inbox` repointed; see the landed entry above).
-   (e) **C.3-e — SandboxBackend**: it has no shared-volume analog for Team Drive/Scratch
-   (B-pre #6) — invest in a microVM sync layer, or delete the backend and commit to
-   Docker. Do not leave it half-supporting the flagship feature.
-   Also revisit §8 #1 (raw shared scratch stays deferred; git-Drive-first is the default).
-2. **Phase 2 — collaboration substrate** (§6): Team Drive (git, mesh-mediated),
-   Team Threads (**DONE** — Phase-2 unit 2; durable store replaced
-   `MessageRouter.message_log`, B-pre #4),
-   `ask_teammate`, provenance tier; blackboard → signals only (respect B8's rider list).
-   The volume lifecycle owner now exists (the TeamStore — A.3 #3 satisfied).
-   (Full YOU-ARE-HERE advance happens at phase end.)
-3. **Then Phases 3–5** as sequenced in §6 (B1 reframe for Phase 3's "dual lanes" —
-   priority steer, NOT parallel; B2 spend split gates the suppression removal;
-   B3 scope for Phase 5 hibernation). Personnel-file *import* still needs B-pre #2's
-   config file-lock first.
+*CI note:* workflow runs on app-authored PRs in this repo require the maintainer's one-click
+approval and did not auto-run; each unit was landed on a green full local suite (the exact
+`make test` command CI runs) + per-unit adversarial review + a post-rebase touched-suite
+verification. One cross-unit integration bug was caught this way (unit 4's artifact endpoints
+called the now-async `_drive_repo` without `await` after unit 1's review-fix — fixed pre-merge).
 
-**Handoff note:** this doc is the source of truth — a fresh session can continue from here
-without this session's chat history. Read §5 (keep/refactor/remove), Appendices A–C, §8
-(ratified decisions), and the Phase-1 entries above (they record implementation
-corrections and review findings the appendices don't).
+### YOU ARE HERE → Phase 3
+
+**Phase 2 (collaboration substrate) is COMPLETE.** All four units landed as separate green PRs
+off `main`, each completing its C.1 deletion in-phase (C.4 phase-exit verified per unit):
+- **Team Drive** (#1195) — mesh-hosted git, one bare repo per team, transport-level (NO shared
+  volume — C.3-e resolved KEEP-the-SandboxBackend, §8 #9); review-before-integrate is unforgeable
+  (pinned `head_sha` + claim-first atomic merge, hardened in the review-fix pass).
+- **Team Threads** (#1196) — durable `ThreadStore` REPLACED the in-memory `MessageRouter.message_log`
+  deque (B-pre #4) AND the blackboard `inbox/{agent}/task_event/` back-edge feed (C.3-a REPLACE,
+  §8 #8); one event surface, human-visible in the dashboard.
+- **ask_teammate** (#1197) — mesh-brokered inline Q&A, steer-delivered (no `task_id`,
+  Constraint-#6-correct), asker-billed via the mesh-authoritative `set_bill_resolver` seam,
+  provenance-tagged "teammate" + sanitized; the §5 pushback-reissue prompt copy is retired.
+- **blackboard → signals only** (#1198) — ONLY `output/*` + `artifacts/*` payloads moved to the
+  Drive (B8 riders held); grep-zero on the old writers (C.1 row 2 closed).
+
+§8 #1 stands reconfirmed: git-Drive-first, **raw shared `/team/scratch` is NOT built** (deferred,
+unratified) — do not build it without an explicit user decision; any future scratch ratification
+MUST resolve the SandboxBackend story at the same time (recorded in §8 #9).
+
+**Next: Phase-3 pre-decisions (decide BEFORE building, like C.3-a/b were):**
+1. **B1 — reframe "dual lanes" to a PRIORITY STEER lane, NOT parallel execution.** The agent
+   runtime is single-lane by explicit design (`_chat_lock` + shared `_chat_messages`/`state`/
+   `_loop_detector`); a true second parallel worker would corrupt state (B1, the plan's single
+   most dangerous item). The Phase-3 "interactive lane" must be steer-style injection into the
+   running turn (the mechanism `ask_teammate` already exercises), not a concurrent turn. Rewrite
+   the §6 Phase-3 "dual lanes" bullet to "priority steer lane" before building.
+2. **B2 — the coordination-vs-work SPEND SPLIT gates the heartbeat-suppression removal.** Removing
+   the LLM-skip (cron.py idle heartbeat) without a spend split lets agenda ticks exhaust the flat
+   per-agent daily ledger and then HARD-BLOCK real task work (budget is pre-flight enforced). The
+   cheap-model tiering HOOK exists (Phase-0 residual a, `llm.utility_model`); B2 needs the actual
+   split (separate coordination sub-budget, or exempt cheap-tier coordination from the work cap)
+   to land WITH or BEFORE the suppression removal (§8 #3 ratified this ordering). Do not remove
+   the LLM-skip until the split exists.
+Then build Phase 3 (agenda loop, priority steer lane, budget-governed initiative) per §6.
+Phase-5 hibernation still needs B3's three-subsystem scoping; Personnel-file *import* still needs
+B-pre #2's config file-lock first.
+
+**Handoff note:** this doc is the source of truth — a fresh session can continue from here without
+this session's chat history. Read §5 (keep/refactor/remove), Appendices A–C, §8 (ratified
+decisions), and the Phase-1 + Phase-2 landed entries above (they record implementation corrections
+and review findings the appendices don't).
 
 ---
 
