@@ -561,6 +561,54 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   `teams/X/goals/Y` (inert — nothing reads such keys into prompts anymore), and
   `_fetch_goals` semantics (verified behavior-identical at all five prompt consumers).
 
+- **✅ Landed — Phase-1 unit 2: durable pre-flight team budget envelope (B4 complete;
+  in-memory `_team_budgets` deleted).** The envelope lives on the team row
+  (`budget_daily_usd`/`budget_monthly_usd`, columns since unit 1); costs.py only READS
+  it via `set_team_store()` wiring. New `CostTracker.team_envelope_check(agent, model)`
+  runs at the LLM-proxy chokepoint (`credentials.execute_api_call`) immediately after
+  the per-agent preflight — aggregate member spend + estimated call cost vs envelope,
+  distinct "Team budget exceeded for team 'X'" error (surfaces on `tasks.blocker_note`
+  via the existing failed-transition promotion; no new plumbing per the earlier B4 plan
+  correction). **THE B4 SEMANTICS FLIP, pinned both ways in tests:** unset/NULL/0
+  envelope = UNLIMITED (`test_zero_envelope_is_unlimited`,
+  `test_zero_envelope_does_not_block` at the proxy) while the per-agent ledger's
+  0-blocks-everything contract is explicitly UNCHANGED
+  (`test_zero_agent_budget_still_blocks`). Envelope checks fail OPEN on store read
+  errors (an additional governor must not take down the LLM path; the per-agent budget
+  still applies) and are skipped entirely on the OAuth path (inherits `_needs_budget`).
+  Surfaces: `PUT /mesh/teams/{id}/budget` (operator-or-internal; 0→NULL normalized so
+  "unlimited" has one stored shape; caps $10k daily/$100k monthly),
+  `manage_team(action="set_budget")` operator tool + `MeshClient.set_team_budget`;
+  `get_team_spend` rewritten store-backed (unknown team keeps the historical error-dict
+  contract so introspect's `"error" not in` guard is unchanged; known team now returns
+  limits — None = unlimited — making `/mesh/costs/team/{id}` and the introspect
+  `team_budget` block real for the first time). Old `set_team_budget`/`_team_budgets`
+  deleted with their tests (C.1 discipline). **B-pre #3 folded in:** the
+  no-settings-file default is now $50/$200 via `DEFAULT_DAILY_BUDGET_USD`/
+  `DEFAULT_MONTHLY_BUDGET_USD` constants single-sourced into the dashboard's
+  `_SYSTEM_SETTINGS_DEFAULTS` (was a silent $10 enforced vs $50 advertised).
+  Known accepted race: the proxy's budget lock is per-agent, so two members' concurrent
+  calls can both pass one envelope check — same post-hoc exposure class as the daily
+  ledger; the governor converges on the next call. Tests: `tests/test_team_budget.py`
+  (endpoint/tool/proxy E2E) + rewritten `test_costs.py` team classes.
+  **Adversarial review: 4 findings (1 low-medium, 3 low), all fixed pre-PR:**
+  (1) `image_gen` spend counted against the envelope but was never gated by it (its
+  preflight branch only ran per-agent `check_budget`) — an exhausted team could keep
+  spending real dollars through image generation; the envelope check now runs on that
+  branch too (fixed-cost service → gates on already-consumed headroom, no estimate);
+  (2) `NaN`/`Infinity` passed `_parse_limit`'s comparisons, silently storing NULL
+  (= unlimited) then 500ing on response render — non-finite values now 400 (pinned via
+  raw-body JSON, since `json.loads` accepts the non-standard literals);
+  (3) three residual hardcoded `$10` daily-default literals survived the B-pre #3
+  single-sourcing (`cli/runtime.py` config-budget apply, `cli/repl.py` /restart apply,
+  two dead dashboard fallbacks) — all now use the constants;
+  (4) `manage_team(set_budget)` is full-replace, so updating one limit silently cleared
+  the other — the tool description now says to supply BOTH fields every call.
+  Cleared as non-findings: envelope semantics on every path (0/NULL/negative =
+  unlimited, exactly-equal allowed, consistent with per-agent `<=`), SQL
+  parameterization, OAuth skip, single prod construction site for the wiring, and the
+  `get_team_spend` None-limit shape (no `.toFixed`/`:.2f` consumer exists).
+
 ### YOU ARE HERE → next phase
 Foundation (#1180/#1181/#1183/#1184) and the rename (#1185) are merged. Phase 0's removal
 column is fully done. Next, in order:

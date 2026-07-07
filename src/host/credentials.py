@@ -1383,6 +1383,24 @@ class CredentialVault:
                                 f"/${budget_check['monthly_limit']:.2f} monthly"
                             ),
                         )
+                    # Team envelope applies to image_gen too — its fixed
+                    # costs land in the same usage ledger the envelope
+                    # sums, so an exhausted team must not keep spending
+                    # through image generation. Fixed-cost service → no
+                    # meaningful per-call estimate; this gates on
+                    # already-consumed headroom.
+                    envelope = self.cost_tracker.team_envelope_check(
+                        agent_id, request.params.get("model", "unknown"),
+                    )
+                    if not envelope["allowed"]:
+                        return APIProxyResponse(
+                            success=False,
+                            error=(
+                                f"Team budget exceeded for team "
+                                f"'{envelope['team']}': image generation is "
+                                f"paused until the envelope resets"
+                            ),
+                        )
                 else:
                     model = request.params.get("model", "unknown")
                     preflight = self.cost_tracker.preflight_check(agent_id, model)
@@ -1397,6 +1415,27 @@ class CredentialVault:
                                 f"/${preflight['monthly_limit']:.2f} monthly "
                                 f"(estimated next call: "
                                 f"${preflight['estimated_cost']:.4f})"
+                            ),
+                        )
+                    # Team envelope on top of the per-agent budget (plan
+                    # B4): unset/0 = unlimited; enforced pre-flight at the
+                    # same chokepoint so one runaway member can't drain the
+                    # whole team's allocation.
+                    envelope = self.cost_tracker.team_envelope_check(agent_id, model)
+                    if not envelope["allowed"]:
+                        _d = envelope.get("daily_limit")
+                        _m = envelope.get("monthly_limit")
+                        return APIProxyResponse(
+                            success=False,
+                            error=(
+                                f"Team budget exceeded for team "
+                                f"'{envelope['team']}': "
+                                f"${envelope['daily_used']:.2f}"
+                                f"/{f'${_d:.2f}' if _d else 'unlimited'} daily, "
+                                f"${envelope['monthly_used']:.2f}"
+                                f"/{f'${_m:.2f}' if _m else 'unlimited'} monthly "
+                                f"(estimated next call: "
+                                f"${envelope['estimated_cost']:.4f})"
                             ),
                         )
 

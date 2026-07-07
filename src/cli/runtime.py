@@ -574,6 +574,9 @@ class RuntimeContext:
             db_path=os.environ.get("OPENLEGION_TEAMS_DB", "data/teams.db"),
             teams_dir=TEAMS_DIR,
         )
+        # Team budget envelope (plan B4): the cost tracker resolves each
+        # caller's team + envelope through the store at pre-flight time.
+        self.cost_tracker.set_team_store(self.teams_store)
         self.router = MessageRouter(
             self.permissions, self.agent_urls,
             trace_store=self.trace_store,
@@ -716,10 +719,11 @@ class RuntimeContext:
                 )
             budget = agent_cfg.get("budget", {})
             if budget:
+                from src.host.costs import DEFAULT_DAILY_BUDGET_USD, DEFAULT_MONTHLY_BUDGET_USD
                 self.cost_tracker.set_budget(
                     agent_id,
-                    daily_usd=budget.get("daily_usd", 10.0),
-                    monthly_usd=budget.get("monthly_usd", 200.0),
+                    daily_usd=budget.get("daily_usd", DEFAULT_DAILY_BUDGET_USD),
+                    monthly_usd=budget.get("monthly_usd", DEFAULT_MONTHLY_BUDGET_USD),
                 )
             # Guard the empty case: os.path.abspath("") resolves to the CWD
             # (the repo root), which would bind-mount the whole tree — .venv,

@@ -21,6 +21,15 @@ from src.shared.utils import setup_logging
 
 logger = setup_logging("host.costs")
 
+# Single source of truth for the per-agent budget defaults (B-pre #3):
+# the dashboard's Settings page (`_SYSTEM_SETTINGS_DEFAULTS`) reads these
+# same constants, so the advertised default and the enforced default can
+# never diverge again (previously the file-absent code path silently
+# enforced $10/day while the dashboard advertised $50).
+DEFAULT_DAILY_BUDGET_USD = 50.0
+DEFAULT_MONTHLY_BUDGET_USD = 200.0
+
+
 def _default_budget() -> dict:
     """Read default budget from dashboard system settings, falling back to hardcoded defaults."""
     try:
@@ -28,12 +37,12 @@ def _default_budget() -> dict:
         if p.exists():
             data = json.loads(p.read_text())
             return {
-                "daily_usd": data.get("default_daily_budget", 50.0),
-                "monthly_usd": data.get("default_monthly_budget", 200.0),
+                "daily_usd": data.get("default_daily_budget", DEFAULT_DAILY_BUDGET_USD),
+                "monthly_usd": data.get("default_monthly_budget", DEFAULT_MONTHLY_BUDGET_USD),
             }
     except (json.JSONDecodeError, OSError):
         pass
-    return {"daily_usd": 10.0, "monthly_usd": 200.0}
+    return {"daily_usd": DEFAULT_DAILY_BUDGET_USD, "monthly_usd": DEFAULT_MONTHLY_BUDGET_USD}
 
 
 class CostTracker:
@@ -70,7 +79,14 @@ class CostTracker:
         self._budget_lock = threading.Lock()
         self.budgets: dict[str, dict[str, float]] = {}
         self._load_budgets()
-        self._team_budgets: dict[str, dict] = {}
+        # Team-envelope source (the TeamStore) — wired post-construction by
+        # the runtime via set_team_store(). None (e.g. bare tests) disables
+        # the envelope layer; the per-agent budget still applies.
+        self._team_store = None
+
+    def set_team_store(self, team_store) -> None:
+        """Wire the TeamStore so team envelopes can be resolved per call."""
+        self._team_store = team_store
 
     def _load_budgets(self) -> None:
         """Load per-agent budget overrides from disk (tolerant of missing/corrupt)."""
@@ -352,28 +368,97 @@ class CostTracker:
             "by_model": by_model,
         }
 
-    # ── Team-level budget enforcement ──────────────────────────────────
+    # ── Team-level budget enforcement (durable envelope, plan B4) ─────
+    #
+    # The envelope lives on the team row in the TeamStore (data/teams.db),
+    # not here — costs.py only reads it. SEMANTICS (the B4 flip): an
+    # unset/NULL/0 envelope means UNLIMITED, the opposite of the per-agent
+    # ledger's arithmetic where a 0 budget blocks everything. A brand-new
+    # enforced team layer defaulting to "block all members" would be the
+    # exact failure mode B4 warns about.
 
-    def set_team_budget(
-        self,
-        team: str,
-        members: list[str],
-        daily_usd: float = 50.0,
-        monthly_usd: float = 1000.0,
-    ) -> None:
-        """Set an aggregate budget for a team (sum of member agents)."""
-        self._team_budgets[team] = {
-            "members": members,
-            "daily_usd": daily_usd,
-            "monthly_usd": monthly_usd,
+    def _members_spend_totals(self, members: list[str], since: str) -> tuple[float, int]:
+        """Sum (cost, tokens) across member agents since a timestamp."""
+        if not members:
+            return 0.0, 0
+        placeholders = ",".join("?" for _ in members)
+        row = self.db.execute(
+            "SELECT SUM(cost_usd), SUM(total_tokens) FROM usage "
+            f"WHERE timestamp >= ? AND agent IN ({placeholders})",
+            [since, *members],
+        ).fetchone()
+        return float(row[0] or 0.0), int(row[1] or 0)
+
+    def team_envelope_check(self, agent: str, model: str, estimated_tokens: int = 4096) -> dict:
+        """Pre-flight team-envelope check for one member's upcoming call.
+
+        Returns ``{"allowed": True, "team": None}`` when the agent has no
+        team, no store is wired, or the team's envelope is unset/0
+        (= unlimited). Fails OPEN on store read errors — the envelope is
+        an additional governor on top of the always-on per-agent budget,
+        and a storage hiccup must not take down the whole LLM path.
+        """
+        store = self._team_store
+        if store is None or not agent:
+            return {"allowed": True, "team": None}
+        try:
+            team = store.team_of(agent)
+            if not team:
+                return {"allowed": True, "team": None}
+            trow = store.get_team(team)
+        except Exception as e:
+            logger.warning("Team envelope check skipped (store read failed): %s", e)
+            return {"allowed": True, "team": None}
+        if trow is None:
+            return {"allowed": True, "team": None}
+        daily_env = trow.get("budget_daily_usd") or 0.0
+        monthly_env = trow.get("budget_monthly_usd") or 0.0
+        if daily_env <= 0 and monthly_env <= 0:
+            # Unset / 0 / negative = unlimited (B4).
+            return {"allowed": True, "team": team, "daily_limit": None, "monthly_limit": None}
+
+        members = trow.get("members") or [agent]
+        estimated_cost = estimate_cost(model, total_tokens=estimated_tokens)
+        daily_used, _ = self._members_spend_totals(members, _period_to_since("today"))
+        monthly_used, _ = self._members_spend_totals(members, _period_to_since("month"))
+
+        daily_ok = daily_env <= 0 or (daily_used + estimated_cost) <= daily_env
+        monthly_ok = monthly_env <= 0 or (monthly_used + estimated_cost) <= monthly_env
+        allowed = daily_ok and monthly_ok
+        if not allowed:
+            logger.warning(
+                "Team envelope check failed for agent '%s' (team '%s'): "
+                "estimated $%.4f would exceed envelope (daily: $%.4f/$%.2f, monthly: $%.4f/$%.2f)",
+                agent, team, estimated_cost, daily_used, daily_env, monthly_used, monthly_env,
+            )
+        return {
+            "allowed": allowed,
+            "team": team,
+            "estimated_cost": round(estimated_cost, 6),
+            "daily_used": round(daily_used, 4),
+            "daily_limit": daily_env if daily_env > 0 else None,
+            "monthly_used": round(monthly_used, 4),
+            "monthly_limit": monthly_env if monthly_env > 0 else None,
         }
 
     def get_team_spend(self, team: str, period: str = "today") -> dict:
-        """Aggregate spend across all member agents for a team."""
-        tbudget = self._team_budgets.get(team)
-        if tbudget is None:
-            return {"team": team, "error": "No team budget configured"}
-        members = tbudget["members"]
+        """Aggregate spend across a team's members, with its envelope.
+
+        Unknown team (or no store wired) keeps the historical error-dict
+        contract — callers guard on ``"error" not in result``.
+        ``daily_limit``/``monthly_limit`` are None when the envelope is
+        unset/0 (= unlimited, plan B4).
+        """
+        store = self._team_store
+        trow = None
+        if store is not None:
+            try:
+                trow = store.get_team(team)
+            except Exception as e:
+                logger.warning("get_team_spend: store read failed: %s", e)
+        if trow is None:
+            return {"team": team, "error": "Unknown team (or no team store wired)"}
+        members = trow.get("members") or []
         total_cost = 0.0
         total_tokens = 0
         agent_breakdown = []
@@ -386,13 +471,15 @@ class CostTracker:
                 "cost": spend.get("total_cost", 0),
                 "tokens": spend.get("total_tokens", 0),
             })
+        daily_env = trow.get("budget_daily_usd") or 0.0
+        monthly_env = trow.get("budget_monthly_usd") or 0.0
         return {
             "team": team,
             "period": period,
             "total_cost": round(total_cost, 4),
             "total_tokens": total_tokens,
-            "daily_limit": tbudget["daily_usd"],
-            "monthly_limit": tbudget["monthly_usd"],
+            "daily_limit": daily_env if daily_env > 0 else None,
+            "monthly_limit": monthly_env if monthly_env > 0 else None,
             "agents": agent_breakdown,
         }
 

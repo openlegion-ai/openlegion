@@ -7622,6 +7622,58 @@ def create_mesh_app(
     # confirmed via ``/mesh/config/confirm``. Archive must precede delete;
     # the gate is enforced server-side at propose time.
 
+    @app.put("/mesh/teams/{team_name}/budget")
+    async def set_team_budget_endpoint(team_name: str, request: Request) -> dict:
+        """Set a team's budget envelope (operator-only, plan B4).
+
+        Body ``{daily_usd, monthly_usd}`` — each a number or null.
+        SEMANTICS: null/0 = UNLIMITED (deliberately the opposite of the
+        per-agent ledger, where 0 blocks everything — see plan B4). The
+        envelope is enforced pre-flight at the LLM proxy across the sum
+        of all members' spend.
+        """
+        caller = _extract_verified_agent_id(request)
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can manage teams")
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, "body must be a JSON object")
+
+        def _parse_limit(field: str, cap: float) -> float | None:
+            raw = body.get(field)
+            if raw is None:
+                return None
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                raise HTTPException(400, f"{field} must be a number or null")
+            val = float(raw)
+            # NaN passes < and > comparisons and would store as NULL while
+            # the response render 500s — reject non-finite outright.
+            if val != val or val in (float("inf"), float("-inf")):
+                raise HTTPException(400, f"{field} must be a finite number")
+            if val < 0:
+                raise HTTPException(400, f"{field} must be >= 0 (0 or null = unlimited)")
+            if val > cap:
+                raise HTTPException(400, f"{field} exceeds the maximum of {cap:g}")
+            # Normalize 0 → NULL so "unlimited" has one stored shape.
+            return val or None
+
+        daily = _parse_limit("daily_usd", 10_000.0)
+        monthly = _parse_limit("monthly_usd", 100_000.0)
+        try:
+            teams_store.set_budget(team_name, daily, monthly)
+        except TeamNotFound:
+            raise HTTPException(404, f"Team '{team_name}' not found")
+        _emit_team_event(
+            event_bus, "team_updated", agent="operator", name=team_name,
+            extra={"field": "budget"},
+        )
+        return {
+            "team": team_name,
+            "budget_daily_usd": daily,
+            "budget_monthly_usd": monthly,
+            "unlimited": daily is None and monthly is None,
+        }
+
     @app.post("/mesh/teams/{team_name}/archive")
     async def archive_team_endpoint(team_name: str, request: Request) -> dict:
         """Archive a team (operator-only). Idempotent."""

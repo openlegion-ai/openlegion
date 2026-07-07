@@ -2972,9 +2972,15 @@ def create_dashboard_router(
                 raw_daily = budget_val.get("daily_usd")
                 raw_monthly = budget_val.get("monthly_usd")
                 if raw_daily is not None or raw_monthly is not None:
+                    from src.host.costs import DEFAULT_DAILY_BUDGET_USD, DEFAULT_MONTHLY_BUDGET_USD
+
                     current = cost_tracker.check_budget(agent_id)
-                    daily = _parse_positive_float(raw_daily, "daily_usd", current.get("daily_limit", 10.0))
-                    monthly = _parse_positive_float(raw_monthly, "monthly_usd", current.get("monthly_limit", 200.0))
+                    daily = _parse_positive_float(
+                        raw_daily, "daily_usd", current.get("daily_limit", DEFAULT_DAILY_BUDGET_USD),
+                    )
+                    monthly = _parse_positive_float(
+                        raw_monthly, "monthly_usd", current.get("monthly_limit", DEFAULT_MONTHLY_BUDGET_USD),
+                    )
                     budget_apply = {"daily_usd": daily, "monthly_usd": monthly}
 
         if "thinking" in body:
@@ -3296,9 +3302,15 @@ def create_dashboard_router(
         raw_monthly = body.get("monthly_usd")
         if raw_daily is None and raw_monthly is None:
             raise HTTPException(status_code=400, detail="Provide daily_usd and/or monthly_usd")
+        from src.host.costs import DEFAULT_DAILY_BUDGET_USD, DEFAULT_MONTHLY_BUDGET_USD
+
         current = cost_tracker.check_budget(agent_id)
-        daily_usd = _parse_positive_float(raw_daily, "daily_usd", current.get("daily_limit", 10.0))
-        monthly_usd = _parse_positive_float(raw_monthly, "monthly_usd", current.get("monthly_limit", 200.0))
+        daily_usd = _parse_positive_float(
+            raw_daily, "daily_usd", current.get("daily_limit", DEFAULT_DAILY_BUDGET_USD),
+        )
+        monthly_usd = _parse_positive_float(
+            raw_monthly, "monthly_usd", current.get("monthly_limit", DEFAULT_MONTHLY_BUDGET_USD),
+        )
         cost_tracker.set_budget(agent_id, daily_usd=daily_usd, monthly_usd=monthly_usd)
         from src.cli.config import _update_agent_field
         _update_agent_field(agent_id, "budget", {"daily_usd": daily_usd, "monthly_usd": monthly_usd})
@@ -6568,9 +6580,14 @@ def create_dashboard_router(
         "lane_timeout_seconds",
     })
 
+    from src.host.costs import DEFAULT_DAILY_BUDGET_USD, DEFAULT_MONTHLY_BUDGET_USD
+
     _SYSTEM_SETTINGS_DEFAULTS: dict[str, float | int] = {
-        "default_daily_budget": 50.0,
-        "default_monthly_budget": 200.0,
+        # Single-sourced from costs.py (plan B-pre #3): the advertised
+        # default and the enforced no-settings-file fallback must never
+        # diverge (they were $50 vs $10 before).
+        "default_daily_budget": DEFAULT_DAILY_BUDGET_USD,
+        "default_monthly_budget": DEFAULT_MONTHLY_BUDGET_USD,
         "tool_timeout": 900,
         "browser_idle_timeout": 30,
         "health_poll_interval": 30,
