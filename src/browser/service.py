@@ -1037,12 +1037,15 @@ _HARD_BLOCK_STATUS_THRESHOLD = 400
 
 # Status codes that, on their own, mean "you were blocked / throttled"
 # rather than "page not found / server error". A bare bot wall often
-# returns a 403 (or 429/503 challenge) with NO vendor header, so the
-# status alone has to be enough to tell the agent the response it got
-# back is a wall, not the site's content. 404/410/500 are deliberately
-# absent — those are ordinary navigation failures, and flagging them as
-# blocks would train the agent to distrust normal misses.
-_BLOCK_STATUS_CODES: frozenset[int] = frozenset({401, 403, 407, 429, 451, 503})
+# returns a 403 (or a 429 throttle) with NO vendor header, so the status
+# alone has to be enough to tell the agent the response it got back is a
+# wall, not the site's content. 404/410/500/503 are deliberately absent:
+# those are ordinary navigation / server-availability failures, and
+# flagging them as blocks would train the agent to distrust normal misses
+# and transient outages. A 503 that IS an anti-bot challenge still
+# classifies as a vendor_block via its header (``_classify_hard_block``
+# fires on status >= 400), so only the ambiguous bare 503 is excluded.
+_BLOCK_STATUS_CODES: frozenset[int] = frozenset({401, 403, 407, 429, 451})
 
 
 def _classify_hard_block(headers: dict[str, str], status: int) -> tuple[str, str] | None:
@@ -5822,6 +5825,33 @@ class BrowserManager:
             # against the stale prior page.
             inst.refs = {}
             inst.last_snapshot.clear()
+            # Truth-telling: classify the main-document response NOW — before
+            # title extraction or captcha auto-solve can throw or navigate
+            # away — and record it on the instance immediately, so a later
+            # snapshot() echoes the block of the document we actually landed
+            # on even if the post-nav processing below fails. (A solver-driven
+            # navigation is handled after _check_captcha; tab/history changes
+            # are cleared in open_tab/switch_tab/go_back/go_forward.)
+            status_code: int | None = None
+            hard_block: dict | None = None
+            if nav_response is not None:
+                try:
+                    status_code = int(nav_response.status)
+                except Exception:
+                    status_code = None
+                # Playwright exposes ``headers`` as a plain dict property;
+                # isinstance-guard it so a non-mapping value can never reach
+                # the classifier (stays vendor-header classification, never a
+                # coincidental truthy object).
+                raw_headers = getattr(nav_response, "headers", None)
+                response_headers = (
+                    raw_headers if isinstance(raw_headers, dict) else {}
+                )
+                if status_code is not None:
+                    hard_block = _classify_navigation_block(
+                        response_headers, status_code,
+                    )
+            inst.last_nav_hard_block = hard_block
             if wait_ms > 0:
                 await asyncio.sleep(wait_ms / 1000 + navigation_jitter())
             try:
@@ -5866,37 +5896,20 @@ class BrowserManager:
                     and envelope.get("solver_outcome") != "solved"
                 ):
                     result["captcha"] = _with_legacy_fields(envelope)
-                # Truth-telling: surface the main-document HTTP status and,
-                # when the response is block-shaped (403/429/503 or a vendor
-                # block header), an explicit ``hard_block`` signal. Without
-                # this a challenge/wall page is returned as ordinary "success"
-                # content and the agent acts on the wall as if it were the
-                # site. ``success`` stays True — the navigation mechanically
-                # completed; the agent keys on ``hard_block`` (mirrors how a
-                # captcha is surfaced without failing the nav).
-                status_code: int | None = None
-                hard_block: dict | None = None
-                if nav_response is not None:
-                    try:
-                        status_code = int(nav_response.status)
-                    except Exception:
-                        status_code = None
-                    # Playwright exposes ``headers`` as a plain dict property;
-                    # isinstance-guard it so a non-mapping value can never
-                    # reach the classifier (and so it stays vendor-header
-                    # classification, never a coincidental truthy object).
-                    raw_headers = getattr(nav_response, "headers", None)
-                    response_headers = (
-                        raw_headers if isinstance(raw_headers, dict) else {}
-                    )
-                    if status_code is not None:
-                        result["data"]["http_status"] = status_code
-                        hard_block = _classify_navigation_block(
-                            response_headers, status_code,
-                        )
-                # Record on the instance (even when None) so the next
-                # snapshot reflects the current page's block state.
-                inst.last_nav_hard_block = hard_block
+                # Truth-telling: the main-document status + hard-block were
+                # classified above (before title/captcha could throw or the
+                # solver could navigate away). If a captcha AUTO-SOLVED during
+                # this navigate, the page moved past the challenge, so the
+                # response-derived block no longer describes the current
+                # document — drop it. ``success`` stays True; the agent keys
+                # on ``hard_block`` (mirrors how a captcha is surfaced without
+                # failing the nav).
+                if envelope.get("solver_outcome") == "solved":
+                    status_code = None
+                    hard_block = None
+                    inst.last_nav_hard_block = None
+                if status_code is not None:
+                    result["data"]["http_status"] = status_code
                 if hard_block is not None:
                     result["hard_block"] = hard_block
                 snapshot_succeeded = False
@@ -6850,14 +6863,19 @@ class BrowserManager:
                     # "Post" button behind the compose modal).  A modal-
                     # scoped click that can't find the element will timeout
                     # rather than hit the wrong target.
+                    # Full accumulator reset, matching the retry branch above,
+                    # so the post-fallback _walk(tree) is the ONLY contributor.
+                    # Without clearing refs/ref_counter/admitted_total too, the
+                    # discarded modal-scoping pass would leave phantom refs in
+                    # ``refs`` (absent from the rendered ``lines``) and inflate
+                    # the shown/total truncation counts.
+                    refs.clear()
                     lines.clear()
-                    # Same reset rationale as the retry branch above —
-                    # discard fallback's parallel structures (entries
-                    # for v2 rendering, ref_summary for §7.3 diff
-                    # baseline) so the post-fallback _walk(tree) is
-                    # the only contributor.
                     entries.clear()
                     ref_summary.clear()
+                    ref_counter[0] = 0
+                    admitted_total[0] = 0
+                    occurrence_counts.clear()
                     lines.append(
                         "** A modal dialog is open but its elements could "
                         "not be isolated — elements with a (dialog: ...) "
@@ -12355,6 +12373,10 @@ class BrowserManager:
 
                 inst.page = new_page
                 inst.refs = {}  # Stale refs from previous tab's snapshot
+                # The hard-block signal is tied to the page navigate() last
+                # saw it on; a new tab has its own state, so clear it (else
+                # snapshot() would echo the previous tab's block on this one).
+                inst.last_nav_hard_block = None
                 inst.dialog_active = False
                 inst.dialog_detected = False
                 try:
@@ -12867,6 +12889,10 @@ class BrowserManager:
                 response = await inst.page.go_back(timeout=10000)
                 inst.dialog_active = False  # New page — stale modal state
                 inst.dialog_detected = False
+                # History nav lands on a different document; drop the stale
+                # per-page hard-block signal so snapshot() doesn't echo the
+                # previous page's block here.
+                inst.last_nav_hard_block = None
                 await asyncio.sleep(action_delay())
                 title = await inst.page.title()
                 url = self.redactor.redact(agent_id, inst.page.url)
@@ -12885,6 +12911,10 @@ class BrowserManager:
                 response = await inst.page.go_forward(timeout=10000)
                 inst.dialog_active = False  # New page — stale modal state
                 inst.dialog_detected = False
+                # History nav lands on a different document; drop the stale
+                # per-page hard-block signal so snapshot() doesn't echo the
+                # previous page's block here.
+                inst.last_nav_hard_block = None
                 await asyncio.sleep(action_delay())
                 title = await inst.page.title()
                 url = self.redactor.redact(agent_id, inst.page.url)
@@ -12936,6 +12966,10 @@ class BrowserManager:
                     inst.page = pages[tab_index]
                     await inst.page.bring_to_front()
                     inst.refs = {}  # Stale refs from previous tab's snapshot
+                    # Clear the per-page hard-block signal — this tab has its
+                    # own block state; navigate() will repopulate it. Without
+                    # this, snapshot() echoes the prior tab's block here.
+                    inst.last_nav_hard_block = None
                     inst.dialog_active = False  # New tab may not have a dialog
                     inst.dialog_detected = False
                     active_index = tab_index

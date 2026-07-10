@@ -57,12 +57,22 @@ class TestClassifyNavigationBlock:
             "kind": "http_block",
         }
 
-    @pytest.mark.parametrize("status", [401, 403, 407, 429, 451, 503])
+    @pytest.mark.parametrize("status", [401, 403, 407, 429, 451])
     def test_block_shaped_statuses_flagged(self, status):
         out = _classify_navigation_block({}, status)
         assert out is not None
         assert out["kind"] == "http_block"
         assert out["status"] == status
+
+    def test_bare_503_is_not_a_block_but_vendor_503_is(self):
+        # A bare 503 is ambiguous (maintenance / overload), so it is NOT a
+        # hard_block — only http_status is surfaced by the caller. A 503 that
+        # carries an anti-bot vendor header still classifies as a vendor_block.
+        assert _classify_navigation_block({}, 503) is None
+        vendor = _classify_navigation_block({"cf-mitigated": "block"}, 503)
+        assert vendor is not None
+        assert vendor["kind"] == "vendor_block"
+        assert vendor["vendor"] == "cloudflare"
 
     def test_cf_soft_challenge_still_http_block_by_status(self):
         # ``cf-mitigated: challenge`` is NOT a hard vendor block, but a 403
@@ -270,3 +280,31 @@ class TestSnapshotTruncation:
         # A snapshot taken while the page is a block must say so too.
         assert res["success"] is True
         assert res["hard_block"] == block
+
+    @pytest.mark.asyncio
+    async def test_switch_tab_clears_stale_hard_block(self):
+        # Regression: the block is per-page. Switching to another (clean)
+        # tab must clear last_nav_hard_block so snapshot() doesn't echo the
+        # previous tab's block on the new one (a truth-telling false positive).
+        mgr = BrowserManager(profiles_dir=f"{_PROFILES_ROOT}/s6")
+        clean = AsyncMock()
+        clean.url = "https://clean.example"
+        clean.title = AsyncMock(return_value="Clean")
+        clean.bring_to_front = AsyncMock()
+        blocked = AsyncMock()
+        blocked.url = "https://blocked.example"
+        blocked.title = AsyncMock(return_value="Blocked")
+        ctx = MagicMock()
+        ctx.pages = [clean, blocked]
+        inst = CamoufoxInstance("a1", MagicMock(), ctx, blocked)
+        inst.last_nav_hard_block = {
+            "status": 403, "vendor": None,
+            "signal": "http_status=403", "kind": "http_block",
+        }
+        mgr._instances["a1"] = inst
+
+        res = await mgr.switch_tab("a1", tab_index=0)
+
+        assert res["success"] is True
+        assert inst.page is clean
+        assert inst.last_nav_hard_block is None
