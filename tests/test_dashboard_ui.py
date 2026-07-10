@@ -2060,6 +2060,7 @@ _VERB_FOR_TOOL_FALLBACK_OK = frozenset({
     "browser_read_clipboard",
     "browser_write_clipboard",
     "browser_wait_for_network_idle",
+    "browser_select_option",
     "request_captcha_help",
     "request_browser_login",
     # Watch / pub-sub.

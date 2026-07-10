@@ -9454,6 +9454,206 @@ class BrowserManager:
                 action_result.setdefault("captcha", captcha_envelope)
             return action_result
 
+    async def select_option(
+        self, agent_id: str, ref: str | None = None, selector: str | None = None,
+        value: str | list[str] | None = None,
+        label: str | list[str] | None = None,
+        index: int | list[int] | None = None,
+        snapshot_after: bool = False,
+        frame: str | None = None,
+    ) -> dict:
+        """Choose an option in a native ``<select>`` dropdown.
+
+        Sets the underlying DOM value and fires ``input``/``change``
+        directly via Playwright's ``locator.select_option`` — it does NOT
+        open the OS-native popup a real click on a Firefox ``<select>``
+        would show. That popup lives outside the page DOM entirely, so
+        nothing in this service's ref/snapshot machinery can see or
+        drive it; ``select_option`` sidesteps the popup rather than
+        operating it.
+
+        Only works on NATIVE ``<select>`` elements (ARIA role
+        ``combobox`` backed by a real ``<select>`` tag in a snapshot). A
+        custom ARIA dropdown built from divs/listbox roles is not a real
+        ``<select>`` — Playwright raises on it and this method returns
+        ``not_a_select`` directing the agent to ``browser_click`` +
+        ``press_key`` (ArrowDown/Enter) instead.
+
+        Identify the option with exactly one of ``value`` (the
+        ``<option>``'s ``value`` attribute), ``label`` (its visible
+        text), or ``index`` (0-based position). Each may be a single
+        string/int or a list of them for a multi-select — Playwright
+        treats whichever kwarg is supplied as authoritative.
+        """
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        async with inst.lock:
+            async def _select_body() -> dict:
+                if inst._user_control:
+                    return {
+                        "success": False,
+                        "error": "User has browser control — action paused until control is released.",
+                    }
+                if value is None and label is None and index is None:
+                    return _err("invalid_input", "Provide one of value, label, or index")
+                if sum(x is not None for x in (value, label, index)) > 1:
+                    return _err(
+                        "invalid_input",
+                        "Provide exactly one of value, label, or index (not multiple)",
+                    )
+
+                resolved_frame = None
+                if frame is not None:
+                    try:
+                        resolved_frame = self._resolve_frame_arg(inst, frame)
+                    except RefStale as rs:
+                        return {
+                            "success": False,
+                            "error": {
+                                "code": "ref_stale",
+                                "message": str(rs),
+                            },
+                        }
+                    if resolved_frame is None:
+                        return {
+                            "success": False,
+                            "error": (
+                                f"frame {frame!r} did not match any frame "
+                                "url-substring or frame_id"
+                            ),
+                        }
+
+                locator = None
+                if ref and ref in inst.refs:
+                    if frame is not None:
+                        ref_info = inst.refs[ref]
+                        resolved_frame_id = (
+                            inst._register_frame(resolved_frame)
+                            if resolved_frame is not None else None
+                        )
+                        # Caller asserted a specific frame; ref must agree.
+                        if ref_info.frame_id != resolved_frame_id:
+                            return {
+                                "success": False,
+                                "error": {
+                                    "code": "invalid_input",
+                                    "message": (
+                                        "frame argument conflicts with "
+                                        "ref's frame"
+                                    ),
+                                },
+                            }
+                    try:
+                        locator = await self._locator_from_ref(inst, ref)
+                    except RefStale as rs:
+                        return {
+                            "success": False,
+                            "error": {
+                                "code": "ref_stale",
+                                "message": str(rs),
+                            },
+                        }
+                    if not locator:
+                        return {"success": False, "error": f"Ref '{ref}' not found"}
+                elif selector:
+                    if resolved_frame is not None:
+                        locator = resolved_frame.locator(selector).first
+                    else:
+                        locator = inst.page.locator(selector).first
+                else:
+                    return {"success": False, "error": "Must provide ref or selector"}
+
+                kwargs: dict = {}
+                if value is not None:
+                    kwargs["value"] = value
+                if label is not None:
+                    kwargs["label"] = label
+                if index is not None:
+                    kwargs["index"] = index
+
+                try:
+                    selected = await locator.select_option(**kwargs)
+                except Exception as e:
+                    msg_l = str(e).lower()
+                    # A detached/stale element (shadow ElementHandle that went away, closed
+                    # tab) — surface as ref_stale so the agent re-snapshots, NOT not_a_select.
+                    if "not attached" in msg_l or "detached" in msg_l:
+                        return {"success": False, "error": {"code": "ref_stale", "message": str(e)}}
+                    # Genuinely not a native <select> (custom ARIA dropdown). Match ONLY the
+                    # specific phrasing — "element is not a" alone is too broad.
+                    if "is not a <select>" in msg_l:
+                        return _err(
+                            "not_a_select",
+                            "Element is not a native <select>. For a custom dropdown, use "
+                            "browser_click to open it then browser_click the option, or "
+                            "press_key with ArrowDown/Enter.",
+                        )
+                    # Explicit no-matching-option phrasings.
+                    if (
+                        "did not find some options" in msg_l
+                        or "options not found" in msg_l
+                        or "no options matched" in msg_l
+                    ):
+                        return _err(
+                            "option_not_found",
+                            "No option matched the given value/label/index. Snapshot the "
+                            "select's options first.",
+                        )
+                    # A bare timeout is AMBIGUOUS — hidden/disabled/detached/still-loading, or
+                    # the option doesn't exist. Report honestly rather than guessing.
+                    if "timeout" in msg_l and "exceeded" in msg_l:
+                        return _err(
+                            "not_interactable",
+                            "The <select> did not accept the selection within the timeout — "
+                            "it may be hidden, disabled, still loading, detached, or the "
+                            "requested option doesn't exist. Snapshot it and verify.",
+                        )
+                    raise
+
+                landed = None
+                try:
+                    landed = await locator.input_value()
+                except Exception:
+                    pass
+
+                # A <select> whose change handler reverts the value makes Playwright
+                # return the requested option in ``selected`` while ``input_value()``
+                # shows the OLD value — a contradictory success. Verify it stuck.
+                if landed is not None and selected and landed not in selected:
+                    return _err(
+                        "selection_reverted",
+                        f"The <select> value did not change to the requested option "
+                        f"(page script may have reset it). Current value: {landed!r}.",
+                    )
+
+                result = {
+                    "success": True,
+                    "data": {
+                        "selected": selected,
+                        "value": landed,
+                        "ref": ref or selector,
+                    },
+                }
+                if snapshot_after:
+                    snap = await self._snapshot_impl(inst, agent_id)
+                    result["snapshot"] = snap.get("data", {})
+                return result
+
+            try:
+                action_result, captcha_envelope = await self._with_captcha_redetect(
+                    inst, _select_body(),
+                )
+            except Exception as e:
+                return _err("service_unavailable", str(e))
+
+            if (
+                captcha_envelope is not None
+                and isinstance(action_result, dict)
+                and action_result.get("success")
+            ):
+                action_result.setdefault("captcha", captcha_envelope)
+            return action_result
+
     async def evaluate(self, agent_id: str, expression: str) -> dict:
         """Execute JavaScript and return result.
 

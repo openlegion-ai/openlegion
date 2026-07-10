@@ -1754,6 +1754,7 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "browser_read_clipboard",
     "browser_write_clipboard",
     "browser_wait_for_network_idle",
+    "browser_select_option",
 ]
 
 # Grouped Tool Search bridge — pulls a deferred capability group's full schemas

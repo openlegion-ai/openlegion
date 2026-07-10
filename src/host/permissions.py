@@ -108,6 +108,12 @@ KNOWN_BROWSER_ACTIONS: frozenset[str] = frozenset(
         "read_clipboard",
         "write_clipboard",
         "wait_for_network_idle",
+        # Native <select> dropdown support — sets the value via
+        # Playwright's ``locator.select_option`` (with a trusted-keyboard
+        # fallback for non-native dropdowns). Default-allow like every
+        # other known action; operators narrow via
+        # ``AgentPermissions.browser_actions``.
+        "select_option",
     }
 )
 

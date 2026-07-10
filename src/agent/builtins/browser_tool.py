@@ -1027,6 +1027,94 @@ async def browser_type(
 
 
 @tool(
+    name="browser_select_option",
+    description=(
+        "Choose an option in a native HTML <select> dropdown. Identify the "
+        "select by ref from browser_get_elements (role 'combobox' backed by "
+        "a real <select> tag — preferred) or a CSS selector. Pick the option "
+        "with EXACTLY ONE of: value (the <option>'s value attribute), label "
+        "(its visible text), or index (0-based position). This sets the "
+        "value directly and fires input/change events — it does NOT open "
+        "the browser's native dropdown popup (that popup isn't part of the "
+        "page DOM, so nothing can click into it). "
+        "This only works on a REAL <select> element. For a custom "
+        "(non-native) dropdown built from divs/listbox roles, use "
+        "browser_click to open it, then either browser_click the option or "
+        "browser_press_key with ArrowDown/Enter to navigate it — calling "
+        "this tool on one returns a not_a_select error."
+    ),
+    parameters={
+        "selector": {
+            "type": "string",
+            "description": "CSS selector of the <select> element. Not needed if ref is provided.",
+            "default": "",
+        },
+        "ref": {
+            "type": "string",
+            "description": (
+                "Preferred: element ref from browser_get_elements "
+                "(e.g. 'e5'), role combobox. Use this instead of selector "
+                "when available."
+            ),
+            "default": "",
+        },
+        "value": {
+            "type": "string",
+            "description": "The <option>'s value attribute to select. Provide exactly one of value/label/index.",
+        },
+        "label": {
+            "type": "string",
+            "description": "The option's visible text to select. Provide exactly one of value/label/index.",
+        },
+        "index": {
+            "type": "integer",
+            "description": "0-based position of the option to select. Provide exactly one of value/label/index.",
+        },
+        "snapshot_after": {
+            "type": "boolean",
+            "description": "Include element snapshot in the response (default false)",
+            "default": False,
+        },
+        "frame": {
+            "type": "string",
+            "description": (
+                "Optional frame selector for selector-based selection. "
+                "Matched as a URL substring against frame URLs, or as a "
+                "frame_id token from a prior snapshot. Refs from a "
+                "snapshot already carry their frame, so this argument is "
+                "redundant when ref is set and conflicts return an error."
+            ),
+        },
+    },
+    parallel_safe=False,
+)
+async def browser_select_option(
+    selector: str = "", ref: str = "",
+    value: str | None = None, label: str | None = None, index: int | None = None,
+    snapshot_after: bool = False, frame: str | None = None,
+    *, mesh_client=None,
+) -> dict:
+    """Select an option in a native <select> dropdown by value, label, or index."""
+    if not selector and not ref:
+        return {"error": "Provide either 'ref' (from browser_get_elements) or 'selector' (CSS)"}
+    if value is None and label is None and index is None:
+        return {"error": "Provide one of 'value', 'label', or 'index'"}
+    if sum(x is not None for x in (value, label, index)) > 1:
+        return {"error": "Provide exactly one of 'value', 'label', or 'index' (not multiple)"}
+
+    cmd = {"ref": ref, "selector": selector, "snapshot_after": snapshot_after}
+    if value is not None:
+        cmd["value"] = value
+    if label is not None:
+        cmd["label"] = label
+    if index is not None:
+        cmd["index"] = index
+    if frame is not None:
+        cmd["frame"] = frame
+    return await _browser_command(mesh_client, "select_option", cmd)
+
+
+@tool(
     name="browser_hover",
     description=(
         "Move the mouse over an element without clicking it. "

@@ -409,6 +409,23 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         await _apply_delay()
         return result
 
+    @app.post("/browser/{agent_id}/select_option")
+    async def select_option(agent_id: str, request: Request):
+        _verify_auth(request)
+        body = await request.json()
+        result = await manager.select_option(
+            agent_id,
+            ref=body.get("ref"),
+            selector=body.get("selector"),
+            value=body.get("value"),
+            label=body.get("label"),
+            index=body.get("index"),
+            snapshot_after=_body_bool(body, "snapshot_after", False),
+            frame=body.get("frame"),
+        )
+        await _apply_delay()
+        return result
+
     # /browser/{agent_id}/evaluate endpoint intentionally removed —
     # arbitrary JS execution is an SSRF/sandbox-escape vector.
     # The evaluate() method remains on BrowserManager for internal use only.
