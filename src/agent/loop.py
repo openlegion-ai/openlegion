@@ -139,7 +139,8 @@ _RUNTIME_GATE_TOOLS: dict[str, frozenset[str]] = {
     # Mirrors the @tool names in ``builtins/browser_tool.py``.
     "browser": frozenset({
         "browser_navigate", "browser_warmup", "browser_get_elements",
-        "browser_wait_for", "browser_screenshot", "browser_click",
+        "browser_wait_for", "browser_screenshot", "browser_screenshot_marks",
+        "browser_click",
         "browser_click_xy", "browser_type", "browser_hover", "browser_scroll",
         "browser_reset", "browser_press_key", "browser_go_back",
         "browser_go_forward", "browser_switch_tab", "browser_find_text",

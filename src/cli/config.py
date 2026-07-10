@@ -1727,6 +1727,7 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "browser_get_elements",
     "browser_wait_for",
     "browser_screenshot",
+    "browser_screenshot_marks",
     "browser_click",
     "browser_click_xy",
     "browser_type",

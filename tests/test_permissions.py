@@ -212,6 +212,20 @@ class TestCanBrowserAction:
             # can_use_browser=False overrides even a wildcard.
             assert browser_matrix.can_browser_action("no-browser-agent", action) is False, action
 
+    def test_screenshot_marks_action_gating(self, browser_matrix):
+        """The set-of-marks capture is a distinct action from ``screenshot``:
+        default-allow, honors the wildcard, and is narrowable. The
+        readonly-agent allows ``screenshot`` but NOT ``screenshot_marks``,
+        so a narrowed allowlist must deny it."""
+        # Default (None) and wildcard both allow.
+        assert browser_matrix.can_browser_action("legacy-agent", "screenshot_marks") is True
+        assert browser_matrix.can_browser_action("wildcard-agent", "screenshot_marks") is True
+        # readonly-agent allows plain screenshot but not screenshot_marks.
+        assert browser_matrix.can_browser_action("readonly-agent", "screenshot") is True
+        assert browser_matrix.can_browser_action("readonly-agent", "screenshot_marks") is False
+        # can_use_browser=False overrides even a wildcard.
+        assert browser_matrix.can_browser_action("no-browser-agent", "screenshot_marks") is False
+
     def test_specific_list_is_opt_out_restriction(self, browser_matrix):
         """Operators can narrow to a specific list — opt-out default-allow."""
         assert browser_matrix.can_browser_action("readonly-agent", "navigate") is True
@@ -283,6 +297,13 @@ class TestKnownBrowserActionsSet:
         from src.host.permissions import KNOWN_BROWSER_ACTIONS
         assert "upload_file" in KNOWN_BROWSER_ACTIONS
         assert "download" in KNOWN_BROWSER_ACTIONS
+
+    def test_screenshot_marks_present(self):
+        """The set-of-marks capture action must be recognized by the mesh
+        input validator so ``/mesh/browser/command`` accepts it (else a
+        clean 400 blocks the action before the per-agent gate decides)."""
+        from src.host.permissions import KNOWN_BROWSER_ACTIONS
+        assert "screenshot_marks" in KNOWN_BROWSER_ACTIONS
 
     def test_phase_5_find_text_and_open_tab_present(self):
         """Phase 5 §8.5 / §8.6 default-allow actions registered with the
