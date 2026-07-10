@@ -1487,17 +1487,36 @@ _SLIDER_PROBE_JS = r"""
 """
 
 
-# Selectors that mark the SOLVABLE slider control inside the puzzle frame.
-# DataDome obfuscates class names, so these are best-effort structural
-# guesses (the draggable handle + its track). If the class-name heuristics
-# ever stop matching, ``_classify_slider`` returns None and the caller
+# Shared selector tuples for the SOLVABLE slider — the SINGLE source used by
+# BOTH the classifier (``_classify_slider``, presence detection) and the
+# service-side solver (``_solve_slider``, element resolution) so the two can
+# never drift apart. DataDome obfuscates class names, so these are
+# best-effort structural guesses; a miss returns None and the caller
 # escalates — never a false ``solved``.
+#
+# ``_SLIDER_HANDLE_SELECTORS`` is ordered SPECIFIC → BROAD: semantic handle
+# markers (role / draggable / aria-label) first, class globs last. The broad
+# ``[class*="slider"]`` deliberately comes last because it also matches the
+# ``sliderContainer`` wrapper; the specific selectors win when present.
+# ``[class*="puzzle"]`` is intentionally NOT in the handle list — it belongs
+# to the background raster and would let the solver pick the same element as
+# both CV target and drag handle.
 _SLIDER_HANDLE_SELECTORS: tuple[str, ...] = (
-    '[class*="slider"]',
-    '[class*="sliderContainer"]',
-    '[class*="slide-button"]',
+    '[role="slider"]',
+    '[draggable="true"]',
     '[aria-label*="slider" i]',
+    '[class*="slide-button"]',
+    '[class*="slider"]',
+)
+
+# ``_SLIDER_BG_SELECTORS`` targets the puzzle RASTER we run CV over. ``canvas``
+# / ``img`` first (the actual image surface), class globs after.
+_SLIDER_BG_SELECTORS: tuple[str, ...] = (
+    "canvas",
     '[class*="puzzle"]',
+    '[class*="background"]',
+    '[class*="captcha__image"]',
+    "img",
 )
 
 

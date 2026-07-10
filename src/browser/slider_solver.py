@@ -32,7 +32,23 @@ logger = setup_logging("browser.slider_solver")
 # Minimum normalized prominence for the detected peak to be trusted. Below
 # this the "gap" is indistinguishable from image texture and we return None
 # so the caller escalates rather than dragging to a guessed offset.
+#
+# KNOWN best-effort limitation (documented follow-up, NOT fixed here): the
+# score is a single peak-vertical-edge measure over the WHOLE image with a
+# fixed ``left_margin``. It can be fooled by any high-contrast vertical edge
+# that isn't the puzzle notch, and the margin doesn't scale with DPR / piece
+# width or restrict to a vertical band of interest (ROI). A real paired-edge
+# / gap-shape / ROI detector is deferred; the confidence threshold + the
+# default-off flag + the fail-safe re-probe in ``_solve_slider`` keep a
+# false peak from ever producing a false "solved".
 _MIN_CONFIDENCE = 0.35
+
+# Hard pixel-count cap. The service can hand us a large element screenshot
+# (broad ``img`` / ``canvas`` selectors), and the decode + O(w·h) scan run on
+# a worker thread but still allocate memory and burn CPU. A real slider bg is
+# ~300×200; a few-million-pixel ceiling rejects anything pathological while
+# leaving a comfortable margin.
+_MAX_IMAGE_PIXELS = 4_000_000
 
 
 def compute_slider_offset(
@@ -84,14 +100,27 @@ def compute_slider_offset(
 
     try:
         img = Image.open(io.BytesIO(background_png))
-        img = img.convert("L")
+        # ``.size`` reads the header only — cheap, before we load pixels.
+        width, height = img.size
     except Exception:
         logger.debug("compute_slider_offset: image decode failed", exc_info=True)
         return None
 
-    width, height = img.size
     # Need enough columns past the resting margin to have a search region.
     if width <= left_margin + 2 or height < 1:
+        return None
+    # Reject pathologically large images BEFORE the pixel load + O(w·h) scan.
+    if width * height > _MAX_IMAGE_PIXELS:
+        logger.debug(
+            "compute_slider_offset: image %dx%d exceeds %d px cap; skipping",
+            width, height, _MAX_IMAGE_PIXELS,
+        )
+        return None
+
+    try:
+        img = img.convert("L")
+    except Exception:
+        logger.debug("compute_slider_offset: grayscale convert failed", exc_info=True)
         return None
 
     try:

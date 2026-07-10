@@ -58,6 +58,20 @@ def _flat_png(*, width: int = 200, height: int = 100, value: int = 205) -> bytes
     return buf.getvalue()
 
 
+def _striped_png(*, width: int = 200, height: int = 100) -> bytes:
+    """High-contrast per-column stripe texture with NO localized gap.
+
+    Every adjacent column pair differs by the same amount, so per-column edge
+    energy is uniform → peak ≈ mean → confidence ≈ 0 → ``None``.
+    """
+    img = Image.new("L", (width, height))
+    row = [200 if x % 2 == 0 else 30 for x in range(width)]
+    img.putdata(row * height)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
 def _mk_inst(*, agent_id: str = "agent-1", x11_wid: int | None = None,
              page_url: str = "https://shop.example.com") -> CamoufoxInstance:
     page = MagicMock()
@@ -107,6 +121,19 @@ class TestComputeSliderOffset:
 
     def test_flat_image_returns_none(self):
         assert compute_slider_offset(_flat_png()) is None
+
+    def test_textured_no_gap_returns_none(self):
+        # Finding 8: a high-contrast texture with no localized notch has no
+        # prominent peak (peak ≈ mean) ⇒ confidence below threshold ⇒ None.
+        assert compute_slider_offset(_striped_png()) is None
+
+    def test_oversize_image_returns_none(self):
+        # Finding 6: images beyond the pixel cap are rejected BEFORE the
+        # pixel load + O(w·h) scan (protects the shared event loop). Use a
+        # notched image that WOULD otherwise detect a gap, so a None result
+        # proves the cap fired rather than a plain no-gap outcome.
+        big = _png_with_notch(width=2100, height=2000, notch_x=1000, notch_w=8)
+        assert compute_slider_offset(big) is None
 
     def test_garbage_bytes_returns_none(self):
         assert compute_slider_offset(b"not-a-png") is None
@@ -254,8 +281,11 @@ class TestSolveSlider:
             "src.browser.slider_solver.compute_slider_offset",
             lambda *a, **k: (0.5, 0.9),
         )
-        # Re-probe: slider gone ⇒ success.
-        monkeypatch.setattr(svc, "_classify_slider", AsyncMock(return_value=None))
+        # Re-probe: the top-page probe SUCCEEDS and reports no DataDome
+        # iframe ⇒ positively absent ⇒ solved.
+        inst.page.evaluate = AsyncMock(
+            return_value={"dd_iframe": False, "dd_blocker": False},
+        )
         monkeypatch.setattr(svc, "_record_captcha_audit_event", AsyncMock())
 
         envelope = await mgr._solve_slider(inst, inst.page.url)
@@ -271,7 +301,7 @@ class TestSolveSlider:
         assert envelope["solver_confidence"] == "high"
 
     @pytest.mark.asyncio
-    async def test_success_reprobe_still_present_returns_none(self, mgr, monkeypatch):
+    async def test_reprobe_still_present_returns_none(self, mgr, monkeypatch):
         monkeypatch.setenv("CAPTCHA_INHOUSE_SLIDER_ENABLED", "true")
         monkeypatch.setattr(svc.asyncio, "sleep", AsyncMock())
         inst = _mk_inst(x11_wid=12345)
@@ -286,32 +316,100 @@ class TestSolveSlider:
             "src.browser.slider_solver.compute_slider_offset",
             lambda *a, **k: (0.5, 0.9),
         )
-        # Re-probe: slider STILL present ⇒ DataDome rejected the drag.
-        monkeypatch.setattr(
-            svc, "_classify_slider", AsyncMock(return_value="datadome-slider"),
+        # Re-probe: iframe STILL present ⇒ DataDome rejected the drag.
+        inst.page.evaluate = AsyncMock(
+            return_value={"dd_iframe": True, "dd_blocker": False},
         )
         # Drag fired, but the result is "not solved" (escalate).
         assert await mgr._solve_slider(inst, inst.page.url) is None
         mgr._x11_drag.assert_awaited_once()
 
-
-# ── §11.5 integration: _check_captcha preserves escalation with flag off ─────
-
-
-class TestCheckCaptchaEscalationPreserved:
     @pytest.mark.asyncio
-    async def test_slider_detected_flag_off_escalates(self, mgr, monkeypatch):
-        monkeypatch.delenv("CAPTCHA_INHOUSE_SLIDER_ENABLED", raising=False)
-        # A captcha selector matches so we enter classification.
-        page = MagicMock()
-        page.url = "https://shop.example.com"
-        locator = MagicMock()
-        locator.count = AsyncMock(return_value=1)
-        page.locator = MagicMock(return_value=locator)
-        inst = CamoufoxInstance("agent-1", MagicMock(), MagicMock(), page)
-        inst.x11_wid = 12345
+    async def test_reprobe_failure_is_not_solved(self, mgr, monkeypatch):
+        # Finding 4: a transient post-drag probe FAILURE must NOT read as
+        # solved. The drag fires, but the re-probe raising ⇒ None (escalate).
+        monkeypatch.setenv("CAPTCHA_INHOUSE_SLIDER_ENABLED", "true")
+        monkeypatch.setattr(svc.asyncio, "sleep", AsyncMock())
+        inst = _mk_inst(x11_wid=12345)
+        mgr._x11_drag = AsyncMock()
+        bg_el = _mk_element(
+            box={"x": 10, "y": 60, "width": 260, "height": 160},
+            screenshot=b"PNGBYTES",
+        )
+        handle_el = _mk_element(box={"x": 20, "y": 100, "width": 40, "height": 40})
+        _wire_frame(monkeypatch, bg_el=bg_el, handle_el=handle_el)
+        monkeypatch.setattr(
+            "src.browser.slider_solver.compute_slider_offset",
+            lambda *a, **k: (0.5, 0.9),
+        )
+        # Re-probe RAISES (frame detached / navigation) — must NOT be solved.
+        inst.page.evaluate = AsyncMock(side_effect=RuntimeError("frame detached"))
+        assert await mgr._solve_slider(inst, inst.page.url) is None
+        mgr._x11_drag.assert_awaited_once()
 
-        # Positively classify a solvable slider; keep audit side-effect quiet.
+    @pytest.mark.asyncio
+    async def test_bg_and_handle_same_box_returns_none(self, mgr, monkeypatch):
+        # Finding 7: when the broad selectors resolve the SAME element for
+        # both background and handle (coincident boxes), a drag would be a
+        # no-op — escalate instead of dragging.
+        monkeypatch.setenv("CAPTCHA_INHOUSE_SLIDER_ENABLED", "true")
+        inst = _mk_inst(x11_wid=12345)
+        mgr._x11_drag = AsyncMock()
+        same_box = {"x": 10, "y": 60, "width": 260, "height": 160}
+        bg_el = _mk_element(box=dict(same_box), screenshot=b"PNGBYTES")
+        handle_el = _mk_element(box=dict(same_box))
+        _wire_frame(monkeypatch, bg_el=bg_el, handle_el=handle_el)
+        assert await mgr._solve_slider(inst, inst.page.url) is None
+        mgr._x11_drag.assert_not_called()
+
+
+# ── §11.5 integration: _check_captcha flag gating ────────────────────────────
+
+
+def _mk_check_captcha_inst(*, agent_id: str = "agent-1") -> CamoufoxInstance:
+    """A CamoufoxInstance whose page reports a matching captcha selector."""
+    page = MagicMock()
+    page.url = "https://shop.example.com"
+    locator = MagicMock()
+    locator.count = AsyncMock(return_value=1)
+    page.locator = MagicMock(return_value=locator)
+    inst = CamoufoxInstance(agent_id, MagicMock(), MagicMock(), page)
+    inst.x11_wid = 12345
+    return inst
+
+
+class TestCheckCaptchaFlagGating:
+    @pytest.mark.asyncio
+    async def test_flag_off_branch_is_inert(self, mgr, monkeypatch):
+        # Finding 5: flag off ⇒ the whole slider branch is skipped —
+        # _classify_slider is never even called, no datadome-slider envelope,
+        # and control falls through to the pre-existing downstream path.
+        monkeypatch.delenv("CAPTCHA_INHOUSE_SLIDER_ENABLED", raising=False)
+        inst = _mk_check_captcha_inst()
+
+        classify = AsyncMock(return_value="datadome-slider")
+        monkeypatch.setattr(svc, "_classify_slider", classify)
+        audit = AsyncMock()
+        monkeypatch.setattr(svc, "_record_captcha_audit_event", audit)
+        mgr._x11_drag = AsyncMock()
+
+        envelope = await mgr._check_captcha(inst)
+
+        classify.assert_not_called()
+        assert envelope["kind"] != "datadome-slider"
+        # No slider audit event was written by the (skipped) branch.
+        for call in audit.await_args_list:
+            assert "datadome-slider" not in call.args
+        mgr._x11_drag.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_flag_on_unsolved_escalates(self, mgr, monkeypatch):
+        # Flag on but the solve can't proceed (no X11) ⇒ escalate via the
+        # same request_captcha_help shape the behavioral kinds use.
+        monkeypatch.setenv("CAPTCHA_INHOUSE_SLIDER_ENABLED", "true")
+        inst = _mk_check_captcha_inst()
+        inst.x11_wid = None  # gate 2 in _solve_slider fails ⇒ not solved
+
         monkeypatch.setattr(
             svc, "_classify_slider", AsyncMock(return_value="datadome-slider"),
         )
@@ -320,7 +418,6 @@ class TestCheckCaptchaEscalationPreserved:
 
         envelope = await mgr._check_captcha(inst)
 
-        # Flag off ⇒ _solve_slider returns None ⇒ identical escalation.
         assert envelope["captcha_found"] is True
         assert envelope["kind"] == "datadome-slider"
         assert envelope["solver_attempted"] is False
