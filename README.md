@@ -502,6 +502,7 @@ canonicalized parameters and results over a 15-call sliding window.
 | `wallet_execute` | Execute an Ethereum smart contract function (requires `[wallet]` extras) |
 | `get_system_status` | Query own runtime state: permissions, budget, fleet, cron, health |
 | `read_agent_history` | Read another agent's conversation logs |
+- [JMT x402 Agent Tools](https://jmt-x402-proxy.jmthomasofficial.workers.dev) — 25 paid x402 endpoints on Base mainnet: web search, AI analysis, crypto/stock data, SEC filings, company intel, news, sentiment, macro dashboard. $0.001-$0.15/call USDC. Local LLM-powered.
 
 Custom tools are Python functions decorated with `@tool`, auto-discovered
 from the agent's `tools_dir` at startup. Agents can also create new tools
