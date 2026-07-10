@@ -1090,6 +1090,32 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
      `get_team_spend`, surfaced in the heartbeat prompt's runtime-context block) — unit 4's
      "budget-aware prioritization" is prompt + data-shape work, not a new endpoint.
 
+- **✅ Landed — Phase-3 unit 1: B2 coordination-vs-work spend split (#1202; §8 #11 implemented
+  as written).** The `usage` table gains `kind TEXT NOT NULL DEFAULT 'work'` (CREATE TABLE + the
+  `trace_id`-style introspection migration — legacy rows default to work, preserving semantics);
+  enforcement reads (`preflight_check`, `check_budget`, `_check_budget_post_hoc`,
+  `_members_spend_totals`/team envelope) filter `kind='work'` while `get_spend` stays
+  spend-inclusive by default. Classification at the proxy: `_bare_model` prefix-insensitive
+  compare of the REQUESTED model against the deployment `llm.utility_model`, resolved fresh per
+  call through the new `CredentialVault.set_utility_model_provider` seam wired in
+  `create_mesh_app` to the pin's own `_deployment_utility_model` reader. Coordination calls skip
+  the work preflight, the team envelope, AND the ask-window billing redirect (`note_billed_cost`
+  structurally unreachable — `bill_agent != agent_id` can never hold), and are gated by
+  `limits.coordination_daily_cap_usd()` (`OPENLEGION_COORDINATION_DAILY_CAP_USD`, default $2.00,
+  clamp [0,100], **0 valid = tier blocked** kill-switch) with a distinct "Coordination budget
+  exceeded" error in the work path's envelope shape. Both proxy paths covered (sync
+  `execute_api_call` fork image_gen/coordination/work; streaming `stream_llm` same fork after the
+  OAuth early-returns, distinct SSE error frame, `kind` on the final track — the streaming
+  preflight site was NOT named in §8 #11's anchors and was caught in-build). Introspect's budget
+  section gains a `coordination` sub-dict (unit 4 consumes it). Tests:
+  `tests/test_coordination_split.py` (28) incl. work-exhausted-coordination-allowed at the proxy,
+  reverse isolation, envelope exclusion, ask-precedence, legacy-DB migration idempotency; existing
+  ledger pins unchanged. Full suite 8162 passed / 15 known dev-container failures / ruff clean.
+  **Implementation deviations (2, recorded):** the seam is wired in `server.py:create_mesh_app`
+  (where `set_bill_resolver` actually lives — the A.2-era `cli/runtime.py` guess was wrong), and
+  `set_utility_model_provider` is a vault METHOD, not a module function (Constraint #8 — no new
+  module-level globals).
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|
@@ -1111,10 +1137,11 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
 | #1197 | ask_teammate — mesh-brokered inline Q&A, asker-billed, steer-delivered (unit 3) | green |
 | #1198 | blackboard → signals only — hand_off data + artifacts move to the Team Drive (unit 4) | green |
 
-### PR ledger — Phase 3 (as of 2026-07-07)
+### PR ledger — Phase 3 (as of 2026-07-10)
 | PR | Unit | CI |
 |---|---|---|
-| — | Phase-3 pre-decisions ratified (B1 → §8 #10, B2 → §8 #11) + build order | this PR |
+| #1200 | Phase-3 pre-decisions ratified (B1 → §8 #10, B2 → §8 #11) + build order | merged |
+| #1202 | B2 coordination-vs-work spend split at the LLM proxy (unit 1) | merged |
 
 *CI note:* workflow runs on app-authored PRs in this repo require the maintainer's one-click
 approval and did not auto-run; each unit was landed on a green full local suite (the exact
