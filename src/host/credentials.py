@@ -576,6 +576,17 @@ def _masked_upstream_error(service: str, action: str, status_code: int, detail: 
     return f"Upstream {service} call failed (HTTP {status_code})."
 
 
+def _bare_model(name: str) -> str:
+    """Provider-prefix-insensitive model compare key.
+
+    Mirrors the mesh model pin's ``_bare`` (``server.py:_enforce_model_pin``)
+    so B2 coordination classification and the pin agree on when a requested
+    model "is" the deployment utility model — ``anthropic/modelx`` and bare
+    ``modelx`` compare equal.
+    """
+    return name.rsplit("/", 1)[-1].lower()
+
+
 def _load_oauth_config(env_var: str, label: str) -> dict | None:
     """Load and parse an OAuth JSON config from an environment variable.
 
@@ -657,6 +668,13 @@ class CredentialVault:
         # target the ASKER — mesh-authoritative billing; nothing a
         # container sends can influence the mapping.
         self._bill_resolver: object | None = None
+        # ``_utility_model_provider`` (Phase 3 unit 1 — B2 spend split):
+        # optional zero-arg callable returning the deployment-configured
+        # ``llm.utility_model`` (mesh-held config, read fresh per call).
+        # When the REQUESTED model matches it, the call is COORDINATION:
+        # separate ledger + its own daily cap, never the work budget.
+        # None (bare tests / unwired) = no coordination tier.
+        self._utility_model_provider: Callable[[], str] | None = None
         self._load_credentials()
         self._register_handlers()
 
@@ -720,6 +738,29 @@ class CredentialVault:
         headers can never redirect billing. Pass ``None`` to disable.
         """
         self._bill_resolver = resolver
+
+    def set_utility_model_provider(self, provider: Callable[[], str] | None) -> None:
+        """Wire the deployment utility-model source (B2 spend split).
+
+        ``provider()`` returns the current ``llm.utility_model`` config
+        value (empty/unset = no coordination tier). Called fresh on every
+        proxied LLM call so a config edit applies without a restart. The
+        value is operator/deployment-controlled and read mesh-side —
+        classification can never key off container-supplied content.
+        Pass ``None`` to disable.
+        """
+        self._utility_model_provider = provider
+
+    def _resolve_utility_model(self) -> str:
+        """Current deployment utility model, or "" when unset/unwired/broken."""
+        if self._utility_model_provider is None:
+            return ""
+        try:
+            value = self._utility_model_provider()
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("utility model provider failed: %s", e)
+            return ""
+        return value if isinstance(value, str) else ""
 
     def _load_credentials(self) -> None:
         """Load credentials from environment variables (two-phase).
@@ -1381,6 +1422,23 @@ class CredentialVault:
 
         _needs_budget = (is_llm and not _is_oauth) or request.service == "image_gen"
 
+        # Phase 3 unit 1 (B2 spend split): a call is COORDINATION iff the
+        # REQUESTED model equals the deployment-configured utility model
+        # (prefix-insensitive, mesh-held config — never container headers;
+        # the requested model, not a post-failover substitute, is the
+        # honest coordination signal). Coordination skips the work
+        # preflight + team envelope AND the ask billing redirect, and is
+        # gated by its own daily cap instead. image_gen (service != llm)
+        # and OAuth traffic are never coordination.
+        _is_coordination = False
+        if is_llm and not _is_oauth:
+            _utility_model = self._resolve_utility_model()
+            if _utility_model:
+                _is_coordination = (
+                    _bare_model(request.params.get("model", "") or "")
+                    == _bare_model(_utility_model)
+                )
+
         # Phase 2 unit 3 (ask_teammate): resolve the bill-to identity ONCE
         # per call, from mesh-held broker state keyed on the VERIFIED
         # ``agent_id`` (never from request content). While an ask billing
@@ -1388,9 +1446,12 @@ class CredentialVault:
         # the ASKER — their ledger pays for the ask turn. Snapshotting at
         # call start means a window closing mid-call bills this one call
         # to the asker (bounded by the broker's per-ask cap) and the next
-        # call re-resolves.
+        # call re-resolves. Coordination calls never redirect (B2
+        # precedence): the recipient's own coordination ledger absorbs
+        # its utility-model churn, keeping the asker's cap for the work
+        # they asked for.
         bill_agent = agent_id
-        if agent_id and _needs_budget and self._bill_resolver is not None:
+        if agent_id and _needs_budget and not _is_coordination and self._bill_resolver is not None:
             try:
                 _asker = self._bill_resolver.active_billing_for(agent_id)
             except Exception as _bill_err:  # pragma: no cover - defensive
@@ -1441,6 +1502,25 @@ class CredentialVault:
                                 f"Team budget exceeded for team "
                                 f"'{envelope['team']}': image generation is "
                                 f"paused until the envelope resets"
+                            ),
+                        )
+                elif _is_coordination:
+                    # B2: coordination is gated ONLY by its own daily cap —
+                    # never the work preflight or the team envelope, so
+                    # utility-model churn can't starve (or be starved by)
+                    # real work. Same error SHAPE as the work path with a
+                    # DISTINCT message prefix the agent loop can surface.
+                    model = request.params.get("model", "unknown")
+                    c_pre = self.cost_tracker.coordination_preflight_check(bill_agent, model)
+                    if not c_pre["allowed"]:
+                        return APIProxyResponse(
+                            success=False,
+                            error=(
+                                "Coordination budget exceeded: "
+                                f"${c_pre['daily_used']:.2f}"
+                                f"/${c_pre['daily_limit']:.2f} daily "
+                                f"(estimated next call: "
+                                f"${c_pre['estimated_cost']:.4f})"
                             ),
                         )
                 else:
@@ -1509,6 +1589,7 @@ class CredentialVault:
                         tracked = self.cost_tracker.track(
                             bill_agent, model, prompt_tokens, completion_tokens,
                             bill=not _is_oauth,
+                            kind="coordination" if _is_coordination else "work",
                         )
                         # Ask window accounting: accrue the billed cost so
                         # the broker can close the window at the per-ask
@@ -3993,11 +4074,28 @@ class CredentialVault:
                 yield await _emit_distinguished_error(e, kind="config_error")
             return
 
+        # B2 spend split — same model-keyed classification as
+        # ``execute_api_call`` (REQUESTED model, never the failover
+        # substitute). The OAuth branches returned above, so anything
+        # reaching here is metered API-key traffic.
+        _utility_model = self._resolve_utility_model()
+        _is_coordination = bool(_utility_model) and (
+            _bare_model(requested_model) == _bare_model(_utility_model)
+        )
+
         if self.cost_tracker and agent_id and request.service == "llm":
-            preflight = self.cost_tracker.preflight_check(agent_id, requested_model)
-            if not preflight["allowed"]:
-                yield f"data: {json.dumps({'error': 'Budget exceeded'})}\n\n"
-                return
+            if _is_coordination:
+                c_pre = self.cost_tracker.coordination_preflight_check(
+                    agent_id, requested_model,
+                )
+                if not c_pre["allowed"]:
+                    yield f"data: {json.dumps({'error': 'Coordination budget exceeded'})}\n\n"
+                    return
+            else:
+                preflight = self.cost_tracker.preflight_check(agent_id, requested_model)
+                if not preflight["allowed"]:
+                    yield f"data: {json.dumps({'error': 'Budget exceeded'})}\n\n"
+                    return
 
         models_to_try = self._failover_chain.get_models_to_try(requested_model)
 
@@ -4314,7 +4412,10 @@ class CredentialVault:
             if self.cost_tracker and agent_id and tokens_used:
                 pt = prompt_tokens or int(tokens_used * 0.7)
                 ct = completion_tokens or (tokens_used - pt)
-                self.cost_tracker.track(agent_id, used_model, pt, ct)
+                self.cost_tracker.track(
+                    agent_id, used_model, pt, ct,
+                    kind="coordination" if _is_coordination else "work",
+                )
 
         except Exception as e:
             logger.error(f"Streaming LLM call failed: {e}")

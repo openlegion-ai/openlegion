@@ -174,6 +174,39 @@ def ask_bill_cap_usd() -> float:
     return clamped
 
 
+# Per-agent daily coordination-spend cap (USD) — B2 spend split (plan
+# §8 #11). Utility-model (coordination) LLM calls skip the per-agent
+# work preflight and the team envelope, and are gated by THIS cap
+# instead. Unlike ask_bill_cap_usd, 0 is a VALID value: it blocks the
+# coordination tier entirely (operator kill-switch restoring
+# probe-only ticks) — do not clamp it up to a minimum.
+COORDINATION_DAILY_CAP_USD_DEFAULT = 2.0
+_COORDINATION_DAILY_CAP_USD_RANGE = (0.0, 100.0)
+
+
+def coordination_daily_cap_usd() -> float:
+    """Resolve the per-agent daily coordination cap (env override, clamped; 0 = tier blocked)."""
+    raw = os.environ.get("OPENLEGION_COORDINATION_DAILY_CAP_USD")
+    if raw is None:
+        return COORDINATION_DAILY_CAP_USD_DEFAULT
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Invalid OPENLEGION_COORDINATION_DAILY_CAP_USD=%r — using default %.2f",
+            raw, COORDINATION_DAILY_CAP_USD_DEFAULT,
+        )
+        return COORDINATION_DAILY_CAP_USD_DEFAULT
+    lo, hi = _COORDINATION_DAILY_CAP_USD_RANGE
+    clamped = max(lo, min(value, hi))
+    if clamped != value:
+        logger.info(
+            "coordination_daily_cap_usd=%s clamped to %s (range %s-%s)",
+            value, clamped, lo, hi,
+        )
+    return clamped
+
+
 def clamp(key: str, value: int) -> int:
     """Clamp ``value`` into the spec range for ``key`` (logs if it moved)."""
     _default, lo, hi = LIMIT_SPECS[key]

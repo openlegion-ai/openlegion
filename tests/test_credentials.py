@@ -2813,7 +2813,7 @@ async def test_oauth_tracks_usage_but_skips_budget_enforcement(monkeypatch):
     # Usage IS tracked now (token visibility) but with bill=False so the
     # row records cost_usd=0 — OAuth (subscription) accrues no dollar spend.
     cost_tracker.track.assert_called_once_with(
-        "test-agent", "anthropic/claude-sonnet-4-6", 50, 25, bill=False,
+        "test-agent", "anthropic/claude-sonnet-4-6", 50, 25, bill=False, kind="work",
     )
     # ... and no dollar enforcement runs on the OAuth path.
     cost_tracker.preflight_check.assert_not_called()
