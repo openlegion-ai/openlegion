@@ -203,6 +203,8 @@ class TestCanBrowserAction:
             # P2 parity actions.
             "right_click", "read_clipboard",
             "write_clipboard", "wait_for_network_idle",
+            # Native <select> dropdown support.
+            "select_option",
         ):
             # Default (None) and wildcard both allow.
             assert browser_matrix.can_browser_action("legacy-agent", action) is True, action
@@ -332,6 +334,8 @@ class TestKnownBrowserActionsSet:
             # P2 parity actions.
             "right_click", "read_clipboard",
             "write_clipboard", "wait_for_network_idle",
+            # Native <select> dropdown support.
+            "select_option",
         ):
             assert action in KNOWN_BROWSER_ACTIONS, action
 

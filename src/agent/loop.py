@@ -151,6 +151,7 @@ _RUNTIME_GATE_TOOLS: dict[str, frozenset[str]] = {
         "browser_grant_permissions", "browser_set_geolocation",
         "browser_right_click", "browser_read_clipboard",
         "browser_write_clipboard", "browser_wait_for_network_idle",
+        "browser_select_option",
     }),
 }
 
