@@ -1136,6 +1136,34 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   tests deleted with the code they covered. Full local suite 8215 passed / 26 skipped / 0 failed;
   grep-zero for `force_llm`/`x-force-llm`/`HEARTBEAT_OK` in src/.
 
+- **✅ Landed — Phase-3 unit 3: priority steer lane (#1208; §8 #10 implemented, two recorded
+  deviations).** `LaneManager.deliver_chat` (src/host/lanes.py) generalizes the exact
+  `AskBroker._deliver_ask` busy/idle fork to interactive chat: busy → `try_steer_and_wait`
+  (steer-inject + wait on the turn's reply), idle → `_handle_followup` lane turn; never a second
+  parallel turn (B1 — `_chat_lock` stays single-lane), steered/followup chat carries no task_id
+  (Constraint #6). Reply back-edge: `SteerMessage` gains `wait_reply`/`timeout`; `/chat/steer`
+  with `wait_reply=True` routes to `AgentLoop.inject_steer_and_wait`, which rides an
+  `asyncio.Future` on the steer-queue entry; `_drain_steer_messages` collects folded-in futures
+  and `_resolve_turn_steer_futures` — a `finally` sweep in both `chat()` and `chat_stream()`
+  before the lock releases — settles them with the turn's own final response text (callers get
+  the agent's actual reply, not the old injection ack). The same sweep closes the
+  steer-after-last-drain race: still-queued entries with a live future resolve `None` → the mesh
+  dispatches a fresh followup (entry consumed, no double delivery); plain entries re-queue for
+  the next turn's catch-all; caller-side timeout after injection → "still processing"
+  placeholder, never a duplicate followup. Task turns never drain chat steers mid-turn (existing
+  task-busy guard catches the followup). Dashboard `/api/agents/{id}/chat` now goes through
+  `deliver_chat` instead of POSTing the agent's `/chat` directly (no more 120s `_chat_lock`
+  block); trace-id/origin/intent preserved. New clamped limit `steer_reply_timeout_seconds`
+  (default 150s). Fire-and-forget steer callers (asks, wakes, REPL, channels) byte-for-byte
+  unchanged. **Deviations (2, recorded):** the reply future is held agent-side on the steer-queue
+  entry — the mesh waits on one HTTP call, the same RPC-wait pattern `/mesh/ask` uses — rather
+  than mesh-held (a mesh-held future would have required a new agent→mesh callback endpoint);
+  and only the non-streaming dashboard chat endpoint was re-routed per the unit's gap list
+  (streaming/broadcast/channel paths were already lane-aware). Tests: pinned test_lanes.py (68)
+  and test_ask_teammate.py (51, `TestLanePrimitives` untouched) green; 10 new back-edge/race
+  tests in test_chat.py; new dashboard busy/idle routing class. Full local suite 8297 passed /
+  26 skipped / 0 failed.
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|
@@ -1163,6 +1191,7 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
 | #1200 | Phase-3 pre-decisions ratified (B1 → §8 #10, B2 → §8 #11) + build order | merged |
 | #1202 | B2 coordination-vs-work spend split at the LLM proxy (unit 1) | merged |
 | #1206 | plate-gated agenda loop replaces heartbeat suppression (unit 2) | merged |
+| #1208 | priority steer lane — busy chat steers the running turn with reply back-edge (unit 3) | merged |
 
 *CI note:* workflow runs on app-authored PRs in this repo require the maintainer's one-click
 approval and did not auto-run; each unit was landed on a green full local suite (the exact
