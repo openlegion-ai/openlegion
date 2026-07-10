@@ -1164,6 +1164,24 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   tests in test_chat.py; new dashboard busy/idle routing class. Full local suite 8297 passed /
   26 skipped / 0 failed.
 
+- **✅ Landed — Phase-3 unit 4: budget-governed initiative (#1210; §6 unit 4 as ratified — prompt
+  + data-shape work only, NO new mesh endpoints, per the recon correction).** The shared
+  `_format_runtime_context` formatter in src/agent/loop.py (the single path task/chat/agenda
+  prompts all use) renders introspect budget's `coordination` sub-dict
+  (`{daily_used, daily_limit}` — added by unit 1 for exactly this consumer) as a labeled line
+  under the work-budget line, gated on presence; the agenda turn surfaces it automatically
+  through the existing Runtime Context block. The agenda Operating Rules (loop.py) and the
+  cron-side agenda rules gate goal-driven `hand_off`-to-self work on plate capacity + the dual
+  budget lines; **standing goals remain operator-write-only** (`_require_goals_writer` untouched;
+  no agent-side goals write path, tool, or endpoint was added — a self-write carve-out stays a
+  NEW decision requiring explicit ratification). `set_cron`'s "Only change if the USER explicitly
+  asks" heartbeat muzzle is replaced with budget-governed cadence policy (tighten the interval
+  when the plate is full and coordination budget has headroom, loosen when thin or tight —
+  consistent with unit 2's deletion of the old cron suppression rule). Tests: coordination-budget
+  breakout + omission-when-absent, agenda-prompt goal-driven self-tasking + budget surfacing,
+  cron rule copy, set_cron copy pins (existing pinned substrings kept intact). Full local suite
+  8303 passed / 0 failed.
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|
@@ -1185,71 +1203,62 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
 | #1197 | ask_teammate — mesh-brokered inline Q&A, asker-billed, steer-delivered (unit 3) | green |
 | #1198 | blackboard → signals only — hand_off data + artifacts move to the Team Drive (unit 4) | green |
 
-### PR ledger — Phase 3 (as of 2026-07-10)
+### PR ledger — Phase 3 (as of 2026-07-11)
 | PR | Unit | CI |
 |---|---|---|
 | #1200 | Phase-3 pre-decisions ratified (B1 → §8 #10, B2 → §8 #11) + build order | merged |
 | #1202 | B2 coordination-vs-work spend split at the LLM proxy (unit 1) | merged |
 | #1206 | plate-gated agenda loop replaces heartbeat suppression (unit 2) | merged |
 | #1208 | priority steer lane — busy chat steers the running turn with reply back-edge (unit 3) | merged |
+| #1210 | budget-governed initiative — budget-aware agenda context + goal-driven self-tasking (unit 4) | merged |
 
 *CI note:* workflow runs on app-authored PRs in this repo require the maintainer's one-click
-approval and did not auto-run; each unit was landed on a green full local suite (the exact
-`make test` command CI runs) + per-unit adversarial review + a post-rebase touched-suite
-verification. One cross-unit integration bug was caught this way (unit 4's artifact endpoints
-called the now-async `_drive_repo` without `await` after unit 1's review-fix — fixed pre-merge).
+approval and did not auto-run; every unit was landed on a green full local suite (the exact
+`make test` command CI runs) + a post-rebase touched-suite verification. Phase-1/2 units and
+Phase-3 units 1–2 additionally got per-unit adversarial review (one cross-unit integration bug
+was caught this way in Phase 2: unit 4's artifact endpoints called the now-async `_drive_repo`
+without `await` after unit 1's review-fix — fixed pre-merge). Phase-3 units 3–4 landed on quick
+per-unit gates; the phase closes with a consolidated adversarial review of ALL Phase-3 PRs —
+findings, if any, land as a follow-up fix PR recorded in this ledger.
 
-### YOU ARE HERE → Phase 3
+### YOU ARE HERE → Phase 4
 
-**Phase 2 (collaboration substrate) is COMPLETE.** All four units landed as separate green PRs
-off `main`, each completing its C.1 deletion in-phase (C.4 phase-exit verified per unit):
-- **Team Drive** (#1195) — mesh-hosted git, one bare repo per team, transport-level (NO shared
-  volume — C.3-e resolved KEEP-the-SandboxBackend, §8 #9); review-before-integrate is unforgeable
-  (pinned `head_sha` + claim-first atomic merge, hardened in the review-fix pass).
-- **Team Threads** (#1196) — durable `ThreadStore` REPLACED the in-memory `MessageRouter.message_log`
-  deque (B-pre #4) AND the blackboard `inbox/{agent}/task_event/` back-edge feed (C.3-a REPLACE,
-  §8 #8); one event surface, human-visible in the dashboard.
-- **ask_teammate** (#1197) — mesh-brokered inline Q&A, steer-delivered (no `task_id`,
-  Constraint-#6-correct), asker-billed via the mesh-authoritative `set_bill_resolver` seam,
-  provenance-tagged "teammate" + sanitized; the §5 pushback-reissue prompt copy is retired.
-- **blackboard → signals only** (#1198) — ONLY `output/*` + `artifacts/*` payloads moved to the
-  Drive (B8 riders held); grep-zero on the old writers (C.1 row 2 closed).
+**Phase 3 (the workday) is COMPLETE.** All four units landed as separate green PRs off `main`,
+each completing its C.1 deletion in-phase. The C.4 phase-exit check ran on the merged tree
+(2026-07-11): grep-zero in `src/` for `force_llm`, `x-force-llm`, `HEARTBEAT_OK`,
+`no_heartbeat_rules`, `_is_heartbeat_empty`, `_HEADING_OR_EMPTY_RE`; `is_default_heartbeat`
+survives only as plate-gate/message input (by design), never as skip logic.
+- **B2 spend split** (#1202) — coordination vs work is model-keyed at the LLM proxy (requested
+  model == deployment `llm.utility_model`), `kind` column on `usage`, enforcement reads filter
+  `kind='work'`, coordination has its own daily cap with a 0-valid kill-switch (§8 #11).
+- **agenda loop** (#1206) — plate-gated agenda dispatch REPLACED heartbeat suppression (C.1 row
+  5 closed): actionable plates always escalate, goals-only plates escalate only with a configured
+  utility model, truly-empty plates never reach the LLM.
+- **priority steer lane** (#1208) — busy chat steers the running turn with a real reply back-edge
+  (never a parallel turn, B1/§8 #10); dashboard chat rides the lane path; the
+  steer-after-last-drain race is closed deterministically.
+- **budget-governed initiative** (#1210) — agenda context surfaces work + coordination budget;
+  goal-driven `hand_off`-to-self gated on plate capacity + budget headroom; `set_cron` cadence is
+  budget-governed, not user-gated. Standing goals stayed operator-write-only.
 
 §8 #1 stands reconfirmed: git-Drive-first, **raw shared `/team/scratch` is NOT built** (deferred,
 unratified) — do not build it without an explicit user decision; any future scratch ratification
 MUST resolve the SandboxBackend story at the same time (recorded in §8 #9).
 
-**Phase-3 pre-decisions: ✅ BOTH RATIFIED (2026-07-07), recorded BEFORE building per the C.3-a/b
-precedent:**
-1. **B1 → §8 #10.** "Dual lanes" is reframed to a **priority steer lane** — steer-style injection
-   into the running turn (the `ask_teammate` mechanism) with a reply back-edge; never a second
-   parallel turn. §6 Phase 3, §5 (lanes row), and Appendix A.2 (dual-lanes sketch superseded) are
-   rewritten accordingly.
-2. **B2 → §8 #11.** The coordination-vs-work spend split is **model-keyed at the LLM proxy**
-   (requested model == deployment `llm.utility_model` → separate coordination ledger + own daily
-   cap; work preflight and team envelope exclude it). It lands as Phase-3 **unit 1**, BEFORE the
-   heartbeat-suppression removal (§8 #3 ordering honored). Full design of record in §8 #11.
-
-**Phase-3 build order (one PR per unit, each green before the next):**
-- **Unit 1 — B2 spend split** (`kind` column on `usage`, proxy classification, coordination cap in
-  `limits.py`, enforcement reads filter `kind='work'`).
-- **Unit 2 — agenda loop** (review plate → prioritize → may self-create goal-directed work) **+ the
-  C.1 row-5 deletion in the same unit**: the cron four-condition LLM-skip (`cron.py:543-554`), the
-  agent-side goal-gated skip (`loop.py:2370-2378`), `force_llm`/`x-force-llm` plumbing, and the
-  "HEARTBEAT_OK / don't increase frequency" prompt copy all go; deterministic probes stay as the
-  cheap pre-check fast path.
-- **Unit 3 — priority steer lane** (per B1/§8 #10: generalize the ask busy/idle fork to interactive
-  chat; reply back-edge for steered messages; dashboard chat path redirected off direct `/chat`).
-- **Unit 4 — budget-governed initiative + richer self-scheduling** (budget-aware agenda prompt via
-  the already-visible introspect budget block; self-created work toward standing goals; the
-  `set_cron` "only if the USER asks" muzzle replaced with budget-governed policy).
-Phase-5 hibernation still needs B3's three-subsystem scoping; Personnel-file *import* still needs
-B-pre #2's config file-lock first.
+**Phase 4 (org model) is next** — see §6 Phase 4: **Lead** role (influence, not privilege — zero
+extra permission ceiling), **hiring wizard v2** (goals → job descriptions → agents; `role`
+unfrozen; templates as starting resumes), **onboarding** + **offboarding-with-handover** (distill
+memory/workspace to a handover doc in the Team Drive before deletion), **Team Room** dashboard.
+Constitution amendments land WITH the units that make them true: Constraint #1 → "no *router*
+hierarchy", Constraint #12 → leads gain no permission carve-out. Standing gates carried forward:
+Personnel-file *import* still needs B-pre #2's config file-lock first; Phase-5 hibernation still
+needs B3's three-subsystem scoping; a standing-goals agent-write carve-out remains UNRATIFIED —
+do not build it without an explicit user decision.
 
 **Handoff note:** this doc is the source of truth — a fresh session can continue from here without
 this session's chat history. Read §5 (keep/refactor/remove), Appendices A–C, §8 (ratified
-decisions), and the Phase-1 + Phase-2 landed entries above (they record implementation corrections
-and review findings the appendices don't).
+decisions), and the Phase-1/2/3 landed entries above (they record implementation corrections,
+recorded deviations, and review findings the appendices don't).
 
 ---
 
