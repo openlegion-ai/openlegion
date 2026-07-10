@@ -47,6 +47,7 @@ KNOWN_BROWSER_ACTIONS: frozenset[str] = frozenset(
         "type",
         "hover",
         "screenshot",
+        "screenshot_marks",
         "reset",
         "focus",
         "status",

@@ -2033,6 +2033,7 @@ _VERB_FOR_TOOL_FALLBACK_OK = frozenset({
     # download/reset/go_back/go_forward/solve_captcha share the
     # generic "using browser_*" fallback which reads fine).
     "browser_warmup",
+    "browser_screenshot_marks",
     "browser_switch_tab",
     "browser_open_tab",
     "browser_inspect_requests",

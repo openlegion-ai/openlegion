@@ -673,6 +673,135 @@ async def browser_screenshot(
 
 
 @tool(
+    name="browser_screenshot_marks",
+    description=(
+        "Take a viewport screenshot with numbered boxes (set-of-marks) drawn "
+        "over every clickable element, and get back a 'marks' list mapping "
+        "each number to that element. Use this on canvas / WebGL / map / "
+        "image-heavy pages where a plain browser_get_elements snapshot misses "
+        "or can't localize the visual target — you SEE the numbered box in the "
+        "image, then click it. Each entry in 'marks' has: 'mark' (the number "
+        "on the image), 'ref' (PREFERRED — click it with browser_click(ref="
+        "...), resolution-stable), 'role'/'name' (what it is), and 'x'/'y' "
+        "(the element's CSS-pixel centre — click with browser_click_xy(x, y) "
+        "when a ref click isn't viable). Defaults: WebP quality=75, up to 50 "
+        "marks. 'marks_truncated'=true means more clickable elements exist "
+        "than were labelled (raise max_marks or narrow the view). "
+        "'snapshot_truncated'=true means the page had more elements than the "
+        "a11y snapshot cap, so some clickable targets may be unlabelled — "
+        "scroll or narrow the view to reach them. 'annotated'=false means the "
+        "boxes couldn't be drawn (image still usable, marks still mapped). "
+        "Prefer clicking by ref over x/y."
+    ),
+    parameters={
+        "format": {
+            "type": "string",
+            "description": (
+                "Image format: 'webp' (default, smaller, lossy) or 'png' "
+                "(lossless, larger)."
+            ),
+            "default": "webp",
+        },
+        "quality": {
+            "type": "integer",
+            "description": (
+                "WebP quality 1–100 (default 75). Ignored for PNG."
+            ),
+            "default": 75,
+        },
+        "scale": {
+            "type": "number",
+            "description": (
+                "Resize factor 0.5–1.0 (default 1.0). Mark outlines and "
+                "numbers are size-compensated for the downscale, so they stay "
+                "legible in the final image even at 0.5."
+            ),
+            "default": 1.0,
+        },
+        "max_marks": {
+            "type": "integer",
+            "description": (
+                "Max numbered elements to label, 1–100 (default 50). Beyond "
+                "this the response sets marks_truncated=true."
+            ),
+            "default": 50,
+        },
+    },
+    parallel_safe=False,
+    loop_exempt=True,
+)
+async def browser_screenshot_marks(
+    format: str = "webp",
+    quality: int = 75,
+    scale: float = 1.0,
+    max_marks: int = 50,
+    *,
+    mesh_client=None,
+) -> dict:
+    """Take an annotated (set-of-marks) screenshot via the browser service.
+
+    Same ``_image`` handling as :func:`browser_screenshot`: extracts
+    ``image_base64`` from the raw result *before* ``_deep_redact`` runs
+    (the broad credential patterns would corrupt the image payload) and
+    re-attaches it under ``_image`` so ``_run_tool`` can build a
+    multimodal content block. The ``marks`` list — each binding a drawn
+    number to a ``ref`` + CSS-centre coords — survives redaction and is
+    returned to the agent alongside the image.
+    """
+    if not mesh_client:
+        return {"error": "Browser requires mesh connectivity"}
+    try:
+        raw = await mesh_client.browser_command(
+            "screenshot_marks",
+            {
+                "format": format,
+                "quality": quality,
+                "scale": scale,
+                "max_marks": max_marks,
+            },
+        )
+    except Exception as e:
+        return {"error": _deep_redact(str(e))}
+
+    # Pull out image data before redaction can corrupt it.
+    # Browser service returns {"success": ..., "data":
+    #   {"image_base64": ..., "format": "webp"|"png", "marks": [...], ...}}
+    image_data = None
+    actual_format = "png"
+    if isinstance(raw, dict):
+        data = raw.get("data")
+        if isinstance(data, dict) and data.get("image_base64"):
+            image_data = data.pop("image_base64")
+            actual_format = (data.get("format") or "png").lower()
+
+    result = _deep_redact(raw)
+
+    if image_data:
+        media_type = "image/webp" if actual_format == "webp" else "image/png"
+        result["_image"] = {"data": image_data, "media_type": media_type}
+        # Give the LLM a short text summary instead of the raw base64 blob.
+        # Status must reflect whether annotation ACTUALLY happened — an image
+        # exists even when boxes couldn't be drawn (Pillow missing / draw
+        # failed / no marks), so keying off ``data.annotated`` avoids claiming
+        # "annotated" when it isn't. ``data`` here is the same dict we popped
+        # ``image_base64`` from (pre-redaction) — reuse it directly.
+        if isinstance(data, dict):
+            n_marks = len(data.get("marks", []))
+            if data.get("annotated"):
+                result.setdefault(
+                    "status", f"annotated screenshot captured, {n_marks} marks",
+                )
+            else:
+                result.setdefault(
+                    "status",
+                    f"screenshot captured (annotation unavailable), "
+                    f"{n_marks} marks mapped",
+                )
+
+    return result
+
+
+@tool(
     name="browser_click",
     description=(
         "Click an element on the current page. Preferred: use ref from "

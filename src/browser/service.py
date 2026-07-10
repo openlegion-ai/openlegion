@@ -2670,6 +2670,134 @@ def _encode_screenshot(
         return png_bytes, "png", w, h
 
 
+def _draw_set_of_marks(
+    png_bytes: bytes,
+    marks: list[dict],
+    css_w: float,
+    css_h: float,
+    *,
+    scale: float = 1.0,
+    agent_id: str = "",
+) -> bytes:
+    """Overlay numbered set-of-marks annotations onto a viewport PNG.
+
+    ``marks`` is a list of dicts each carrying ``mark`` (the integer label)
+    and ``box`` = ``(bx, by, bw, bh)`` in **CSS pixels** (Playwright
+    ``bounding_box`` space). For each mark this draws a red rectangle
+    outline around the element plus a small filled label box at its
+    top-left corner holding the mark number in white — giving a
+    vision-capable agent a stable numbered target it can click by ref or
+    by CSS-centre coordinate (see :meth:`BrowserManager.screenshot_marks`).
+
+    DPR-correct: the CSS→image scale is derived from the ACTUAL decoded
+    image size vs the CSS viewport, so a retina 2× PNG lands the boxes on
+    the right pixels. Returns the SAME ``png_bytes`` object unchanged when
+    Pillow is unavailable or anything in the draw path fails — the caller
+    keys off the object identity to report whether annotation actually
+    happened (graceful degrade: an un-annotated screenshot still beats an
+    error).
+
+    The function is intentionally synchronous and pure — trivial to unit
+    test. Callers should offload it to a worker thread (Pillow releases
+    the GIL during its C-level draw/encode steps).
+    """
+    # Pillow is the only draw backend; without it we can't annotate. Return
+    # the original object (identity preserved) so the caller can detect the
+    # no-op and flag ``annotated=False`` rather than lying.
+    try:
+        from io import BytesIO
+
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        logger.debug(
+            "Pillow not installed; set-of-marks annotation skipped (agent=%s)",
+            agent_id,
+        )
+        return png_bytes
+
+    # No marks or an unusable CSS viewport → nothing to draw. Guarding the
+    # css dims here keeps the CSS→image divide below safe.
+    if not marks or css_w <= 0 or css_h <= 0:
+        return png_bytes
+
+    # Same decompression-bomb cap the encode path pins — module-level global,
+    # idempotent set (see ``_encode_screenshot``).
+    if Image.MAX_IMAGE_PIXELS != 50_000_000:
+        Image.MAX_IMAGE_PIXELS = 50_000_000
+
+    try:
+        img = Image.open(BytesIO(png_bytes))
+        # Normalize to RGB so the draw ops and the PNG re-encode below don't
+        # hit a palette-mode surprise.
+        if img.mode not in ("RGB", "RGBA"):
+            img = img.convert("RGB")
+        img_w, img_h = img.size
+        # CSS→image scale. A retina PNG is 2× the CSS viewport, so a box at
+        # CSS (x,y) is multiplied up into image pixels before drawing.
+        sx = img_w / css_w
+        sy = img_h / css_h
+
+        # Size-compensate the drawing primitives so they stay ~constant in the
+        # FINAL image: ``screenshot_marks`` draws on the NATIVE image, then
+        # ``_encode_screenshot`` downscales by ``scale`` — at ``scale=0.5`` a
+        # 2px outline / 12px number would render at ~1px / ~6px. Inflate by
+        # ``1/scale`` up front so the post-downscale size is what we intend.
+        msf = 1.0 / scale if 0 < scale < 1 else 1.0
+        outline_w = max(2, round(2 * msf))
+
+        draw = ImageDraw.Draw(img)
+        try:
+            # Pillow ≥10 accepts a ``size`` for the built-in bitmap font;
+            # older Pillow ignores/rejects it — fall back on ANY exception so
+            # a stale install can't break annotation entirely.
+            font = ImageFont.load_default(size=round(12 * msf))
+        except Exception:
+            try:
+                font = ImageFont.load_default()
+            except Exception:
+                font = None
+        outline = (255, 0, 0)  # high-visibility red
+        text_fill = (255, 255, 255)  # white number on the red label bg
+
+        for m in marks:
+            box = m.get("box")
+            if not box or len(box) != 4:
+                continue
+            bx, by, bw, bh = box
+            x0 = bx * sx
+            y0 = by * sy
+            x1 = (bx + bw) * sx
+            y1 = (by + bh) * sy
+            draw.rectangle([x0, y0, x1, y1], outline=outline, width=outline_w)
+
+            label = str(m.get("mark", ""))
+            # Size the label background to the text via ``textbbox`` (Pillow
+            # ≥8); fall back to a fixed estimate when it's unavailable.
+            try:
+                left, top, right, bottom = draw.textbbox((0, 0), label, font=font)
+                tw, th = right - left, bottom - top
+            except Exception:
+                tw, th = 7 * len(label), 11
+            pad = 2
+            draw.rectangle(
+                [x0, y0, x0 + tw + 2 * pad, y0 + th + 2 * pad], fill=outline,
+            )
+            if font is not None:
+                draw.text((x0 + pad, y0 + pad), label, fill=text_fill, font=font)
+            else:
+                draw.text((x0 + pad, y0 + pad), label, fill=text_fill)
+
+        out = BytesIO()
+        img.save(out, format="PNG")
+        return out.getvalue()
+    except Exception as e:
+        logger.warning(
+            "Set-of-marks annotation failed (%s); returning un-annotated PNG",
+            e,
+        )
+        return png_bytes
+
+
 # ── §11.4 / §18.2 captcha re-detection after non-navigate actions ──────────
 #
 # Two-call install/read-back pattern: install a MutationObserver before the
@@ -9454,6 +9582,225 @@ class BrowserManager:
             "bytes": len(encoded),
             "viewport": viewport_data,
             "image": {"width": img_w, "height": img_h},
+        }
+        if click_scale is not None:
+            data["click_scale"] = click_scale
+        return {"success": True, "data": data}
+
+    async def screenshot_marks(
+        self,
+        agent_id: str,
+        format: str = "webp",
+        quality: int = 75,
+        scale: float = 1.0,
+        max_marks: int = 50,
+    ) -> dict:
+        """Viewport screenshot with numbered set-of-marks overlays.
+
+        A plain :meth:`screenshot` leaves a vision-capable agent guessing
+        pixel coordinates on canvas / WebGL / map / image-heavy pages where
+        the accessibility snapshot alone can't localize a target. This
+        annotates the viewport capture with a numbered box around every
+        actionable element (buttons, links, inputs, …) resolved from the
+        current a11y snapshot, and returns a ``marks`` map binding each
+        label to:
+
+        - a ``ref`` — click it with the existing ``click`` action
+          (``browser_click(ref=...)``, the preferred, resolution-stable
+          path); and
+        - ``x`` / ``y`` — the element's CSS-pixel centre, clickable via
+          ``click_xy`` when a ref click isn't viable.
+
+        Always a VIEWPORT capture (never full-page) so ``click_scale`` and
+        the CSS-centre coordinates map cleanly into the click space. Marks
+        carry no new instance state — the ref in each entry resolves via
+        the same machinery as any snapshot ref.
+        """
+        inst = await self.get_or_start(agent_id)
+        inst.touch()
+        # Validate inputs exactly like ``screenshot`` — reject unknown formats,
+        # clamp quality/scale to their documented ranges.
+        from src.browser.flags import get_str
+        if not format:
+            format = get_str(
+                "BROWSER_SCREENSHOT_FORMAT", "webp", agent_id=agent_id,
+            )
+        fmt = format.strip().lower()
+        if fmt not in ("webp", "png"):
+            return {"success": False, "error": f"Unsupported screenshot format: {format!r}"}
+        try:
+            quality = int(quality)
+        except (TypeError, ValueError):
+            quality = 75
+        quality = max(1, min(100, quality))
+        try:
+            scale_f = float(scale)
+        except (TypeError, ValueError):
+            scale_f = 1.0
+        scale_f = max(0.5, min(1.0, scale_f))
+        try:
+            max_marks_i = max(1, min(100, int(max_marks)))
+        except (TypeError, ValueError):
+            max_marks_i = 50
+
+        marks: list[dict] = []
+        marks_truncated = False
+        async with inst.lock:
+            # Refresh refs to the live DOM WITHOUT perturbing the diff
+            # baseline (``_skip_baseline=True``) — the returned marks must
+            # reference elements that exist right now.
+            snap = await self._snapshot_impl(inst, agent_id, _skip_baseline=True)
+            if not snap.get("success"):
+                return snap
+            # Whether the a11y snapshot itself dropped elements past its own
+            # ``_MAX_SNAPSHOT_ELEMENTS`` cap (PR #1201 truncation fields). Kept
+            # DISTINCT from ``marks_truncated`` (the max_marks cap) so we never
+            # claim completeness when upstream already dropped clickable targets.
+            snap_data = snap.get("data", {}) if isinstance(snap, dict) else {}
+            snapshot_truncated = bool(snap_data.get("truncated"))
+            try:
+                # Viewport-only capture — set-of-marks is for click targeting,
+                # which can only reach the current viewport.
+                png_bytes = await inst.page.screenshot(full_page=False)
+            except Exception as e:
+                return {"success": False, "error": str(e)}
+            # Captured under the lock so it reflects the viewport at capture
+            # time. May be ``None`` in some Playwright configs (same caveat
+            # as ``screenshot``'s ``viewport_size`` read).
+            raw_viewport = inst.page.viewport_size
+            vw = vh = 0
+            if isinstance(raw_viewport, dict):
+                vw = int(raw_viewport.get("width") or 0)
+                vh = int(raw_viewport.get("height") or 0)
+
+            # Mirror ``_find_text_impl``: iterate refs, resolve each to a live
+            # locator, keep only visible, in-viewport, actionable elements.
+            next_mark = 1
+            for ref_id, handle in inst.refs.items():
+                if handle.role not in _ACTIONABLE_ROLES:
+                    continue
+                # One bad ref (stale shadow host, closed tab, resolver error)
+                # must not abort the whole capture. ``RefStale`` is an
+                # ``Exception`` subclass, so the broad catch covers it.
+                try:
+                    locator = await self._locator_from_ref(inst, ref_id)
+                except Exception:
+                    continue
+                if locator is None:
+                    continue
+                try:
+                    if not await locator.is_visible():
+                        continue
+                except Exception:
+                    continue
+                try:
+                    box = await locator.bounding_box()
+                except Exception:
+                    continue
+                if not box:
+                    continue
+                bx = float(box.get("x", 0))
+                by = float(box.get("y", 0))
+                bw = float(box.get("width", 0))
+                bh = float(box.get("height", 0))
+                if bw <= 0 or bh <= 0:
+                    continue
+                # In-viewport intersection test, identical to
+                # ``_find_text_impl``. Skip when a viewport is known and the
+                # box lies fully outside it.
+                if vw > 0 and vh > 0:
+                    in_viewport = (
+                        bx + bw > 0 and by + bh > 0
+                        and bx < vw and by < vh
+                    )
+                    if not in_viewport:
+                        continue
+                if next_mark > max_marks_i:
+                    marks_truncated = True
+                    break
+                # Click point = centre of the element's VISIBLE intersection
+                # with the viewport, kept strictly inside it (click_xy rejects
+                # x>=vw / y>=vh).
+                vx0 = max(bx, 0.0)
+                vy0 = max(by, 0.0)
+                vx1 = min(bx + bw, float(vw)) if vw > 0 else bx + bw
+                vy1 = min(by + bh, float(vh)) if vh > 0 else by + bh
+                cx = (vx0 + vx1) / 2
+                cy = (vy0 + vy1) / 2
+                if vw > 0:
+                    cx = min(cx, float(vw) - 1.0)
+                if vh > 0:
+                    cy = min(cy, float(vh) - 1.0)
+                cx = max(cx, 0.0)
+                cy = max(cy, 0.0)
+                marks.append({
+                    "mark": next_mark,
+                    "ref": ref_id,
+                    "role": handle.role,
+                    "name": sanitize_for_prompt(
+                        self.redactor.redact(agent_id, handle.name or ""),
+                    )[:80],
+                    "box": (bx, by, bw, bh),
+                    "x": round(cx, 1),
+                    "y": round(cy, 1),
+                })
+                next_mark += 1
+
+        # Draw + encode OUTSIDE the lock — Pillow work must not hold the
+        # per-instance lock (it would block concurrent browser ops for this
+        # agent). css dims come from the viewport; when it's unknown we skip
+        # drawing (css_w == 0 short-circuits the helper) and omit click_scale,
+        # matching ``screenshot``.
+        css_w = float(vw)
+        css_h = float(vh)
+        annotated_png = await asyncio.to_thread(
+            _draw_set_of_marks,
+            png_bytes, marks, css_w, css_h, scale=scale_f, agent_id=agent_id,
+        )
+        # Identity check: the helper returns the SAME object when Pillow is
+        # missing or the draw failed — that's our "was it annotated?" signal.
+        annotated = annotated_png is not png_bytes
+        encoded, used_format, img_w, img_h = await asyncio.to_thread(
+            _encode_screenshot,
+            annotated_png, fmt, quality, scale_f, agent_id=agent_id,
+        )
+        b64 = base64.b64encode(encoded).decode()
+
+        # Coordinate-mapping metadata — identical semantics to ``screenshot``.
+        # Always a viewport capture here, so ``click_scale`` applies whenever
+        # the viewport is known and the encoded image has real dimensions.
+        viewport_data = None
+        click_scale = None
+        if isinstance(raw_viewport, dict):
+            css_vw = raw_viewport.get("width")
+            css_vh = raw_viewport.get("height")
+            if isinstance(css_vw, (int, float)) and isinstance(css_vh, (int, float)):
+                viewport_data = {"width": css_vw, "height": css_vh}
+                if img_w > 0 and img_h > 0:
+                    click_scale = {"x": css_vw / img_w, "y": css_vh / img_h}
+
+        # Strip the internal CSS ``box`` tuple — the agent gets mark/ref/role/
+        # name/x/y only.
+        public_marks = [
+            {
+                "mark": m["mark"], "ref": m["ref"], "role": m["role"],
+                "name": m["name"], "x": m["x"], "y": m["y"],
+            }
+            for m in marks
+        ]
+
+        data = {
+            "image_base64": b64,
+            "format": used_format,
+            "bytes": len(encoded),
+            "viewport": viewport_data,
+            "image": {"width": img_w, "height": img_h},
+            "marks": public_marks,
+            "marks_shown": len(public_marks),
+            "marks_truncated": marks_truncated,
+            "snapshot_truncated": snapshot_truncated,
+            "marks_max": max_marks_i,
+            "annotated": annotated,
         }
         if click_scale is not None:
             data["click_scale"] = click_scale

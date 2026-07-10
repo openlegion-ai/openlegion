@@ -425,6 +425,18 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             scale=body.get("scale", 1.0),
         )
 
+    @app.post("/browser/{agent_id}/screenshot_marks")
+    async def screenshot_marks(agent_id: str, request: Request):
+        _verify_auth(request)
+        body = await request.json()
+        return await manager.screenshot_marks(
+            agent_id,
+            format=body.get("format", "webp"),
+            quality=body.get("quality", 75),
+            scale=body.get("scale", 1.0),
+            max_marks=body.get("max_marks", 50),
+        )
+
     @app.post("/browser/{agent_id}/reset")
     async def reset(agent_id: str, request: Request):
         _verify_auth(request)
