@@ -1132,6 +1132,115 @@ async def test_steer_error_fallback_carries_system_note():
     dispatch.assert_awaited_once_with("agent1", "watch update", system_note=True)
 
 
+# ── Priority steer lane (plan §8 #10, Phase 3 unit 3): deliver_chat ──
+# generalizes the ask_teammate busy/idle fork to interactive chat, with
+# a reply back-edge on the busy path instead of a bare injection ack.
+
+
+@pytest.mark.asyncio
+async def test_try_steer_and_wait_calls_steer_fn_with_wait_reply():
+    """try_steer_and_wait asks the steer_fn to wait for the real reply —
+    a different call shape than the fire-and-forget try_steer/enqueue
+    steer paths (ask_teammate, REPL, channels), which are untouched."""
+    steer = AsyncMock(return_value={"injected": True, "reply": "on it"})
+    lm = LaneManager(dispatch_fn=AsyncMock(), steer_fn=steer)
+
+    injected, reply = await lm.try_steer_and_wait("agent1", "hurry", timeout=5)
+    assert (injected, reply) == (True, "on it")
+    steer.assert_awaited_once_with("agent1", "hurry", wait_reply=True, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_try_steer_and_wait_without_steer_fn():
+    lm = LaneManager(dispatch_fn=AsyncMock())
+    assert await lm.try_steer_and_wait("agent1", "hurry", timeout=5) == (False, None)
+
+
+@pytest.mark.asyncio
+async def test_try_steer_and_wait_exception_reads_as_not_injected():
+    steer = AsyncMock(side_effect=RuntimeError("transport down"))
+    lm = LaneManager(dispatch_fn=AsyncMock(), steer_fn=steer)
+    assert await lm.try_steer_and_wait("agent1", "hurry", timeout=5) == (False, None)
+
+
+@pytest.mark.asyncio
+async def test_deliver_chat_busy_returns_real_reply_no_followup():
+    """BUSY: the running turn's actual reply comes back — never a second
+    parallel turn (B1), so dispatch_fn must NOT fire at all."""
+    dispatch = AsyncMock(return_value="should not be called")
+    steer = AsyncMock(return_value={"injected": True, "reply": "steered answer"})
+    lm = LaneManager(dispatch_fn=dispatch, steer_fn=steer)
+
+    result = await lm.deliver_chat("agent1", "please pause")
+    assert result == "steered answer"
+    dispatch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_deliver_chat_busy_no_reply_yet_returns_placeholder_no_followup():
+    """Genuinely injected but the turn hasn't answered within the wait —
+    still must NOT fall back to followup (that would double-deliver into
+    the turn that already has the message)."""
+    dispatch = AsyncMock(return_value="should not be called")
+    steer = AsyncMock(return_value={"injected": True, "reply": None})
+    lm = LaneManager(dispatch_fn=dispatch, steer_fn=steer)
+
+    result = await lm.deliver_chat("agent1", "please pause")
+    assert "steered" in result.lower() or "processing" in result.lower()
+    dispatch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_deliver_chat_idle_dispatches_followup_without_task_id():
+    """IDLE: a normal followup turn runs — Constraint #6, no task_id ever
+    threads through a chat steer/followup delivery."""
+    dispatch = AsyncMock(return_value="hello back")
+    steer = AsyncMock(return_value={"injected": False})
+    lm = LaneManager(dispatch_fn=dispatch, steer_fn=steer)
+
+    result = await lm.deliver_chat("agent1", "good morning")
+    assert result == "hello back"
+    dispatch.assert_awaited_once()
+    assert dispatch.await_args.args == ("agent1", "good morning")
+    assert "task_id" not in dispatch.await_args.kwargs
+
+
+@pytest.mark.asyncio
+async def test_deliver_chat_idle_without_steer_fn_dispatches_followup():
+    """No steer_fn wired at all (e.g. a deployment without the agent
+    transport) — deliver_chat still degrades to a normal followup."""
+    dispatch = AsyncMock(return_value="hi")
+    lm = LaneManager(dispatch_fn=dispatch)
+
+    result = await lm.deliver_chat("agent1", "hello")
+    assert result == "hi"
+    dispatch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_deliver_chat_forwards_trace_id_and_origin_on_idle_path():
+    """``trace_id`` rides the queued task's trace context (same mechanism
+    a normal followup wake uses), ``origin`` rides straight through as a
+    dispatch kwarg — both must survive deliver_chat's idle fallback."""
+    from src.shared.trace import current_trace_id
+    from src.shared.types import MessageOrigin
+
+    captured: dict = {}
+
+    async def dispatch(agent, message, **kwargs):
+        captured["origin"] = kwargs.get("origin")
+        captured["trace_id"] = current_trace_id.get()
+        return "ok"
+
+    steer = AsyncMock(return_value={"injected": False})
+    lm = LaneManager(dispatch_fn=dispatch, steer_fn=steer)
+    origin = MessageOrigin(kind="human", channel="dashboard", user="op")
+
+    await lm.deliver_chat("agent1", "hi", trace_id="tr_abc", origin=origin)
+    assert captured["origin"] == origin
+    assert captured["trace_id"] == "tr_abc"
+
+
 # ── Rehydration (recover restart-stranded pending tasks) ─────
 
 

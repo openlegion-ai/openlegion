@@ -75,6 +75,12 @@ LIMIT_SPECS: dict[str, tuple[int, int, int]] = {
     # registration. Larger content degrades gracefully (handoff → inline
     # brief; artifact → saved-but-unregistered with the workspace path).
     "drive_artifact_max_mb": (8, 1, 512),
+    # Priority steer lane (Phase 3 unit 3). How long a busy-chat steer
+    # (``LaneManager.deliver_chat`` / ``try_steer_and_wait``) waits for the
+    # running turn's actual reply before returning a "still processing"
+    # placeholder. The message was already folded into the turn by then —
+    # a timeout here is degraded UX, not a dropped message.
+    "steer_reply_timeout_seconds": (150, 15, 600),
 }
 
 # key -> OPENLEGION_* env var name (the second-lowest precedence source).
@@ -90,6 +96,7 @@ ENV_NAMES: dict[str, str] = {
     "drive_quota_mb": "OPENLEGION_DRIVE_QUOTA_MB",
     "ask_timeout_seconds": "OPENLEGION_ASK_TIMEOUT_SECONDS",
     "drive_artifact_max_mb": "OPENLEGION_DRIVE_ARTIFACT_MAX_MB",
+    "steer_reply_timeout_seconds": "OPENLEGION_STEER_REPLY_TIMEOUT_SECONDS",
 }
 
 # Per-agent config keys (agents.yaml / edit_agent) -> limits key. Only the

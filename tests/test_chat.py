@@ -1,5 +1,6 @@
 """Tests for agent chat mode and chat endpoints."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -235,6 +236,57 @@ class TestChatEndpoints:
             assert resp.json()["injected"] is False  # idle state
         finally:
             loop._chat_lock.release()
+
+    def test_post_chat_steer_wait_reply_idle_not_injected(self):
+        """wait_reply on an idle agent answers immediately: not injected,
+        no reply, nothing queued — the mesh caller dispatches a followup."""
+        loop = _make_loop()
+        app = create_agent_app(loop)
+        client = TestClient(app)
+
+        resp = client.post(
+            "/chat/steer", json={"message": "hi", "wait_reply": True},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["injected"] is False
+        assert data["reply"] is None
+        assert loop._steer_queue.empty()
+
+    def test_post_chat_steer_wait_reply_task_busy_not_injected(self):
+        """A TASK turn (current_task set) never drains steers mid-turn, so
+        wait_reply must read as not-injected immediately instead of
+        stranding the caller until timeout."""
+        loop = _make_loop()
+        loop.state = "working"
+        loop.current_task = "task_123"
+        app = create_agent_app(loop)
+        client = TestClient(app)
+
+        resp = client.post(
+            "/chat/steer", json={"message": "hi", "wait_reply": True},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["injected"] is False
+        assert data["reply"] is None
+        assert loop._steer_queue.empty()
+
+    def test_post_chat_steer_without_wait_reply_keeps_legacy_shape(self):
+        """The fire-and-forget steer contract is unchanged: no ``reply``
+        key, message queued even while a task turn runs."""
+        loop = _make_loop()
+        loop.state = "working"
+        loop.current_task = "task_123"
+        app = create_agent_app(loop)
+        client = TestClient(app)
+
+        resp = client.post("/chat/steer", json={"message": "note this"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["injected"] is True
+        assert "reply" not in data
+        assert loop._steer_queue.get_nowait() == ("note this", False)
 
     def test_status_returns_context_fields(self):
         """GET /status should include context_tokens, context_max, context_pct."""
@@ -925,4 +977,177 @@ class TestChatTaskIsolationGuard:
         done_events = [e for e in events if e.get("type") == "done"]
         assert len(done_events) == 1
         assert done_events[0]["response"] == "Hello!"
+
+
+# ── Priority steer lane (plan §8 #10, Phase 3 unit 3) ───────────────
+#
+# Generalizes the ask_teammate busy/idle fork to interactive chat:
+# ``inject_steer_and_wait`` gives a busy-chat steer a reply back-edge
+# (the chat analog of ``answer_ask``) instead of a bare injection ack.
+
+
+class TestPrioritySteerLaneReplyBackEdge:
+    @pytest.mark.asyncio
+    async def test_idle_agent_returns_not_injected_immediately(self):
+        """Idle at call time: no queueing, no waiting — the caller
+        (LaneManager.deliver_chat) should dispatch a normal followup."""
+        loop = _make_loop()
+        loop.state = "idle"
+
+        injected, reply = await loop.inject_steer_and_wait("hi", timeout=5)
+
+        assert (injected, reply) == (False, None)
+        assert loop._steer_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_busy_steer_resolves_with_turns_reply_when_drained(self):
+        """A steer folded into the running turn (via _drain_steer_messages,
+        e.g. from _compact_chat_context or _prepare_chat_turn) settles its
+        future with that turn's own final response text once the turn
+        reports in via _resolve_turn_steer_futures."""
+        loop = _make_loop()
+        loop.state = "working"
+
+        async def _simulate_turn_processing():
+            # Give inject_steer_and_wait a chance to enqueue first.
+            await asyncio.sleep(0)
+            drained = loop._drain_steer_messages()
+            assert drained == [("please hurry", False)]
+            assert len(loop._turn_steer_futures) == 1
+            loop._resolve_turn_steer_futures({"response": "on it!"})
+
+        sim = asyncio.ensure_future(_simulate_turn_processing())
+        injected, reply = await loop.inject_steer_and_wait(
+            "please hurry", timeout=5,
+        )
+        await sim
+
+        assert (injected, reply) == (True, "on it!")
+
+    @pytest.mark.asyncio
+    async def test_busy_steer_no_task_id_ever_attached(self):
+        """Steered chat messages carry no task_id (plan Constraint #6) —
+        the queue entry is a plain (text, system_note, future), nothing
+        task-shaped rides along."""
+        loop = _make_loop()
+        loop.state = "working"
+
+        async def _drain_and_resolve():
+            await asyncio.sleep(0)
+            entry = loop._steer_queue.get_nowait()
+            assert len(entry) == 3
+            assert entry[0] == "no task here"
+            assert entry[1] is False
+            loop._steer_queue.put_nowait(entry)  # put back for the drain below
+            loop._drain_steer_messages()
+            loop._resolve_turn_steer_futures({"response": "ack"})
+
+        sim = asyncio.ensure_future(_drain_and_resolve())
+        injected, reply = await loop.inject_steer_and_wait(
+            "no task here", timeout=5,
+        )
+        await sim
+        assert (injected, reply) == (True, "ack")
+
+    @pytest.mark.asyncio
+    async def test_steer_after_last_drain_falls_back_deterministically(self):
+        """The steer-after-last-drain race (gap c): a steer arrives after
+        the turn's final _has_pending_steers() check, so it never gets
+        folded in anywhere. _resolve_turn_steer_futures's stranded sweep
+        must find it and resolve (False, None) — a deterministic signal
+        for the caller to dispatch a fresh followup turn, not a hang."""
+        loop = _make_loop()
+        loop.state = "working"
+
+        async def _simulate_turn_ending_without_draining():
+            await asyncio.sleep(0)
+            # The turn concludes WITHOUT ever draining the queue —
+            # exactly the race: its own final answer is unrelated.
+            loop._resolve_turn_steer_futures({"response": "unrelated final answer"})
+
+        sim = asyncio.ensure_future(_simulate_turn_ending_without_draining())
+        injected, reply = await loop.inject_steer_and_wait(
+            "arrived too late", timeout=5,
+        )
+        await sim
+
+        assert (injected, reply) == (False, None)
+        # Never dropped silently, and never left sitting in the queue —
+        # the sentinel resolution already consumed it.
+        assert loop._steer_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_stranded_sweep_preserves_non_future_entries_for_next_turn(self):
+        """A plain (no-future) steer entry — a wake, ask, or REPL steer —
+        found stranded by the same sweep must NOT be dropped either: it
+        is put back for the natural next-turn catch-all drain."""
+        loop = _make_loop()
+        loop.state = "working"
+        await loop.inject_steer("a system wake", system_note=True)
+
+        loop._resolve_turn_steer_futures({"response": "unrelated"})
+
+        assert loop._drain_steer_messages() == [("a system wake", True)]
+
+    @pytest.mark.asyncio
+    async def test_reply_wait_times_out_without_dropping_or_double_delivering(self):
+        """Folded into the turn, but the turn is still running past the
+        caller's patience window — (True, None), NOT a followup fallback
+        (that would double-deliver into the turn that already has it)."""
+        loop = _make_loop()
+        loop.state = "working"
+
+        injected, reply = await loop.inject_steer_and_wait(
+            "slow turn", timeout=0.05,
+        )
+
+        assert (injected, reply) == (True, None)
+        # The entry is still sitting there — a real turn would eventually
+        # drain and answer it; cleanup so the test doesn't leak state.
+        assert loop._drain_steer_messages() == [("slow turn", False)]
+
+    @pytest.mark.asyncio
+    async def test_end_to_end_busy_chat_turn_answers_the_steer(self):
+        """Full integration: a real chat() turn, mid-tool-call, receives a
+        steer via inject_steer_and_wait and the caller gets back the
+        turn's actual subsequent answer — not a bare injection ack."""
+        tool_call = ToolCallInfo(name="exec", arguments={"command": "ls"})
+        loop = _make_loop([
+            LLMResponse(content="", tool_calls=[tool_call], tokens_used=10),
+            LLMResponse(content="Done, adjusted per your note.", tokens_used=10),
+        ])
+        loop.tools.get_tool_definitions = MagicMock(return_value=[{"name": "exec"}])
+
+        tool_started = asyncio.Event()
+        release_tool = asyncio.Event()
+
+        async def _controlled_tool(*a, **kw):
+            tool_started.set()
+            await release_tool.wait()
+            return {"ok": True}
+
+        loop.tools.execute = AsyncMock(side_effect=_controlled_tool)
+
+        chat_task = asyncio.ensure_future(loop.chat("do the thing"))
+        await tool_started.wait()  # round 1's tool is now blocked mid-flight
+
+        steer_result: dict = {}
+
+        async def _do_steer():
+            steer_result["injected"], steer_result["reply"] = (
+                await loop.inject_steer_and_wait(
+                    "please also check X", timeout=5,
+                )
+            )
+
+        steer_task = asyncio.ensure_future(_do_steer())
+        await asyncio.sleep(0)  # let it enqueue before the tool is released
+        release_tool.set()
+
+        result = await chat_task
+        await steer_task
+
+        assert result["response"] == "Done, adjusted per your note."
+        assert steer_result["injected"] is True
+        assert steer_result["reply"] == "Done, adjusted per your note."
         assert loop._steer_queue.empty()

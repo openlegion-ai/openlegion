@@ -862,6 +862,11 @@ class SteerMessage(BaseModel):
     """Injected into an agent's active conversation mid-execution."""
 
     message: str
+    # Priority steer lane (Phase 3 unit 3) — when set, the caller is
+    # synchronously waiting on the turn's actual reply to this message
+    # (the chat analog of ``answer_ask``), not just an injection ack.
+    wait_reply: bool = False
+    timeout: float | None = None
 
 
 class NotifyRequest(BaseModel):

@@ -517,11 +517,24 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
 
     @app.post("/chat/steer")
     async def chat_steer(msg: SteerMessage, request: Request) -> dict:
-        """Inject a message into the active conversation. Does NOT acquire _chat_lock."""
-        injected = await loop.inject_steer(
-            sanitize_for_prompt(msg.message),
-            system_note=_system_note_from_mesh_request(request),
-        )
+        """Inject a message into the active conversation. Does NOT acquire _chat_lock.
+
+        ``wait_reply`` (priority steer lane, plan §8 #10) makes this call
+        wait for the turn's actual answer instead of returning a bare
+        injection ack — the chat analog of ``answer_ask``. Bounded by
+        ``timeout`` (clamped via ``limits.steer_reply_timeout_seconds``).
+        """
+        system_note = _system_note_from_mesh_request(request)
+        message = sanitize_for_prompt(msg.message)
+        if msg.wait_reply:
+            from src.shared import limits as _limits
+
+            timeout = msg.timeout or _limits.resolve("steer_reply_timeout_seconds")
+            injected, reply = await loop.inject_steer_and_wait(
+                message, system_note=system_note, timeout=timeout,
+            )
+            return {"injected": injected, "agent_state": loop.state, "reply": reply}
+        injected = await loop.inject_steer(message, system_note=system_note)
         return {"injected": injected, "agent_state": loop.state}
 
     @app.post("/chat/stream")

@@ -1252,6 +1252,9 @@ class RuntimeContext:
             agent_name: str,
             message: str,
             system_note: bool = False,
+            *,
+            wait_reply: bool = False,
+            timeout: float | None = None,
         ) -> dict:
             try:
                 # Same marker as _direct_dispatch: a system-composed steer
@@ -1259,12 +1262,23 @@ class RuntimeContext:
                 # from the steer queue as a ``system`` transcript row, not
                 # a "[steer]" user bubble.
                 headers = {"x-system-wake": "1"} if system_note else None
+                body: dict = {"message": message}
+                # Priority steer lane (plan §8 #10) — the caller wants the
+                # turn's actual reply, not a bare injection ack. Give the
+                # HTTP call headroom over the agent-side wait so the
+                # request itself never times out first.
+                req_timeout = 120
+                if wait_reply:
+                    body["wait_reply"] = True
+                    body["timeout"] = timeout
+                    req_timeout = int((timeout or 120) + 20)
                 return await self.transport.request(
                     agent_name,
                     "POST",
                     "/chat/steer",
-                    json={"message": message},
+                    json=body,
                     headers=headers,
+                    timeout=req_timeout,
                 )
             except Exception as e:
                 return {"injected": False, "error": str(e)}

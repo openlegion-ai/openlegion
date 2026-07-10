@@ -4868,36 +4868,26 @@ class TestDashboardOriginStamp:
         _teardown(self.components)
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
-    def _origin_from(self, headers: dict | None) -> dict | None:
-        from src.shared.types import MessageOrigin
-        if not headers:
-            return None
-        wire = headers.get("X-Origin") or headers.get("x-origin")
-        if not wire:
-            return None
-        parsed = MessageOrigin.from_header_value(wire, trust_kind=True)
-        return parsed
-
     def test_api_chat_stamps_human_dashboard_origin(self):
-        """POST /api/agents/{id}/chat sets X-Origin: kind=human, channel=dashboard."""
+        """POST /api/agents/{id}/chat delivers via the lane with a
+        kind=human, channel=dashboard origin (priority steer lane,
+        plan §8 #10 — routed through ``LaneManager.deliver_chat`` instead
+        of a direct agent call)."""
         from src.shared.types import MessageOrigin
 
-        self.components["transport"].request = AsyncMock(
-            return_value={"response": "hi"},
-        )
+        self.components["lane_manager"].deliver_chat = AsyncMock(return_value="hi")
         resp = self.client.post(
             "/dashboard/api/agents/alpha/chat",
             json={"message": "hello"},
         )
         assert resp.status_code == 200
-        call = self.components["transport"].request.await_args
-        hdrs = call.kwargs.get("headers")
-        parsed = self._origin_from(hdrs)
-        assert isinstance(parsed, MessageOrigin)
-        assert parsed.kind == "human"
-        assert parsed.channel == "dashboard"
+        call = self.components["lane_manager"].deliver_chat.await_args
+        origin = call.kwargs.get("origin")
+        assert isinstance(origin, MessageOrigin)
+        assert origin.kind == "human"
+        assert origin.channel == "dashboard"
         # ``user`` is the operator session digest (or "operator" in dev).
-        assert parsed.user
+        assert origin.user
 
     def test_api_steer_stamps_human_origin(self):
         """POST /api/agents/{id}/steer enqueues with kind="human" origin."""
@@ -6168,16 +6158,20 @@ class TestAgentGoalsEndpoints:
 
 class TestDashboardChatMintsTraceId:
     """Session observability (Phase 1) — the dashboard chat entry points
-    mint a per-turn trace_id and forward it as the ``X-Trace-Id`` header
-    on the outbound agent call. Regression for the dashboard-untraceable
-    defect (server.py:3611 region) where trace_headers() ran without a
-    seeded contextvar and emitted an empty correlation id.
+    mint a per-turn trace_id. ``/chat`` forwards it to
+    ``LaneManager.deliver_chat`` (priority steer lane, plan §8 #10 —
+    routed through the lane instead of a direct agent call);
+    ``/broadcast`` still calls the agent directly and must NOT inherit
+    one. Regression for the dashboard-untraceable defect (server.py:3611
+    region) where trace_headers() ran without a seeded contextvar and
+    emitted an empty correlation id.
     """
 
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()
         self.components = _make_components(self._tmpdir, include_v2=True)
-        # Capture the headers the dashboard forwards to the agent.
+        # Capture what /chat hands the lane, and what /broadcast forwards
+        # directly to the agent (two different delivery paths).
         self._captured: dict = {}
 
         async def _fake_request(agent_id, method, path, **kwargs):
@@ -6186,7 +6180,13 @@ class TestDashboardChatMintsTraceId:
             self._captured["path"] = path
             return {"response": "ack"}
 
+        async def _fake_deliver_chat(agent_id, message, *, trace_id=None, origin=None):
+            self._captured["chat_trace_id"] = trace_id
+            self._captured["chat_origin"] = origin
+            return "ack"
+
         self.components["transport"].request = AsyncMock(side_effect=_fake_request)
+        self.components["lane_manager"].deliver_chat = AsyncMock(side_effect=_fake_deliver_chat)
         self.client = _make_client(self.components)
 
     def teardown_method(self):
@@ -6198,27 +6198,24 @@ class TestDashboardChatMintsTraceId:
             "/dashboard/api/agents/alpha/chat", json={"message": "hi"},
         )
         assert resp.status_code == 200
-        hdrs = self._captured["headers"]
-        # The fix: a non-empty trace_id is minted and forwarded. Header
-        # keys can be either case; the trace module emits "X-Trace-Id".
-        trace_val = hdrs.get("X-Trace-Id") or hdrs.get("x-trace-id")
-        assert trace_val, f"expected X-Trace-Id header, got {hdrs!r}"
+        # The fix: a non-empty trace_id is minted and forwarded to the lane.
+        trace_val = self._captured.get("chat_trace_id")
+        assert trace_val, f"expected a minted trace_id, got {self._captured!r}"
         assert trace_val.startswith("tr_")
         # Origin is still stamped human/dashboard alongside the trace.
-        origin_val = hdrs.get("X-Origin") or hdrs.get("x-origin")
-        assert origin_val and "dashboard" in origin_val
+        origin = self._captured.get("chat_origin")
+        assert origin is not None and origin.kind == "human"
+        assert origin.channel == "dashboard"
 
     def test_two_chats_get_distinct_trace_ids(self):
         self.client.post(
             "/dashboard/api/agents/alpha/chat", json={"message": "first"},
         )
-        first = (self._captured["headers"].get("X-Trace-Id")
-                 or self._captured["headers"].get("x-trace-id"))
+        first = self._captured.get("chat_trace_id")
         self.client.post(
             "/dashboard/api/agents/alpha/chat", json={"message": "second"},
         )
-        second = (self._captured["headers"].get("X-Trace-Id")
-                  or self._captured["headers"].get("x-trace-id"))
+        second = self._captured.get("chat_trace_id")
         assert first and second and first != second
 
     def test_chat_trace_does_not_leak_into_broadcast(self):
@@ -6237,25 +6234,27 @@ class TestDashboardChatMintsTraceId:
         self.client.post(
             "/dashboard/api/agents/alpha/chat", json={"message": "chat first"},
         )
-        chat_trace = (self._captured["headers"].get("X-Trace-Id")
-                      or self._captured["headers"].get("x-trace-id"))
+        chat_trace = self._captured.get("chat_trace_id")
         assert chat_trace and chat_trace.startswith("tr_")
         # Broadcast does NOT mint a trace — it must carry no inherited one.
         resp = self.client.post(
             "/dashboard/api/broadcast", json={"message": "to everyone"},
         )
         assert resp.status_code == 200, resp.text
-        bc_trace = (self._captured["headers"].get("X-Trace-Id")
-                    or self._captured["headers"].get("x-trace-id"))
+        bc_hdrs = self._captured.get("headers") or {}
+        bc_trace = bc_hdrs.get("X-Trace-Id") or bc_hdrs.get("x-trace-id")
         assert bc_trace != chat_trace
         assert not bc_trace, f"broadcast leaked a stale trace_id: {bc_trace!r}"
 
 
 class TestDashboardIntentCapture:
-    """Session observability (Phase 2): the dashboard chat endpoints call the
-    agent directly (not via the lane's ``_direct_dispatch``), so they are the
-    ONLY intent-capture point for the primary human surface. Without capture
-    here, ``openlegion sessions``/``session`` never see dashboard turns — the
+    """Session observability (Phase 2): ``/chat`` records intent explicitly
+    before handing off to the priority steer lane (plan §8 #10,
+    ``LaneManager.deliver_chat``) — the busy-steer path has no other
+    capture point, so this stays the ONLY intent-capture point for the
+    primary human surface. ``/chat/stream`` still calls the agent
+    directly and captures the same way. Without capture here,
+    ``openlegion sessions``/``session`` never see dashboard turns — the
     feature's headline use case. These pin that wiring end-to-end."""
 
     def setup_method(self):
@@ -6273,7 +6272,7 @@ class TestDashboardIntentCapture:
         shutil.rmtree(self._tmpdir, ignore_errors=True)
 
     def test_dashboard_chat_captures_intent(self):
-        self.components["transport"].request = AsyncMock(return_value={"response": "ok"})
+        self.components["lane_manager"].deliver_chat = AsyncMock(return_value="ok")
         resp = self.client.post(
             "/dashboard/api/agents/alpha/chat",
             json={"message": "pull last week signups"},
@@ -6306,7 +6305,7 @@ class TestDashboardIntentCapture:
     def test_dashboard_chat_capture_failure_never_breaks_chat(self):
         """Intent capture is best-effort — a store failure must not 5xx the
         chat response."""
-        self.components["transport"].request = AsyncMock(return_value={"response": "ok"})
+        self.components["lane_manager"].deliver_chat = AsyncMock(return_value="ok")
         self.intent_store.record = MagicMock(side_effect=RuntimeError("boom"))
         resp = self.client.post(
             "/dashboard/api/agents/alpha/chat",
@@ -6314,3 +6313,85 @@ class TestDashboardIntentCapture:
         )
         assert resp.status_code == 200, resp.text
         assert resp.json()["response"] == "ok"
+
+
+class TestDashboardChatPrioritySteerLane:
+    """Priority steer lane (plan §8 #10, Phase 3 unit 3): the dashboard's
+    primary chat endpoint routes through ``LaneManager.deliver_chat``
+    instead of calling the agent's ``/chat`` directly (gap a) — a busy
+    agent gets steered with a reply back-edge, an idle one runs a normal
+    followup turn, and the endpoint simply relays whatever the lane
+    decided. The busy/idle fork itself (steer-inject vs followup) is
+    exercised at the ``LaneManager`` level in test_lanes.py; these pin
+    the dashboard-side ROUTING for both outcomes."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_chat_relays_busy_steered_reply(self):
+        """A busy agent's steered-in reply flows straight through — no
+        separate busy-handling branch left in the dashboard endpoint."""
+        self.components["lane_manager"].deliver_chat = AsyncMock(
+            return_value="steered reply from the running turn",
+        )
+        resp = self.client.post(
+            "/dashboard/api/agents/alpha/chat", json={"message": "hurry up"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["response"] == "steered reply from the running turn"
+
+    def test_chat_relays_idle_followup_reply(self):
+        """An idle agent's normal followup-turn reply flows through
+        identically — the endpoint doesn't care which path the lane took."""
+        self.components["lane_manager"].deliver_chat = AsyncMock(
+            return_value="a normal idle-turn reply",
+        )
+        resp = self.client.post(
+            "/dashboard/api/agents/alpha/chat", json={"message": "good morning"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["response"] == "a normal idle-turn reply"
+
+    def test_chat_forwards_agent_id_and_message_to_lane(self):
+        captured: dict = {}
+
+        async def _fake(agent_id, message, **kwargs):
+            captured["agent_id"] = agent_id
+            captured["message"] = message
+            return "ok"
+
+        self.components["lane_manager"].deliver_chat = AsyncMock(side_effect=_fake)
+        self.client.post(
+            "/dashboard/api/agents/alpha/chat", json={"message": "hello there"},
+        )
+        assert captured["agent_id"] == "alpha"
+        assert captured["message"] == "hello there"
+
+    def test_chat_503_without_lane_manager(self):
+        self.components["lane_manager"] = None
+        client = _make_client(self.components)
+        resp = client.post(
+            "/dashboard/api/agents/alpha/chat", json={"message": "hi"},
+        )
+        assert resp.status_code == 503
+
+    def test_chat_404_unknown_agent(self):
+        resp = self.client.post(
+            "/dashboard/api/agents/ghost/chat", json={"message": "hi"},
+        )
+        assert resp.status_code == 404
+
+    def test_chat_delivery_failure_surfaces_as_502(self):
+        self.components["lane_manager"].deliver_chat = AsyncMock(
+            side_effect=RuntimeError("agent unreachable"),
+        )
+        resp = self.client.post(
+            "/dashboard/api/agents/alpha/chat", json={"message": "hi"},
+        )
+        assert resp.status_code == 502

@@ -654,11 +654,12 @@ def create_dashboard_router(
     # Optional so existing dashboard tests that don't construct one keep
     # working; the endpoints return ``{enabled: False}`` when absent.
     summaries_store: Any = None,
-    # Session observability (Phase 2) — verbatim-intent store. The dashboard
-    # chat endpoints call the agent DIRECTLY (not via the lane's
-    # ``_direct_dispatch``, the only other capture point), so this is the sole
-    # intent-capture surface for the primary human UI. Optional so existing
-    # tests keep working; capture is skipped when absent.
+    # Session observability (Phase 2) — verbatim-intent store. ``api_chat``
+    # records here explicitly before handing off to the lane
+    # (``LaneManager.deliver_chat``, plan §8 #10): the busy-steer path has
+    # no other capture point, so this stays the primary-human-UI
+    # intent-capture surface. Optional so existing tests keep working;
+    # capture is skipped when absent.
     intent_store: Any = None,
     # Phase -1 onboarding wizard — tracks first-visit activation. Optional
     # so existing tests that don't pass it keep working; we lazy-init a
@@ -3644,8 +3645,8 @@ def create_dashboard_router(
     async def api_chat(agent_id: str, request: Request) -> dict:
         if agent_id not in agent_registry:
             raise HTTPException(status_code=404, detail="Agent not found")
-        if transport is None:
-            raise HTTPException(status_code=503, detail="Transport not available")
+        if lane_manager is None:
+            raise HTTPException(status_code=503, detail="Lane manager not available")
         body = await request.json()
         message = body.get("message", "").strip()
         if not message:
@@ -3660,19 +3661,18 @@ def create_dashboard_router(
         # authorization gates can distinguish a user-driven chat from
         # an agent-initiated wake.
         # Session observability (Phase 1): mint a per-turn trace_id and
-        # seed the contextvar BEFORE trace_headers() — mirrors the CLI
-        # (repl.py: current_trace_id.set(new_trace_id())). Without this the
-        # dashboard's outbound /chat call carried an empty X-Trace-Id and
-        # the resulting LLM/task/transcript rows were uncorrelatable.
-        from src.shared.trace import current_trace_id, new_trace_id, origin_header, trace_headers
+        # seed the contextvar before handing off to the lane (mirrors the
+        # CLI: repl.py: current_trace_id.set(new_trace_id())). Without this
+        # the outbound call carried an empty trace_id and the resulting
+        # LLM/task/transcript rows were uncorrelatable.
+        from src.shared.trace import current_trace_id, new_trace_id
         from src.shared.types import MessageOrigin
 
-        # Mint + seed, then RESET via token after the awaited outbound call.
-        # Without the reset, this minted trace_id stays on the (worker-reused)
-        # context and contaminates a later handler that calls trace_headers()
-        # without minting (e.g. /api/broadcast), so its rows inherit a trace
-        # from an unrelated chat. The finally runs after transport.request,
-        # so the outbound trace_headers() still carries X-Trace-Id.
+        # Mint + seed, then RESET via token after delivery. Without the
+        # reset, this minted trace_id stays on the (worker-reused) context
+        # and contaminates a later handler that calls trace_headers()
+        # without minting (e.g. /api/broadcast), so its rows inherit a
+        # trace from an unrelated chat.
         _trace_tok = current_trace_id.set(new_trace_id())
         try:
             origin = MessageOrigin(
@@ -3680,18 +3680,18 @@ def create_dashboard_router(
                 channel="dashboard",
                 user=_operator_session_id(request),
             )
-            hdrs = trace_headers()
-            hdrs.update(origin_header(origin))
+            trace_id = current_trace_id.get()
             # Session observability (Phase 2): capture the verbatim dashboard
-            # turn. This path calls the agent directly (not via
-            # ``_direct_dispatch``), so it is the ONLY intent-capture point for
-            # the primary human surface — without it ``sessions``/``session``
-            # never see dashboard turns. Best-effort: a store failure must
-            # never break chat. Redaction happens at storage (H16).
+            # turn explicitly here — the priority steer lane's busy path
+            # (LaneManager.deliver_chat -> try_steer_and_wait) has no other
+            # capture point, so this remains the surface ``sessions``/
+            # ``session`` read dashboard turns from. Best-effort: a store
+            # failure must never break chat. Redaction happens at storage
+            # (H16).
             if intent_store is not None:
                 try:
                     intent_store.record(
-                        trace_id=current_trace_id.get(),
+                        trace_id=trace_id,
                         origin_kind="human",
                         origin_channel="dashboard",
                         origin_user=origin.user,
@@ -3701,15 +3701,14 @@ def create_dashboard_router(
                     )
                 except Exception as _intent_err:
                     logger.debug("dashboard intent capture failed: %s", _intent_err)
-            result = await transport.request(
-                agent_id,
-                "POST",
-                "/chat",
-                json={"message": message},
-                timeout=120,
-                headers=hdrs,
+            # Priority steer lane (plan §8 #10): busy/idle-aware delivery —
+            # a busy agent gets this message steered into its running turn
+            # (with a reply back-edge) instead of blocking here behind it;
+            # an idle agent runs a normal followup turn. Never a second
+            # parallel turn (B1); no task_id (Constraint #6).
+            response = await lane_manager.deliver_chat(
+                agent_id, message, trace_id=trace_id, origin=origin,
             )
-            response = result.get("response", "(no response)")
             if event_bus:
                 event_bus.emit("chat_done", agent=agent_id, data={"response": response, "session": chat_session})
             return {"response": response}
