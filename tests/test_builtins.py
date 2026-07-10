@@ -1863,6 +1863,23 @@ class TestSetCronHeartbeat:
         assert "error" in result
         assert "message" in result["error"].lower()
 
+    def test_set_cron_heartbeat_copy_is_budget_governed(self):
+        """Phase-3 unit 4: the old 'only if the USER explicitly asks' muzzle
+        is replaced with budget-governed cadence policy — the agent may
+        adjust its own heartbeat schedule when its plate/budget justify it."""
+        import importlib
+
+        import src.agent.builtins.mesh_tool as mesh_tool
+        importlib.reload(mesh_tool)
+        from src.agent.tools import _tool_staging
+
+        tool_desc = _tool_staging["set_cron"]["description"]
+        heartbeat_param_desc = _tool_staging["set_cron"]["parameters"]["heartbeat"]["description"]
+
+        for text in (tool_desc, heartbeat_param_desc):
+            assert "explicitly asks" not in text
+            assert "budget" in text.lower()
+
 
 class TestSearchWithFallback:
     """Tests for the _search_with_fallback helper in memory_tool."""
