@@ -420,8 +420,16 @@ class AgentLoop:
         self._task_round_counts: dict[str, int] = {}
         # Entries are (text, system_note) — system_note marks
         # mesh-composed messages so transcript persistence uses the
-        # honest ``system`` role at every drain site.
-        self._steer_queue: asyncio.Queue[tuple[str, bool]] = asyncio.Queue()
+        # honest ``system`` role at every drain site. A chat steer that
+        # wants a reply back-edge (``inject_steer_and_wait``) appends a
+        # third element — the ``asyncio.Future`` its caller is awaiting —
+        # so plain 2-tuple entries (wakes, asks, REPL) stay untouched.
+        self._steer_queue: asyncio.Queue[tuple] = asyncio.Queue()
+        # Reply futures this TURN drained via ``_drain_steer_messages`` —
+        # resolved with the turn's own final text when it returns (see
+        # ``_resolve_turn_steer_futures``). Reset implicitly: it is only
+        # ever appended to and drained within one turn's lifetime.
+        self._turn_steer_futures: list[asyncio.Future] = []
         self._fleet_roster: list[dict] | None = None  # cached fleet info
         self._fleet_roster_ts: float = 0  # timestamp of last fetch
         self._introspect_cache: dict | None = None
@@ -967,24 +975,120 @@ class AgentLoop:
 
         ``system_note`` marks a SYSTEM-composed message (mesh wake, cron,
         webhook) so the drained transcript entry uses role ``system``
-        instead of impersonating the user.
+        instead of impersonating the user. Fire-and-forget — callers that
+        need the turn's actual reply (interactive chat) use
+        ``inject_steer_and_wait`` instead; asks resolve via ``answer_ask``.
         """
         await self._steer_queue.put((message, system_note))
         return self.state == "working"
+
+    async def inject_steer_and_wait(
+        self, message: str, *, system_note: bool = False, timeout: float,
+    ) -> tuple[bool, str | None]:
+        """Steer-inject with a reply back-edge (priority steer lane, plan
+        §8 #10) — the chat analog of ``answer_ask`` resolving a mesh-held
+        future. ``inject_steer`` is fire-and-forget (asks resolve via the
+        ``answer_ask`` tool; wakes need no reply); here the caller IS
+        synchronously waiting on an answer, so a future rides the queue
+        entry and is resolved with whatever text the turn that folds this
+        message in eventually returns.
+
+        Returns ``(injected, reply)``:
+          * idle at call time -> ``(False, None)``: caller should dispatch
+            a normal followup turn.
+          * folded into the running turn, which replied before ``timeout``
+            -> ``(True, text)``.
+          * folded in, but the turn is still running past ``timeout`` ->
+            ``(True, None)``: genuinely injected — NOT safe to fall back
+            to followup (that would double-deliver into the same turn).
+          * arrived after the turn's last drain (the steer-after-drain
+            race) -> ``(False, None)``: never folded in anywhere, so a
+            followup dispatch is the correct, deterministic pickup with
+            no double-delivery risk.
+
+        A TASK turn (``current_task`` set) reads as not-injected without
+        queueing: ``execute_task`` never drains steers mid-turn, so a
+        reply could only strand until timeout. The followup fallback
+        lands in ``chat()``'s task-busy guard, which queues the message
+        for the next turn and answers immediately — today's semantics.
+        """
+        if self.state != "working" or self.current_task is not None:
+            return False, None
+        reply_future: asyncio.Future = asyncio.get_running_loop().create_future()
+        await self._steer_queue.put((message, system_note, reply_future))
+        try:
+            reply = await asyncio.wait_for(reply_future, timeout=timeout)
+        except asyncio.TimeoutError:
+            return True, None
+        if reply is None:
+            return False, None
+        return True, reply
 
     def _has_pending_steers(self) -> bool:
         """Check if steer messages are waiting without draining them."""
         return not self._steer_queue.empty()
 
     def _drain_steer_messages(self) -> list[tuple[str, bool]]:
-        """Non-blocking drain of pending steers as (text, system_note)."""
-        messages = []
+        """Non-blocking drain of pending steers as (text, system_note).
+
+        Entries may carry a reply future as a third element
+        (``inject_steer_and_wait``) — any such future is folded into
+        ``_turn_steer_futures`` so it settles with THIS turn's own
+        response text once it returns (see
+        ``_resolve_turn_steer_futures``). Plain 2-tuple entries (wakes,
+        asks, REPL) are unaffected.
+        """
+        messages: list[tuple[str, bool]] = []
         while not self._steer_queue.empty():
             try:
-                messages.append(self._steer_queue.get_nowait())
+                entry = self._steer_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
+            messages.append((entry[0], entry[1]))
+            reply_future = entry[2] if len(entry) > 2 else None
+            if reply_future is not None and not reply_future.done():
+                self._turn_steer_futures.append(reply_future)
         return messages
+
+    def _resolve_turn_steer_futures(self, result: dict | None) -> None:
+        """Settle every steer reply future this turn folded in.
+
+        Called once per turn (``chat()`` / ``chat_stream()``, in a
+        ``finally`` around the inner turn call) with that turn's own
+        final ``result`` — resolves every future accumulated in
+        ``_turn_steer_futures`` with its response text, the chat analog
+        of ``answer_ask``. ``result`` is ``None`` on a hard failure /
+        cancellation; futures still resolve (with empty text) rather
+        than hang.
+
+        Anything STILL queued afterward never made it into this turn —
+        the steer-after-last-drain race (plan §8 #10 gap c). Entries
+        carrying a reply future are resolved with ``None`` so the
+        waiting caller (``LaneManager.deliver_chat``) falls back to a
+        fresh followup dispatch instead of hanging; entries with no
+        future (wakes, asks, REPL) are put back for the natural
+        next-turn catch-all drain in ``_prepare_chat_turn`` — never
+        dropped.
+        """
+        reply_text = (result or {}).get("response", "") if result else ""
+        for fut in self._turn_steer_futures:
+            if not fut.done():
+                fut.set_result(reply_text)
+        self._turn_steer_futures = []
+        if self._steer_queue.empty():
+            return
+        stranded = []
+        while not self._steer_queue.empty():
+            try:
+                stranded.append(self._steer_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        for entry in stranded:
+            reply_future = entry[2] if len(entry) > 2 else None
+            if reply_future is not None and not reply_future.done():
+                reply_future.set_result(None)
+            else:
+                self._steer_queue.put_nowait(entry)
 
     def _persist_steer_entries(self, steered: list[tuple[str, bool]]) -> None:
         """Write drained steer entries to the transcript with honest roles.
@@ -3069,6 +3173,7 @@ class AgentLoop:
                     # the outer finally so it never outlives this turn.
                     await self._apply_task_thinking(task_id)
                 try:
+                    result = None
                     try:
                         result = await self._chat_inner(
                             user_message, system_note=system_note,
@@ -3093,6 +3198,13 @@ class AgentLoop:
                                 error=str(e)[:500],
                             )
                         raise
+                    finally:
+                        # Priority steer lane (plan §8 #10, gap b/c) — settle
+                        # every steer reply future this turn folded in (or
+                        # discovered stranded past its last drain) BEFORE
+                        # the lock releases, regardless of how the turn
+                        # ended. See ``_resolve_turn_steer_futures``.
+                        self._resolve_turn_steer_futures(result)
                     # Auto-close on success. Three terminal branches:
                     #   1. Failure markers in ``result`` → ``failed``. Codex
                     #      r10: ``_chat_inner`` catches LLMAuthError /
@@ -5064,10 +5176,19 @@ class AgentLoop:
         try:
             async with self._chat_lock:
                 await self._maybe_restore_session()
+                _stream_final_response = ""
                 try:
                     async for event in self._chat_stream_inner(user_message):
+                        if isinstance(event, dict) and event.get("type") == "done":
+                            _stream_final_response = event.get("response") or ""
                         yield event
                 finally:
+                    # Priority steer lane (plan §8 #10, gap b/c) — same
+                    # settle-before-lock-release contract as ``chat()``,
+                    # applied to the streaming turn driver.
+                    self._resolve_turn_steer_futures(
+                        {"response": _stream_final_response},
+                    )
                     await self._checkpoint_chat_session()
         finally:
             with contextlib.suppress(ValueError):

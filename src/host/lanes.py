@@ -512,6 +512,60 @@ class LaneManager:
             return False
         return bool(result.get("injected", False)) if isinstance(result, dict) else False
 
+    async def try_steer_and_wait(
+        self, agent: str, message: str, *, timeout: float | None = None,
+    ) -> tuple[bool, str | None]:
+        """Steer-inject with a reply back-edge — the chat analog of
+        ``try_steer`` (asks use the fire-and-forget probe above and
+        resolve via ``answer_ask``; a plain chat message has no such
+        tool, so the caller here waits on the turn's own answer). Never
+        raises; a missing steer_fn or a transport error reads as "not
+        injected" so the caller falls back to a followup dispatch — see
+        ``AgentLoop.inject_steer_and_wait`` for the exact (injected,
+        reply) combinations.
+        """
+        if self._steer_fn is None:
+            return False, None
+        resolved_timeout = (
+            timeout if timeout is not None
+            else limits.resolve("steer_reply_timeout_seconds")
+        )
+        try:
+            result = await self._steer_fn(
+                agent, message, wait_reply=True, timeout=resolved_timeout,
+            )
+        except Exception as e:
+            logger.warning("try_steer_and_wait to '%s' failed: %s", agent, e)
+            return False, None
+        if not isinstance(result, dict):
+            return False, None
+        return bool(result.get("injected", False)), result.get("reply")
+
+    async def deliver_chat(
+        self, agent: str, message: str, *,
+        trace_id: str | None = None,
+        origin: MessageOrigin | None = None,
+    ) -> str:
+        """Busy/idle-aware interactive-chat delivery (plan §8 #10) — the
+        ``ask_teammate`` busy/idle fork generalized to plain chat. BUSY
+        steers into the running turn and returns its actual reply
+        (never a second parallel turn — the lane stays single per
+        agent, B1). IDLE runs a normal followup turn, same as a direct
+        dispatch. Steered messages carry no ``task_id`` (Constraint #6).
+        """
+        self._ensure_lane(agent)
+        injected, reply = await self.try_steer_and_wait(agent, message)
+        if injected:
+            if reply is not None:
+                return reply
+            return (
+                f"Steered: message injected into {agent}'s active "
+                "conversation — still processing."
+            )
+        return await self._handle_followup(
+            agent, message, trace_id=trace_id, origin=origin,
+        )
+
     def _check_steer_wakeup_rate(self, agent: str) -> bool:
         """Return True if the agent hasn't exceeded the steer-wakeup rate limit."""
         now = time.monotonic()
