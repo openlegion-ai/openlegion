@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-04
 **Status:** Proposed (design brainstorm → implementation blueprint)
-**Author:** Principal-engineering review (Claude Code)
+**Author:** Principal-engineering review
 **Supersedes coordination model in:** `docs/architecture.md` (fleet/blackboard sections), the
 per-agent lane/heartbeat design, and the project→team migration shims.
 
@@ -1116,6 +1116,26 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   `set_utility_model_provider` is a vault METHOD, not a module function (Constraint #8 — no new
   module-level globals).
 
+- **✅ Landed — Phase-3 unit 2: plate-gated agenda loop (#1206; §6 unit 2 as ratified, C.1 row 5
+  deleted in-phase).** The cron scheduler now computes the plate mesh-side:
+  `actionable = bool(triggered probes) or has_recent_activity or not is_default_heartbeat`
+  (custom HEARTBEAT.md rules are always actionable); a non-actionable tick dispatches only when
+  the agent has operator-set standing goals AND the deployment has `llm.utility_model` configured
+  (goal-only escalation) — otherwise it returns without reaching the LLM (truly-empty plate =
+  zero tokens). New scheduler ctor seams `utility_model_fn`/`goals_fn` are wired in
+  `cli/runtime.py` from the same deployment-config read the proxy classifier uses (mesh-side,
+  never container-supplied). Replace-pair deletions: `CronJob.force_llm` (+ its
+  `_UPDATABLE_FIELDS` entry + the four-condition skip), the agent-side `x-force-llm` header,
+  `execute_heartbeat`'s `force_llm` param, the goal-gated `no_heartbeat_rules` skip, and the
+  `HEARTBEAT_OK`/`_is_heartbeat_empty`/`_HEADING_OR_EMPTY_RE` empty-answer machinery; the
+  heartbeat prompt and the 7 bundled templates rewritten to agenda copy ("end the checkup"
+  replaces the sentinel). Legacy `cron.json` rows containing `force_llm` load safely (unknown
+  fields are filtered against the dataclass fields on read). Agenda wakes carry no task_id
+  (Constraint #6) and run on the utility model via the existing `utility_model_kwargs()` path.
+  Tests: new `TestPlateGate` in test_cron.py; `TestCronForceLlm` and the sentinel/empty-heartbeat
+  tests deleted with the code they covered. Full local suite 8215 passed / 26 skipped / 0 failed;
+  grep-zero for `force_llm`/`x-force-llm`/`HEARTBEAT_OK` in src/.
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|
@@ -1142,6 +1162,7 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
 |---|---|---|
 | #1200 | Phase-3 pre-decisions ratified (B1 → §8 #10, B2 → §8 #11) + build order | merged |
 | #1202 | B2 coordination-vs-work spend split at the LLM proxy (unit 1) | merged |
+| #1206 | plate-gated agenda loop replaces heartbeat suppression (unit 2) | merged |
 
 *CI note:* workflow runs on app-authored PRs in this repo require the maintainer's one-click
 approval and did not auto-run; each unit was landed on a green full local suite (the exact
