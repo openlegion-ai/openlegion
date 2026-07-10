@@ -127,13 +127,6 @@ class TestAddAgentToConfig(_TempConfigMixin):
             cfg = yaml.safe_load(f)
         assert cfg["agents"]["frank"]["budget"]["daily_usd"] == 5.0
 
-    def test_resources(self):
-        _add_agent_to_config("greg", "helper", "openai/gpt-4o", resources={"memory_limit": "1g", "cpu_limit": 1.0})
-        with open(self._agents_path) as f:
-            cfg = yaml.safe_load(f)
-        assert cfg["agents"]["greg"]["resources"]["memory_limit"] == "1g"
-        assert cfg["agents"]["greg"]["resources"]["cpu_limit"] == 1.0
-
     def test_empty_fields_not_written(self):
         """Empty optional fields should not appear in agents.yaml."""
         _add_agent_to_config("hank", "helper", "openai/gpt-4o")
@@ -146,7 +139,6 @@ class TestAddAgentToConfig(_TempConfigMixin):
         assert "initial_interface" not in agent
         assert "thinking" not in agent
         assert "budget" not in agent
-        assert "resources" not in agent
 
     def test_all_fields_together(self):
         """All optional fields can be set simultaneously."""
@@ -160,7 +152,6 @@ class TestAddAgentToConfig(_TempConfigMixin):
             initial_interface="Accepts X, produces Y.",
             thinking="high",
             budget={"daily_usd": 10.0},
-            resources={"memory_limit": "512m"},
         )
         with open(self._agents_path) as f:
             cfg = yaml.safe_load(f)
@@ -171,7 +162,6 @@ class TestAddAgentToConfig(_TempConfigMixin):
         assert agent["initial_interface"] == "Accepts X, produces Y."
         assert agent["thinking"] == "high"
         assert agent["budget"]["daily_usd"] == 10.0
-        assert agent["resources"]["memory_limit"] == "512m"
 
     def test_structured_routing_fields_persisted(self):
         """Task 8 — structured fields round-trip through agents.yaml."""
@@ -551,25 +541,6 @@ class TestApplyTemplate(_TempConfigMixin):
         with open(self._agents_path) as f:
             cfg = yaml.safe_load(f)
         assert cfg["agents"][agent_id]["initial_interface"] == expected_interface
-
-    def test_resources_written_in_single_pass(self):
-        """Resources are included in the same agents.yaml write, not a separate re-read."""
-        tpl = {
-            "agents": {
-                "worker": {
-                    "role": "worker",
-                    "model": "{default_model}",
-                    "resources": {"memory_limit": "1g", "cpu_limit": 1.0},
-                },
-            },
-        }
-        with self._mock_config():
-            _apply_template("test-tpl", tpl)
-
-        with open(self._agents_path) as f:
-            cfg = yaml.safe_load(f)
-        assert cfg["agents"]["worker"]["resources"]["memory_limit"] == "1g"
-        assert cfg["agents"]["worker"]["resources"]["cpu_limit"] == 1.0
 
     def test_sets_permissions_from_template(self):
         tpl = {
@@ -1260,16 +1231,6 @@ class TestCreateAgentFromTemplate(_TempConfigMixin):
         with self._mock_config():
             with pytest.raises(ValueError, match="Invalid agent name"):
                 _create_agent_from_template("../evil", "devteam/engineer", "openai/gpt-4o")
-
-    def test_applies_resources_from_template(self):
-        with self._mock_config():
-            _create_agent_from_template("my_eng", "devteam/engineer", "openai/gpt-4o")
-
-        with open(self._agents_path) as f:
-            cfg = yaml.safe_load(f)
-        resources = cfg["agents"]["my_eng"].get("resources", {})
-        assert resources.get("memory_limit") == "1g"
-        assert resources.get("cpu_limit") == 1.0
 
     def test_applies_budget_from_template(self):
         with self._mock_config():

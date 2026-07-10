@@ -2698,3 +2698,54 @@ class TestChatDeliverables:
         # (PR #1037) rather than inventing a new download route.
         assert "downloadAgentFile('operator', f.path)" in _INDEX_HTML
         assert "downloadAgentFile(activeChatId, f.path)" in _INDEX_HTML
+
+
+class TestHireTeammateEntryPoint:
+    """Hiring wizard v2 (Phase-4 §8 #16) — Team Hub "Hire teammate" button.
+
+    This is a chat-seeding shortcut, not a new wizard state machine: it
+    must reuse the existing sendChatTo('operator', …) pipeline exactly
+    like the wizard v1 chips do, and must never call a create API
+    (create_agent / apply_template) directly from the UI — the operator
+    agent drives creation itself, gated on the user's chat confirmation."""
+
+    def test_button_present_in_team_members_tab(self):
+        assert "hireForTeam(activeTeam)" in _INDEX_HTML
+        assert "Hire teammate" in _INDEX_HTML
+
+    def test_handler_declared_in_app_js(self):
+        assert "hireForTeam(team)" in _APP_JS_TEXT
+
+    def test_handler_reuses_send_chat_to_pipeline(self):
+        idx = _APP_JS_TEXT.index("hireForTeam(team)")
+        block = _APP_JS_TEXT[idx:idx + 900]
+        assert "this.sendChatTo('operator'" in block
+
+    def test_handler_never_calls_a_create_api_directly(self):
+        """The wizard UI must never call create_agent/apply_template itself
+        — only the operator agent (via its own tools) creates anything."""
+        idx = _APP_JS_TEXT.index("hireForTeam(team)")
+        block = _APP_JS_TEXT[idx:idx + 900]
+        assert "/agents" not in block
+        assert "apply_template" not in block
+        assert "fetch(" not in block
+
+    def test_seeded_message_names_the_team_and_hiring_flow(self):
+        """Pins the substance of the seeded prompt: review team goals +
+        members, draft job descriptions, template as starting resume, role
+        from the job description, wait for confirmation before creating."""
+        idx = _APP_JS_TEXT.index("hireForTeam(team)")
+        block = _APP_JS_TEXT[idx:idx + 900]
+        assert "I want to hire for team ${team}" in block
+        assert "north_star / success criteria" in block
+        assert "job" in block and "descriptions" in block
+        assert "starting resume" in block
+        assert "set role from the job description" in block
+        assert "wait for my confirmation before" in block
+
+    def test_button_lives_in_team_hub_members_tab(self):
+        """The button must render inside the members sub-tab (team
+        selected), not as a fleet-wide/global action."""
+        idx = _INDEX_HTML.index("teamHubTab === 'members'\" x-cloak")
+        block = _INDEX_HTML[idx:idx + 600]
+        assert "hireForTeam(activeTeam)" in block

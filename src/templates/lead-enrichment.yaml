@@ -175,9 +175,6 @@ agents:
       # Navigates login-gated sources (e.g. LinkedIn) — may need to ask
       # the user for a service credential via request_credential().
       can_request_user_credentials: true
-    resources:
-      memory_limit: "768m"
-      cpu_limit: 0.5
     budget:
       daily_usd: 15.0
       monthly_usd: 300.0
@@ -276,9 +273,6 @@ agents:
       blackboard_write: ["leads/exports/*", "tasks/*", "status/*"]
       can_publish: ["export_ready"]
       can_subscribe: ["lead_enriched", "batch_complete"]
-    resources:
-      memory_limit: "512m"
-      cpu_limit: 0.5
     budget:
       daily_usd: 2.0
       monthly_usd: 40.0

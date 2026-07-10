@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import yaml
 
 
 @pytest.fixture(autouse=True)
@@ -648,8 +649,54 @@ class TestMeshFleetApplyEndpoint:
         cm.start_agent.assert_not_called()
 
     @patch.dict("os.environ", {"OPENLEGION_MAX_AGENTS": "10"})
-    def test_apply_role_override_field_rejected(self):
-        """`role` is intentionally NOT in the allowed fields → 400."""
+    def test_apply_role_override_field_accepted(self, tmp_path, monkeypatch):
+        """`role` is a hiring-wizard-v2 unfreeze (§8 #16b): a per-slot
+        override lands in agents.yaml AND the started container's env
+        (AGENT_ROLE), letting a hire's job-description-derived role win
+        over the template slot's default role."""
+        from fastapi.testclient import TestClient
+
+        # Isolate agents.yaml/permissions.json for this test — other tests
+        # in this class share the real repo config (gitignored, tolerated
+        # because they never assert on `created` contents), but this test
+        # DOES assert on-disk content, so it needs a clean slate rather
+        # than depending on whether a prior test run already created
+        # (and thus template-skipped) the "assistant" slot.
+        import src.cli.config as cli_config
+
+        monkeypatch.setattr(cli_config, "AGENTS_FILE", tmp_path / "agents.yaml")
+        monkeypatch.setattr(cli_config, "PERMISSIONS_FILE", tmp_path / "permissions.json")
+
+        app, cm, _ = self._make_app(existing_agents={"operator": "http://localhost:8400"})
+        client = TestClient(app)
+        resp = client.post(
+            "/mesh/fleet/apply",
+            json={
+                "template": "starter",
+                "agent_overrides": {"assistant": {"role": "Senior support specialist"}},
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        created_ids = [c["agent_id"] for c in data["created"]]
+        assert "assistant" in created_ids
+        assert next(c for c in data["created"] if c["agent_id"] == "assistant")["role"] == (
+            "Senior support specialist"
+        )
+
+        cm.start_agent.assert_called_once()
+        _, kwargs = cm.start_agent.call_args
+        assert kwargs["role"] == "Senior support specialist"
+
+        with open(cli_config.AGENTS_FILE) as f:
+            agents_cfg = yaml.safe_load(f)
+        assert agents_cfg["agents"]["assistant"]["role"] == "Senior support specialist"
+
+    @patch.dict("os.environ", {"OPENLEGION_MAX_AGENTS": "10"})
+    def test_apply_still_unknown_override_field_rejected(self):
+        """A field that was never allowed (and still isn't) stays a 400 —
+        `role` moving to the allowed set doesn't loosen the unknown-field
+        gate for everything else."""
         from fastapi.testclient import TestClient
 
         app, cm, _ = self._make_app(existing_agents={"operator": "http://localhost:8400"})
@@ -658,14 +705,13 @@ class TestMeshFleetApplyEndpoint:
             "/mesh/fleet/apply",
             json={
                 "template": "starter",
-                "agent_overrides": {"assistant": {"role": "renamed-role"}},
+                "agent_overrides": {"assistant": {"nickname": "renamed"}},
             },
         )
         assert resp.status_code == 400
         detail = resp.json()["detail"]
-        assert "role" in detail
-        # Allowed list should be present in the error
-        assert "soul" in detail or "instructions" in detail
+        assert "nickname" in detail
+        assert "role" in detail  # allowed list is echoed in the error
         cm.start_agent.assert_not_called()
 
     @patch.dict("os.environ", {"OPENLEGION_MAX_AGENTS": "10"})

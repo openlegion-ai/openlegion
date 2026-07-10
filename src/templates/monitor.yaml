@@ -74,9 +74,6 @@ agents:
       # Checks login-gated sources via browser — may need to ask the user
       # for a service credential.
       can_request_user_credentials: true
-    resources:
-      memory_limit: "512m"
-      cpu_limit: 0.5
     budget:
       daily_usd: 3.0
       monthly_usd: 60.0
@@ -137,9 +134,6 @@ agents:
       blackboard_write: ["analysis/*", "tasks/*", "status/*"]
       can_publish: ["analysis_complete"]
       can_subscribe: ["alert_triggered"]
-    resources:
-      memory_limit: "512m"
-      cpu_limit: 0.5
     budget:
       daily_usd: 5.0
       monthly_usd: 100.0

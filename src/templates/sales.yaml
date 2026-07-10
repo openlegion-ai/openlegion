@@ -63,9 +63,6 @@ agents:
       # Researches login-gated company/contact sources (e.g. LinkedIn) —
       # may need to ask the user for a service credential.
       can_request_user_credentials: true
-    resources:
-      memory_limit: "512m"
-      cpu_limit: 0.5
     budget:
       daily_usd: 5.0
       monthly_usd: 100.0
@@ -130,9 +127,6 @@ agents:
       blackboard_write: ["leads/*/qualification", "tasks/*", "status/*"]
       can_publish: ["qualified", "disqualified"]
       can_subscribe: ["research_complete"]
-    resources:
-      memory_limit: "512m"
-      cpu_limit: 0.5
     budget:
       daily_usd: 3.0
       monthly_usd: 60.0
@@ -198,9 +192,6 @@ agents:
       blackboard_write: ["leads/*/outreach", "tasks/*", "status/*"]
       can_publish: ["outreach_ready"]
       can_subscribe: ["qualified"]
-    resources:
-      memory_limit: "512m"
-      cpu_limit: 0.5
     budget:
       daily_usd: 3.0
       monthly_usd: 60.0

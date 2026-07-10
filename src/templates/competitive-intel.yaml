@@ -225,10 +225,6 @@ agents:
       # to ask the user for a service credential.
       can_request_user_credentials: true
 
-    resources:
-      memory_limit: "768m"
-      cpu_limit: 0.5
-
     budget:
       daily_usd: 10.0
       monthly_usd: 200.0

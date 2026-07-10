@@ -101,6 +101,3 @@ agents:
       daily_usd: 5.0
       monthly_usd: 100.0
 
-    resources:
-      memory_limit: "512m"
-      cpu_limit: 0.5

@@ -151,9 +151,6 @@ agents:
       # Reads login-gated social platforms via browser — may need to ask
       # the user for a service credential.
       can_request_user_credentials: true
-    resources:
-      memory_limit: "512m"
-      cpu_limit: 0.5
     budget:
       daily_usd: 4.0
       monthly_usd: 80.0
@@ -300,9 +297,6 @@ agents:
       blackboard_write: ["drafts/*", "tasks/*", "status/*"]
       can_publish: ["draft_complete"]
       can_subscribe: ["signal_found"]
-    resources:
-      memory_limit: "512m"
-      cpu_limit: 0.5
     budget:
       daily_usd: 6.0
       monthly_usd: 120.0
