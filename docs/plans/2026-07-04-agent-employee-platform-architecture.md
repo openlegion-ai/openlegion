@@ -1345,6 +1345,31 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   re-deferred with a recorded gate if the design balloons) → phase exit + consolidated
   end-of-phase review (the Phase-3 pattern that caught two CRITICALs).
 
+- **✅ Landed — Phase-4 unit 1: Lead role core (#1218; §8 #12/#13/#14 implemented as ratified —
+  zero permission elevation).** Nullable `teams.lead_agent_id` (the per-team-singleton column
+  shape) with `set_lead` membership validation (operator rejected) and SAME-transaction integrity
+  clears on `remove_member`/`remove_agent`/`add_member`-eviction; `led_team` reverse lookup.
+  Assign/unassign is operator-or-internal (`PUT`/`DELETE /mesh/teams/{name}/lead` + dashboard
+  equivalents); listings surface the lead; Team Hub shows a Lead badge + controls (default-contact
+  is UI copy only). Advisory verdicts: `drive_reviews` gains `lead_verdict`/`_note`/`_at`;
+  `POST .../reviews/{id}/verdict` is agent-reachable but LEAD-ONLY (non-lead member, other team's
+  lead, and operator-as-itself all 403; open reviews only; notes sanitized + capped) — the
+  merge/reject endpoints and their operator gates have ZERO changed lines and the pinned
+  `test_merge_reject_are_operator_only` is unmodified; the `team_drive` tool gains
+  `record_verdict` and `list_reviews` surfaces verdicts sanitized. Lead plate: a mesh-side
+  `lead_reviews_fn` probe (wired like `goals_fn`) surfaces pending verdicts on the lead's agenda —
+  one cheap lookup for non-leads. Standup: `CronJob.post_to_channel` (team id) makes the executor
+  post a message-job's non-empty dispatch response into the team channel thread host-side (the
+  writers-host-side-only invariant survives); the field is excluded from `_UPDATABLE_FIELDS` and
+  UNREACHABLE from every agent-facing cron surface (explicit-field extraction on create; pinned by
+  dedicated tests); `ensure_standup_job` (dedup by team, repoints on lead change, per-team
+  `settings.standup_schedule`, default 09:30 vs the 09:00 summary) + `_reconcile_standup_jobs`
+  boot reconcile; lead assign/unassign/team-delete sync live. Constitution amendments landed:
+  Constraint #1 → "no *router* hierarchy" wording, Constraint #12 → lead carve-out sentence, with
+  a new CLAUDE.md pinning test. **Recorded deviation:** live standup-cron sync hooks the dedicated
+  lead endpoints + team delete; a lead cleared via the team-membership endpoints is pruned by the
+  boot reconcile. 92 new tests; full local suite 8448 passed / 26 skipped / 0 failed.
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|
@@ -1389,6 +1414,7 @@ findings, if any, land as a follow-up fix PR recorded in this ledger.
 | PR | Unit | CI |
 |---|---|---|
 | #1217 | Phase-4 pre-decisions ratified (§8 #12–#16) + build order | merged |
+| #1218 | Lead role core — designation, advisory verdicts, host-published standup (unit 1) | merged |
 
 ### YOU ARE HERE → Phase 4
 
