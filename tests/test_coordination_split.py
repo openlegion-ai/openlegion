@@ -482,11 +482,19 @@ class TestKindMigration:
 
 class TestIntrospectCoordinationBlock:
     def test_budget_section_includes_coordination(self, tmp_path, monkeypatch):
+        import src.cli.config as _cfg
         from src.host.mesh import Blackboard, MessageRouter, PubSub
         from src.host.permissions import PermissionMatrix
         from src.host.server import create_mesh_app
 
         monkeypatch.delenv("OPENLEGION_COORDINATION_DAILY_CAP_USD", raising=False)
+        # Finding 4(a): the coordination sub-dict is surfaced ONLY when a
+        # utility model is configured (otherwise the tier is structurally
+        # inert). Configure one so this correct-semantics case holds.
+        monkeypatch.setattr(
+            _cfg, "_load_config",
+            lambda *a, **k: {"llm": {"utility_model": UTILITY_MODEL}},
+        )
         bb = Blackboard(db_path=str(tmp_path / "bb.db"))
         perms = PermissionMatrix.__new__(PermissionMatrix)
         perms.permissions = {}
@@ -506,5 +514,36 @@ class TestIntrospectCoordinationBlock:
         assert budget["coordination"]["daily_used"] > 0
         # The work budget excludes the coordination row (enforcement split).
         assert budget["daily_used"] == 0.0
+        bb.close()
+        tracker.close()
+
+    def test_no_utility_model_omits_coordination(self, tmp_path, monkeypatch):
+        """Finding 4(a): with no ``llm.utility_model``, nothing can classify
+        as coordination (every call bills WORK), so the introspect budget
+        omits the ``coordination`` sub-dict entirely — no misleading
+        permanently-$0.00 tier in the runtime context."""
+        import src.cli.config as _cfg
+        from src.host.mesh import Blackboard, MessageRouter, PubSub
+        from src.host.permissions import PermissionMatrix
+        from src.host.server import create_mesh_app
+
+        monkeypatch.delenv("OPENLEGION_COORDINATION_DAILY_CAP_USD", raising=False)
+        monkeypatch.setattr(_cfg, "_load_config", lambda *a, **k: {"llm": {}})
+        bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+        perms = PermissionMatrix.__new__(PermissionMatrix)
+        perms.permissions = {}
+        router = MessageRouter(permissions=perms, agent_registry={})
+        tracker = CostTracker(db_path=str(tmp_path / "costs.db"))
+        tracker.track("alice", UTILITY_MODEL, 1000, 500, kind="coordination")
+
+        app = create_mesh_app(bb, PubSub(), router, perms, cost_tracker=tracker)
+        response = TestClient(app).get(
+            "/mesh/introspect",
+            params={"section": "budget"},
+            headers={"X-Agent-ID": "alice"},
+        )
+        assert response.status_code == 200
+        budget = response.json()["budget"]
+        assert "coordination" not in budget
         bb.close()
         tracker.close()

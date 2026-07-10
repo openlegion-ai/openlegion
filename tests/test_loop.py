@@ -2081,6 +2081,56 @@ class TestFormatRuntimeContext:
         result = AgentLoop._format_runtime_context(data)
         assert "Coordination budget" not in result
 
+    def test_coordination_budget_exceeded_flag(self):
+        """Finding 3: an exhausted coordination tier ($2.00/$2.00) is flagged
+        [EXCEEDED] — matching the work-line convention — so it can't read as
+        healthy headroom."""
+        data = {
+            "budget": {
+                "allowed": True,
+                "daily_used": 1.00,
+                "daily_limit": 5.00,
+                "monthly_used": 3.00,
+                "monthly_limit": 50.00,
+                "coordination": {"daily_used": 2.00, "daily_limit": 2.00},
+            },
+        }
+        result = AgentLoop._format_runtime_context(data)
+        assert "$2.00/$2.00 [EXCEEDED]" in result
+
+    def test_coordination_budget_kill_switch_flag(self):
+        """Finding 3: a kill-switched coordination tier (limit <= 0) is flagged
+        BLOCKED, so '$0.00/$0.00' can't read as healthy headroom."""
+        data = {
+            "budget": {
+                "allowed": True,
+                "daily_used": 1.00,
+                "daily_limit": 5.00,
+                "monthly_used": 3.00,
+                "monthly_limit": 50.00,
+                "coordination": {"daily_used": 0.00, "daily_limit": 0.00},
+            },
+        }
+        result = AgentLoop._format_runtime_context(data)
+        assert "$0.00/$0.00 [BLOCKED: coordination kill-switch]" in result
+
+    def test_coordination_budget_healthy_no_flag(self):
+        """Finding 3: a coordination tier with headroom stays bare — no flag."""
+        data = {
+            "budget": {
+                "allowed": True,
+                "daily_used": 1.00,
+                "daily_limit": 5.00,
+                "monthly_used": 3.00,
+                "monthly_limit": 50.00,
+                "coordination": {"daily_used": 0.10, "daily_limit": 2.00},
+            },
+        }
+        result = AgentLoop._format_runtime_context(data)
+        assert "$0.10/$2.00" in result
+        assert "[EXCEEDED]" not in result
+        assert "BLOCKED" not in result
+
 
 # === Solo Agent Blackboard Surface (solo = team-of-one, ratified #5) ===
 
@@ -3065,6 +3115,184 @@ async def test_heartbeat_drains_steer_queue():
     user_content = captured_messages[0][0]["content"]
     assert "Pending Coordination Signals" in user_content
     assert "coordination signal from writer" in user_content
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_holds_chat_lock_blocks_concurrent_chat():
+    """Finding 1 (B1 single-lane): execute_heartbeat holds ``_chat_lock`` for
+    its whole agenda turn, so a concurrent ``chat()`` cannot run a second LLM
+    turn against the shared state mid-heartbeat — it blocks on the lock until
+    the heartbeat finishes."""
+    loop = _make_loop([])
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+
+    hb_in_llm = asyncio.Event()
+    release_hb = asyncio.Event()
+
+    async def _blocking_llm(*, system, messages, **kw):
+        hb_in_llm.set()
+        await release_hb.wait()
+        return LLMResponse(content="turn done", tokens_used=10)
+
+    loop.llm.chat = AsyncMock(side_effect=_blocking_llm)
+
+    hb = asyncio.ensure_future(loop.execute_heartbeat("tick"))
+    await asyncio.wait_for(hb_in_llm.wait(), timeout=2.0)
+
+    # Heartbeat is mid-turn: the lane is held and the agent is working.
+    assert loop._chat_lock.locked()
+    assert loop.state == "working"
+
+    # A concurrent chat must NOT proceed while the heartbeat holds the lane.
+    chat_task = asyncio.ensure_future(loop.chat("hi"))
+    await asyncio.sleep(0.05)
+    assert not chat_task.done(), "chat ran concurrently with the heartbeat turn"
+
+    # Release the heartbeat; only now can the chat acquire the lane and run.
+    release_hb.set()
+    hb_result = await asyncio.wait_for(hb, timeout=2.0)
+    chat_result = await asyncio.wait_for(chat_task, timeout=2.0)
+    assert hb_result["outcome"] == "ok"
+    assert chat_result["response"] == "turn done"
+    assert loop.state == "idle"
+    assert not loop._chat_lock.locked()
+
+
+@pytest.mark.asyncio
+async def test_drain_steer_heartbeat_consumes_reply_future():
+    """Finding 2: a heartbeat-mode drain resolves a chat reply-future with
+    ``None`` and consumes the entry — never injected into the agenda prompt,
+    never folded into ``_turn_steer_futures``. Plain 2-tuples still inject."""
+    loop = _make_loop()
+    fut = asyncio.get_running_loop().create_future()
+    await loop._steer_queue.put(("chat message", False, fut))
+    await loop._steer_queue.put(("wake signal", True))
+
+    drained = loop._drain_steer_messages(heartbeat=True)
+
+    assert drained == [("wake signal", True)]
+    assert fut.done() and fut.result() is None
+    assert loop._turn_steer_futures == []
+
+
+@pytest.mark.asyncio
+async def test_drain_steer_chat_mode_still_folds_future():
+    """Finding 2 regression guard: the non-heartbeat drain keeps folding reply
+    futures into ``_turn_steer_futures`` (chat/task turns answer them)."""
+    loop = _make_loop()
+    fut = asyncio.get_running_loop().create_future()
+    await loop._steer_queue.put(("chat message", False, fut))
+
+    drained = loop._drain_steer_messages()
+
+    assert drained == [("chat message", False)]
+    assert loop._turn_steer_futures == [fut]
+    assert not fut.done()
+
+
+@pytest.mark.asyncio
+async def test_sweep_heartbeat_steer_futures():
+    """Finding 2 sweep (race-proof layer): live reply futures left in the
+    queue resolve ``None`` and are consumed; plain entries stay queued for the
+    next-turn catch-all; any stray folded future is cleared."""
+    loop = _make_loop()
+    live = asyncio.get_running_loop().create_future()
+    await loop._steer_queue.put(("late chat", False, live))
+    await loop._steer_queue.put(("late wake", True))
+    stray = asyncio.get_running_loop().create_future()
+    loop._turn_steer_futures = [stray]
+
+    loop._sweep_heartbeat_steer_futures()
+
+    assert live.done() and live.result() is None
+    assert stray.done() and stray.result() is None
+    assert loop._turn_steer_futures == []
+    # The plain 2-tuple is left on the queue for the normal next-turn drain.
+    assert loop._drain_steer_messages() == [("late wake", True)]
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_steer_reply_future_resolves_none_not_timeout():
+    """Finding 2 mode (a): a chat wait-reply steer that lands during a live
+    heartbeat turn is consumed (future resolved ``None`` → followup fallback),
+    NOT injected into the agenda prompt and NOT left to time out."""
+    loop = _make_loop([])
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+
+    hb_in_llm = asyncio.Event()
+    release_hb = asyncio.Event()
+    captured = []
+
+    async def _hb_llm(*, system, messages, **kw):
+        captured.append(messages)
+        hb_in_llm.set()
+        await release_hb.wait()
+        return LLMResponse(content="agenda answer", tokens_used=10)
+
+    loop.llm.chat = AsyncMock(side_effect=_hb_llm)
+
+    hb = asyncio.ensure_future(loop.execute_heartbeat("tick"))
+    await asyncio.wait_for(hb_in_llm.wait(), timeout=2.0)
+
+    # Steer arrives AFTER the heartbeat's drain (mid-LLM) — the sweep path.
+    assert loop.state == "working"
+    steer = asyncio.ensure_future(
+        loop.inject_steer_and_wait("hi from dashboard", timeout=5.0),
+    )
+    await asyncio.sleep(0)
+
+    release_hb.set()
+    await asyncio.wait_for(hb, timeout=2.0)
+    injected, reply = await asyncio.wait_for(steer, timeout=2.0)
+
+    # Promptly not-injected (mesh dispatches its own followup), not a timeout.
+    assert (injected, reply) == (False, None)
+    assert loop._turn_steer_futures == []
+    # The chat text was never folded into the agenda prompt.
+    assert "hi from dashboard" not in captured[0][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_steer_no_cross_turn_reply_bleed():
+    """Finding 2 mode (b): a heartbeat-era chat steer is settled by the
+    heartbeat itself (to ``None``), so a later, unrelated chat turn's own
+    answer can never bleed into that stranded caller's future."""
+    loop = _make_loop([])
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+
+    hb_in_llm = asyncio.Event()
+    release_hb = asyncio.Event()
+
+    async def _hb_llm(*, system, messages, **kw):
+        hb_in_llm.set()
+        await release_hb.wait()
+        return LLMResponse(content="agenda answer", tokens_used=10)
+
+    loop.llm.chat = AsyncMock(side_effect=_hb_llm)
+
+    hb = asyncio.ensure_future(loop.execute_heartbeat("tick"))
+    await asyncio.wait_for(hb_in_llm.wait(), timeout=2.0)
+
+    steer = asyncio.ensure_future(
+        loop.inject_steer_and_wait("what is the ETA on my order?", timeout=5.0),
+    )
+    await asyncio.sleep(0)
+
+    release_hb.set()
+    await asyncio.wait_for(hb, timeout=2.0)
+    injected, reply = await asyncio.wait_for(steer, timeout=2.0)
+    assert (injected, reply) == (False, None)
+    assert loop._turn_steer_futures == []
+
+    # A later, unrelated chat turn must NOT deliver its answer to the already
+    # settled steer caller.
+    loop.llm.chat = AsyncMock(
+        return_value=LLMResponse(content="deploying the staging build", tokens_used=5),
+    )
+    result = await loop.chat("unrelated question")
+    assert result["response"] == "deploying the staging build"
+    # The steer caller's result is unchanged — no cross-turn reply bleed.
+    assert (injected, reply) == (False, None)
 
 
 @pytest.mark.asyncio
