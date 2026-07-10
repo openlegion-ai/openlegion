@@ -134,6 +134,15 @@ KNOWN_FLAGS: dict[str, str] = {
     "CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH": "per-agent USD cap",
     "CAPTCHA_COST_LIMIT_USD_PER_TENANT_MONTH": "per-tenant USD cap",
     "CAPTCHA_DISABLED": "true | false (default false)",
+    "CAPTCHA_INHOUSE_SLIDER_ENABLED":
+        "true | false (DEFAULT FALSE) — opt-in in-house solve of the "
+        "DataDome image-slider puzzle (§11.5). When enabled AND the trusted "
+        "X11 input path is available, the service detects the solvable "
+        "slider, computes the gap offset via pure CV, and drives the "
+        "existing human-like X11 drag — no provider, no cost. Every failure "
+        "path (flag off, no X11, low confidence, exception) falls through to "
+        "the same request_captcha_help escalation as the behavioral kinds, "
+        "so flag-off behavior is byte-for-byte unchanged.",
     "CAPTCHA_SOLVER_PROXY_TYPE": "http | https | socks4 | socks5",
     "CAPTCHA_SOLVER_PROXY_ADDRESS": "dedicated solver proxy host",
     "CAPTCHA_SOLVER_PROXY_PORT": "int",
