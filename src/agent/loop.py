@@ -880,6 +880,16 @@ class AgentLoop:
                 f"/${budget.get('monthly_limit', 0):.2f}"
                 + ("" if allowed else " [EXCEEDED]")
             )
+            # B2 breakout (Phase-3 unit 1): coordination-tier headroom (agenda
+            # ticks, summaries) — separate from the work ledger above, so
+            # initiative decisions can weigh it independently (Phase-3 unit 4).
+            coordination = budget.get("coordination")
+            if coordination:
+                lines.append(
+                    f"- Coordination budget (agenda/summaries, separate from "
+                    f"work above): daily ${coordination.get('daily_used', 0):.2f}"
+                    f"/${coordination.get('daily_limit', 0):.2f}"
+                )
 
         if not exclude_fleet:
             fleet = data.get("fleet")
@@ -2499,8 +2509,11 @@ class AgentLoop:
                     f"- Follow HEARTBEAT.md strictly. Do not infer tasks from prior sessions.\n"
                     f"{inbox_line}"
                     f"- You may create goal-directed work toward your goals "
-                    f"(hand_off to yourself) when nothing else is pending. Work "
-                    f"within your budget.\n"
+                    f"(hand_off to yourself) once your plate has capacity — "
+                    f"never let it crowd out pending tasks, inbox events, or "
+                    f"probe alerts. Check the Budget line in Runtime Context "
+                    f"below (work AND coordination) before adding new "
+                    f"self-directed work.\n"
                     f"- If your plate is empty and nothing advances your goals, "
                     f"end the turn without making tool calls.\n"
                     f"- You have max {max_iters} iterations.\n"

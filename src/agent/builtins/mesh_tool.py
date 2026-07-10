@@ -483,7 +483,9 @@ async def save_artifact(
         "2. MESSAGE MODE (message set) — wake you with a message each tick for LLM processing. "
         "Use when the action needs reasoning. Costs API credits.\n"
         "3. HEARTBEAT MODE (heartbeat=true) — update your autonomous wakeup schedule. "
-        "Only change if the USER explicitly asks.\n"
+        "Budget-governed: tighten the interval when your plate is full and your "
+        "budget has headroom, loosen it when your plate is thin or budget is tight. "
+        "You do not need the user to ask.\n"
         "Schedules: cron ('0 9 * * 1-5') or intervals ('every 30m'). "
         "tool_name and message are mutually exclusive."
     ),
@@ -522,7 +524,10 @@ async def save_artifact(
             "type": "boolean",
             "description": (
                 "If true, updates your autonomous heartbeat wakeup schedule. "
-                "Only change if the USER explicitly asks — each heartbeat costs API credits."
+                "Each tick costs coordination budget, so this is budget-governed, not "
+                "user-gated: shorten the interval when your plate/goals justify more "
+                "frequent ticks and your coordination budget has headroom; lengthen it "
+                "when your plate is thin or your budget is tight."
             ),
             "default": False,
         },

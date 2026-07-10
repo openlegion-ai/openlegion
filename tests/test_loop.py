@@ -2046,6 +2046,41 @@ class TestFormatRuntimeContext:
         result = AgentLoop._format_runtime_context(data)
         assert "\u200b" not in result
 
+    def test_coordination_budget_breakout(self):
+        """Phase-3 unit 4: the introspect budget section's ``coordination``
+        sub-dict (unit 1) is surfaced as its own line, separate from the
+        work ledger, so the agenda turn can weigh both independently."""
+        data = {
+            "budget": {
+                "allowed": True,
+                "daily_used": 0.50,
+                "daily_limit": 5.00,
+                "monthly_used": 3.00,
+                "monthly_limit": 50.00,
+                "coordination": {"daily_used": 0.10, "daily_limit": 2.00},
+            },
+        }
+        result = AgentLoop._format_runtime_context(data)
+        assert "Budget: daily $0.50/$5.00" in result
+        assert "Coordination budget" in result
+        assert "$0.10/$2.00" in result
+
+    def test_no_coordination_key_omits_coordination_line(self):
+        """A budget dict without the coordination sub-dict (e.g. an older
+        mesh, or the tier disabled) renders no coordination line \u2014 purely
+        additive, never assumed present."""
+        data = {
+            "budget": {
+                "allowed": True,
+                "daily_used": 0.50,
+                "daily_limit": 5.00,
+                "monthly_used": 3.00,
+                "monthly_limit": 50.00,
+            },
+        }
+        result = AgentLoop._format_runtime_context(data)
+        assert "Coordination budget" not in result
+
 
 # === Solo Agent Blackboard Surface (solo = team-of-one, ratified #5) ===
 
@@ -2541,6 +2576,59 @@ async def test_heartbeat_prompt_uses_agenda_copy():
     system_prompt = loop.llm.chat.call_args.kwargs.get("system", "")
     assert "Review your plate" in system_prompt
     assert "HEARTBEAT_OK" not in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_prompt_directs_goal_driven_self_tasking():
+    """Phase-3 unit 4: the agenda turn's Operating Rules direct the agent to
+    self-task toward its standing goals (hand_off to yourself) only once its
+    plate has capacity, and to weigh that against its budget first."""
+    loop = _make_loop()
+    loop.llm.chat = AsyncMock(return_value=LLMResponse(content="done", tokens_used=10))
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+    loop.workspace = MagicMock()
+    loop.workspace.get_bootstrap_content = MagicMock(return_value="")
+    loop.workspace.get_learnings_context = MagicMock(return_value="")
+    loop.workspace.load_heartbeat_rules = MagicMock(return_value="")
+    loop.workspace.append_daily_log = MagicMock()
+    loop.workspace.append_activity = MagicMock()
+
+    await loop.execute_heartbeat("Check stuff")
+    system_prompt = loop.llm.chat.call_args.kwargs.get("system", "")
+    assert "hand_off to yourself" in system_prompt
+    assert "plate has capacity" in system_prompt
+    assert "Budget" in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_prompt_surfaces_coordination_budget():
+    """Phase-3 unit 4: the agenda turn's Runtime Context surfaces the
+    introspect ``coordination`` sub-dict (unit 1) alongside the work budget,
+    so the agent can prioritize initiative against remaining budget."""
+    loop = _make_loop()
+    loop.llm.chat = AsyncMock(return_value=LLMResponse(content="done", tokens_used=10))
+    loop.mesh_client.introspect = AsyncMock(return_value={
+        "budget": {
+            "allowed": True,
+            "daily_used": 1.0,
+            "daily_limit": 10.0,
+            "monthly_used": 5.0,
+            "monthly_limit": 100.0,
+            "coordination": {"daily_used": 0.25, "daily_limit": 2.0},
+        },
+    })
+    loop.workspace = MagicMock()
+    loop.workspace.get_bootstrap_content = MagicMock(return_value="")
+    loop.workspace.get_learnings_context = MagicMock(return_value="")
+    loop.workspace.load_heartbeat_rules = MagicMock(return_value="")
+    loop.workspace.append_daily_log = MagicMock()
+    loop.workspace.append_activity = MagicMock()
+
+    await loop.execute_heartbeat("Check stuff")
+    system_prompt = loop.llm.chat.call_args.kwargs.get("system", "")
+    assert "Budget: daily $1.00/$10.00" in system_prompt
+    assert "Coordination budget" in system_prompt
+    assert "$0.25/$2.00" in system_prompt
 
 
 @pytest.mark.asyncio
