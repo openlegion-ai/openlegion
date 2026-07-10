@@ -59,7 +59,7 @@ agents:
       Call check_inbox() for requests from teammates.
       Compare current state against memory. Write alerts for real changes
       and use hand_off(to="analyst") to wake the analyst.
-      If nothing changed, respond HEARTBEAT_OK immediately.
+      If nothing changed, end the checkup without further tool calls.
       Call update_status() with your current state.
 
       ## Monitoring targets

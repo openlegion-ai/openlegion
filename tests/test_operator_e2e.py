@@ -605,21 +605,30 @@ class TestEnvOverridesIsolation:
 
 
 class TestHeartbeatSkipLogic:
-    """Verify heartbeat skips when no rules are set."""
+    """Verify heartbeat runs the agenda turn once dispatched; the only
+    remaining skip is agent_busy (the goal-gated no_heartbeat_rules skip
+    was deleted in Phase-3 unit 2 — the cron plate gate decides ticks)."""
 
     @pytest.mark.asyncio
-    async def test_heartbeat_skips_empty_rules(self):
-        """Heartbeat should skip when HEARTBEAT.md has no actionable content."""
-        loop = _make_loop()
+    async def test_heartbeat_runs_agenda_turn_empty_rules(self):
+        """Empty HEARTBEAT.md + no goals still runs the agenda turn (no
+        {"skipped": "no_heartbeat_rules"}) — the plate gate already decided."""
+        loop = _make_loop(llm_responses=[LLMResponse(content="done", tokens_used=10)])
         ws = MagicMock()
-        # Return content with only headings, no rules
+        # Content with only headings, no rules.
         ws.load_heartbeat_rules = MagicMock(return_value="## Heartbeat Rules\n\n")
+        ws.get_bootstrap_content = MagicMock(return_value="")
+        ws.get_learnings_context = MagicMock(return_value="")
+        ws.append_daily_log = MagicMock()
+        ws.append_activity = MagicMock()
         loop.workspace = ws
         loop._fetch_goals = AsyncMock(return_value=None)
+        loop._fetch_introspect_cached = AsyncMock(return_value=None)
+        loop._fetch_fleet_roster = AsyncMock(return_value=[])
 
         result = await loop.execute_heartbeat("Run check")
-        assert result.get("skipped") is True
-        assert result.get("reason") == "no_heartbeat_rules"
+        assert not result.get("skipped", False)
+        assert result.get("outcome") == "ok"
 
     @pytest.mark.asyncio
     async def test_heartbeat_skips_when_busy(self):

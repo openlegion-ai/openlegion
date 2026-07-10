@@ -112,7 +112,7 @@ agents:
          b. hand_off(to="writer", summary="signal found: {platform}/{post_slug}", data="signal JSON")
             Include: url, title, platform, score, signal_type, post_content
             (first 500 chars), top_comments (first 3), posted_at, upvotes
-      8. If nothing scores 6+: respond HEARTBEAT_OK
+      8. If nothing scores 6+: end the checkup
       9. Only notify_user if 3+ signals found in one cycle (batch summary)
       10. Call update_status() with your current state.
 
@@ -129,7 +129,7 @@ agents:
       Call check_inbox() for requests from teammates.
       Track processed post IDs in memory to avoid duplicates.
       Only surface signals scoring 6+ (see scoring criteria in INSTRUCTIONS.md).
-      If nothing qualifies, respond HEARTBEAT_OK immediately.
+      If nothing qualifies, end the checkup without further tool calls.
       Call update_status() with your current state.
 
       Rotate through different competitors and query types each cycle — don't

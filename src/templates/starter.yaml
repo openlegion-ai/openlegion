@@ -82,7 +82,7 @@ agents:
       2. If you have autonomous work (monitoring, scheduled tasks), execute it
       3. Use notify_user to report results of autonomous work
       4. Call update_status() with your current state
-      If nothing requires action, respond HEARTBEAT_OK immediately.
+      If nothing requires action, end the checkup without further tool calls.
 
     soul: |
       You are helpful, proactive, and direct. You execute immediately using your

@@ -74,13 +74,6 @@ class CronJob:
     heartbeat: bool = False
     tool_name: str | None = None    # invoke this tool directly — no LLM involved
     tool_params: str | None = None  # JSON-encoded params dict for the tool
-    # Bug 4 (force_llm): heartbeats normally short-circuit the LLM when
-    # there's nothing actionable (default HEARTBEAT.md, no recent
-    # activity, no probes triggered) to keep cost down. Pipeline-kicker
-    # agents that have no probes and an empty HEARTBEAT.md never wake
-    # under that policy. Setting ``force_llm=True`` makes the cron tick
-    # always dispatch to the LLM regardless of the skip predicate.
-    force_llm: bool = False
     last_run: str | None = None
     next_run: str | None = None
     run_count: int = 0
@@ -91,8 +84,10 @@ class CronScheduler:
     """Persistent cron scheduler that lives in the mesh host.
 
     Heartbeat jobs run cheap deterministic probes before dispatching to
-    the agent. This keeps autonomous operation economical — the LLM is
-    only invoked when there's actually something to act on.
+    the agent, gating the agenda turn on a non-empty plate (pending
+    tasks / inbox events / probe alerts / standing goals). A truly-empty
+    plate never reaches the LLM — the tick stays a ~zero-cost probe-only
+    check.
     """
 
     TICK_INTERVAL = 5
@@ -109,6 +104,8 @@ class CronScheduler:
         heartbeat_dispatch_fn: Callable | None = None,
         event_bus: Any = None,
         health_monitor: Any = None,
+        utility_model_fn: Callable | None = None,
+        goals_fn: Callable | None = None,
     ):
         self.config_path = Path(config_path)
         self.jobs: dict[str, CronJob] = {}
@@ -119,6 +116,15 @@ class CronScheduler:
         self.context_fn = context_fn
         self.heartbeat_dispatch_fn = heartbeat_dispatch_fn
         self._event_bus = event_bus
+        # Plate-gate inputs read mesh-side (never from the untrusted
+        # container). ``utility_model_fn() -> str`` returns the
+        # deployment ``llm.utility_model`` ("" when unset); ``goals_fn(
+        # agent) -> dict | None`` returns the agent's standing-goals
+        # record from the Team store. Both gate the goal-only initiative
+        # escalation: a plate with no actionable items but standing goals
+        # dispatches only when a utility (coordination) model exists.
+        self.utility_model_fn = utility_model_fn
+        self.goals_fn = goals_fn
         # ``health_monitor`` (Fix 5 in seam follow-up): when wired, the
         # scheduler skips dispatch for quarantined agents. Heartbeat
         # cron jobs would otherwise keep ticking on a broken credential.
@@ -338,9 +344,6 @@ class CronScheduler:
     _UPDATABLE_FIELDS = frozenset({
         "schedule", "message", "enabled", "suppress_empty",
         "tool_name", "tool_params",
-        # Bug 4: operator can toggle force_llm on an existing cron job
-        # without recreating it.
-        "force_llm",
     })
 
     async def update_job(self, job_id: str, **kwargs) -> CronJob | None:
@@ -533,25 +536,34 @@ class CronScheduler:
                         is_default = ctx.get("is_default_heartbeat", True)
                         has_activity = ctx.get("has_recent_activity", False)
 
-                        # Skip-LLM optimization: no custom rules, no activity, no probes
-                        # Always dispatch when manually triggered (user expects it to run)
-                        # Bug 4 (force_llm): pipeline-kicker agents (no probes,
-                        # empty HEARTBEAT.md) need the LLM every tick — they're
-                        # the wake signal for whatever pipeline they're driving.
-                        # ``force_llm=True`` short-circuits the skip so the
-                        # operator can opt out of the cost optimization.
-                        if (
-                            not manual
-                            and not job.force_llm
-                            and is_default
-                            and not has_activity
-                            and not triggered
-                        ):
-                            logger.debug(
-                                "Heartbeat %s: skipped (default rules, no activity, "
-                                "no probes) for '%s'", job.id, job.agent,
-                            )
-                            return None
+                        # Plate gate (Phase-3 unit 2): the heartbeat becomes an
+                        # agenda dispatch. ACTIONABLE items — triggered probes
+                        # (disk / pending signals / pending tasks), recent
+                        # activity, or custom HEARTBEAT.md rules — always
+                        # escalate to an agenda turn (work responding to work;
+                        # pre-B2 behavior already dispatched on activity/probes).
+                        # A manual trigger always runs (the user expects it).
+                        #
+                        # With NO actionable items, only standing goals could
+                        # justify a tick. Goal-only initiative REQUIRES the
+                        # coordination tier (§8 #11): without a configured
+                        # utility model, a speculative goal-only tick would bill
+                        # the WORK ledger on the strong model — the exact B2
+                        # starvation vector — so it stays a probe-only tick.
+                        # A truly-empty plate (no actionable items, no goals, or
+                        # no utility model) never reaches the LLM.
+                        actionable = bool(triggered) or has_activity or not is_default
+                        if not manual and not actionable:
+                            has_goals = self._agent_has_goals(job.agent)
+                            utility_ready = self._utility_model_configured()
+                            if not (has_goals and utility_ready):
+                                logger.debug(
+                                    "Heartbeat %s: probe-only tick for '%s' "
+                                    "(no actionable plate; goals=%s, "
+                                    "utility_model=%s)",
+                                    job.id, job.agent, has_goals, utility_ready,
+                                )
+                                return None
 
                         # Build rich heartbeat message. The leading line
                         # carries the current ISO timestamp so the LLM
@@ -575,19 +587,22 @@ class CronScheduler:
                         # the blackboard rule is accurate for it too.
                         hb_rules = (
                             "## Heartbeat Operating Rules (non-negotiable)\n\n"
-                            "1. Be ECONOMICAL. Each heartbeat costs API credits. "
-                            "Only call tools if there is actual work to do.\n"
-                            "2. If nothing needs attention, respond HEARTBEAT_OK "
-                            "immediately. Do NOT make unnecessary tool calls.\n"
+                            "1. This is your workday tick. Review your plate — "
+                            "pending tasks, inbox events, probe alerts, and your "
+                            "standing goals — then prioritize and act on what "
+                            "matters most.\n"
+                            "2. You MAY create goal-directed work toward your "
+                            "standing goals (hand_off to yourself) when nothing "
+                            "else is pending. Your budget is the governor — work "
+                            "the plate until it is clear or the budget is spent.\n"
                             "3. Report what you worked on to the USER via "
                             "notify_user.\n"
                             "4. The blackboard is for sharing data with other "
                             "agents. Do NOT write status updates or progress "
                             "reports there.\n"
-                            "5. Do NOT change "
-                            "your heartbeat schedule to run more frequently unless "
-                            "the user asked you to. More frequent heartbeats "
-                            "waste credits."
+                            "5. If the plate is genuinely empty and nothing "
+                            "advances your goals, end the turn without making "
+                            "tool calls."
                         )
                         sections.append(hb_rules)
 
@@ -620,25 +635,22 @@ class CronScheduler:
 
                         if is_default:
                             sections.append(
-                                "Work toward your goals. If nothing needs attention, "
-                                "respond HEARTBEAT_OK."
+                                "Review your plate and work toward your goals. If "
+                                "the plate is empty and nothing advances your "
+                                "goals, end the turn."
                             )
                         else:
                             sections.append(
-                                "Follow your HEARTBEAT.md rules. If nothing needs "
-                                "attention, respond HEARTBEAT_OK."
+                                "Follow your HEARTBEAT.md rules and work your "
+                                "plate. If nothing needs attention, end the turn."
                             )
 
                         message = "\n\n".join(sections)
 
                         # Use dedicated heartbeat endpoint when available.
-                        # Bug 6 (codex P2 r2): propagate ``force_llm`` to the
-                        # dispatch fn so the agent-side
-                        # ``no_heartbeat_rules`` skip is also bypassed for
-                        # pipeline-kicker agents.
                         if self.heartbeat_dispatch_fn:
                             hb_result = await self.heartbeat_dispatch_fn(
-                                job.agent, message, force_llm=job.force_llm,
+                                job.agent, message,
                             )
                             # hb_result is a structured dict from execute_heartbeat
                             if isinstance(hb_result, dict):
@@ -687,6 +699,38 @@ class CronScheduler:
                 logger.error(f"Cron {job.id} failed: {e}")
                 self._emit_cron_change("error", job)
                 return None
+
+    def _agent_has_goals(self, agent: str) -> bool:
+        """Whether the agent has any standing goals (operator-set).
+
+        Read mesh-side via the same Team-store goals surface the agent's
+        own ``_fetch_goals`` reads — never from the untrusted container.
+        Missing wiring or a read failure degrades to "no goals" so the
+        goal-only escalation stays conservative.
+        """
+        if self.goals_fn is None:
+            return False
+        try:
+            record = self.goals_fn(agent)
+        except Exception as e:
+            logger.debug("goals_fn failed for '%s': %s", agent, e)
+            return False
+        return bool(record and record.get("goals"))
+
+    def _utility_model_configured(self) -> bool:
+        """Whether a deployment utility (coordination) model is configured.
+
+        Reads the same ``llm.utility_model`` config the mesh model pin /
+        proxy classifier use. Unset (or unwired) ⇒ no coordination tier,
+        so goal-only initiative ticks stay probe-only (§8 #11).
+        """
+        if self.utility_model_fn is None:
+            return False
+        try:
+            return bool(self.utility_model_fn())
+        except Exception as e:
+            logger.debug("utility_model_fn failed: %s", e)
+            return False
 
     def _run_heartbeat_probes(self, agent: str) -> list[HeartbeatProbeResult]:
         """Run cheap, deterministic probes before invoking the LLM."""

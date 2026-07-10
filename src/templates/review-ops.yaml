@@ -125,7 +125,7 @@ agents:
         - Average rating trend (if enough data points)
         - List platforms + counts
 
-      If no new reviews: respond HEARTBEAT_OK silently
+      If no new reviews: end the checkup silently
 
     heartbeat: |
       On each heartbeat, check all configured review platforms for new reviews.
@@ -133,7 +133,7 @@ agents:
       Stop extracting when you reach reviews older than your last check date.
       Save all new reviews to blackboard. Use hand_off(to="responder") for 1-3
       star reviews without vendor responses. Update last_check date in memory.
-      If no new reviews: respond HEARTBEAT_OK.
+      If no new reviews: end the checkup.
       Call update_status() with your current state.
 
       ## Configured products

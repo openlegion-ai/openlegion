@@ -463,21 +463,12 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         Task 2b: parse ``X-Origin`` so the heartbeat path stamps the
         contextvar with ``kind="heartbeat"`` for any tool / coordination
         call made during the heartbeat run.
-
-        Bug 6 (codex P2 r2): read the ``x-force-llm`` header set by
-        ``cli/runtime.py:heartbeat_dispatch`` when the cron job has
-        ``force_llm=True``. Without this propagation the cron-side skip
-        is bypassed but the loop-side skip still fires for empty
-        HEARTBEAT.md, leaving pipeline-kicker agents silent.
         """
         from src.shared.trace import current_origin
         origin = _origin_from_mesh_request(request)
-        force_llm = (request.headers.get("x-force-llm") or "").lower() in ("1", "true", "yes")
         token = current_origin.set(origin)
         try:
-            result = await loop.execute_heartbeat(
-                sanitize_for_prompt(msg.message), force_llm=force_llm,
-            )
+            result = await loop.execute_heartbeat(sanitize_for_prompt(msg.message))
         finally:
             current_origin.reset(token)
         return result

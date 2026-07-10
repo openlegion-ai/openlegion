@@ -2337,14 +2337,14 @@ def test_heartbeat_max_iterations_constant():
 async def test_heartbeat_simple_completion():
     """Heartbeat returns structured result when LLM gives final answer."""
     loop = _make_loop()
-    loop.llm.chat = AsyncMock(return_value=LLMResponse(content="HEARTBEAT_OK", tokens_used=50))
+    loop.llm.chat = AsyncMock(return_value=LLMResponse(content="All clear.", tokens_used=50))
     loop.mesh_client.introspect = AsyncMock(return_value={})
 
     result = await loop.execute_heartbeat("Check stuff")
 
     assert result["skipped"] is False
     assert result["outcome"] == "ok"
-    assert result["response"] == "HEARTBEAT_OK"
+    assert result["response"] == "All clear."
     assert result["tokens_used"] == 50
     assert result["duration_ms"] >= 0
     assert result["tools_used"] == []
@@ -2356,7 +2356,7 @@ async def test_heartbeat_injects_tool_history():
     """The heartbeat system prompt carries Recent Tool History — the
     evidence the Self-Evolution nudge tells the agent to act on."""
     loop = _make_loop()
-    loop.llm.chat = AsyncMock(return_value=LLMResponse(content="HEARTBEAT_OK", tokens_used=50))
+    loop.llm.chat = AsyncMock(return_value=LLMResponse(content="All clear.", tokens_used=50))
     loop.mesh_client.introspect = AsyncMock(return_value={})
     loop.memory.get_tool_history = MagicMock(return_value=[
         {"tool_name": "exec", "params_hash": "h1", "outcome": "file.txt",
@@ -2378,7 +2378,7 @@ async def test_heartbeat_injects_tool_history():
 async def test_heartbeat_omits_tool_history_when_empty():
     """No tool outcomes recorded → no Recent Tool History section."""
     loop = _make_loop()  # fixture stubs get_tool_history to []
-    loop.llm.chat = AsyncMock(return_value=LLMResponse(content="HEARTBEAT_OK", tokens_used=50))
+    loop.llm.chat = AsyncMock(return_value=LLMResponse(content="All clear.", tokens_used=50))
     loop.mesh_client.introspect = AsyncMock(return_value={})
 
     result = await loop.execute_heartbeat("Check stuff")
@@ -2468,55 +2468,15 @@ async def test_run_maintenance_loop_invokes_then_cancels(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_skips_when_no_rules():
-    """Heartbeat skips LLM call when HEARTBEAT.md is empty and no goals set."""
-    loop = _make_loop()
-    loop.workspace = MagicMock()
-    loop.workspace.load_heartbeat_rules = MagicMock(return_value="# Heartbeat Rules\n")
-
-    result = await loop.execute_heartbeat("Check stuff")
-    assert result["skipped"] is True
-    assert result["reason"] == "no_heartbeat_rules"
-    loop.llm.chat.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_heartbeat_dispatch_handles_missing_file():
-    """Lazy-create contract: missing HEARTBEAT.md must dispatch like empty.
-
-    After the lazy-bootstrap refactor, ``load_heartbeat_rules()`` returns
-    ``""`` (not a "# Heartbeat Rules\n" stub) when no file exists on disk.
-    ``_is_heartbeat_empty("")`` must still treat that as "no rules",
-    fire the ``no_heartbeat_rules`` skip without crashing, and never
-    reach the LLM. This pins the boundary so a future reader that grows
-    a strict-existence check can't silently break agents created after
-    the lazy-bootstrap change.
+async def test_heartbeat_runs_agenda_turn_with_empty_rules():
+    """Agenda posture (Phase-3 unit 2): the agent-side goal-gated skip is
+    gone. Once the cron plate gate dispatches a tick, an empty HEARTBEAT.md
+    with no goals still runs the agenda turn — no more
+    ``{"skipped": "no_heartbeat_rules"}``.
     """
     loop = _make_loop()
-    loop.workspace = MagicMock()
-    # Simulate the missing-file state — load_heartbeat_rules returns "".
-    loop.workspace.load_heartbeat_rules = MagicMock(return_value="")
-    loop._fetch_goals = AsyncMock(return_value=None)
-
-    result = await loop.execute_heartbeat("Check stuff")
-    assert result["skipped"] is True
-    assert result["reason"] == "no_heartbeat_rules"
-    loop.llm.chat.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_heartbeat_force_llm_bypasses_no_heartbeat_rules_skip():
-    """Bug 6 (codex P2 r2): force_llm=True must reach the LLM even with empty rules.
-
-    Pipeline-kicker agents intentionally have no HEARTBEAT.md content and
-    no goals (their job IS to think on a schedule and decide what to
-    do). Without force_llm propagation the agent-side
-    ``no_heartbeat_rules`` skip would silence them. Pin the bypass.
-    """
-    loop = _make_loop()
-    loop.llm.chat = AsyncMock(return_value=LLMResponse(content="kicked", tokens_used=10))
+    loop.llm.chat = AsyncMock(return_value=LLMResponse(content="done", tokens_used=10))
     loop.mesh_client.introspect = AsyncMock(return_value={})
-    loop.mesh_client.read_blackboard = AsyncMock(return_value=None)
     loop.workspace = MagicMock()
     loop.workspace.get_bootstrap_content = MagicMock(return_value="")
     loop.workspace.get_learnings_context = MagicMock(return_value="")
@@ -2524,29 +2484,63 @@ async def test_heartbeat_force_llm_bypasses_no_heartbeat_rules_skip():
     loop.workspace.append_daily_log = MagicMock()
     loop.workspace.append_activity = MagicMock()
 
-    result = await loop.execute_heartbeat("Check stuff", force_llm=True)
+    result = await loop.execute_heartbeat("Check stuff")
     assert not result.get("skipped", False)
     loop.llm.chat.assert_called()
 
 
 @pytest.mark.asyncio
-async def test_heartbeat_force_llm_still_respects_agent_busy():
-    """Bug 6 (codex P2 r2): force_llm bypasses no_heartbeat_rules but NOT busy.
-
-    A busy agent has work in flight — running the heartbeat would
-    contend with the active state machine. force_llm is about
-    overriding the skip-LLM cost optimization, not about ignoring
-    safety interlocks. Pin that busy still wins.
+async def test_heartbeat_dispatch_handles_missing_file():
+    """Lazy-create contract: missing HEARTBEAT.md (``load_heartbeat_rules()``
+    returns ``""``) must run the agenda turn without crashing, not skip.
+    Pins the boundary so a future reader can't silently break agents
+    created after the lazy-bootstrap change.
     """
     loop = _make_loop()
-    # Mark the agent as already working.
-    await loop._chat_lock.acquire()
-    try:
-        result = await loop.execute_heartbeat("Check stuff", force_llm=True)
-        assert result["skipped"] is True
-        assert result["reason"] == "agent_busy"
-    finally:
-        loop._chat_lock.release()
+    loop.llm.chat = AsyncMock(return_value=LLMResponse(content="done", tokens_used=10))
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+    loop.workspace = MagicMock()
+    loop.workspace.get_bootstrap_content = MagicMock(return_value="")
+    loop.workspace.get_learnings_context = MagicMock(return_value="")
+    # Simulate the missing-file state — load_heartbeat_rules returns "".
+    loop.workspace.load_heartbeat_rules = MagicMock(return_value="")
+    loop.workspace.append_daily_log = MagicMock()
+    loop.workspace.append_activity = MagicMock()
+    loop._fetch_goals = AsyncMock(return_value=None)
+
+    result = await loop.execute_heartbeat("Check stuff")
+    assert not result.get("skipped", False)
+    loop.llm.chat.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_no_longer_accepts_force_llm():
+    """Phase-3 unit 2: ``force_llm`` plumbing is deleted — the kwarg is
+    gone from ``execute_heartbeat``. Passing it must raise, so no caller
+    can silently resurrect the suppression-bypass path."""
+    loop = _make_loop()
+    with pytest.raises(TypeError):
+        await loop.execute_heartbeat("Check stuff", force_llm=True)
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_prompt_uses_agenda_copy():
+    """The heartbeat system prompt carries the agenda posture, not the
+    deleted HEARTBEAT_OK suppression copy."""
+    loop = _make_loop()
+    loop.llm.chat = AsyncMock(return_value=LLMResponse(content="done", tokens_used=10))
+    loop.mesh_client.introspect = AsyncMock(return_value={})
+    loop.workspace = MagicMock()
+    loop.workspace.get_bootstrap_content = MagicMock(return_value="")
+    loop.workspace.get_learnings_context = MagicMock(return_value="")
+    loop.workspace.load_heartbeat_rules = MagicMock(return_value="# Heartbeat Rules\n")
+    loop.workspace.append_daily_log = MagicMock()
+    loop.workspace.append_activity = MagicMock()
+
+    await loop.execute_heartbeat("Check stuff")
+    system_prompt = loop.llm.chat.call_args.kwargs.get("system", "")
+    assert "Review your plate" in system_prompt
+    assert "HEARTBEAT_OK" not in system_prompt
 
 
 @pytest.mark.asyncio
@@ -2992,7 +2986,7 @@ async def test_heartbeat_check_inbox_in_system_prompt():
 
     async def _capture_llm(*, system, messages, **kw):
         captured_system.append(system)
-        return LLMResponse(content="HEARTBEAT_OK", tokens_used=10)
+        return LLMResponse(content="All clear.", tokens_used=10)
 
     loop = _make_loop([])
     loop.llm.chat = AsyncMock(side_effect=_capture_llm)
@@ -3002,7 +2996,7 @@ async def test_heartbeat_check_inbox_in_system_prompt():
 
     assert len(captured_system) == 1
     assert "check_inbox()" in captured_system[0]
-    assert "goals, or inbox needs attention" in captured_system[0]
+    assert "Review your plate" in captured_system[0]
 
 
 @pytest.mark.asyncio
@@ -3013,7 +3007,7 @@ async def test_heartbeat_solo_gets_check_inbox():
 
     async def _capture_llm(*, system, messages, **kw):
         captured_system.append(system)
-        return LLMResponse(content="HEARTBEAT_OK", tokens_used=10)
+        return LLMResponse(content="All clear.", tokens_used=10)
 
     loop = _make_loop([])
     loop.mesh_client.team_name = loop.agent_id
@@ -3024,7 +3018,7 @@ async def test_heartbeat_solo_gets_check_inbox():
 
     assert len(captured_system) == 1
     assert "check_inbox()" in captured_system[0]
-    assert "goals, or inbox needs attention" in captured_system[0]
+    assert "Review your plate" in captured_system[0]
 
 
 @pytest.mark.asyncio

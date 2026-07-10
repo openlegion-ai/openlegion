@@ -64,24 +64,10 @@ _FALLBACK_MAX_TOKENS = 100_000  # context trim fallback when no context manager
 _TOOL_HISTORY_LIMIT = 10  # recent tool outcomes in system prompt
 HEARTBEAT_MAX_ITERATIONS = 12  # tighter bound for heartbeat (cheaper than task/chat)
 
-# Markdown heading pattern for detecting effectively-empty heartbeat files
-_HEADING_OR_EMPTY_RE = re.compile(r"^(#+\s.*|\s*)$")
-
 # Strip leading <think>…</think> blocks emitted by reasoning models
 # (Qwen3, DeepSeek-R1 etc.) so chat bubbles and conversation history
 # contain only the actual answer.
 _THINK_TAG_RE = re.compile(r"^(?:<think>[\s\S]*?</think>\s*)+")
-
-
-def _is_heartbeat_empty(content: str | None) -> bool:
-    """Check if HEARTBEAT.md has no actionable content (only headings/blanks).
-
-    Returns True when the file is missing, empty, or contains only markdown
-    headings and whitespace — meaning there are no heartbeat rules to execute.
-    """
-    if not content:
-        return True
-    return all(_HEADING_OR_EMPTY_RE.match(line) for line in content.splitlines())
 
 
 def _strip_think_tags(text: str) -> str:
@@ -2327,7 +2313,7 @@ class AgentLoop:
 
     # ── Heartbeat mode ────────────────────────────────────────
 
-    async def execute_heartbeat(self, message: str, *, force_llm: bool = False) -> dict:
+    async def execute_heartbeat(self, message: str) -> dict:
         """Execute an autonomous heartbeat — stateless, separate from chat.
 
         Returns a structured dict with response, tools used, duration, etc.
@@ -2336,12 +2322,11 @@ class AgentLoop:
         Notifications are still persisted to the chat transcript so users
         can find them in chat history.
 
-        ``force_llm`` (Bug 6 — codex P2 r2): pipeline-kicker agents have
-        no probes and ship with an empty HEARTBEAT.md, which makes the
-        ``no_heartbeat_rules`` skip below fire on every tick. When the
-        cron job sets ``force_llm: true`` the dispatcher forwards the
-        flag (via ``x-force-llm`` header) so the LLM is invoked anyway.
-        The ``agent_busy`` skip is NOT bypassed — busy is busy.
+        The cron-side plate gate decides whether a tick reaches this
+        method at all (truly-empty plates stay probe-only). Once
+        dispatched, this runs the agenda turn — the only skip is
+        ``agent_busy`` (busy is busy; a heartbeat must never contend with
+        an in-flight task or chat).
         """
         # Restrict operator to heartbeat-only tools during unsupervised execution.
         # Non-operator agents have _allowed_tools=None, so the swap is skipped.
@@ -2363,20 +2348,9 @@ class AgentLoop:
             if self.state != "idle" or self._chat_lock.locked():
                 return {"skipped": True, "reason": "agent_busy"}
 
-            # Skip the LLM call entirely when HEARTBEAT.md has no actionable
-            # content and no goals are set — saves tokens on empty heartbeats.
-            # Bug 6 fix: ``force_llm`` lets the operator opt out of this
-            # optimization for pipeline-kicker agents.
-            if (
-                not force_llm
-                and self.workspace
-                and _is_heartbeat_empty(self.workspace.load_heartbeat_rules())
-            ):
-                # Still need to check goals before skipping
-                goals = await self._fetch_goals()
-                if not goals:
-                    return {"skipped": True, "reason": "no_heartbeat_rules"}
-
+            # No goal-gated LLM skip here (Phase-3 unit 2): the cron-side
+            # plate gate already decided this tick is worth an agenda turn.
+            # Once dispatched, the agent reviews its plate and works it.
             token = _heartbeat_mode.set(True)
             start = time.time()
             total_tokens = 0
@@ -2412,15 +2386,19 @@ class AgentLoop:
 
                 # 3. Core rules
                 inbox_line = "- Call check_inbox() to see if teammates sent you tasks.\n"
-                nothing_clause = "goals, or inbox"
                 parts.append(
                     f"You are the '{self.role}' agent.\n\n"
                     f"## Operating Rules\n"
-                    f"- This is a HEARTBEAT wakeup. Check your HEARTBEAT.md rules and "
-                    f"goals, then act on anything that needs attention.\n"
+                    f"- This is a HEARTBEAT wakeup. Review your plate — your "
+                    f"HEARTBEAT.md rules, your goals, and your inbox — then "
+                    f"prioritize and act on what matters most.\n"
                     f"- Follow HEARTBEAT.md strictly. Do not infer tasks from prior sessions.\n"
                     f"{inbox_line}"
-                    f"- If nothing in HEARTBEAT.md, {nothing_clause} needs attention, reply HEARTBEAT_OK immediately.\n"
+                    f"- You may create goal-directed work toward your goals "
+                    f"(hand_off to yourself) when nothing else is pending. Work "
+                    f"within your budget.\n"
+                    f"- If your plate is empty and nothing advances your goals, "
+                    f"end the turn without making tool calls.\n"
                     f"- You have max {max_iters} iterations.\n"
                     f"- Use notify_user to report results to the user.\n"
                 )

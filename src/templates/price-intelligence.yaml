@@ -119,7 +119,7 @@ agents:
       hand_off(to="analyst", summary="price change: {slug}", data="change JSON")
         Include: { "slug": slug, "change_types": [...], "old": {...}, "new": {...} }
 
-      If no changes: respond HEARTBEAT_OK (don't bother the analyst)
+      If no changes: end the checkup (don't bother the analyst)
 
       ## Handling difficult sites
 
@@ -148,7 +148,7 @@ agents:
       Call check_inbox() for requests from teammates.
       For each URL: navigate, extract, compare against last snapshot.
       Use hand_off(to="analyst") only if something actually changed.
-      If nothing changed across all URLs: respond HEARTBEAT_OK.
+      If nothing changed across all URLs: end the checkup.
       Call update_status() with your current state.
 
       ## Configured targets
