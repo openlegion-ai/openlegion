@@ -324,6 +324,7 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             diff_from_last=_body_bool(body, "diff_from_last", False),
             frame=body.get("frame"),
             include_frames=_body_bool(body, "include_frames", True),
+            max_elements=body.get("max_elements"),
         )
 
     @app.post("/browser/{agent_id}/click")

@@ -1035,6 +1035,15 @@ _HARD_BLOCK_HEADER_PROBES: tuple[tuple[str, str, "callable"], ...] = (
 )
 _HARD_BLOCK_STATUS_THRESHOLD = 400
 
+# Status codes that, on their own, mean "you were blocked / throttled"
+# rather than "page not found / server error". A bare bot wall often
+# returns a 403 (or 429/503 challenge) with NO vendor header, so the
+# status alone has to be enough to tell the agent the response it got
+# back is a wall, not the site's content. 404/410/500 are deliberately
+# absent — those are ordinary navigation failures, and flagging them as
+# blocks would train the agent to distrust normal misses.
+_BLOCK_STATUS_CODES: frozenset[int] = frozenset({401, 403, 407, 429, 451, 503})
+
 
 def _classify_hard_block(headers: dict[str, str], status: int) -> tuple[str, str] | None:
     """Return (vendor, header_or_status) when headers show an unambiguous block.
@@ -1059,6 +1068,43 @@ def _classify_hard_block(headers: dict[str, str], status: int) -> tuple[str, str
         except Exception:
             # A misshapen predicate must never block the response listener.
             continue
+    return None
+
+
+def _classify_navigation_block(
+    headers: dict[str, str], status: int,
+) -> dict | None:
+    """Return an agent-facing hard-block payload, or ``None`` for content.
+
+    Pure classification of a single (already-received) main-document
+    response. Two independent triggers:
+
+      * a known detection vendor fires an unambiguous block header
+        (delegated to :func:`_classify_hard_block`), or
+      * the status code is itself block-shaped (:data:`_BLOCK_STATUS_CODES`).
+
+    The vendor path is preferred when both fire because it names *who*
+    blocked us. The payload shape is agent-facing and stable::
+
+        {"status": int, "vendor": str | None,
+         "signal": str, "kind": "vendor_block" | "http_block"}
+    """
+    vendor_hit = _classify_hard_block(headers, status)
+    if vendor_hit is not None:
+        vendor, signal = vendor_hit
+        return {
+            "status": status,
+            "vendor": vendor,
+            "signal": signal,
+            "kind": "vendor_block",
+        }
+    if status in _BLOCK_STATUS_CODES:
+        return {
+            "status": status,
+            "vendor": None,
+            "signal": f"http_status={status}",
+            "kind": "http_block",
+        }
     return None
 
 
@@ -1494,6 +1540,12 @@ _FIREFOX_GRANTABLE_PERMISSIONS: frozenset[str] = frozenset({
 })
 
 _MAX_SNAPSHOT_ELEMENTS = 200
+# Hard ceiling on a caller-supplied ``max_elements`` override. A dense
+# page (feed, table, catalogue) can legitimately need more than the 200
+# default, but an unbounded cap would let one snapshot return tens of
+# thousands of refs — a token/latency footgun. 1000 covers real pages
+# while keeping the payload bounded.
+_MAX_SNAPSHOT_ELEMENTS_CEILING = 1000
 _MAX_WALK_DEPTH = 50
 
 _MAX_FRAME_NESTING = 3
@@ -1510,6 +1562,48 @@ _FRAME_ID_RE = re.compile(r"^f-[0-9a-f]{8}$")
 # punishing).
 _V2_MAX_INDENT_DEPTH = 4
 _V2_NO_LANDMARK_KEY = ""
+
+
+def _snapshot_truncation_fields(shown: int, total: int, cap: int) -> dict:
+    """Truncation metadata for a snapshot ``data`` payload.
+
+    Returns an EMPTY dict when nothing was dropped, so the common
+    (un-truncated) case adds no keys to the response and existing callers
+    see the historical shape. When elements were dropped past the cap it
+    reports the counts plus an actionable hint so the agent can recover
+    the rest instead of being confidently wrong about a dense page.
+    """
+    if total <= shown:
+        return {}
+    return {
+        "truncated": True,
+        "shown_elements": shown,
+        "total_elements": total,
+        "elements_omitted": total - shown,
+        "truncation_hint": (
+            f"{total - shown} more actionable element(s) exist past the "
+            f"{cap}-element snapshot cap and were NOT included. Re-request "
+            f"with a higher max_elements (up to "
+            f"{_MAX_SNAPSHOT_ELEMENTS_CEILING}), or narrow with "
+            f"filter= / from_ref= to bring the rest into view."
+        ),
+    }
+
+
+def _snapshot_truncation_notice(shown: int, total: int, cap: int) -> str:
+    """One-line, text-only truncation banner appended to the snapshot text.
+
+    Mirrors :func:`_snapshot_truncation_fields` for agents that read the
+    rendered ``snapshot`` string rather than the structured fields. Empty
+    when nothing was dropped.
+    """
+    if total <= shown:
+        return ""
+    return (
+        f"\n\n[snapshot truncated: showing {shown} of {total} elements "
+        f"(cap {cap}). {total - shown} not shown — re-request with a higher "
+        f"max_elements or narrow with filter= / from_ref=.]"
+    )
 
 
 def _format_snapshot_v2(
@@ -2916,6 +3010,13 @@ class CamoufoxInstance:
         # to True after the first navigate completes; subsequent navs may
         # use ``inst.page.url`` as the previous-URL hint.
         self.had_real_navigate: bool = False
+        # Truth-telling: the hard-block payload from the MOST RECENT
+        # navigate on this instance (``None`` when the last nav landed on
+        # ordinary content). Set by ``navigate`` on every nav and echoed
+        # by ``snapshot`` so a snapshot taken on an already-blocked page
+        # is reported as a block, not as content. Same shape as
+        # ``_classify_navigation_block``'s return.
+        self.last_nav_hard_block: dict | None = None
         # §6.3 navigator self-test result. ``None`` until the post-launch
         # probe runs. Populated dict (see ``BrowserManager._run_navigator_probe``)
         # exposes ``ok`` + ``mismatches`` + raw signal values for dashboard /
@@ -5674,9 +5775,13 @@ class BrowserManager:
                 goto_kwargs["referer"] = resolved_referer
 
             # Single retry on timeout — transient network issues get a second chance.
+            # Capture the main-document Response so we can surface its status
+            # and any hard-block signal to the agent (Playwright returns None
+            # only for same-document navigations, which a real ``goto`` isn't).
+            nav_response = None
             for attempt in range(2):
                 try:
-                    await inst.page.goto(url, **goto_kwargs)
+                    nav_response = await inst.page.goto(url, **goto_kwargs)
                     break
                 except Exception as e:
                     if attempt == 0 and "timeout" in str(e).lower():
@@ -5761,6 +5866,39 @@ class BrowserManager:
                     and envelope.get("solver_outcome") != "solved"
                 ):
                     result["captcha"] = _with_legacy_fields(envelope)
+                # Truth-telling: surface the main-document HTTP status and,
+                # when the response is block-shaped (403/429/503 or a vendor
+                # block header), an explicit ``hard_block`` signal. Without
+                # this a challenge/wall page is returned as ordinary "success"
+                # content and the agent acts on the wall as if it were the
+                # site. ``success`` stays True — the navigation mechanically
+                # completed; the agent keys on ``hard_block`` (mirrors how a
+                # captcha is surfaced without failing the nav).
+                status_code: int | None = None
+                hard_block: dict | None = None
+                if nav_response is not None:
+                    try:
+                        status_code = int(nav_response.status)
+                    except Exception:
+                        status_code = None
+                    # Playwright exposes ``headers`` as a plain dict property;
+                    # isinstance-guard it so a non-mapping value can never
+                    # reach the classifier (and so it stays vendor-header
+                    # classification, never a coincidental truthy object).
+                    raw_headers = getattr(nav_response, "headers", None)
+                    response_headers = (
+                        raw_headers if isinstance(raw_headers, dict) else {}
+                    )
+                    if status_code is not None:
+                        result["data"]["http_status"] = status_code
+                        hard_block = _classify_navigation_block(
+                            response_headers, status_code,
+                        )
+                # Record on the instance (even when None) so the next
+                # snapshot reflects the current page's block state.
+                inst.last_nav_hard_block = hard_block
+                if hard_block is not None:
+                    result["hard_block"] = hard_block
                 snapshot_succeeded = False
                 if snapshot_after:
                     snap = await self._snapshot_impl(inst, agent_id)
@@ -5821,6 +5959,7 @@ class BrowserManager:
         diff_from_last: bool = False,
         frame: str | None = None,
         include_frames: bool = True,
+        max_elements: int | None = None,
     ) -> dict:
         """Get accessibility tree with element refs.
 
@@ -5878,6 +6017,7 @@ class BrowserManager:
                 diff_from_last=diff_from_last,
                 frame=frame,
                 include_frames=include_frames,
+                max_elements=max_elements,
             )
             # §11.4 / §18.2 — surface and CLEAR any pending captcha
             # envelope captured by ``_with_captcha_redetect`` after a
@@ -5894,6 +6034,16 @@ class BrowserManager:
                 data = result.setdefault("data", {})
                 data.setdefault("captcha", pending)
                 inst._pending_captcha_envelope = None
+            # Truth-telling: echo the last navigation's hard-block state so a
+            # snapshot taken on an already-blocked page isn't reported as
+            # ordinary content. Set by ``navigate``; cleared to None on a
+            # clean nav. Top-level, mirroring the navigate result shape.
+            if (
+                inst.last_nav_hard_block
+                and isinstance(result, dict)
+                and result.get("success")
+            ):
+                result.setdefault("hard_block", inst.last_nav_hard_block)
             return result
 
     async def _snapshot_impl(
@@ -5906,8 +6056,21 @@ class BrowserManager:
         _skip_baseline: bool = False,
         frame: str | None = None,
         include_frames: bool = True,
+        max_elements: int | None = None,
     ) -> dict:
         """Snapshot implementation.  Caller must hold ``inst.lock``."""
+        # Resolve the element cap once. ``None`` ⇒ the 200 default; an
+        # override is clamped to [1, ceiling] so a caller can pull a dense
+        # page in one wider walk without letting one snapshot balloon.
+        if max_elements is None:
+            effective_max = _MAX_SNAPSHOT_ELEMENTS
+        else:
+            try:
+                effective_max = max(
+                    1, min(int(max_elements), _MAX_SNAPSHOT_ELEMENTS_CEILING),
+                )
+            except (TypeError, ValueError):
+                effective_max = _MAX_SNAPSHOT_ELEMENTS
         # Read BROWSER_SNAPSHOT_FORMAT exactly once at entry so a flag
         # flip mid-call (operator settings hot-reload, agent override
         # change racing the snapshot) cannot produce mixed v1/v2 output
@@ -6079,6 +6242,12 @@ class BrowserManager:
                 else None
             )
             ref_counter = [0]
+            # Counts EVERY admitted element, including those past the emit
+            # cap. ``ref_counter`` stops at ``effective_max`` (it gates
+            # emission); ``admitted_total`` keeps counting so we can tell the
+            # agent how many elements it did NOT see. Both reset together in
+            # the modal re-scope branch below.
+            admitted_total = [0]
             # Counts occurrences of each (role, name) pair so we can
             # disambiguate duplicate elements (e.g. X's two composer nodes).
             occurrence_counts: dict[tuple, int] = {}
@@ -6163,7 +6332,8 @@ class BrowserManager:
                 else:
                     is_admitted = role in allowed_roles
                 if is_admitted:
-                    if ref_counter[0] < _MAX_SNAPSHOT_ELEMENTS:
+                    admitted_total[0] += 1
+                    if ref_counter[0] < effective_max:
                         ref_id = f"e{ref_counter[0]}"
                         ref_counter[0] += 1
 
@@ -6541,13 +6711,24 @@ class BrowserManager:
                         "\n".join(lines) if lines else "(no interactive elements)"
                     )
                 snapshot_text = self.redactor.redact(agent_id, snapshot_text)
+                trunc = _snapshot_truncation_fields(
+                    ref_counter[0], admitted_total[0], effective_max,
+                )
+                if trunc:
+                    snapshot_text += _snapshot_truncation_notice(
+                        ref_counter[0], admitted_total[0], effective_max,
+                    )
                 inst.m_snapshot_bytes.append(len(snapshot_text))
                 response_refs = {
                     rid: h.to_agent_dict() for rid, h in refs.items()
                 }
                 return {
                     "success": True,
-                    "data": {"snapshot": snapshot_text, "refs": response_refs},
+                    "data": {
+                        "snapshot": snapshot_text,
+                        "refs": response_refs,
+                        **trunc,
+                    },
                 }
 
             # When a modal dialog is open, scope to only dialog elements
@@ -6633,6 +6814,7 @@ class BrowserManager:
                     # ``diff_from_last`` call reports phantom removals.
                     ref_summary.clear()
                     ref_counter[0] = 0
+                    admitted_total[0] = 0
                     occurrence_counts.clear()
                     lines.append("** Modal dialog is open — only dialog elements are shown **")
                     # Re-query modal elements — handles go stale when SPAs
@@ -6756,6 +6938,18 @@ class BrowserManager:
                     "\n".join(lines) if lines else "(no interactive elements)"
                 )
             snapshot_text = self.redactor.redact(agent_id, snapshot_text)
+            # Truth-telling: if the walk admitted more elements than the cap
+            # let us emit, tell the agent — in the rendered text AND as
+            # structured fields — instead of silently dropping them. Empty
+            # dict / "" when nothing was dropped, so the common case is
+            # unchanged. Shared by every return path below via ``trunc``.
+            trunc = _snapshot_truncation_fields(
+                ref_counter[0], admitted_total[0], effective_max,
+            )
+            if trunc:
+                snapshot_text += _snapshot_truncation_notice(
+                    ref_counter[0], admitted_total[0], effective_max,
+                )
             # Record snapshot byte size for §4.6 metrics. Collected per call;
             # drained as p50/p95 on the next minute tick.
             inst.m_snapshot_bytes.append(len(snapshot_text))
@@ -6818,6 +7012,7 @@ class BrowserManager:
                             "snapshot": snapshot_text,
                             "refs": response_refs,
                             "scope": "navigation",
+                            **trunc,
                         },
                     }
                 if previous_baseline is None:
@@ -6831,14 +7026,17 @@ class BrowserManager:
                             "snapshot": snapshot_text,
                             "refs": response_refs,
                             "scope": "navigation",
+                            **trunc,
                         },
                     }
                 diff = _compute_snapshot_diff(
                     previous_baseline["refs_by_key"], ref_summary,
                 )
+                # A truncated walk means the diff baseline is incomplete, so
+                # the delta may miss elements past the cap — flag it.
                 return {
                     "success": True,
-                    "data": {**diff, "scope": scope},
+                    "data": {**diff, "scope": scope, **trunc},
                 }
 
             # Either diff_from_last=False, or scope is navigation/tab_changed
@@ -6848,6 +7046,7 @@ class BrowserManager:
             data: dict = {"snapshot": snapshot_text, "refs": response_refs}
             if diff_from_last:
                 data["scope"] = scope
+            data.update(trunc)
             return {"success": True, "data": data}
         except Exception as e:
             # Match the §2.3 error envelope used by the new from_ref /

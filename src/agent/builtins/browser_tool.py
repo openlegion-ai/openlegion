@@ -413,7 +413,12 @@ async def browser_warmup(
         "since the last snapshot — added/removed/changed elements with a "
         "'scope' label (same | modal_opened | modal_closed | frame_changed "
         "| navigation | tab_changed). Returns a full snapshot when scope is "
-        "navigation/tab_changed."
+        "navigation/tab_changed.\n\n"
+        "Dense pages are capped at 200 elements by default. When the result "
+        "carries truncated=true, elements past the cap were NOT included — "
+        "raise max_elements (up to 1000) to pull more, or use filter= / "
+        "from_ref= to narrow. Never assume the page has only the elements "
+        "shown when truncated=true."
     ),
     parameters={
         "filter": {
@@ -469,6 +474,16 @@ async def browser_warmup(
             ),
             "default": True,
         },
+        "max_elements": {
+            "type": "integer",
+            "description": (
+                "Override the 200-element snapshot cap (max 1000). Use "
+                "when a prior snapshot came back truncated=true and you "
+                "need the elements past the cap in one call. Prefer "
+                "filter= / from_ref= first when they'd narrow the page "
+                "enough — a larger cap costs more tokens."
+            ),
+        },
     },
     parallel_safe=False,
 )
@@ -478,6 +493,7 @@ async def browser_get_elements(
     diff_from_last: bool = False,
     frame: str | None = None,
     include_frames: bool = True,
+    max_elements: int | None = None,
     *,
     mesh_client=None,
 ) -> dict:
@@ -493,6 +509,8 @@ async def browser_get_elements(
         payload["frame"] = frame
     if not include_frames:
         payload["include_frames"] = False
+    if max_elements is not None:
+        payload["max_elements"] = max_elements
     return await _browser_command(mesh_client, "snapshot", payload)
 
 
