@@ -21,6 +21,7 @@ import random
 import re
 import signal
 import socket
+import struct
 import subprocess
 import time
 import uuid
@@ -2562,6 +2563,25 @@ def _is_empty_payload(payload: dict) -> bool:
     ))
 
 
+def _png_dimensions(png_bytes: bytes) -> tuple[int, int]:
+    """Extract ``(width, height)`` from a PNG's IHDR chunk, no Pillow needed.
+
+    Playwright's ``page.screenshot()`` always returns real PNG bytes, and
+    the IHDR chunk (width/height as big-endian uint32) is at a fixed
+    offset per the PNG spec — parsing it directly lets the format="png"
+    fast path in :func:`_encode_screenshot` report dimensions without an
+    unconditional Pillow import. Returns ``(0, 0)`` if the bytes don't
+    look like a PNG.
+    """
+    try:
+        if len(png_bytes) >= 24 and png_bytes[:8] == b"\x89PNG\r\n\x1a\n" and png_bytes[12:16] == b"IHDR":
+            width, height = struct.unpack(">II", png_bytes[16:24])
+            return width, height
+    except Exception:
+        pass
+    return 0, 0
+
+
 def _encode_screenshot(
     png_bytes: bytes,
     fmt: str,
@@ -2569,13 +2589,17 @@ def _encode_screenshot(
     scale: float,
     *,
     agent_id: str = "",
-) -> tuple[bytes, str]:
+) -> tuple[bytes, str, int, int]:
     """Encode a Playwright PNG to WebP / PNG with optional downscale.
 
-    Returns ``(encoded_bytes, actual_format)``. ``actual_format`` may be
-    ``"png"`` even when ``fmt="webp"`` was requested — Pillow may be
-    absent in the dev path or fail on a corrupt frame; PNG fallback
-    keeps the agent unblocked rather than returning an error.
+    Returns ``(encoded_bytes, actual_format, width, height)`` where
+    ``width``/``height`` are the pixel dimensions of the FINAL encoded
+    image (post-resize, when ``scale`` triggers one) — this is what a
+    caller needs to map an image pixel the agent sees back to a
+    viewport CSS-pixel coordinate. ``actual_format`` may be ``"png"``
+    even when ``fmt="webp"`` was requested — Pillow may be absent in
+    the dev path or fail on a corrupt frame; PNG fallback keeps the
+    agent unblocked rather than returning an error.
 
     The function is intentionally synchronous and pure — easy to unit
     test and reason about. Pillow does its own threading internally;
@@ -2584,7 +2608,8 @@ def _encode_screenshot(
     """
     # Fast path: caller asked for PNG and no scale change → pass through.
     if fmt == "png" and abs(scale - 1.0) < 1e-3:
-        return png_bytes, "png"
+        w, h = _png_dimensions(png_bytes)
+        return png_bytes, "png", w, h
 
     try:
         from io import BytesIO
@@ -2600,7 +2625,8 @@ def _encode_screenshot(
         logger.debug(
             "Pillow not installed; falling back to PNG (agent=%s)", agent_id,
         )
-        return png_bytes, "png"
+        w, h = _png_dimensions(png_bytes)
+        return png_bytes, "png", w, h
 
     # Decompression-bomb protection. Pillow's ``MAX_IMAGE_PIXELS`` is a
     # MODULE-LEVEL global; rebinding it on every screenshot encode (the
@@ -2631,16 +2657,17 @@ def _encode_screenshot(
             if img.mode not in ("RGB", "RGBA"):
                 img = img.convert("RGB")
             img.save(out, format="WEBP", quality=quality, method=4)
-            return out.getvalue(), "webp"
+            return out.getvalue(), "webp", img.width, img.height
         # PNG re-encode (only reached when scale != 1.0 above).
         img.save(out, format="PNG", optimize=True)
-        return out.getvalue(), "png"
+        return out.getvalue(), "png", img.width, img.height
     except Exception as e:
         logger.warning(
             "Screenshot %s encode failed (%s); falling back to original PNG",
             fmt, e,
         )
-        return png_bytes, "png"
+        w, h = _png_dimensions(png_bytes)
+        return png_bytes, "png", w, h
 
 
 # ── §11.4 / §18.2 captcha re-detection after non-navigate actions ──────────
@@ -9378,24 +9405,59 @@ class BrowserManager:
                 png_bytes = await inst.page.screenshot(full_page=full_page)
             except Exception as e:
                 return {"success": False, "error": str(e)}
+            # Captured alongside the screenshot (still holding the lock) so
+            # it reflects the viewport at capture time. May be ``None`` in
+            # some Playwright configurations (e.g. no explicit context
+            # viewport) — same caveat as ``click_xy``'s ``viewport_size``
+            # read.
+            raw_viewport = inst.page.viewport_size
 
         # Pillow encode is synchronous and ~10–20 ms on a 1080p frame —
         # offload to a thread so we don't block the event loop. Pillow
         # releases the GIL during its C-level encode steps, so this
         # actually parallelizes across concurrent agent screenshots.
-        encoded, used_format = await asyncio.to_thread(
+        encoded, used_format, img_w, img_h = await asyncio.to_thread(
             _encode_screenshot,
             png_bytes, fmt, quality, scale_f, agent_id=agent_id,
         )
         b64 = base64.b64encode(encoded).decode()
-        return {
-            "success": True,
-            "data": {
-                "image_base64": b64,
-                "format": used_format,
-                "bytes": len(encoded),
-            },
+
+        # Coordinate-mapping metadata: lets a caller convert an image pixel
+        # it SEES in ``image_base64`` into a ``click_xy`` viewport CSS-pixel
+        # coordinate. On the default desktop profile (deviceScaleFactor=1,
+        # scale=1.0) image and viewport dimensions match 1:1 and
+        # ``click_scale`` is ``{"x": 1.0, "y": 1.0}``; a retina/mobile
+        # fingerprint (higher deviceScaleFactor) or a ``scale<1.0``
+        # downscale makes them diverge.
+        viewport_data = None
+        click_scale = None
+        if isinstance(raw_viewport, dict):
+            css_w = raw_viewport.get("width")
+            css_h = raw_viewport.get("height")
+            if isinstance(css_w, (int, float)) and isinstance(css_h, (int, float)):
+                viewport_data = {"width": css_w, "height": css_h}
+                # ``click_scale`` is ONLY valid for a viewport capture. A
+                # ``full_page`` image spans the entire scrollable document,
+                # so ``img_h`` is the full page height, not the viewport
+                # height — ``css_h / img_h`` would be a misleading tiny
+                # fraction and ``click_xy`` can only target the viewport
+                # (below-the-fold pixels aren't clickable without scrolling
+                # anyway). Width maps fine (full-page width == viewport
+                # width), but a half-valid mapping is worse than none, so
+                # omit the key entirely for full-page shots.
+                if not full_page and img_w > 0 and img_h > 0:
+                    click_scale = {"x": css_w / img_w, "y": css_h / img_h}
+
+        data = {
+            "image_base64": b64,
+            "format": used_format,
+            "bytes": len(encoded),
+            "viewport": viewport_data,
+            "image": {"width": img_w, "height": img_h},
         }
+        if click_scale is not None:
+            data["click_scale"] = click_scale
+        return {"success": True, "data": data}
 
     async def _type_with_variance(self, page, text: str) -> None:
         """Type text character-by-character with human-like inter-key delays.
