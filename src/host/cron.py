@@ -78,6 +78,16 @@ class CronJob:
     next_run: str | None = None
     run_count: int = 0
     error_count: int = 0
+    # Host-published channel post (plan §8 #14): the team id whose
+    # channel thread receives this job's dispatch response on success.
+    # HOST-SIDE ONLY — deliberately kept out of ``_UPDATABLE_FIELDS`` so
+    # no agent-facing cron surface (create/update endpoints, the
+    # set_cron tool) can ever set or change it. Only bootstrap code
+    # (``ensure_standup_job`` / boot reconcile) writes this field —
+    # letting an agent set it would let it proxy-post into a team
+    # thread, violating the "thread writers are host-side only"
+    # invariant (src/host/threads.py).
+    post_to_channel: str | None = None
 
 
 class CronScheduler:
@@ -106,6 +116,8 @@ class CronScheduler:
         health_monitor: Any = None,
         utility_model_fn: Callable | None = None,
         goals_fn: Callable | None = None,
+        lead_reviews_fn: Callable | None = None,
+        thread_store: Any = None,
     ):
         self.config_path = Path(config_path)
         self.jobs: dict[str, CronJob] = {}
@@ -125,6 +137,18 @@ class CronScheduler:
         # dispatches only when a utility (coordination) model exists.
         self.utility_model_fn = utility_model_fn
         self.goals_fn = goals_fn
+        # Lead-duty probe input (plan §8 #13/#14): ``lead_reviews_fn(agent)
+        # -> {"team_id", "count"} | None`` reads mesh-side Team-store data
+        # only. Returns None for non-leads (one cheap lookup) or leads
+        # with no open reviews — the probe below stays free for everyone
+        # who isn't a lead sitting on a nonempty review queue.
+        self.lead_reviews_fn = lead_reviews_fn
+        # Host-published channel post (§8 #14): wired so ``_execute_job``
+        # can post a standup (or any ``post_to_channel``-tagged) job's
+        # dispatch response into the team's channel thread. None in
+        # deployments that haven't wired Team Threads yet — the post
+        # is skipped, never a hard failure.
+        self.thread_store = thread_store
         # ``health_monitor`` (Fix 5 in seam follow-up): when wired, the
         # scheduler skips dispatch for quarantined agents. Heartbeat
         # cron jobs would otherwise keep ticking on a broken credential.
@@ -340,6 +364,84 @@ class CronScheduler:
                 "scope_id": scope_id,
             }),
         )
+
+    # ── Lead standup (plan §8 #14) ─────────────────────────────────
+    #
+    # A standup is an ordinary MESSAGE cron job (a real LLM turn on the
+    # lead's own container, unlike the tool-fired summary job above) with
+    # ``post_to_channel`` set to the team id — ``_execute_job`` publishes
+    # the turn's response into the team's channel thread on success.
+    # Default schedule is distinct from the 9:00 daily summary so the two
+    # don't collide.
+
+    DEFAULT_STANDUP_SCHEDULE = "30 9 * * *"
+
+    _STANDUP_MESSAGE = (
+        "It's standup time for your team. Check your plate: team tasks "
+        "in flight, any Team Drive reviews awaiting your verdict, and "
+        "your team's current goals. Reply with a short, plain-language "
+        "standup update for your teammates — what the team is working "
+        "on, anything blocked or needing attention, and what's next. "
+        "Keep it conversational; this goes straight into the team "
+        "channel."
+    )
+
+    def find_standup_job(self, team_id: str) -> CronJob | None:
+        """Find the existing standup job for a team, if any.
+
+        Matches on ``post_to_channel == team_id`` for a plain message
+        job (no ``tool_name``, not the heartbeat) — the only kind of job
+        ``ensure_standup_job`` ever creates, and the only field this
+        module lets carry ``post_to_channel`` at all.
+        """
+        for job in self.jobs.values():
+            if job.post_to_channel == team_id and not job.tool_name and not job.heartbeat:
+                return job
+        return None
+
+    def ensure_standup_job(
+        self,
+        team_id: str,
+        lead_agent_id: str,
+        schedule: str | None = None,
+    ) -> CronJob:
+        """Idempotently ensure a team's standup cron job exists, pointed
+        at the current lead.
+
+        Repoints ``job.agent`` (and reschedules) an existing job in
+        place when the lead or the per-team cadence changed since the
+        job was created — mirrors ``ensure_summary_job``'s
+        create-once-then-reconcile shape, except this job DOES need
+        live repointing (the summary job's ``agent`` is always
+        "operator" and never drifts).
+        """
+        desired_schedule = schedule or self.DEFAULT_STANDUP_SCHEDULE
+        existing = self.find_standup_job(team_id)
+        if existing:
+            changed = False
+            if existing.agent != lead_agent_id:
+                existing.agent = lead_agent_id
+                changed = True
+            if existing.schedule != desired_schedule:
+                existing.schedule = desired_schedule
+                self._compute_next_run(existing)
+                changed = True
+            if changed:
+                self._save()
+            return existing
+        return self.add_job(
+            agent=lead_agent_id,
+            schedule=desired_schedule,
+            message=self._STANDUP_MESSAGE,
+            post_to_channel=team_id,
+        )
+
+    def remove_standup_job(self, team_id: str) -> bool:
+        """Remove a team's standup job, if one exists (lead cleared)."""
+        existing = self.find_standup_job(team_id)
+        if existing is None:
+            return False
+        return self.remove_job(existing.id)
 
     _UPDATABLE_FIELDS = frozenset({
         "schedule", "message", "enabled", "suppress_empty",
@@ -696,6 +798,14 @@ class CronScheduler:
                         return response
                     logger.info(f"Cron {job.id} executed for agent '{job.agent}'")
 
+                    # Host-published channel post (§8 #14): a standup (or
+                    # any message job the host tagged) publishes its
+                    # dispatch response into the team's channel thread.
+                    # Only on a non-empty/non-error response — an empty
+                    # or suppressed tick has nothing worth posting.
+                    if job.post_to_channel and not _is_empty_response(response):
+                        self._post_to_channel(job, response)
+
                 self._emit_cron_change("executed", job)
                 return response
             except Exception as e:
@@ -704,6 +814,26 @@ class CronScheduler:
                 logger.error(f"Cron {job.id} failed: {e}")
                 self._emit_cron_change("error", job)
                 return None
+
+    def _post_to_channel(self, job: CronJob, response: Any) -> None:
+        """Publish ``response`` into ``job.post_to_channel``'s channel
+        thread on the job's behalf (plan §8 #14).
+
+        Best-effort, mirrors the mesh's other host-side thread writers
+        (e.g. ``mesh.py``'s ``route()``) — a ThreadStore hiccup must
+        never crash the cron job; the standup itself already ran.
+        """
+        if self.thread_store is None:
+            return
+        try:
+            channel = self.thread_store.ensure_channel(job.post_to_channel)
+            body = response if isinstance(response, str) else dumps_safe(response)
+            self.thread_store.post_message(channel["id"], sender=job.agent, body=body)
+        except Exception:
+            logger.exception(
+                "Cron %s: failed to post to channel for team %s",
+                job.id, job.post_to_channel,
+            )
 
     def _agent_has_goals(self, agent: str) -> bool:
         """Whether the agent has any standing goals (operator-set).
@@ -780,6 +910,28 @@ class CronScheduler:
                 ))
             except Exception as e:
                 logger.debug("Pending tasks probe failed for '%s': %s", agent, e)
+
+        # Probe 4: lead-duty pending drive-review verdicts (plan §8 #13/
+        # #14). Mesh-side Team-store data only — no container hop. Non-
+        # leads pay for exactly one cheap lookup (``lead_reviews_fn``
+        # short-circuits before querying reviews at all); a read failure
+        # degrades to "no probe" rather than raising into the tick.
+        if self.lead_reviews_fn is not None:
+            try:
+                pending = self.lead_reviews_fn(agent)
+            except Exception as e:
+                logger.debug("lead_reviews_fn failed for '%s': %s", agent, e)
+                pending = None
+            if pending:
+                count = pending.get("count", 0)
+                team_id = pending.get("team_id", "")
+                results.append(HeartbeatProbeResult(
+                    name="lead_pending_reviews",
+                    triggered=bool(count),
+                    detail=(
+                        f"{count} drive review(s) pending your verdict for team {team_id}"
+                    ),
+                ))
 
         return results
 

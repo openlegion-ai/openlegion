@@ -2421,6 +2421,24 @@ class TestPolishFixesApplied:
         for state in ("idle", "ask", "confirming", "building", "first-output", "build_failed"):
             assert state in claude_md, f"wizard state {state} not documented"
 
+    def test_claudemd_documents_lead_router_and_permission_constraints(self):
+        """CLAUDE.md Constraint #1 is amended to the "no *router* hierarchy"
+        wording and Constraint #12 gains the lead permission-carve-out
+        sentence (Phase-4 unit 1, plan §8 #14)."""
+        claude_md = (_REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        assert "no *router* hierarchy" in claude_md, (
+            "Constraint #1 should be amended to the no-router-hierarchy wording"
+        )
+        assert (
+            "never a message router and never a permission tier" in claude_md
+        ), "Constraint #1 should state a lead is never a router or permission tier"
+        assert (
+            "Team leads gain no permission carve-out" in claude_md
+        ), "Constraint #12 should gain the lead permission-carve-out sentence"
+        assert "lead is team data" in claude_md, (
+            "Constraint #12 addendum should frame lead as team data, not an identity tier"
+        )
+
 
 # ── EventBus coverage — JS handlers wired in onWsEvent ────────────────
 

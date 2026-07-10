@@ -2021,6 +2021,20 @@ class RuntimeContext:
             store = getattr(self, "teams_store", None)
             return store.get_agent_goals(agent) if store is not None else None
 
+        def lead_pending_reviews(agent: str) -> dict | None:
+            """Lead-duty probe input (plan §8 #13/#14): mesh-side Team
+            store data only, never the container. Returns None fast for
+            non-leads (one cheap ``led_team`` lookup) or leads with no
+            open reviews; otherwise ``{"team_id", "count"}``."""
+            store = getattr(self, "teams_store", None)
+            if store is None:
+                return None
+            team_id = store.led_team(agent)
+            if not team_id:
+                return None
+            reviews = store.list_reviews(team_id, status="open")
+            return {"team_id": team_id, "count": len(reviews)} if reviews else None
+
         def deployment_utility_model() -> str:
             """Deployment ``llm.utility_model`` for the cron plate gate.
 
@@ -2110,6 +2124,15 @@ class RuntimeContext:
             # model exists.
             utility_model_fn=deployment_utility_model,
             goals_fn=agent_standing_goals,
+            # Lead plate input (§8 #14): mesh-side probe + host-published
+            # channel post for the standup job. ``self.thread_store`` is
+            # already constructed by ``_create_components`` (called before
+            # ``_create_cron_scheduler`` in ``start()``) in the real boot
+            # path; ``getattr`` keeps synthetic test contexts (which stub
+            # only a handful of attrs, mirroring the ``health_monitor``
+            # note above) from needing to know about every new seam.
+            lead_reviews_fn=lead_pending_reviews,
+            thread_store=getattr(self, "thread_store", None),
         )
         self._cron_job_count = len(self.cron_scheduler.jobs)
 
@@ -2263,9 +2286,65 @@ class RuntimeContext:
                         e,
                     )
 
+    def _reconcile_standup_jobs(self) -> None:
+        """Ensure each active team WITH a lead has a standup cron job
+        (pointed at the current lead), and prune the job for any team
+        that is archived, deleted, or has no lead. Idempotent — runs at
+        every mesh startup, mirroring ``_reconcile_work_summary_jobs``.
+
+        Live lead-assign/unassign (the mesh/dashboard lead endpoints)
+        already ensures/removes the job in real time; this reconcile
+        exists to catch drift those live paths don't reach directly —
+        a lead cleared via the team-membership endpoints (not the
+        dedicated lead endpoint), a per-team ``settings.standup_schedule``
+        edit, or a mesh restart between boots.
+        """
+        if not self.cron_scheduler:
+            return
+        try:
+            teams = self.teams_store.list_teams()
+        except Exception as e:
+            logger.warning("standup cron bootstrap failed to load teams: %s", e)
+            return
+        led_team_names: set[str] = set()
+        for name, meta in teams.items():
+            if (meta.get("status") or "active") == "archived":
+                continue
+            lead_agent_id = meta.get("lead_agent_id")
+            if not lead_agent_id:
+                continue
+            led_team_names.add(name)
+            settings = meta.get("settings") or {}
+            schedule = settings.get("standup_schedule")
+            try:
+                self.cron_scheduler.ensure_standup_job(name, lead_agent_id, schedule=schedule)
+            except Exception as e:
+                logger.warning("ensure_standup_job for team %s failed: %s", name, e)
+        # Prune standup jobs for teams that are archived/deleted/leadless.
+        # ``ensure_standup_job`` only ever creates message jobs tagged
+        # with ``post_to_channel`` — that's the sole marker checked here.
+        for job in list(self.cron_scheduler.jobs.values()):
+            if job.tool_name or job.heartbeat or not job.post_to_channel:
+                continue
+            team_id = job.post_to_channel
+            if team_id not in led_team_names:
+                try:
+                    self.cron_scheduler.remove_job(job.id)
+                    logger.info(
+                        "pruned standup cron for team %s (no active lead)",
+                        team_id,
+                    )
+                except Exception as e:
+                    logger.debug(
+                        "failed to prune orphan standup cron %s: %s",
+                        job.id,
+                        e,
+                    )
+
     def _start_background(self) -> None:
         self._reconcile_heartbeats()
         self._reconcile_work_summary_jobs()
+        self._reconcile_standup_jobs()
 
         # Start cron
         def run_cron():

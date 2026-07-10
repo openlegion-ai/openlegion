@@ -6565,6 +6565,39 @@ function dashboard() {
       } catch (e) { this.showToast(`Remove failed: ${e.message}`); }
     },
 
+    /** Assign a team's lead. Lead is team data, not a permission tier (§8 #14) — no restart needed. */
+    async setTeamLead(team, agent) {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/teams/${encodeURIComponent(team)}/lead`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ agent_id: agent }),
+        });
+        if (resp.ok) {
+          await this.fetchTeams();
+          this.showToast(`${agent} is now lead of ${team}`);
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Set lead failed: ${err.detail || 'Unknown error'}`);
+        }
+      } catch (e) { this.showToast(`Set lead failed: ${e.message}`); }
+    },
+
+    async clearTeamLead(team) {
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/teams/${encodeURIComponent(team)}/lead`, {
+          method: 'DELETE',
+        });
+        if (resp.ok) {
+          await this.fetchTeams();
+          this.showToast(`Lead cleared for ${team}`);
+        } else {
+          const err = await resp.json().catch(() => ({}));
+          this.showToast(`Clear lead failed: ${err.detail || 'Unknown error'}`);
+        }
+      } catch (e) { this.showToast(`Clear lead failed: ${e.message}`); }
+    },
+
     /** Agents in the registry that are not in any team. Excludes operator (system agent, not team-assignable). */
     get soloAgents() {
       const assigned = new Set();

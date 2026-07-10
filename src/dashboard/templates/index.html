@@ -2137,10 +2137,21 @@
                           <img :src="agentAvatarUrl(m)" :alt="m">
                         </div>
                         <span class="text-xs text-gray-300 truncate" x-text="m"></span>
+                        <span x-show="activeTeamData?.lead_agent_id === m"
+                          class="text-[11px] px-1.5 py-0.5 rounded bg-amber-900/30 text-amber-400 border border-amber-800/40 flex-shrink-0"
+                          title="Team lead — accountability owner (standup, advisory review verdicts, goal stewardship). Also the dashboard's default human contact for this team. No extra permissions.">Lead</span>
                       </div>
-                      <button @click="removeMember(activeTeam, m)"
-                        class="text-xs text-gray-500 hover:text-red-400 transition-colors flex-shrink-0 px-2 py-1 rounded hover:bg-red-900/20"
-                        title="Remove from team">Remove</button>
+                      <div class="flex items-center gap-1 flex-shrink-0">
+                        <button x-show="activeTeamData?.lead_agent_id === m" @click="clearTeamLead(activeTeam)"
+                          class="text-xs text-gray-500 hover:text-amber-400 transition-colors px-2 py-1 rounded hover:bg-amber-900/20"
+                          title="Unassign lead">Unassign lead</button>
+                        <button x-show="activeTeamData?.lead_agent_id !== m" @click="setTeamLead(activeTeam, m)"
+                          class="text-xs text-gray-500 hover:text-amber-400 transition-colors px-2 py-1 rounded hover:bg-amber-900/20"
+                          title="Make this agent the team lead">Make lead</button>
+                        <button @click="removeMember(activeTeam, m)"
+                          class="text-xs text-gray-500 hover:text-red-400 transition-colors px-2 py-1 rounded hover:bg-red-900/20"
+                          title="Remove from team">Remove</button>
+                      </div>
                     </div>
                   </template>
                   <div x-show="(activeTeamData?.members || []).length === 0" class="text-center py-6">

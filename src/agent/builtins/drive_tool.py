@@ -37,7 +37,7 @@ _MAX_OUTPUT = 20_000
 _BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,200}")
 
 _ACTIONS = (
-    "clone", "pull", "sync", "branch", "submit_review", "list_reviews", "log", "status",
+    "clone", "pull", "sync", "branch", "submit_review", "list_reviews", "record_verdict", "log", "status",
 )
 
 
@@ -128,6 +128,11 @@ def _cloned() -> bool:
         "integrate-only — you CANNOT push to it; a human merges "
         "approved reviews. 'pull' refreshes from the drive, "
         "'list_reviews'/'log'/'status' inspect state.\n\n"
+        "'record_verdict' records YOUR advisory approve/reject opinion "
+        "on an open review (review_id, verdict, optional note) — LEAD-"
+        "ONLY, enforced server-side (403 if you aren't your team's "
+        "lead). It has no effect on merge/reject; a human still "
+        "decides those.\n\n"
         "Solo agents (not on a team) have no Team Drive."
     ),
     parameters={
@@ -165,6 +170,22 @@ def _cloned() -> bool:
             "description": "list_reviews filter: open|merged|rejected|superseded (default all)",
             "default": "",
         },
+        "review_id": {
+            "type": "string",
+            "description": "Review id (record_verdict). Required for record_verdict.",
+            "default": "",
+        },
+        "verdict": {
+            "type": "string",
+            "enum": ["approve", "reject"],
+            "description": "Your advisory verdict (record_verdict). Required for record_verdict.",
+            "default": "",
+        },
+        "note": {
+            "type": "string",
+            "description": "Optional note explaining your verdict (record_verdict), max 2000 chars.",
+            "default": "",
+        },
     },
 )
 async def team_drive(
@@ -174,6 +195,9 @@ async def team_drive(
     title: str = "",
     summary: str = "",
     status_filter: str = "",
+    review_id: str = "",
+    verdict: str = "",
+    note: str = "",
     *,
     mesh_client=None,
 ) -> dict:
@@ -362,8 +386,43 @@ async def team_drive(
                 "head_sha": sanitize_for_prompt(str(r.get("head_sha_short") or r.get("head_sha") or "")),
                 "created_at": r.get("created_at"),
                 "resolved_at": r.get("resolved_at"),
+                # Advisory lead verdict (plan §8 #13) — informational only,
+                # zero effect on merge/reject. Sanitized like every other
+                # teammate-authored field re-entering this agent's context.
+                "lead_verdict": r.get("lead_verdict"),
+                "lead_verdict_note": sanitize_for_prompt(str(r.get("lead_verdict_note") or ""))[:1000] or None,
+                "lead_verdict_at": r.get("lead_verdict_at"),
             })
         return {"ok": True, "reviews": reviews, "count": len(reviews)}
+
+    if action == "record_verdict":
+        if mesh_client is None:
+            return _fail("No mesh_client available.", "This is an infrastructure fault — report it to the operator.")
+        if not review_id.strip():
+            return _fail("review_id is required for record_verdict.", "Pass review_id='...' from list_reviews.")
+        if verdict not in ("approve", "reject"):
+            return _fail(
+                f"Invalid verdict '{verdict}'.",
+                "Pass verdict='approve' or verdict='reject'.",
+            )
+        clean_note = sanitize_for_prompt(note)[:2000] if note else ""
+        try:
+            resp = await mesh_client.record_drive_verdict(review_id.strip(), verdict, clean_note)
+        except Exception as e:
+            return _fail(
+                f"Recording verdict failed: {_scrub(str(e), token)[:300]}",
+                "Only your team's lead can record a verdict — if you aren't "
+                "the lead, this will always 403. If the review is no "
+                "longer open, it can't take a verdict.",
+            )
+        review = resp.get("review") or {}
+        return {
+            "ok": True,
+            "recorded": True,
+            "review_id": str(review.get("id", review_id)),
+            "verdict": verdict,
+            "note": "This is advisory only — a human still merges or rejects the review.",
+        }
 
     if action == "log":
         rc, out = await _git(

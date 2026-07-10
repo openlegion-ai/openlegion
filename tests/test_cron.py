@@ -393,6 +393,117 @@ class TestHeartbeat:
         assert updated.id == original_id  # id should not change
 
 
+class TestLeadDutyProbe:
+    """Mesh-side lead-duty probe (plan §8 #13/#14): a team lead with
+    open drive reviews gets a triggered "Probe Alerts" entry; non-leads
+    pay for exactly one cheap ``lead_reviews_fn`` lookup and nothing
+    else — no probe entry, no extra queries."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.config_path = f"{self._tmpdir}/cron.json"
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_non_lead_gets_no_probe(self):
+        sched = CronScheduler(
+            config_path=self.config_path,
+            lead_reviews_fn=lambda agent: None,
+        )
+        results = sched._run_heartbeat_probes("worker")
+        assert not any(r.name == "lead_pending_reviews" for r in results)
+
+    def test_lead_with_open_reviews_gets_triggered_probe(self):
+        sched = CronScheduler(
+            config_path=self.config_path,
+            lead_reviews_fn=lambda agent: {"team_id": "alpha", "count": 2},
+        )
+        results = sched._run_heartbeat_probes("lead-1")
+        probe = next(r for r in results if r.name == "lead_pending_reviews")
+        assert probe.triggered is True
+        assert "2 drive review(s)" in probe.detail
+        assert "alpha" in probe.detail
+
+    def test_lead_with_no_open_reviews_gets_no_probe(self):
+        """lead_reviews_fn itself returns None when the lead's queue is
+        empty (the count>0 check lives in the seam, not the probe)."""
+        sched = CronScheduler(
+            config_path=self.config_path,
+            lead_reviews_fn=lambda agent: None,
+        )
+        results = sched._run_heartbeat_probes("lead-1")
+        assert not any(r.name == "lead_pending_reviews" for r in results)
+
+    def test_lead_reviews_fn_failure_degrades_gracefully(self):
+        def _boom(agent):
+            raise RuntimeError("store unavailable")
+
+        sched = CronScheduler(config_path=self.config_path, lead_reviews_fn=_boom)
+        results = sched._run_heartbeat_probes("lead-1")
+        assert not any(r.name == "lead_pending_reviews" for r in results)
+
+    def test_no_lead_reviews_fn_wired_is_a_noop(self):
+        sched = CronScheduler(config_path=self.config_path)
+        results = sched._run_heartbeat_probes("lead-1")
+        assert not any(r.name == "lead_pending_reviews" for r in results)
+
+    @pytest.mark.asyncio
+    async def test_lead_probe_escalates_an_otherwise_empty_plate(self):
+        """A triggered lead-duty probe is actionable — it escalates the
+        heartbeat dispatch even with no other pending work, no goals,
+        and no utility model configured (B2 guard doesn't apply to
+        actionable items)."""
+        dispatch = AsyncMock(return_value="reviewing now")
+        mock_bb = MagicMock()
+        mock_bb.list_by_prefix.return_value = []
+        ctx = AsyncMock(return_value={
+            "heartbeat_rules": "", "daily_logs": "",
+            "is_default_heartbeat": True, "has_recent_activity": False,
+        })
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            blackboard=mock_bb, context_fn=ctx,
+            goals_fn=lambda agent: None, utility_model_fn=lambda: "",
+            lead_reviews_fn=lambda agent: {"team_id": "alpha", "count": 1},
+        )
+        job = sched.add_job(agent="lead-1", schedule="every 15m", message="heartbeat", heartbeat=True)
+        result = await sched._execute_job(job)
+        assert result is not None
+        dispatch.assert_called_once()
+        call_msg = dispatch.call_args[0][1]
+        assert "Probe Alerts" in call_msg
+        assert "pending your verdict" in call_msg
+
+    @pytest.mark.asyncio
+    async def test_non_lead_empty_plate_still_skips(self):
+        """A non-lead with an otherwise-empty plate stays probe-only —
+        the lead-duty probe must never fire for a non-lead. Disk usage
+        is mocked low so only the mocked blackboard/lead probes decide
+        the outcome (isolates from the real host's disk state)."""
+        dispatch = AsyncMock(return_value="should not run")
+        mock_bb = MagicMock()
+        mock_bb.list_by_prefix.return_value = []
+        ctx = AsyncMock(return_value={
+            "heartbeat_rules": "", "daily_logs": "",
+            "is_default_heartbeat": True, "has_recent_activity": False,
+        })
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            blackboard=mock_bb, context_fn=ctx,
+            goals_fn=lambda agent: None, utility_model_fn=lambda: "",
+            lead_reviews_fn=lambda agent: None,
+        )
+        job = sched.add_job(agent="worker", schedule="every 15m", message="heartbeat", heartbeat=True)
+        with patch(
+            "src.host.cron.shutil.disk_usage",
+            return_value=MagicMock(used=0, total=100, free=100),
+        ):
+            result = await sched._execute_job(job)
+        assert result is None
+        dispatch.assert_not_called()
+
+
 class TestCronConcurrentUpdate:
     """Tests for per-job locking under concurrent mutation."""
 

@@ -135,7 +135,10 @@ def team_app(tmp_path, monkeypatch):
         teams_store=teams_store,
         # Bearer auth so ``_resolve_agent_id`` verifies the operator
         # identity (the team-write endpoints 403 an unverifiable "").
-        auth_tokens={"operator": "op-token"},
+        # agent1's token lets lead-endpoint tests exercise a real
+        # authenticated-but-non-operator 403 (as opposed to an
+        # unauthenticated 401).
+        auth_tokens={"operator": "op-token", "agent1": "a1-token"},
     )
     yield app, teams_store, perms_file, tmp_path
     blackboard.close()
@@ -154,6 +157,15 @@ async def _post(app, path, json_body):
 async def _delete(app, path):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         return await c.delete(path, headers=_op_headers())
+
+
+async def _post_put(app, path, json_body):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        return await c.put(path, json=json_body, headers=_op_headers())
+
+
+def _agent_headers(agent: str, token: str) -> dict:
+    return {"Authorization": f"Bearer {token}", "X-Agent-ID": agent}
 
 
 class TestMeshTeamEndpoints:
@@ -376,6 +388,104 @@ class TestMeshTeamEndpoints:
         app, _, _, _ = team_app
         r = await _delete(app, "/mesh/teams/ghost")
         assert r.status_code == 404
+
+
+class TestMeshTeamLeadEndpoint:
+    """PUT/DELETE /mesh/teams/{name}/lead (plan §8 #14) — lead is TEAM
+    DATA, operator-or-internal only assignment, zero permission
+    elevation for the assigned agent."""
+
+    @pytest.mark.asyncio
+    async def test_assign_lead_operator_ok(self, team_app):
+        app, store, _, _ = team_app
+        store.create_team("proj1")
+        store.add_member("proj1", "agent1")
+        r = await _post_put(app, "/mesh/teams/proj1/lead", {"agent_id": "agent1"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["lead_agent_id"] == "agent1"
+        assert store.get_team("proj1")["lead_agent_id"] == "agent1"
+
+    @pytest.mark.asyncio
+    async def test_assign_lead_worker_403(self, team_app):
+        """A real (non-operator) authenticated caller is rejected — not
+        just an unauthenticated one."""
+        app, store, _, _ = team_app
+        store.create_team("proj1")
+        store.add_member("proj1", "agent1")
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.put(
+                "/mesh/teams/proj1/lead",
+                json={"agent_id": "agent1"},
+                headers=_agent_headers("agent1", "a1-token"),
+            )
+        assert r.status_code == 403
+        assert store.get_team("proj1")["lead_agent_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_assign_lead_unknown_team_404(self, team_app):
+        app, _, _, _ = team_app
+        r = await _post_put(app, "/mesh/teams/ghost/lead", {"agent_id": "agent1"})
+        assert r.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_assign_lead_non_member_400(self, team_app):
+        app, store, _, _ = team_app
+        store.create_team("proj1")
+        r = await _post_put(app, "/mesh/teams/proj1/lead", {"agent_id": "agent1"})
+        assert r.status_code == 400
+        assert "not a member" in r.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_assign_lead_operator_rejected(self, team_app):
+        app, store, _, _ = team_app
+        store.create_team("proj1")
+        r = await _post_put(app, "/mesh/teams/proj1/lead", {"agent_id": "operator"})
+        assert r.status_code == 400
+        assert store.get_team("proj1")["lead_agent_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_clear_lead_operator_ok(self, team_app):
+        app, store, _, _ = team_app
+        store.create_team("proj1")
+        store.add_member("proj1", "agent1")
+        store.set_lead("proj1", "agent1")
+        r = await _delete(app, "/mesh/teams/proj1/lead")
+        assert r.status_code == 200
+        assert r.json()["lead_agent_id"] is None
+        assert store.get_team("proj1")["lead_agent_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_clear_lead_worker_403(self, team_app):
+        app, store, _, _ = team_app
+        store.create_team("proj1")
+        store.add_member("proj1", "agent1")
+        store.set_lead("proj1", "agent1")
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.delete(
+                "/mesh/teams/proj1/lead",
+                headers=_agent_headers("agent1", "a1-token"),
+            )
+        assert r.status_code == 403
+        assert store.get_team("proj1")["lead_agent_id"] == "agent1"
+
+    @pytest.mark.asyncio
+    async def test_clear_lead_unknown_team_404(self, team_app):
+        app, _, _, _ = team_app
+        r = await _delete(app, "/mesh/teams/ghost/lead")
+        assert r.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_list_teams_surfaces_lead(self, team_app):
+        app, store, _, _ = team_app
+        store.create_team("proj1")
+        store.add_member("proj1", "agent1")
+        store.set_lead("proj1", "agent1")
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.get("/mesh/teams", headers=_op_headers())
+        assert r.status_code == 200
+        row = next(t for t in r.json()["teams"] if t["name"] == "proj1")
+        assert row["lead_agent_id"] == "agent1"
 
 
 class TestBlackboardPermissions:

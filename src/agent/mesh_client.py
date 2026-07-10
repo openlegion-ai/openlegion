@@ -1816,6 +1816,27 @@ class MeshClient:
         _raise_with_body(response)
         return response.json()
 
+    async def record_drive_verdict(self, review_id: str, verdict: str, note: str = "") -> dict:
+        """Record this agent's advisory approve/reject verdict on a review.
+
+        Server-enforced lead-only (plan §8 #13): the mesh 403s any
+        caller that isn't this team's ``lead_agent_id``. Purely
+        advisory — has zero effect on the merge/reject gates.
+        """
+        if not self.team_name:
+            raise RuntimeError("No team drive available: agent has no team scope")
+        client = await self._get_client()
+        body: dict = {"verdict": verdict}
+        if note:
+            body["note"] = note
+        response = await client.post(
+            f"{self.mesh_url}/mesh/teams/{self.team_name}/drive/reviews/{review_id}/verdict",
+            json=body,
+            headers=self._trace_headers(),
+        )
+        _raise_with_body(response)
+        return response.json()
+
     async def commit_drive_artifact(
         self, team: str, *, name: str, content: str, kind: str = "artifact",
         encoding: str = "utf8",

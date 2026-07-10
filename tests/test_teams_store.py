@@ -301,3 +301,123 @@ class TestAgentGoals:
         store.set_agent_goals("bob", ["standing goal"])
         store.add_member("beta", "bob")
         assert store.get_agent_goals("bob")["goals"] == ["standing goal"]
+
+
+class TestLeadDesignation:
+    """``lead_agent_id`` (plan §8 #14) — team data, not an identity
+    tier. ``set_lead`` validates real membership; integrity clears the
+    pointer on every path that removes the lead from its team."""
+
+    def test_set_lead_requires_member(self, store):
+        store.create_team("alpha")
+        with pytest.raises(ValueError, match="not a member"):
+            store.set_lead("alpha", "bob")
+
+    def test_set_lead_rejects_operator(self, store):
+        store.create_team("alpha")
+        with pytest.raises(ValueError, match="system agent"):
+            store.set_lead("alpha", "operator")
+
+    def test_set_lead_and_get(self, store):
+        store.create_team("alpha")
+        store.add_member("alpha", "bob")
+        team = store.set_lead("alpha", "bob")
+        assert team["lead_agent_id"] == "bob"
+        assert store.get_team("alpha")["lead_agent_id"] == "bob"
+
+    def test_set_lead_none_clears(self, store):
+        store.create_team("alpha")
+        store.add_member("alpha", "bob")
+        store.set_lead("alpha", "bob")
+        team = store.set_lead("alpha", None)
+        assert team["lead_agent_id"] is None
+        assert store.get_team("alpha")["lead_agent_id"] is None
+
+    def test_set_lead_reassign_to_other_member(self, store):
+        store.create_team("alpha")
+        store.add_member("alpha", "bob")
+        store.add_member("alpha", "alice")
+        store.set_lead("alpha", "bob")
+        store.set_lead("alpha", "alice")
+        assert store.get_team("alpha")["lead_agent_id"] == "alice"
+
+    def test_set_lead_missing_team_raises(self, store):
+        with pytest.raises(TeamNotFound):
+            store.set_lead("nope", "bob")
+
+    def test_led_team_unset_returns_none(self, store):
+        store.create_team("alpha")
+        store.add_member("alpha", "bob")
+        assert store.led_team("bob") is None
+
+    def test_led_team_returns_team_id(self, store):
+        store.create_team("alpha")
+        store.add_member("alpha", "bob")
+        store.set_lead("alpha", "bob")
+        assert store.led_team("bob") == "alpha"
+
+    def test_led_team_unknown_agent_returns_none(self, store):
+        assert store.led_team("nobody") is None
+
+    def test_list_teams_includes_lead_agent_id(self, store):
+        store.create_team("alpha")
+        store.add_member("alpha", "bob")
+        store.set_lead("alpha", "bob")
+        store.create_team("beta")
+        teams = store.list_teams()
+        assert teams["alpha"]["lead_agent_id"] == "bob"
+        assert teams["beta"]["lead_agent_id"] is None
+
+    # ── integrity: every removal path clears a stale pointer ──────
+
+    def test_remove_member_clears_lead(self, store):
+        store.create_team("alpha")
+        store.add_member("alpha", "bob")
+        store.set_lead("alpha", "bob")
+        store.remove_member("alpha", "bob")
+        assert store.get_team("alpha")["lead_agent_id"] is None
+
+    def test_remove_member_of_non_lead_leaves_lead_intact(self, store):
+        store.create_team("alpha")
+        store.add_member("alpha", "bob")
+        store.add_member("alpha", "alice")
+        store.set_lead("alpha", "bob")
+        store.remove_member("alpha", "alice")
+        assert store.get_team("alpha")["lead_agent_id"] == "bob"
+
+    def test_remove_agent_clears_lead(self, store):
+        store.create_team("alpha")
+        store.add_member("alpha", "bob")
+        store.set_lead("alpha", "bob")
+        store.remove_agent("bob")
+        assert store.get_team("alpha")["lead_agent_id"] is None
+
+    def test_delete_team_removes_lead_with_the_row(self, store):
+        store.create_team("alpha")
+        store.add_member("alpha", "bob")
+        store.set_lead("alpha", "bob")
+        store.delete_team("alpha")
+        assert store.get_team("alpha") is None
+        # The agent itself is no longer "led" anywhere.
+        assert store.led_team("bob") is None
+
+    def test_add_member_eviction_clears_old_team_lead(self, store):
+        """Moving a lead to a new team must not leave the OLD team
+        pointing at an agent who is no longer a member there."""
+        store.create_team("alpha")
+        store.create_team("beta")
+        store.add_member("alpha", "bob")
+        store.set_lead("alpha", "bob")
+        store.add_member("beta", "bob")
+        assert store.get_team("alpha")["lead_agent_id"] is None
+        assert store.get_team("beta")["lead_agent_id"] is None
+        assert store.team_of("bob") == "beta"
+
+    def test_add_member_readd_same_team_does_not_clear_lead(self, store):
+        """Re-adding an already-member lead to the SAME team (a no-op
+        move) must not disturb the lead pointer."""
+        store.create_team("alpha")
+        store.add_member("alpha", "bob")
+        store.set_lead("alpha", "bob")
+        store.add_member("alpha", "bob")
+        assert store.get_team("alpha")["lead_agent_id"] == "bob"

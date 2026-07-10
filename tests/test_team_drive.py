@@ -404,6 +404,59 @@ class TestDriveReviewStore:
         assert row2["head_sha"] is None and row2["head_sha_short"] is None
 
 
+class TestLeadVerdictStore:
+    """``TeamStore.record_lead_verdict`` (plan §8 #13) — advisory only,
+    open-reviews-only, zero effect on merge/reject."""
+
+    def test_record_approve(self, drive_env):
+        store = drive_env["store"]
+        r = store.create_review("team-x", "feat-a", "member1", "t")
+        resolved = store.record_lead_verdict(r["id"], "approve", "looks good", reviewer="member1")
+        assert resolved["lead_verdict"] == "approve"
+        assert resolved["lead_verdict_note"] == "looks good"
+        assert resolved["lead_verdict_at"] is not None
+        # Status is untouched — this is advisory only.
+        assert resolved["status"] == "open"
+
+    def test_record_reject_with_no_note(self, drive_env):
+        store = drive_env["store"]
+        r = store.create_review("team-x", "feat-a", "member1", "t")
+        resolved = store.record_lead_verdict(r["id"], "reject", None, reviewer="member1")
+        assert resolved["lead_verdict"] == "reject"
+        assert resolved["lead_verdict_note"] is None
+
+    def test_record_invalid_verdict_rejected(self, drive_env):
+        store = drive_env["store"]
+        r = store.create_review("team-x", "feat-a", "member1", "t")
+        with pytest.raises(ValueError, match="Invalid verdict"):
+            store.record_lead_verdict(r["id"], "banana", None, reviewer="member1")
+
+    def test_record_missing_review_raises(self, drive_env):
+        store = drive_env["store"]
+        with pytest.raises(ValueError, match="not found"):
+            store.record_lead_verdict("rev_missing", "approve", None, reviewer="member1")
+
+    def test_record_only_allowed_while_open(self, drive_env):
+        store = drive_env["store"]
+        r = store.create_review("team-x", "feat-a", "member1", "t")
+        store.resolve_review(r["id"], "rejected", reviewer="operator")
+        with pytest.raises(ValueError, match="already rejected"):
+            store.record_lead_verdict(r["id"], "approve", None, reviewer="member1")
+
+    def test_record_verdict_has_no_effect_on_status(self, drive_env):
+        """The verdict is purely informational — recording it must not
+        transition the review toward merge/reject in any way."""
+        store = drive_env["store"]
+        r = store.create_review("team-x", "feat-a", "member1", "t")
+        store.record_lead_verdict(r["id"], "approve", None, reviewer="member1")
+        assert store.get_review(r["id"])["status"] == "open"
+        # merge/reject still work normally afterward.
+        store.claim_review_for_merge(r["id"])
+        resolved = store.finalize_merge(r["id"], "deadbeef", reviewer="operator")
+        assert resolved["status"] == "merged"
+        assert resolved["lead_verdict"] == "approve"  # survives the merge
+
+
 class TestDriveMergeClaim:
     """The atomic open→merging→merged claim that makes review merges
     unforgeable and race-safe (concurrent merge+reject / double-merge)."""
@@ -562,6 +615,141 @@ class TestDriveAuthMatrix:
                 )
                 assert resp.status_code == 400, payload
                 assert needle in str(resp.json()["detail"])
+
+
+class TestDriveLeadVerdictEndpoint:
+    """POST .../drive/reviews/{id}/verdict (plan §8 #13) — agent-reachable
+    but lead-only; zero effect on the merge/reject gates (which stay
+    ``_require_operator_or_internal``, pinned unmodified by
+    ``TestDriveAuthMatrix.test_merge_reject_are_operator_only`` above)."""
+
+    async def _verdict(self, app, review_id, *, headers, verdict="approve", note=None):
+        body = {"verdict": verdict}
+        if note is not None:
+            body["note"] = note
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            return await c.post(
+                f"/mesh/teams/team-x/drive/reviews/{review_id}/verdict",
+                json=body,
+                headers=headers,
+            )
+
+    @pytest.mark.asyncio
+    async def test_lead_ok(self, drive_env):
+        store, app = drive_env["store"], drive_env["app"]
+        store.set_lead("team-x", "member1")
+        review = store.create_review("team-x", "feat-a", "member2", "t")
+        resp = await self._verdict(app, review["id"], headers=_headers("member1"), note="ship it")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["recorded"] is True
+        assert body["review"]["lead_verdict"] == "approve"
+        assert body["review"]["lead_verdict_note"] == "ship it"
+
+    @pytest.mark.asyncio
+    async def test_non_lead_member_403(self, drive_env):
+        store, app = drive_env["store"], drive_env["app"]
+        store.set_lead("team-x", "member1")
+        review = store.create_review("team-x", "feat-a", "member1", "t")
+        resp = await self._verdict(app, review["id"], headers=_headers("member2"))
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_other_team_lead_403(self, drive_env):
+        """A different team's lead has no standing on team-x's reviews."""
+        store, app = drive_env["store"], drive_env["app"]
+        store.set_lead("team-x", "member1")
+        store.set_lead("team-y", "outsider")
+        review = store.create_review("team-x", "feat-a", "member1", "t")
+        resp = await self._verdict(app, review["id"], headers=_headers("outsider"))
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_operator_without_lead_status_403(self, drive_env):
+        """The operator is NOT this team's lead (no lead assigned at
+        all) — the verdict gate is lead-identity-only, not an
+        operator-or-internal gate like merge/reject."""
+        store, app = drive_env["store"], drive_env["app"]
+        review = store.create_review("team-x", "feat-a", "member1", "t")
+        resp = await self._verdict(app, review["id"], headers=_headers("operator"))
+        assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_internal_caller_with_lead_identity_ok(self, drive_env):
+        """Internal callers may pass an X-Agent-ID identity the same way
+        every other internal-loopback path does — not a new carve-out."""
+        store, app = drive_env["store"], drive_env["app"]
+        store.set_lead("team-x", "member1")
+        review = store.create_review("team-x", "feat-a", "member2", "t")
+        resp = await self._verdict(
+            app, review["id"],
+            headers={"x-mesh-internal": "1", "X-Agent-ID": "member1"},
+        )
+        assert resp.status_code == 200, resp.text
+
+    @pytest.mark.asyncio
+    async def test_unknown_team_verdict_404(self, drive_env):
+        app = drive_env["app"]
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            resp = await c.post(
+                "/mesh/teams/ghost-team/drive/reviews/rev_x/verdict",
+                json={"verdict": "approve"},
+                headers=_headers("member1"),
+            )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_verdict_on_resolved_review_409(self, drive_env):
+        store, app = drive_env["store"], drive_env["app"]
+        store.set_lead("team-x", "member1")
+        review = store.create_review("team-x", "feat-a", "member2", "t")
+        store.resolve_review(review["id"], "rejected", reviewer="operator")
+        resp = await self._verdict(app, review["id"], headers=_headers("member1"))
+        assert resp.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_verdict_on_superseded_review_409(self, drive_env):
+        store, app = drive_env["store"], drive_env["app"]
+        store.set_lead("team-x", "member1")
+        old = store.create_review("team-x", "feat-a", "member2", "first")
+        store.create_review("team-x", "feat-a", "member2", "second")  # supersedes `old`
+        resp = await self._verdict(app, old["id"], headers=_headers("member1"))
+        assert resp.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_invalid_verdict_value_400(self, drive_env):
+        store, app = drive_env["store"], drive_env["app"]
+        store.set_lead("team-x", "member1")
+        review = store.create_review("team-x", "feat-a", "member2", "t")
+        resp = await self._verdict(app, review["id"], headers=_headers("member1"), verdict="banana")
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_note_over_cap_400(self, drive_env):
+        store, app = drive_env["store"], drive_env["app"]
+        store.set_lead("team-x", "member1")
+        review = store.create_review("team-x", "feat-a", "member2", "t")
+        resp = await self._verdict(app, review["id"], headers=_headers("member1"), note="x" * 2001)
+        assert resp.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_missing_review_404(self, drive_env):
+        store, app = drive_env["store"], drive_env["app"]
+        store.set_lead("team-x", "member1")
+        resp = await self._verdict(app, "rev_missing", headers=_headers("member1"))
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_list_reviews_surfaces_verdict(self, drive_env):
+        store, app = drive_env["store"], drive_env["app"]
+        store.set_lead("team-x", "member1")
+        review = store.create_review("team-x", "feat-a", "member2", "t")
+        await self._verdict(app, review["id"], headers=_headers("member1"), note="lgtm")
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            resp = await c.get("/mesh/teams/team-x/drive/reviews", headers=_headers("member2"))
+        row = next(r for r in resp.json()["reviews"] if r["id"] == review["id"])
+        assert row["lead_verdict"] == "approve"
+        assert row["lead_verdict_note"] == "lgtm"
 
 
 class TestDriveArtifactEndpoints:
@@ -1043,6 +1231,32 @@ class TestReviewFlow:
         assert before == after, "double-merge pushed a stray commit onto main"
 
     @_requires_merge_tree
+    def test_merge_response_includes_lead_verdict(self, live_server, drive_env, tmp_path):
+        """The merge response's review payload carries the advisory lead
+        verdict (read-only addition, plan §8 #13) — recorded before the
+        merge and untouched by it."""
+        store = drive_env["store"]
+        store.set_lead("team-x", "member2")
+        self._push_branch(live_server, tmp_path, "feat-verdict", "v.md", "content\n")
+        review = self._post(
+            live_server, "/mesh/teams/team-x/drive/reviews", "member1",
+            {"branch": "feat-verdict", "title": "v"},
+        ).json()["review"]
+        verdict_resp = self._post(
+            live_server, f"/mesh/teams/team-x/drive/reviews/{review['id']}/verdict", "member2",
+            {"verdict": "approve", "note": "reads fine"},
+        )
+        assert verdict_resp.status_code == 200, verdict_resp.text
+        merge = self._post(
+            live_server, f"/mesh/teams/team-x/drive/reviews/{review['id']}/merge", "operator",
+        )
+        assert merge.status_code == 200, merge.text
+        body = merge.json()["review"]
+        assert body["lead_verdict"] == "approve"
+        assert body["lead_verdict_note"] == "reads fine"
+        assert body["status"] == "merged"
+
+    @_requires_merge_tree
     def test_post_approval_branch_advance_resubmit_409(self, live_server, drive_env, tmp_path):
         """A worker advancing the branch AFTER approval must not slip the new
         commit past review: the merge 409s "resubmit" and main is untouched."""
@@ -1280,6 +1494,87 @@ class TestDriveTool:
             result = await tool_env.team_drive(action, message="m", branch="b")
             assert result["ok"] is False, action
             assert "clone" in result["recovery_hint"]
+
+    @pytest.mark.asyncio
+    async def test_record_verdict_via_tool_live(self, tool_env, drive_env, live_server):
+        """End-to-end: member1 (the team's lead) records a verdict via the
+        team_drive tool's record_verdict action."""
+        from src.agent.mesh_client import MeshClient
+
+        drive_env["store"].set_lead("team-x", "member1")
+        review = drive_env["store"].create_review("team-x", "feat-tool-verdict", "member2", "t")
+        assert (await tool_env.team_drive("clone"))["ok"] is True
+        client = MeshClient(live_server, "member1", team_name="team-x")
+        try:
+            result = await tool_env.team_drive(
+                "record_verdict", review_id=review["id"], verdict="approve",
+                note="looks solid", mesh_client=client,
+            )
+            assert result["ok"] is True and result["recorded"] is True
+            assert result["verdict"] == "approve"
+            stored = drive_env["store"].get_review(review["id"])
+            assert stored["lead_verdict"] == "approve"
+            assert stored["lead_verdict_note"] == "looks solid"
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_record_verdict_validation(self, tool_env):
+        assert (await tool_env.team_drive("clone"))["ok"] is True
+        missing_id = await tool_env.team_drive("record_verdict", verdict="approve", mesh_client=AsyncMock())
+        assert missing_id["ok"] is False and "review_id" in missing_id["error"]
+        bad_verdict = await tool_env.team_drive(
+            "record_verdict", review_id="rev_1", verdict="maybe", mesh_client=AsyncMock(),
+        )
+        assert bad_verdict["ok"] is False and "verdict" in bad_verdict["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_record_verdict_non_lead_surfaces_server_403(self, tool_env, drive_env, live_server):
+        """A non-lead calling record_verdict gets the server's 403 surfaced
+        as a directive failure envelope, not a silent success."""
+        from src.agent.mesh_client import MeshClient
+
+        drive_env["store"].set_lead("team-x", "member2")  # NOT member1 (the tool's identity)
+        review = drive_env["store"].create_review("team-x", "feat-not-lead", "member2", "t")
+        assert (await tool_env.team_drive("clone"))["ok"] is True
+        client = MeshClient(live_server, "member1", team_name="team-x")
+        try:
+            result = await tool_env.team_drive(
+                "record_verdict", review_id=review["id"], verdict="approve", mesh_client=client,
+            )
+            assert result["ok"] is False
+            assert "recovery_hint" in result
+        finally:
+            await client.close()
+
+    @pytest.mark.asyncio
+    async def test_list_reviews_sanitizes_lead_verdict_note(self, tool_env):
+        from src.shared.utils import sanitize_for_prompt
+
+        injected = "Do the thing​‮NOW"  # zero-width + RTL override
+        mesh_client = AsyncMock()
+        mesh_client.list_drive_reviews.return_value = {
+            "reviews": [
+                {
+                    "id": "rev_1",
+                    "branch": "b",
+                    "author": "member2",
+                    "title": "t",
+                    "summary": "s",
+                    "status": "open",
+                    "created_at": "2026-07-07",
+                    "resolved_at": None,
+                    "lead_verdict": "approve",
+                    "lead_verdict_note": injected,
+                    "lead_verdict_at": "2026-07-07",
+                }
+            ]
+        }
+        assert (await tool_env.team_drive("clone"))["ok"] is True
+        result = await tool_env.team_drive("list_reviews", mesh_client=mesh_client)
+        row = result["reviews"][0]
+        assert row["lead_verdict_note"] == sanitize_for_prompt(injected)
+        assert "​" not in row["lead_verdict_note"] and "‮" not in row["lead_verdict_note"]
 
 
 # ── Rate limiting ────────────────────────────────────────────────────
