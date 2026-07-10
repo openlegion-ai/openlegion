@@ -214,7 +214,7 @@ agents:
       3. If yes and last_researched > 14 days ago: do a targeted refresh
       4. Always confirm to the user what action was taken
 
-      If nothing requires action, respond HEARTBEAT_OK immediately.
+      If nothing requires action, end the checkup without further tool calls.
 
     permissions:
       blackboard_read: ["competitors/*", "requests/*", "tasks/*", "status/*"]

@@ -47,9 +47,10 @@ _SCAFFOLD_FILES: dict[str, str] = {
 # HEARTBEAT.md is intentionally NOT bootstrapped. Most agents never write
 # heartbeat rules — leaving the file absent (vs. empty) keeps the workspace
 # directory clean and avoids signalling "this agent has rules" when it
-# doesn't. Readers (loop._is_heartbeat_empty, workspace.load_heartbeat_rules,
-# /heartbeat-context, /workspace listing) all treat missing identically to
-# empty. The file is created lazily on first write — via either
+# doesn't. Readers (workspace.load_heartbeat_rules, /heartbeat-context,
+# /workspace listing) all treat missing identically to empty. The
+# is_default check keys on the same "empty or default heading" rule. The
+# file is created lazily on first write — via either
 # ``edit_agent(field="heartbeat")`` (mesh-side PUT /workspace/HEARTBEAT.md),
 # the ``update_workspace`` agent tool, or the dashboard editor. Templates
 # that ship explicit heartbeat rules still seed the file via

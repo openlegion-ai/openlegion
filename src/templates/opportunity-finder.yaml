@@ -139,7 +139,7 @@ agents:
       3. Update blackboard with gap status changes
       4. notify_user with monthly summary
 
-      If nothing requires action, respond HEARTBEAT_OK immediately.
+      If nothing requires action, end the checkup without further tool calls.
 
     permissions:
       blackboard_read: ["gaps/*", "evaluations/*", "models/*", "requests/*", "tasks/*", "status/*"]
@@ -292,7 +292,7 @@ agents:
       - Call update_status() with your current state
       - Review any gaps on the blackboard at gaps/raw/* that haven't been evaluated yet
 
-      If nothing requires action, respond HEARTBEAT_OK immediately.
+      If nothing requires action, end the checkup without further tool calls.
 
     permissions:
       blackboard_read: ["gaps/*", "evaluations/*", "models/*", "requests/*", "tasks/*", "status/*"]
@@ -504,7 +504,7 @@ agents:
       - Check blackboard evaluations/* for any STRONG/PROMISING evaluations
         that don't have a corresponding model at models/*
 
-      If nothing requires action, respond HEARTBEAT_OK immediately.
+      If nothing requires action, end the checkup without further tool calls.
 
     permissions:
       blackboard_read: ["gaps/*", "evaluations/*", "models/*", "requests/*", "tasks/*", "status/*"]

@@ -726,10 +726,9 @@ class TestHeartbeatFile:
     def test_load_heartbeat_rules_missing_file_returns_empty(self):
         """load_heartbeat_rules returns "" when HEARTBEAT.md doesn't exist.
 
-        This is the contract every reader relies on — _is_heartbeat_empty,
-        the /heartbeat-context endpoint, and the cron skip-LLM optimization
-        all expect "" for a missing file, semantically identical to
-        "no rules".
+        This is the contract every reader relies on — the /heartbeat-context
+        endpoint's is_default check and the cron plate gate both expect ""
+        for a missing file, semantically identical to "no rules".
         """
         root = Path(self._tmpdir)
         assert not (root / "HEARTBEAT.md").exists()

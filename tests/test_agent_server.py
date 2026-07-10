@@ -861,7 +861,7 @@ class TestHeartbeatOriginContextVar:
         app, mock_loop = _make_app()
         captured: list = []
 
-        async def _capture_heartbeat(_msg, *, force_llm: bool = False):
+        async def _capture_heartbeat(_msg):
             # Read the contextvar from inside the heartbeat run — that's
             # what tools (e.g. coordination_tool.hand_off) will see.
             captured.append(current_origin.get())
@@ -894,7 +894,7 @@ class TestHeartbeatOriginContextVar:
         app, mock_loop = _make_app()
         captured: list = []
 
-        async def _capture_heartbeat(_msg, *, force_llm: bool = False):
+        async def _capture_heartbeat(_msg):
             captured.append(current_origin.get())
             return {"response": "ok", "outcome": "ok", "skipped": False}
 
@@ -906,13 +906,13 @@ class TestHeartbeatOriginContextVar:
         assert captured == [None]
 
 
-class TestHeartbeatForceLlmHeader:
-    """Bug 6 (codex P2 r2): the /heartbeat endpoint must read x-force-llm
-    and forward it to ``execute_heartbeat`` so the agent-side
-    no_heartbeat_rules skip is bypassed for pipeline-kicker agents."""
+class TestHeartbeatEndpointNoForceLlm:
+    """Phase-3 unit 2: the ``force_llm`` / ``x-force-llm`` plumbing is
+    deleted. The /heartbeat endpoint forwards only the message — an
+    ``x-force-llm`` header is inert and never reaches execute_heartbeat."""
 
     @pytest.mark.asyncio
-    async def test_force_llm_header_true_propagates(self):
+    async def test_force_llm_header_is_ignored(self):
         app, mock_loop = _make_app()
         mock_loop.execute_heartbeat = AsyncMock(return_value={
             "response": "ok", "outcome": "ok", "skipped": False,
@@ -924,34 +924,8 @@ class TestHeartbeatForceLlmHeader:
                 headers={"x-force-llm": "true"},
             )
         assert resp.status_code == 200
-        assert mock_loop.execute_heartbeat.call_args.kwargs.get("force_llm") is True
-
-    @pytest.mark.asyncio
-    async def test_force_llm_header_absent_defaults_false(self):
-        app, mock_loop = _make_app()
-        mock_loop.execute_heartbeat = AsyncMock(return_value={
-            "response": "ok", "outcome": "ok", "skipped": False,
-        })
-
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.post("/heartbeat", json={"message": "tick"})
-        assert resp.status_code == 200
-        assert mock_loop.execute_heartbeat.call_args.kwargs.get("force_llm") is False
-
-    @pytest.mark.asyncio
-    async def test_force_llm_header_garbage_defaults_false(self):
-        app, mock_loop = _make_app()
-        mock_loop.execute_heartbeat = AsyncMock(return_value={
-            "response": "ok", "outcome": "ok", "skipped": False,
-        })
-
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.post(
-                "/heartbeat", json={"message": "tick"},
-                headers={"x-force-llm": "definitely-not-a-bool"},
-            )
-        assert resp.status_code == 200
-        assert mock_loop.execute_heartbeat.call_args.kwargs.get("force_llm") is False
+        # The endpoint calls execute_heartbeat(message) with no force_llm kwarg.
+        assert "force_llm" not in mock_loop.execute_heartbeat.call_args.kwargs
 
 
 class TestLearningsFeedbackEndpoint:

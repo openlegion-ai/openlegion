@@ -1999,6 +1999,31 @@ class RuntimeContext:
             )
             return result
 
+        def agent_standing_goals(agent: str):
+            """Read the agent's standing-goals record from the Team store
+            (the same surface ``_fetch_goals`` reads). Lazy — resolves the
+            store at call time so cron construction never depends on store
+            init order; missing store ⇒ no goals (conservative)."""
+            store = getattr(self, "teams_store", None)
+            return store.get_agent_goals(agent) if store is not None else None
+
+        def deployment_utility_model() -> str:
+            """Deployment ``llm.utility_model`` for the cron plate gate.
+
+            Reads the same ``config/mesh.yaml`` seam the mesh model pin
+            and proxy coordination-classifier use — never the untrusted
+            container. '' when unset (no coordination tier), which keeps
+            goal-only initiative ticks probe-only (§8 #11).
+            """
+            try:
+                from src.cli.config import _load_config
+
+                value = _load_config().get("llm", {}).get("utility_model", "")
+            except Exception:
+                logger.debug("cron plate gate: utility model config load failed", exc_info=True)
+                return ""
+            return value if isinstance(value, str) else ""
+
         async def fetch_heartbeat_context(agent_name: str) -> dict:
             try:
                 return await self.transport.request(
@@ -2027,22 +2052,12 @@ class RuntimeContext:
         async def heartbeat_dispatch(
             agent_name: str,
             message: str,
-            *,
-            force_llm: bool = False,
         ) -> dict:
             """Dispatch heartbeat via dedicated /heartbeat endpoint.
 
             Task 2b: stamp ``kind="heartbeat"`` origin so the agent's
             tools (and downstream gates) can identify self-triggered
             heartbeat work versus a human or cron wake.
-
-            Bug 6 (codex P2 r2): ``force_llm`` is forwarded to the
-            agent via the ``x-force-llm`` header so
-            ``AgentLoop.execute_heartbeat`` skips its own ``empty
-            HEARTBEAT.md → no_heartbeat_rules`` short-circuit. Without
-            this, bypassing only the cron-side skip leaves
-            pipeline-kicker agents silent because the agent-side check
-            still fires.
             """
             from src.shared.trace import origin_header, trace_headers
             from src.shared.types import MessageOrigin
@@ -2050,8 +2065,6 @@ class RuntimeContext:
             origin = MessageOrigin(kind="heartbeat", channel="heartbeat", user="")
             headers = trace_headers()
             headers.update(origin_header(origin))
-            if force_llm:
-                headers["x-force-llm"] = "true"
             try:
                 return await self.transport.request(
                     agent_name,
@@ -2074,6 +2087,15 @@ class RuntimeContext:
             heartbeat_dispatch_fn=heartbeat_dispatch,
             event_bus=self.event_bus,
             health_monitor=self.health_monitor,
+            # Plate gate (Phase-3 unit 2): both read mesh-side, never from
+            # the container. ``utility_model_fn`` reports whether a
+            # coordination model is configured (same ``llm.utility_model``
+            # source the model pin uses); ``goals_fn`` reads the agent's
+            # standing goals from the Team store (the surface ``_fetch_goals``
+            # reads) so goal-only ticks can escalate only when a utility
+            # model exists.
+            utility_model_fn=deployment_utility_model,
+            goals_fn=agent_standing_goals,
         )
         self._cron_job_count = len(self.cron_scheduler.jobs)
 
