@@ -467,6 +467,88 @@ class TestDashboardAgentCRUD:
         self.components["cron_scheduler"].remove_agent_jobs.assert_called_once_with("alpha")
         self.components["lane_manager"].remove_lane.assert_called_once_with("alpha")
 
+    def test_delete_agent_clears_team_membership_goals_and_lead(self, monkeypatch):
+        """Bug-fix regression: the dashboard delete path used to skip
+        ``teams_store.remove_agent`` entirely, leaving a dangling
+        ``team_members`` row (plus stale ``agent_goals``/``lead_agent_id``)
+        after the agent's config was already gone.
+
+        Real (non-MagicMock) ``AGENTS_FILE``/``PERMISSIONS_FILE`` paths —
+        ``_config_lock()`` opens a real sidecar lock file next to
+        ``AGENTS_FILE.parent``, which a bare ``MagicMock`` can't satisfy.
+        """
+        import src.cli.config as cli_cfg
+
+        config_dir = Path(self._tmpdir) / "config"
+        config_dir.mkdir(exist_ok=True)
+        monkeypatch.setattr(cli_cfg, "AGENTS_FILE", config_dir / "agents.yaml")
+        monkeypatch.setattr(cli_cfg, "PERMISSIONS_FILE", config_dir / "permissions.json")
+
+        teams_store = self.components["teams_store"]
+        teams_store.create_team("research")
+        teams_store.add_member("research", "alpha")
+        teams_store.set_agent_goals("alpha", ["Find qualified leads"], set_by="operator")
+        teams_store.set_lead("research", "alpha")
+        assert teams_store.team_of("alpha") == "research"
+
+        resp = self.client.delete("/dashboard/api/agents/alpha")
+        assert resp.status_code == 200
+
+        assert teams_store.team_of("alpha") is None
+        assert teams_store.get_agent_goals("alpha") is None
+        assert teams_store.get_team("research")["lead_agent_id"] is None
+
+    @patch("src.cli.config._save_permissions")
+    @patch("src.cli.config._load_permissions", return_value={"permissions": {}})
+    @patch("src.cli.config.AGENTS_FILE")
+    def test_delete_agent_offboard_attempted_before_volume_destruction(self, mock_agents_file, mock_lp, mock_sp):
+        """ORDER PROOF (plan §8 #15): the injected ``offboard_agent``
+        callback must run BEFORE ``runtime.stop_agent(..., remove_data=
+        True)`` — this is the delete surface where the container is
+        typically still live, so it's the one where a real handover
+        actually happens."""
+        mock_agents_file.exists.return_value = False
+        order: list[tuple] = []
+
+        async def fake_offboard(agent_id, *, reason):
+            order.append(("offboard", agent_id, reason))
+            return {"handover_committed": True, "errors": []}
+
+        def fake_stop_agent(agent_id, remove_data=False):
+            order.append(("stop_agent", agent_id, remove_data))
+
+        self.components["offboard_agent"] = fake_offboard
+        self.components["runtime"].stop_agent = MagicMock(side_effect=fake_stop_agent)
+        client = _make_client(self.components)
+
+        resp = client.delete("/dashboard/api/agents/alpha")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["offboard"]["handover_committed"] is True
+        assert order == [
+            ("offboard", "alpha", "delete"),
+            ("stop_agent", "alpha", True),
+        ], f"offboard must precede volume destruction, got order={order}"
+
+    @patch("src.cli.config._save_permissions")
+    @patch("src.cli.config._load_permissions", return_value={"permissions": {}})
+    @patch("src.cli.config.AGENTS_FILE")
+    def test_delete_agent_offboard_failure_is_best_effort(self, mock_agents_file, mock_lp, mock_sp):
+        """A raising ``offboard_agent`` callback must not block the
+        human's deliberate one-click delete — teardown still proceeds."""
+        mock_agents_file.exists.return_value = False
+
+        async def failing_offboard(agent_id, *, reason):
+            raise RuntimeError("mesh unreachable")
+
+        self.components["offboard_agent"] = failing_offboard
+        client = _make_client(self.components)
+
+        resp = client.delete("/dashboard/api/agents/alpha")
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["removed"] is True
+        assert "alpha" not in self.components["agent_registry"]
+
     @patch("src.cli.config._create_agent")
     @patch("src.cli.config._load_config")
     def test_post_agent_default_model_uses_credentialed_provider(

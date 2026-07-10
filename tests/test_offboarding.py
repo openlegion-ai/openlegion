@@ -1,0 +1,478 @@
+"""Offboarding-with-handover (plan §8 #15) — the data-loss hot spot.
+
+Covers:
+  - ``_offboard_agent`` core: solo/teamless no-op, live-container handover
+    commit (author = the departing agent), unreachable-container snapshot-
+    only, bounded handover-turn timeout, drive-commit-failure resilience,
+    audit logging.
+  - The new ``POST /mesh/agents/{id}/offboard`` endpoint: auth (operator-
+    or-internal only, worker 403, operator target rejected), and that it
+    runs offboard THEN archive.
+  - ORDER PROOF: the mesh delete-confirm chain attempts the offboard
+    (handover turn) strictly BEFORE ``stop_agent(..., remove_data=True)``.
+  - ``manage_agent(action="offboard")`` operator-tool wiring.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import importlib
+import json
+import time
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+import yaml
+from httpx import ASGITransport, AsyncClient
+
+from src.host import drive as drive_mod
+from src.host.mesh import Blackboard, MessageRouter, PubSub
+from src.host.permissions import PermissionMatrix
+from src.host.teams import TeamStore
+from src.shared.types import MessageOrigin
+
+
+class _RecordingLaneManager:
+    """Duck-typed lane manager stand-in — ``_offboard_agent`` only ever
+    calls ``.enqueue`` on it."""
+
+    def __init__(
+        self, *, reply="Handover doc: current work lives in the drive.",
+        raise_exc=None, delay=0.0, order=None,
+    ):
+        self.calls: list[dict] = []
+        self.reply = reply
+        self.raise_exc = raise_exc
+        self.delay = delay
+        self.order = order
+
+    async def enqueue(self, agent, message, *, mode="followup", system_note=False, **kw):
+        self.calls.append({"agent": agent, "message": message, "mode": mode, "system_note": system_note})
+        if self.order is not None:
+            self.order.append("handover_turn")
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if self.raise_exc:
+            raise self.raise_exc
+        return self.reply
+
+    def remove_lane(self, agent: str) -> None:
+        """No-op — satisfies ``cleanup_agent``'s best-effort lane teardown."""
+
+
+def _human_origin_headers(agent_id: str = "operator") -> dict:
+    origin = MessageOrigin(kind="human", channel="cli", user="u1")
+    return {
+        "Authorization": "Bearer op-token",
+        "X-Agent-ID": agent_id,
+        "X-Origin": origin.to_header_value(),
+    }
+
+
+def _op_headers() -> dict:
+    return {"Authorization": "Bearer op-token", "X-Agent-ID": "operator"}
+
+
+def _worker_headers(agent: str, token: str) -> dict:
+    return {"Authorization": f"Bearer {token}", "X-Agent-ID": agent}
+
+
+def _build_app(
+    tmp_path,
+    monkeypatch,
+    *,
+    lane_manager=None,
+    container_manager=None,
+    with_team_drive=True,
+    extra_agents=None,
+):
+    """Mesh app with a real disk-backed TeamStore (drive provisioner
+    wired so ``_offboard_agent`` commits to a REAL bare git repo), a
+    real on-disk agents.yaml/permissions.json (archive/delete need
+    ``AGENTS_FILE`` to exist), and bearer auth for the operator + a
+    worker."""
+    monkeypatch.chdir(tmp_path)
+    drives_dir = tmp_path / "drives"
+    if with_team_drive:
+        monkeypatch.setenv("OPENLEGION_TEAM_DRIVES_DIR", str(drives_dir))
+
+    agents = {"scout": {"role": "researcher", "model": "openai/gpt-4o-mini"}}
+    if extra_agents:
+        agents.update(extra_agents)
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(exist_ok=True)
+    agents_file = config_dir / "agents.yaml"
+    agents_file.write_text(yaml.dump({"agents": agents}))
+    perms_file = config_dir / "permissions.json"
+    perms_file.write_text(json.dumps({"permissions": {}}))
+    teams_dir = config_dir / "teams"
+    teams_dir.mkdir(parents=True, exist_ok=True)
+
+    import src.cli.config as cli_cfg
+
+    monkeypatch.setattr(cli_cfg, "AGENTS_FILE", agents_file)
+    monkeypatch.setattr(cli_cfg, "PERMISSIONS_FILE", perms_file)
+    monkeypatch.setattr(cli_cfg, "TEAMS_DIR", teams_dir)
+
+    import src.host.server as server_module
+
+    importlib.reload(server_module)
+
+    perms = PermissionMatrix()
+    blackboard = Blackboard(str(tmp_path / "bb.db"))
+    pubsub = PubSub()
+    router = MessageRouter(perms, {"operator": "http://op:8400"})
+    teams_store = TeamStore(db_path=str(tmp_path / "teams.db"), teams_dir=tmp_path / "teams")
+    if with_team_drive:
+        teams_store.set_drive_provisioner(drive_mod.ensure_team_drive, drive_mod.remove_team_drive)
+    teams_store.create_team("research")
+    teams_store.add_member("research", "scout")
+
+    app = server_module.create_mesh_app(
+        blackboard=blackboard,
+        pubsub=pubsub,
+        router=router,
+        permissions=perms,
+        teams_store=teams_store,
+        container_manager=container_manager,
+        lane_manager=lane_manager,
+        auth_tokens={"operator": "op-token", "scout": "scout-token"},
+    )
+    return app, blackboard, teams_store, drives_dir
+
+
+# ── _offboard_agent core ────────────────────────────────────────────
+
+
+class TestOffboardAgentCore:
+    @pytest.mark.asyncio
+    async def test_solo_agent_no_team_drive_clean_manifest_no_exception(self, tmp_path, monkeypatch):
+        """Solo/teamless agents have no Team Drive — skipped, never crashes."""
+        app, bb, store, _ = _build_app(
+            tmp_path, monkeypatch, extra_agents={"loner": {"role": "solo"}},
+        )
+        try:
+            manifest = await app._offboard_agent("loner", reason="delete")
+        finally:
+            bb.close()
+        assert manifest["team_id"] is None
+        assert manifest["skipped"] == "no team drive"
+        assert manifest["handover_committed"] is False
+        assert manifest["snapshot_committed"] is False
+        assert manifest["errors"] == []
+
+    @pytest.mark.asyncio
+    async def test_live_container_commits_handover_authored_by_departing_agent(self, tmp_path, monkeypatch):
+        lane = _RecordingLaneManager(reply="Here is my handover: task X lives on branch y.")
+        app, bb, store, drives_dir = _build_app(tmp_path, monkeypatch, lane_manager=lane)
+        try:
+            manifest = await app._offboard_agent("scout", reason="offboard")
+        finally:
+            bb.close()
+        assert manifest["team_id"] == "research"
+        assert manifest["handover_committed"] is True
+        assert manifest["handover_ref"].startswith("drive://research/handovers/scout/")
+        assert manifest["snapshot_committed"] is True
+        assert manifest["snapshot_ref"].startswith("drive://research/handovers/scout/")
+        assert manifest["errors"] == []
+        # The lane got the SYSTEM-composed handover turn.
+        assert lane.calls and lane.calls[0]["agent"] == "scout"
+        assert lane.calls[0]["system_note"] is True
+
+        # Author verification — a real git log against the bare repo.
+        import subprocess
+
+        repo = drives_dir / "research.git"
+        log = subprocess.run(
+            ["git", "log", "--format=%an <%ae>%n%s", "main"],
+            cwd=repo, capture_output=True, text=True,
+        )
+        assert log.returncode == 0
+        assert "scout <scout@agents.local>" in log.stdout
+        assert "offboard handover for scout" in log.stdout
+        assert "offboard snapshot for scout" in log.stdout
+
+    @pytest.mark.asyncio
+    async def test_unreachable_container_handover_skipped_snapshot_still_commits(self, tmp_path, monkeypatch):
+        """A dispatch failure (unreachable container) must not block the
+        snapshot commit — only the handover is skipped."""
+        lane = _RecordingLaneManager(raise_exc=RuntimeError("connection refused"))
+        app, bb, store, _ = _build_app(tmp_path, monkeypatch, lane_manager=lane)
+        try:
+            manifest = await app._offboard_agent("scout", reason="delete")
+        finally:
+            bb.close()
+        assert manifest["handover_committed"] is False
+        assert manifest["handover_ref"] is None
+        assert manifest["snapshot_committed"] is True
+        assert any("handover turn failed" in e for e in manifest["errors"])
+
+    @pytest.mark.asyncio
+    async def test_no_lane_manager_wired_handover_skipped_snapshot_still_commits(self, tmp_path, monkeypatch):
+        """No lane manager (e.g. a bare mesh construction) — handover step
+        is skipped outright, snapshot still commits."""
+        app, bb, store, _ = _build_app(tmp_path, monkeypatch, lane_manager=None)
+        try:
+            manifest = await app._offboard_agent("scout", reason="delete")
+        finally:
+            bb.close()
+        assert manifest["handover_committed"] is False
+        assert manifest["snapshot_committed"] is True
+
+    @pytest.mark.asyncio
+    async def test_handover_turn_timeout_is_bounded_never_hangs(self, tmp_path, monkeypatch):
+        import src.host.server as server_module
+
+        real_resolve = server_module.limits_mod.resolve
+
+        def _fake_resolve(key, *a, **kw):
+            if key == "offboard_handover_timeout_seconds":
+                return 0.05
+            return real_resolve(key, *a, **kw)
+
+        monkeypatch.setattr(server_module.limits_mod, "resolve", _fake_resolve)
+
+        lane = _RecordingLaneManager(delay=5.0)
+        app, bb, store, _ = _build_app(tmp_path, monkeypatch, lane_manager=lane)
+        try:
+            t0 = time.monotonic()
+            manifest = await app._offboard_agent("scout", reason="delete")
+            elapsed = time.monotonic() - t0
+        finally:
+            bb.close()
+        assert elapsed < 3.0, f"offboard handover did not honor the bound (took {elapsed:.2f}s)"
+        assert manifest["handover_committed"] is False
+        assert any("timed out" in e for e in manifest["errors"])
+        # Snapshot still attempted despite the handover timeout.
+        assert manifest["snapshot_committed"] is True
+
+    @pytest.mark.asyncio
+    async def test_empty_handover_reply_records_no_handover_doc(self, tmp_path, monkeypatch):
+        lane = _RecordingLaneManager(reply="   ")
+        app, bb, store, _ = _build_app(tmp_path, monkeypatch, lane_manager=lane)
+        try:
+            manifest = await app._offboard_agent("scout", reason="delete")
+        finally:
+            bb.close()
+        assert manifest["handover_committed"] is False
+        assert manifest["snapshot_committed"] is True
+
+    @pytest.mark.asyncio
+    async def test_no_response_sentinel_records_no_handover_doc(self, tmp_path, monkeypatch):
+        """The lane dispatcher returns the literal "(no response)" as a
+        SUCCESS string for an unreachable agent (runtime._direct_dispatch)
+        — it must never be committed as if the agent authored it."""
+        lane = _RecordingLaneManager(reply="(no response)")
+        app, bb, store, _ = _build_app(tmp_path, monkeypatch, lane_manager=lane)
+        try:
+            manifest = await app._offboard_agent("scout", reason="delete")
+        finally:
+            bb.close()
+        assert manifest["handover_committed"] is False
+        assert manifest["snapshot_committed"] is True
+        assert any("nothing usable" in e for e in manifest["errors"])
+
+    @pytest.mark.asyncio
+    async def test_drive_commit_failure_records_error_never_raises(self, tmp_path, monkeypatch):
+        """A drive/commit failure must land in the manifest, not raise —
+        teardown (whatever the caller does next) must still proceed."""
+        import src.host.server as server_module
+
+        async def _boom(*a, **kw):
+            raise server_module.team_drive.DriveError("disk full")
+
+        monkeypatch.setattr(server_module.team_drive, "commit_file", _boom)
+
+        lane = _RecordingLaneManager(reply="Handover text.")
+        app, bb, store, _ = _build_app(tmp_path, monkeypatch, lane_manager=lane)
+        try:
+            manifest = await app._offboard_agent("scout", reason="delete")
+        finally:
+            bb.close()
+        assert manifest["handover_committed"] is False
+        assert manifest["snapshot_committed"] is False
+        assert any("commit failed" in e for e in manifest["errors"])
+
+    @pytest.mark.asyncio
+    async def test_no_team_drive_backend_wired_records_error_never_raises(self, tmp_path, monkeypatch):
+        """Team exists but no drive provisioner is wired (``_drive_repo``
+        503s internally) — recorded as an error, not an exception."""
+        lane = _RecordingLaneManager(reply="Handover text.")
+        app, bb, store, _ = _build_app(tmp_path, monkeypatch, lane_manager=lane, with_team_drive=False)
+        try:
+            manifest = await app._offboard_agent("scout", reason="delete")
+        finally:
+            bb.close()
+        assert manifest["handover_committed"] is False
+        assert manifest["snapshot_committed"] is False
+        assert any("drive" in e.lower() for e in manifest["errors"])
+
+    @pytest.mark.asyncio
+    async def test_offboard_audit_logged(self, tmp_path, monkeypatch):
+        lane = _RecordingLaneManager(reply="Handover text.")
+        app, bb, store, _ = _build_app(tmp_path, monkeypatch, lane_manager=lane)
+        try:
+            await app._offboard_agent("scout", reason="delete")
+            log = bb.get_audit_log(agent_id="scout", action="offboard_agent")
+        finally:
+            bb.close()
+        assert log["entries"], "expected an offboard_agent audit row"
+        assert log["entries"][0]["field"] == "delete"
+
+
+# ── POST /mesh/agents/{id}/offboard endpoint ────────────────────────
+
+
+class TestOffboardEndpoint:
+    @pytest.mark.asyncio
+    async def test_requires_operator_or_internal_worker_403(self, tmp_path, monkeypatch):
+        lane = _RecordingLaneManager(reply="Handover text.")
+        app, bb, store, _ = _build_app(tmp_path, monkeypatch, lane_manager=lane)
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+                r = await c.post(
+                    "/mesh/agents/scout/offboard",
+                    headers=_worker_headers("scout", "scout-token"),
+                )
+            assert r.status_code == 403
+        finally:
+            bb.close()
+
+    @pytest.mark.asyncio
+    async def test_operator_target_rejected(self, tmp_path, monkeypatch):
+        lane = _RecordingLaneManager(reply="Handover text.")
+        app, bb, store, _ = _build_app(
+            tmp_path, monkeypatch, lane_manager=lane,
+            extra_agents={"operator": {"role": "operator"}},
+        )
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+                r = await c.post("/mesh/agents/operator/offboard", headers=_op_headers())
+            assert r.status_code == 400
+        finally:
+            bb.close()
+
+    @pytest.mark.asyncio
+    async def test_offboard_then_archive_success(self, tmp_path, monkeypatch):
+        lane = _RecordingLaneManager(reply="Handover text.")
+        container_manager = MagicMock()
+        app, bb, store, _ = _build_app(
+            tmp_path, monkeypatch, lane_manager=lane, container_manager=container_manager,
+        )
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+                r = await c.post("/mesh/agents/scout/offboard", headers=_op_headers())
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["offboarded"] is True
+            assert body["archived"] is True
+            assert body["manifest"]["handover_committed"] is True
+        finally:
+            bb.close()
+        # The offboard's handover turn ran BEFORE archive's container stop.
+        container_manager.stop_agent.assert_called_once()
+        assert lane.calls, "handover turn should have been dispatched"
+
+    @pytest.mark.asyncio
+    async def test_unknown_agent_404(self, tmp_path, monkeypatch):
+        app, bb, store, _ = _build_app(tmp_path, monkeypatch)
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+                r = await c.post("/mesh/agents/ghost/offboard", headers=_op_headers())
+            assert r.status_code == 404
+        finally:
+            bb.close()
+
+
+# ── ORDER PROOF: mesh delete-confirm chain ──────────────────────────
+
+
+class TestMeshDeleteOrderProof:
+    @pytest.mark.asyncio
+    async def test_offboard_attempted_before_volume_destruction(self, tmp_path, monkeypatch):
+        """THE order invariant: the handover turn (offboard) must be
+        dispatched strictly before ``stop_agent(..., remove_data=True)``
+        in the mesh propose/confirm delete chain."""
+        order: list[str] = []
+        lane = _RecordingLaneManager(reply="Handover text.", order=order)
+        container_manager = MagicMock()
+
+        def _stop_agent(agent_id, remove_data=False):
+            if remove_data:
+                order.append("stop_agent_remove_data_true")
+
+        container_manager.stop_agent = MagicMock(side_effect=_stop_agent)
+
+        app, bb, store, _ = _build_app(
+            tmp_path, monkeypatch, lane_manager=lane, container_manager=container_manager,
+        )
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+                r = await c.post("/mesh/agents/scout/archive", headers=_op_headers())
+                assert r.status_code == 200, r.text
+                r = await c.post(
+                    "/mesh/agents/scout/propose-delete", headers=_human_origin_headers(),
+                )
+                assert r.status_code == 200, r.text
+                nonce = r.json()["change_id"]
+                digest = r.json()["payload_digest"]
+                r = await c.post(
+                    "/mesh/config/confirm",
+                    json={"change_id": nonce, "payload_digest": digest},
+                    headers=_human_origin_headers(),
+                )
+                assert r.status_code == 200, r.text
+                body = r.json()
+        finally:
+            bb.close()
+        assert body["deleted"] == "agent"
+        assert body["offboard"]["handover_committed"] is True
+        assert order == ["handover_turn", "stop_agent_remove_data_true"], (
+            f"offboard must precede volume destruction, got order={order}"
+        )
+        # The archive step (earlier in this same flow) also calls
+        # stop_agent WITHOUT remove_data — assert the DELETE step's call
+        # (the volume-destroying one) landed, in addition to the ordering
+        # already proven above via ``order``.
+        container_manager.stop_agent.assert_any_call("scout", remove_data=True)
+
+
+# ── manage_agent(action="offboard") ─────────────────────────────────
+
+
+class TestManageAgentOffboardAction:
+    @pytest.fixture(autouse=True)
+    def _set_operator_env(self, monkeypatch):
+        monkeypatch.setenv("ALLOWED_TOOLS", "manage_agent")
+
+    @pytest.mark.asyncio
+    async def test_manage_agent_offboard_calls_mesh_client(self):
+        from src.agent.builtins.operator_tools import manage_agent
+
+        mc = MagicMock()
+        mc.offboard_agent = AsyncMock(
+            return_value={"offboarded": True, "manifest": {"handover_committed": True}, "archived": True},
+        )
+        messages = [{"role": "user", "content": "yes", "_origin": "user"}]
+        result = await manage_agent("scout", "offboard", mesh_client=mc, _messages=messages)
+        mc.offboard_agent.assert_awaited_once_with("scout")
+        assert result["offboarded"] is True
+
+    @pytest.mark.asyncio
+    async def test_manage_agent_offboard_blocks_operator_target(self):
+        from src.agent.builtins.operator_tools import manage_agent
+
+        messages = [{"role": "user", "content": "yes", "_origin": "user"}]
+        result = await manage_agent("operator", "offboard", mesh_client=MagicMock(), _messages=messages)
+        assert "operator" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_manage_agent_offboard_surfaces_mesh_error(self):
+        from src.agent.builtins.operator_tools import manage_agent
+
+        mc = MagicMock()
+        mc.offboard_agent = AsyncMock(side_effect=RuntimeError("500: boom"))
+        messages = [{"role": "user", "content": "yes", "_origin": "user"}]
+        result = await manage_agent("scout", "offboard", mesh_client=mc, _messages=messages)
+        assert "error" in result

@@ -6133,6 +6133,107 @@ def create_mesh_app(
         )
         return {"created": True, "name": name, "team_name": name, "team_id": name}
 
+    # ── Onboarding wake (plan §8 #15) ─────────────────────────────
+    #
+    # Rides the same primitives as offboarding: a followup-lane turn on
+    # the new member's own container, and — mirroring §8 #14's standup —
+    # a HOST-SIDE post of the turn's reply into the team channel thread.
+    # No agent-facing posting endpoint is added (the invariant threads.py
+    # already pins). Influence-shaped, not privilege-shaped: the
+    # probationary-first-task nudge asks a lead/operator to decide; it
+    # never auto-creates a task row.
+
+    _onboarding_tasks: set[asyncio.Task] = set()
+
+    _ONBOARDING_INTRO_PROMPT = (
+        "You've just joined team {team}. Team goals: {goals}. Read "
+        "TEAM.md for team context. Introduce yourself briefly to the "
+        "team — your reply will be shared in the team channel."
+    )
+    _ONBOARDING_LEAD_NUDGE = (
+        "New teammate {agent} just joined team {team}. Review their "
+        "intro in the team channel and assign them a probationary first "
+        "task (create_task/hand_off)."
+    )
+
+    def _team_goals_summary(team: dict) -> str:
+        north_star = (team.get("north_star") or "").strip()
+        criteria = [str(c).strip() for c in (team.get("success_criteria") or []) if str(c).strip()]
+        parts = [p for p in (north_star, "; ".join(criteria)) if p]
+        return " ".join(parts) if parts else "not yet set"
+
+    async def _dispatch_onboarding_wake(agent_id: str, team_id: str) -> None:
+        """Onboarding intro turn + lead/operator nudge for a new member.
+
+        Guards are checked by the caller (``_schedule_onboarding_wake``)
+        before this is even scheduled. Every step here is independently
+        best-effort: an intro-turn failure must not skip the nudge, and
+        neither ever propagates — this always runs detached from the
+        request that triggered it.
+        """
+        try:
+            team = teams_store.get_team(team_id) or {}
+        except Exception:
+            logger.exception("onboarding wake: team lookup for %s failed", team_id)
+            return
+        intro_prompt = _ONBOARDING_INTRO_PROMPT.format(
+            team=team_id, goals=_team_goals_summary(team),
+        )
+        try:
+            reply = await lane_manager.enqueue(
+                agent_id, intro_prompt, mode="followup", system_note=True,
+            )
+        except Exception:
+            logger.exception("onboarding intro turn for %s failed", agent_id)
+            reply = None
+        from src.shared.types import SILENT_REPLY_TOKEN as _SILENT
+
+        # "(no response)" is the lane dispatcher's unreachable-agent
+        # SUCCESS sentinel (runtime._direct_dispatch) — never post it to
+        # the team channel as if the new member said it.
+        if (
+            isinstance(reply, str)
+            and reply.strip()
+            and reply != _SILENT
+            and reply.strip() != "(no response)"
+            and thread_store is not None
+        ):
+            try:
+                channel = thread_store.ensure_channel(team_id)
+                thread_store.post_message(channel["id"], sender=agent_id, body=reply.strip())
+            except Exception:
+                logger.exception("onboarding intro post for %s/%s failed", agent_id, team_id)
+
+        lead_id = team.get("lead_agent_id")
+        nudge_target = lead_id if (lead_id and lead_id != agent_id) else "operator"
+        if nudge_target != agent_id:
+            nudge = _ONBOARDING_LEAD_NUDGE.format(agent=agent_id, team=team_id)
+            try:
+                await lane_manager.enqueue(
+                    nudge_target, nudge, mode="followup", system_note=True,
+                )
+            except Exception:
+                logger.exception("onboarding lead-nudge to %s failed", nudge_target)
+
+    def _schedule_onboarding_wake(agent_id: str, team_id: str) -> None:
+        """Fire-and-forget scheduler — never awaited by the caller.
+
+        Guards: never for the operator, never when the joining agent
+        isn't currently running (no lane manager wired, or absent from
+        the live registry) — a team JOIN must never fail or block
+        because onboarding hiccuped, so nothing here can raise into the
+        endpoint that calls it.
+        """
+        if agent_id == "operator" or lane_manager is None:
+            return
+        if agent_id not in router.agent_registry:
+            return
+        task = asyncio.create_task(_dispatch_onboarding_wake(agent_id, team_id))
+        _onboarding_tasks.add(task)
+        task.add_done_callback(_onboarding_tasks.discard)
+
+    app._schedule_onboarding_wake = _schedule_onboarding_wake  # exposed for the dashboard
+
     @app.post("/mesh/teams/{team_name}/members")
     async def mesh_add_team_member(team_name: str, request: Request) -> dict:
         """Add an agent to a team (mesh-authed proxy)."""
@@ -6156,6 +6257,7 @@ def create_mesh_app(
             _remove_team_blackboard_permissions(agent, old)
         _add_team_blackboard_permissions(agent, team_name)
         permissions.reload()
+        _schedule_onboarding_wake(agent, team_name)
         return {"added": True, "team_id": team_name, "team_name": team_name, "agent": agent}
 
     @app.delete("/mesh/teams/{team_name}/members/{agent}")
@@ -8954,18 +9056,307 @@ def create_mesh_app(
 
         Stops cron / heartbeat and removes the agent from the live
         registry. Workspace + history are retained; the agent can be
-        unarchived later. Container is best-effort stopped.
+        unarchived later. Container is best-effort stopped. Side effects
+        live in ``_archive_agent_core`` (shared with the offboard
+        endpoint, defined below alongside ``_offboard_agent``).
         """
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
             raise HTTPException(403, "Only the operator can archive agents")
         if agent_id == "operator":
             raise HTTPException(400, "The operator agent cannot be archived")
-        from src.cli.config import _archive_agent, _load_config
+        from src.cli.config import _load_config
 
         cfg = _load_config()
         if agent_id not in cfg.get("agents", {}):
             raise HTTPException(404, f"Agent '{agent_id}' not found")
+        return await _archive_agent_core(agent_id)
+
+    @app.post("/mesh/agents/{agent_id}/unarchive")
+    async def unarchive_agent_endpoint(agent_id: str, request: Request) -> dict:
+        """Unarchive an agent (operator-only). Restart left to operator."""
+        caller = _extract_verified_agent_id(request)
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can unarchive agents")
+        from src.cli.config import _load_config, _unarchive_agent
+
+        cfg = _load_config()
+        if agent_id not in cfg.get("agents", {}):
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+        try:
+            _unarchive_agent(agent_id)
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "agent_unarchived",
+                    agent=agent_id,
+                    data={"agent_id": agent_id},
+                )
+            except Exception as e:
+                logger.debug("agent_unarchived emit failed: %s", e)
+        return {"archived": False, "agent_id": agent_id}
+
+    async def _build_agent_bundle(agent_id: str, agent_cfg: dict | None) -> dict:
+        """Host-side agent personnel-file bundle.
+
+        Shared by ``GET /mesh/agents/{id}/export`` and the offboarding
+        snapshot (plan §8 #15) — same shape, same best-effort posture.
+        Bundles the durable, host-side pieces of an agent's identity —
+        its config (``agents.yaml`` entry, passed in by the caller since
+        both call sites already have it), permission ACL, and
+        cron/heartbeat schedule — plus, best-effort, its workspace
+        markdown (SOUL / INSTRUCTIONS / MEMORY / learnings) fetched from
+        the running container. The workspace is ``None`` when the agent
+        isn't reachable; the host-side pieces are always present. This is
+        the v1 bundle: the binary memory DB (model-specific embeddings) is
+        a deferred follow-up, and the raw fact text it derives from
+        already lives in MEMORY.md here.
+        """
+        # Permissions (deny-all default for an unknown agent).
+        try:
+            perms = permissions.get_permissions(agent_id).model_dump()
+        except Exception as e:
+            logger.warning("agent bundle: permissions read for %s failed: %s", agent_id, e)
+            perms = None
+
+        # Cron / heartbeat jobs owned by this agent.
+        cron_jobs: list[dict] = []
+        if cron_scheduler is not None:
+            try:
+                cron_jobs = [j for j in cron_scheduler.list_jobs() if j.get("agent") == agent_id]
+            except Exception as e:
+                logger.warning("agent bundle: cron read for %s failed: %s", agent_id, e)
+
+        # Workspace markdown — best-effort from the running container; a
+        # stopped/unreachable agent simply yields ``None`` (host-side bundle
+        # is still complete and useful).
+        workspace: dict[str, str] | None = None
+        if transport is not None:
+            try:
+                listing = await transport.request(agent_id, "GET", "/workspace")
+                names = [f["name"] for f in listing.get("files", []) if f.get("name")]
+                gathered: dict[str, str] = {}
+                for name in names:
+                    doc = await transport.request(agent_id, "GET", f"/workspace/{name}")
+                    if isinstance(doc, dict) and "content" in doc:
+                        gathered[name] = doc["content"]
+                workspace = gathered or None
+            except Exception as e:
+                logger.debug("agent bundle: workspace fetch for %s failed: %s", agent_id, e)
+                workspace = None
+
+        return {
+            "bundle_version": 1,
+            "agent_id": agent_id,
+            "config": agent_cfg,
+            "permissions": perms,
+            "cron_jobs": cron_jobs,
+            "workspace": workspace,
+            # Standing goals record from the Team store (ratified #7 /
+            # C.3-b) — ``None`` when unset, matching ``workspace``'s
+            # optional-section style.
+            "goals": teams_store.get_agent_goals(agent_id),
+        }
+
+    @app.get("/mesh/agents/{agent_id}/export")
+    async def export_agent_endpoint(agent_id: str, request: Request) -> dict:
+        """Export an agent's portable personnel file (operator-only).
+
+        Read-only. See ``_build_agent_bundle`` for the bundle shape. The
+        bundle is a plain JSON document the operator can archive, diff,
+        or hand to an import path to recreate the agent elsewhere.
+        """
+        caller = _extract_verified_agent_id(request)
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can export agents")
+        from src.cli.config import _load_config
+
+        cfg = _load_config()
+        agent_cfg = cfg.get("agents", {}).get(agent_id)
+        if agent_cfg is None:
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+        return await _build_agent_bundle(agent_id, agent_cfg)
+
+    # ── Offboarding-with-handover (plan §8 #15) ───────────────────
+    #
+    # THE data-loss invariant this unit exists to enforce: no
+    # volume/workspace destruction may run before a handover + snapshot
+    # commit has been ATTEMPTED. ``_offboard_agent`` is the one internal
+    # helper every delete/offboard surface funnels through — never raises,
+    # always returns a manifest describing what happened.
+
+    _OFFBOARD_HANDOVER_PROMPT = (
+        "You are being offboarded from this team. Before your container "
+        "is archived, write a handover document for your teammates. "
+        "Cover: (1) the current state of your work and where it lives "
+        "(Team Drive paths, task ids, branches); (2) key knowledge and "
+        "decisions a successor needs; (3) placeholders for any "
+        "contacts/credentials a successor will need — NEVER include "
+        "actual secrets, name the vault entry only; (4) advice for "
+        "whoever picks up your work. Reply with the handover document "
+        "itself, plain text, no other commentary."
+    )
+
+    async def _offboard_agent(agent_id: str, *, reason: str) -> dict:
+        """Best-effort handover turn + Team Drive snapshot for a departing
+        agent. Never raises — every caller treats this as a step that must
+        be ATTEMPTED, not one that can fail the surrounding flow.
+
+        Order contract callers must honor: this runs BEFORE any volume or
+        workspace destruction. The handover turn only produces a document
+        while the container is still reachable (the host can only read a
+        workspace over HTTP through the running container — archive stops
+        it), so callers that offboard post-archive naturally get an empty
+        handover and a host-state-only snapshot; that's a documented
+        degrade, not a bug.
+        """
+        manifest: dict = {
+            "agent_id": agent_id,
+            "reason": reason,
+            "team_id": None,
+            "handover_committed": False,
+            "handover_ref": None,
+            "snapshot_committed": False,
+            "snapshot_ref": None,
+            "skipped": None,
+            "errors": [],
+        }
+        team_id = teams_store.team_of(agent_id)
+        manifest["team_id"] = team_id
+        if team_id is None:
+            # Solo/teamless agents have no Team Drive — the export
+            # surface remains their only personnel-file record.
+            manifest["skipped"] = "no team drive"
+            return manifest
+
+        # 1. Handover turn — a normal, bounded turn on the agent's own
+        # model/ledger (the existing preflight already governs cost; this
+        # is a one-shot dispatch, not a new billing surface). Only
+        # meaningful while the container is reachable.
+        handover_text: str | None = None
+        if lane_manager is not None:
+            timeout_s = limits_mod.resolve("offboard_handover_timeout_seconds")
+            try:
+                response = await asyncio.wait_for(
+                    lane_manager.enqueue(
+                        agent_id, _OFFBOARD_HANDOVER_PROMPT,
+                        mode="followup", system_note=True,
+                    ),
+                    timeout=timeout_s,
+                )
+            except asyncio.TimeoutError:
+                manifest["errors"].append("handover turn timed out")
+            except Exception as e:
+                manifest["errors"].append(f"handover turn failed: {e}")
+            else:
+                from src.shared.types import SILENT_REPLY_TOKEN as _SILENT
+
+                # "(no response)" is the lane dispatcher's unreachable-agent
+                # SUCCESS sentinel (runtime._direct_dispatch) — an offboard
+                # of a stopped/dying container must degrade to no handover
+                # doc, not commit the sentinel as if the agent wrote it.
+                if (
+                    isinstance(response, str)
+                    and response.strip()
+                    and response != _SILENT
+                    and response.strip() != "(no response)"
+                ):
+                    handover_text = response.strip()
+                else:
+                    manifest["errors"].append("handover turn returned nothing usable")
+
+        # 2. Snapshot — always attempted; host-side pieces only when the
+        # container isn't reachable (same shape as /export).
+        from src.cli.config import _load_config as _offboard_load_config
+
+        agent_cfg = _offboard_load_config().get("agents", {}).get(agent_id)
+        try:
+            bundle = await _build_agent_bundle(agent_id, agent_cfg)
+        except Exception as e:
+            manifest["errors"].append(f"snapshot build failed: {e}")
+            bundle = None
+
+        # 3. Commit both to the Team Drive. Author = the departing agent
+        # (mirrors ``drive_commit_artifact``'s sender-authored commits —
+        # no token needed, this runs mesh-side/in-process).
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        try:
+            repo = await _drive_repo(team_id)
+        except Exception as e:
+            manifest["errors"].append(f"team drive unavailable: {e}")
+            repo = None
+
+        if repo is not None:
+            quota = limits_mod.resolve("drive_quota_mb") * _MB
+            try:
+                size = await _drive_size(repo)
+            except Exception as e:
+                manifest["errors"].append(f"drive size check failed: {e}")
+                size = None
+            if size is not None and size > quota:
+                manifest["errors"].append(
+                    f"team drive quota exceeded ({size // _MB} MB used, quota {quota // _MB} MB)"
+                )
+            else:
+                author_email = f"{agent_id}@agents.local"
+                if handover_text:
+                    try:
+                        h_path = team_drive.validate_drive_path(
+                            f"handovers/{agent_id}/{date_str}-handover.md"
+                        )
+                        commit = await team_drive.commit_file(
+                            repo, h_path, handover_text.encode("utf-8"),
+                            message=f"offboard handover for {agent_id} ({reason})",
+                            author_name=agent_id, author_email=author_email,
+                        )
+                        manifest["handover_committed"] = True
+                        manifest["handover_ref"] = f"drive://{team_id}/{h_path}@{commit[:10]}"
+                        _drive_size_cache.pop(str(repo), None)
+                    except Exception as e:
+                        manifest["errors"].append(f"handover commit failed: {e}")
+                if bundle is not None:
+                    try:
+                        s_path = team_drive.validate_drive_path(
+                            f"handovers/{agent_id}/{date_str}-snapshot.json"
+                        )
+                        snap_bytes = json.dumps(bundle, indent=2, default=str).encode("utf-8")
+                        commit = await team_drive.commit_file(
+                            repo, s_path, snap_bytes,
+                            message=f"offboard snapshot for {agent_id} ({reason})",
+                            author_name=agent_id, author_email=author_email,
+                        )
+                        manifest["snapshot_committed"] = True
+                        manifest["snapshot_ref"] = f"drive://{team_id}/{s_path}@{commit[:10]}"
+                        _drive_size_cache.pop(str(repo), None)
+                    except Exception as e:
+                        manifest["errors"].append(f"snapshot commit failed: {e}")
+
+        try:
+            blackboard.log_audit(
+                action="offboard_agent",
+                target=agent_id,
+                field=reason,
+                after_value=json.dumps({
+                    "handover_committed": manifest["handover_committed"],
+                    "snapshot_committed": manifest["snapshot_committed"],
+                }),
+                actor="mesh",
+            )
+        except Exception as e:
+            logger.warning("offboard audit log failed for %s: %s", agent_id, e)
+        return manifest
+
+    app._offboard_agent = _offboard_agent  # exposed for the dashboard + CLI REPL
+
+    async def _archive_agent_core(agent_id: str) -> dict:
+        """Archive-agent side effects (cron dereg, health unregister,
+        best-effort container stop). Shared by the archive endpoint and
+        the offboard endpoint so the two never duplicate-drift. Caller has
+        already verified auth, target != operator, and agent existence."""
+        from src.cli.config import _archive_agent
+
         try:
             _archive_agent(agent_id)
         except ValueError as e:
@@ -9003,103 +9394,31 @@ def create_mesh_app(
                 logger.debug("agent_archived emit failed: %s", e)
         return {"archived": True, "agent_id": agent_id}
 
-    @app.post("/mesh/agents/{agent_id}/unarchive")
-    async def unarchive_agent_endpoint(agent_id: str, request: Request) -> dict:
-        """Unarchive an agent (operator-only). Restart left to operator."""
+    @app.post("/mesh/agents/{agent_id}/offboard")
+    async def offboard_agent_endpoint(agent_id: str, request: Request) -> dict:
+        """Offboard an agent: handover + Team Drive snapshot, then archive
+        (operator-or-internal).
+
+        Runs ``_offboard_agent`` (handover turn + snapshot commit) BEFORE
+        the archive sequence's container stop — this is the ONE surface
+        where the container is still guaranteed live, so it is the path
+        where a real handover turn actually happens. Delete keeps its
+        existing archived-precondition + confirm chain unchanged; this
+        endpoint does not delete anything.
+        """
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
-            raise HTTPException(403, "Only the operator can unarchive agents")
-        from src.cli.config import _load_config, _unarchive_agent
+            raise HTTPException(403, "Only the operator can offboard agents")
+        if agent_id == "operator":
+            raise HTTPException(400, "The operator agent cannot be offboarded")
+        from src.cli.config import _load_config
 
         cfg = _load_config()
         if agent_id not in cfg.get("agents", {}):
             raise HTTPException(404, f"Agent '{agent_id}' not found")
-        try:
-            _unarchive_agent(agent_id)
-        except ValueError as e:
-            raise HTTPException(404, str(e))
-        if event_bus is not None:
-            try:
-                event_bus.emit(
-                    "agent_unarchived",
-                    agent=agent_id,
-                    data={"agent_id": agent_id},
-                )
-            except Exception as e:
-                logger.debug("agent_unarchived emit failed: %s", e)
-        return {"archived": False, "agent_id": agent_id}
-
-    @app.get("/mesh/agents/{agent_id}/export")
-    async def export_agent_endpoint(agent_id: str, request: Request) -> dict:
-        """Export an agent's portable personnel file (operator-only).
-
-        Read-only. Bundles the durable, host-side pieces of an agent's
-        identity — its config (``agents.yaml`` entry), permission ACL, and
-        cron/heartbeat schedule — plus, best-effort, its workspace markdown
-        (SOUL / INSTRUCTIONS / MEMORY / learnings) fetched from the running
-        container. The workspace is ``None`` when the agent isn't reachable;
-        the host-side pieces are always present. This is the v1 bundle: the
-        binary memory DB (model-specific embeddings) is a deferred follow-up,
-        and the raw fact text it derives from already lives in MEMORY.md here.
-
-        The bundle is a plain JSON document the operator can archive, diff,
-        or hand to an import path to recreate the agent elsewhere.
-        """
-        caller = _extract_verified_agent_id(request)
-        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
-            raise HTTPException(403, "Only the operator can export agents")
-        from src.cli.config import _load_config
-
-        cfg = _load_config()
-        agent_cfg = cfg.get("agents", {}).get(agent_id)
-        if agent_cfg is None:
-            raise HTTPException(404, f"Agent '{agent_id}' not found")
-
-        # Permissions (deny-all default for an unknown agent).
-        try:
-            perms = permissions.get_permissions(agent_id).model_dump()
-        except Exception as e:
-            logger.warning("export_agent: permissions read for %s failed: %s", agent_id, e)
-            perms = None
-
-        # Cron / heartbeat jobs owned by this agent.
-        cron_jobs: list[dict] = []
-        if cron_scheduler is not None:
-            try:
-                cron_jobs = [j for j in cron_scheduler.list_jobs() if j.get("agent") == agent_id]
-            except Exception as e:
-                logger.warning("export_agent: cron read for %s failed: %s", agent_id, e)
-
-        # Workspace markdown — best-effort from the running container; a
-        # stopped/unreachable agent simply yields ``None`` (host-side bundle
-        # is still complete and useful).
-        workspace: dict[str, str] | None = None
-        if transport is not None:
-            try:
-                listing = await transport.request(agent_id, "GET", "/workspace")
-                names = [f["name"] for f in listing.get("files", []) if f.get("name")]
-                gathered: dict[str, str] = {}
-                for name in names:
-                    doc = await transport.request(agent_id, "GET", f"/workspace/{name}")
-                    if isinstance(doc, dict) and "content" in doc:
-                        gathered[name] = doc["content"]
-                workspace = gathered or None
-            except Exception as e:
-                logger.debug("export_agent: workspace fetch for %s failed: %s", agent_id, e)
-                workspace = None
-
-        return {
-            "bundle_version": 1,
-            "agent_id": agent_id,
-            "config": agent_cfg,
-            "permissions": perms,
-            "cron_jobs": cron_jobs,
-            "workspace": workspace,
-            # Standing goals record from the Team store (ratified #7 /
-            # C.3-b) — ``None`` when unset, matching ``workspace``'s
-            # optional-section style.
-            "goals": teams_store.get_agent_goals(agent_id),
-        }
+        manifest = await _offboard_agent(agent_id, reason="offboard")
+        archive_result = await _archive_agent_core(agent_id)
+        return {"offboarded": True, "manifest": manifest, **archive_result}
 
     # ── Per-agent standing goals (TeamStore ``agent_goals``) ─────
     #
@@ -9515,6 +9834,16 @@ def create_mesh_app(
 
             if target_id not in _load_config().get("agents", {}):
                 raise HTTPException(404, f"Agent '{target_id}' no longer exists")
+            # Offboarding-with-handover (plan §8 #15) — data-loss invariant:
+            # ATTEMPT the handover turn + Team Drive snapshot commit BEFORE
+            # the volume-destroying stop_agent below. By the time a DELETE
+            # reaches here the agent is already archived (propose-delete's
+            # precondition), so the container is usually already stopped —
+            # the handover turn naturally no-ops and the snapshot commits
+            # whatever host-side state still exists. Belt-and-suspenders:
+            # an agent that was already explicitly offboarded just gets a
+            # second dated snapshot — no dedup machinery needed.
+            offboard_manifest = await _offboard_agent(target_id, reason="delete")
             # H11/H12: stop the container through the runtime backend (not the
             # raw-docker path inside ``_remove_agent``) so the agent's mesh
             # auth token is popped (H11) AND its private ``openlegion_data_*``
@@ -9556,7 +9885,12 @@ def create_mesh_app(
                 target=target_id,
                 change_id=record["nonce"],
             )
-            return {"success": True, "deleted": "agent", "agent_id": target_id}
+            return {
+                "success": True,
+                "deleted": "agent",
+                "agent_id": target_id,
+                "offboard": offboard_manifest,
+            }
         raise HTTPException(
             400,
             f"Unsupported pending-delete target_kind: {kind!r}",

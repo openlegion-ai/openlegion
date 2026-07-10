@@ -81,6 +81,13 @@ LIMIT_SPECS: dict[str, tuple[int, int, int]] = {
     # placeholder. The message was already folded into the turn by then —
     # a timeout here is degraded UX, not a dropped message.
     "steer_reply_timeout_seconds": (150, 15, 600),
+    # Offboarding-with-handover (plan §8 #15). How long the offboard
+    # helper waits for the departing agent's own handover turn (a
+    # normal followup-lane dispatch on the still-live container) before
+    # giving up and committing the snapshot without a handover doc.
+    # Mirrors ``ask_timeout_seconds``'s shape — a one-shot bounded LLM
+    # turn, not a cost control.
+    "offboard_handover_timeout_seconds": (180, 30, 600),
 }
 
 # key -> OPENLEGION_* env var name (the second-lowest precedence source).
@@ -97,6 +104,7 @@ ENV_NAMES: dict[str, str] = {
     "ask_timeout_seconds": "OPENLEGION_ASK_TIMEOUT_SECONDS",
     "drive_artifact_max_mb": "OPENLEGION_DRIVE_ARTIFACT_MAX_MB",
     "steer_reply_timeout_seconds": "OPENLEGION_STEER_REPLY_TIMEOUT_SECONDS",
+    "offboard_handover_timeout_seconds": "OPENLEGION_OFFBOARD_HANDOVER_TIMEOUT_SECONDS",
 }
 
 # Per-agent config keys (agents.yaml / edit_agent) -> limits key. Only the

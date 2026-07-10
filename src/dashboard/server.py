@@ -688,6 +688,18 @@ def create_dashboard_router(
     # recent-traffic feed. Optional so existing dashboard tests keep
     # working — the endpoints return empty lists when absent.
     thread_store: Any = None,
+    # Offboarding-with-handover (plan §8 #15). Cross-router seam into the
+    # mesh app's internal ``_offboard_agent`` helper — injected the same
+    # way ``pending_actions``/``tasks_store`` are (``getattr(app, ...)``
+    # in ``cli/runtime.py``). ``async def offboard_agent(agent_id, *,
+    # reason) -> dict``; optional so dashboard-only test constructions
+    # keep working — the delete endpoint skips the offboard attempt when
+    # absent (no manifest to run).
+    offboard_agent: Any = None,
+    # Same seam for the onboarding wake: ``def onboarding_wake(agent_id,
+    # team_id) -> None`` — fire-and-forget (schedules its own background
+    # task; never awaited here). Optional for the same reason.
+    onboarding_wake: Any = None,
 ) -> APIRouter:
     """Create the dashboard FastAPI router."""
     if teams_store is None:
@@ -2638,11 +2650,31 @@ def create_dashboard_router(
 
     @api_router.delete("/api/agents/{agent_id}")
     async def api_remove_agent(agent_id: str) -> dict:
-        """Remove an agent: stop container, unregister, remove config."""
+        """Remove an agent: stop container, unregister, remove config.
+
+        This is the ONE delete surface where the container is typically
+        still live — the human's one-click dashboard action, not gated on
+        an archive precondition. That makes it the path where a real
+        offboarding handover actually happens: ``offboard_agent`` (the
+        mesh app's ``_offboard_agent``, injected via ``create_dashboard_
+        router``) is run FIRST, best-effort, and the volume-destroying
+        ``stop_agent(..., remove_data=True)`` below must stay strictly
+        AFTER it (plan §8 #15's data-loss invariant).
+        """
         if agent_id == "operator":
             raise HTTPException(status_code=403, detail="The operator is a system agent and cannot be deleted")
         if agent_id not in agent_registry:
             raise HTTPException(status_code=404, detail="Agent not found")
+
+        # Offboarding-with-handover BEFORE any volume destruction. Never
+        # raises (the helper itself never raises); best-effort so a
+        # hiccup here must not block the human's deliberate delete.
+        offboard_manifest = None
+        if offboard_agent is not None:
+            try:
+                offboard_manifest = await offboard_agent(agent_id, reason="delete")
+            except Exception as e:
+                logger.warning("Offboard attempt for '%s' failed: %s", agent_id, e)
 
         # Stop container and remove data volume (best-effort — agent may already be gone)
         if runtime is not None:
@@ -2735,6 +2767,7 @@ def create_dashboard_router(
                 _config_lock,
                 _load_agents_yaml,
                 _load_permissions,
+                _remove_team_blackboard_permissions,
                 _save_agents_yaml,
                 _save_permissions,
             )
@@ -2743,6 +2776,18 @@ def create_dashboard_router(
             # lock acquisition — closes the lost-update race this used to
             # run as two independent bare-``open(..., "w")`` writes.
             with _config_lock():
+                # Bug fix: this path used to skip team-membership cleanup
+                # entirely, leaving a dangling ``team_members`` row (and a
+                # stale ``agent_goals``/``lead_agent_id`` pointer) after the
+                # config was already gone — mirrors ``_remove_agent``'s own
+                # team-first ordering (src/cli/config.py) so both delete
+                # surfaces converge on the same cleanup.
+                if teams_store is not None:
+                    with contextlib.suppress(Exception):
+                        _old_team = teams_store.remove_agent(agent_id)
+                        if _old_team:
+                            _remove_team_blackboard_permissions(agent_id, _old_team)
+
                 agents_data = _load_agents_yaml()
                 agents_data.get("agents", {}).pop(agent_id, None)
                 _save_agents_yaml(agents_data)
@@ -2758,7 +2803,7 @@ def create_dashboard_router(
         if event_bus is not None:
             event_bus.emit("agent_state", agent=agent_id, data={"state": "removed"})
 
-        return {"removed": True, "agent": agent_id}
+        return {"removed": True, "agent": agent_id, "offboard": offboard_manifest}
 
     # ── Agent detail ─────────────────────────────────────────
 
@@ -5833,6 +5878,12 @@ def create_dashboard_router(
                 "added": agent,
             },
         )
+        # Onboarding wake (plan §8 #15) — fire-and-forget, never blocks
+        # this response. The mesh app's own guards (never the operator,
+        # never an agent that isn't in the live registry) apply here too
+        # since the callback is the SAME closure the mesh endpoint uses.
+        if onboarding_wake is not None:
+            onboarding_wake(agent, team_name)
         return {
             "added": True,
             "team_name": team_name,
