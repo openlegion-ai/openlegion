@@ -1396,6 +1396,31 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   propose-then-confirm, `add_agents_to_team` after creation. Full local suite 8462 passed /
   26 skipped / 0 failed.
 
+- **✅ Landed — Phase-4 unit 3: onboarding + offboarding-with-handover (#1222; §8 #15 implemented
+  as recon-corrected — handover at the live-container window, all three delete surfaces
+  converge).** `_offboard_agent` (never raises, manifest-returning): bounded handover TURN on the
+  still-live agent (followup lane, system-note, new `limits.offboard_handover_timeout_seconds`
+  default 180s) → `handovers/{agent}/{date}-handover.md`; always-attempted snapshot (the export
+  bundle via the shared `_build_agent_bundle` refactor) → `{date}-snapshot.json`; both committed
+  in-process via `commit_file`, author = the departing agent; solo/teamless agents skip drive
+  commits cleanly. New `POST /mesh/agents/{id}/offboard` (operator-or-internal, operator target
+  rejected) = offboard → extracted `_archive_agent_core`; `manage_agent` gains
+  `action="offboard"`. ORDER INVARIANT (order-proof test per surface): the offboard attempt runs
+  strictly BEFORE `stop_agent(remove_data=True)` on the mesh confirm-delete path, the dashboard
+  `DELETE /api/agents/{id}` (the surface where the container is typically live — the real
+  handover path), and the CLI `/remove` (bridged via the dispatch loop). Two pre-existing bugs
+  fixed in-unit: the dashboard delete now cleans team membership/goals/lead pointer under the
+  config lock (was leaving dangling rows), and the CLI `/remove` now wipes the data volume
+  (was leaking it). **Review fix (pre-merge):** the lane dispatcher returns the literal
+  "(no response)" as an unreachable-agent SUCCESS string — both new consumers (handover doc,
+  onboarding intro post) now reject it explicitly, so a dead container degrades to no document
+  instead of committing/posting the sentinel as agent-authored text (regression-tested).
+  Onboarding: on team join of a running agent, a fire-and-forget intro turn whose reply is
+  posted HOST-SIDE into the team channel (writers stay host-side only), then a probationary
+  first-task nudge to the lead (operator fallback) — no auto-created task rows; join never fails
+  on onboarding hiccups. CLAUDE.md gains Known Constraint #13 (offboard-before-delete).
+  Full local suite 8496 passed / 26 skipped / 0 failed.
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|
@@ -1442,6 +1467,7 @@ findings, if any, land as a follow-up fix PR recorded in this ledger.
 | #1217 | Phase-4 pre-decisions ratified (§8 #12–#16) + build order | merged |
 | #1218 | Lead role core — designation, advisory verdicts, host-published standup (unit 1) | merged |
 | #1220 | hiring wizard v2 — config file-lock (B-pre #2), role unfrozen, goals-driven hiring (unit 2) | merged |
+| #1222 | onboarding + offboarding-with-handover — three delete surfaces converge (unit 3) | merged |
 
 ### YOU ARE HERE → Phase 4
 
