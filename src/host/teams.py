@@ -165,7 +165,8 @@ class TeamStore:
                     budget_daily_usd   REAL,
                     budget_monthly_usd REAL,
                     drive_ref          TEXT,
-                    thread_ref         TEXT
+                    thread_ref         TEXT,
+                    lead_agent_id      TEXT
                 );
 
                 -- One team per agent, enforced by the schema: the agent id
@@ -195,18 +196,21 @@ class TeamStore:
                 -- head_sha pins the branch tip reviewed, so the merge path
                 -- integrates that EXACT commit (approval TOCTOU guard).
                 CREATE TABLE IF NOT EXISTS drive_reviews (
-                    id           TEXT PRIMARY KEY,
-                    team_id      TEXT NOT NULL,
-                    branch       TEXT NOT NULL,
-                    author       TEXT NOT NULL,
-                    title        TEXT NOT NULL DEFAULT '',
-                    summary      TEXT NOT NULL DEFAULT '',
-                    status       TEXT NOT NULL DEFAULT 'open',
-                    reviewer     TEXT,
-                    merge_commit TEXT,
-                    head_sha     TEXT,
-                    created_at   TEXT,
-                    resolved_at  TEXT
+                    id                TEXT PRIMARY KEY,
+                    team_id           TEXT NOT NULL,
+                    branch            TEXT NOT NULL,
+                    author            TEXT NOT NULL,
+                    title             TEXT NOT NULL DEFAULT '',
+                    summary           TEXT NOT NULL DEFAULT '',
+                    status            TEXT NOT NULL DEFAULT 'open',
+                    reviewer          TEXT,
+                    merge_commit      TEXT,
+                    head_sha          TEXT,
+                    created_at        TEXT,
+                    resolved_at       TEXT,
+                    lead_verdict      TEXT,
+                    lead_verdict_note TEXT,
+                    lead_verdict_at   TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_drive_reviews_team
                     ON drive_reviews(team_id, status);
@@ -219,7 +223,8 @@ class TeamStore:
 
     _TEAM_COLS = (
         "id, description, status, created_at, north_star, success_criteria, "
-        "settings, budget_daily_usd, budget_monthly_usd, drive_ref, thread_ref"
+        "settings, budget_daily_usd, budget_monthly_usd, drive_ref, thread_ref, "
+        "lead_agent_id"
     )
 
     @staticmethod
@@ -245,6 +250,7 @@ class TeamStore:
             "budget_monthly_usd": row[8],
             "drive_ref": row[9],
             "thread_ref": row[10],
+            "lead_agent_id": row[11],
         }
 
     def _members_unlocked(self, conn: sqlite3.Connection, team_id: str) -> list[str]:
@@ -347,7 +353,9 @@ class TeamStore:
 
         Returns the (former) member list so the caller can strip their
         team blackboard permissions — permissions.json wiring stays with
-        the permission layer, not the store.
+        the permission layer, not the store. ``lead_agent_id`` needs no
+        separate clear (plan §8 #14 integrity rule) — it dies with the
+        team row itself.
         """
         with self._txn() as conn:
             members = self._members_unlocked(conn, team_id)
@@ -437,6 +445,52 @@ class TeamStore:
             if cur.rowcount == 0:
                 raise TeamNotFound(f"Team '{team_id}' not found")
 
+    # ── lead designation (plan §8 #14) ────────────────────────────
+    #
+    # The lead is TEAM DATA, not an identity tier: a nullable pointer
+    # column, same shape as ``drive_ref`` / ``thread_ref``. Assignment
+    # is operator-or-internal only (enforced at the endpoint layer, see
+    # ``server.py``'s ``mesh_set_team_lead``); this store only enforces
+    # the membership invariant — a lead MUST be a real team member.
+
+    def set_lead(self, team_id: str, agent_id: str | None) -> dict:
+        """Assign (``agent_id``) or clear (``None``) the team's lead.
+
+        Validates real membership: ``agent_id`` must satisfy
+        ``team_of(agent_id) == team_id`` — a lead who isn't on the team
+        is a broken invariant. ``operator`` is rejected outright (a
+        system agent, never team data). Raises ``TeamNotFound`` for an
+        unknown team, ``ValueError`` for an invalid/non-member agent.
+        """
+        with self._txn() as conn:
+            exists = conn.execute("SELECT 1 FROM teams WHERE id = ?", (team_id,)).fetchone()
+            if exists is None:
+                raise TeamNotFound(f"Team '{team_id}' not found")
+            if agent_id is not None:
+                if agent_id == "operator":
+                    raise ValueError("Operator is a system agent and cannot be a team lead")
+                member_row = conn.execute(
+                    "SELECT team_id FROM team_members WHERE agent_id = ?", (agent_id,),
+                ).fetchone()
+                if member_row is None or member_row[0] != team_id:
+                    raise ValueError(
+                        f"Agent '{agent_id}' is not a member of team '{team_id}' — "
+                        "the lead must be a real team member."
+                    )
+            conn.execute("UPDATE teams SET lead_agent_id = ? WHERE id = ?", (agent_id, team_id))
+        return self.get_team(team_id)  # type: ignore[return-value]
+
+    def led_team(self, agent_id: str) -> str | None:
+        """The id of the team this agent leads, or None.
+
+        A single indexless lookup — cheap enough to run on every
+        heartbeat tick (the cron lead-duty probe uses this as its "am I
+        a lead at all" fast path before paying for a reviews query).
+        """
+        with self._conn() as conn:
+            row = conn.execute("SELECT id FROM teams WHERE lead_agent_id = ?", (agent_id,)).fetchone()
+            return row[0] if row else None
+
     # ── membership ───────────────────────────────────────────────
 
     def add_member(self, team_id: str, agent_id: str) -> str | None:
@@ -455,6 +509,15 @@ class TeamStore:
             old_team = row[0] if row else None
             if old_team == team_id:
                 return old_team
+            if old_team is not None:
+                # The agent is moving OFF its old team — if it was that
+                # team's lead, the pointer must not dangle (integrity
+                # rule, plan §8 #14: lead is REAL membership). Cleared in
+                # the SAME transaction as the membership move.
+                conn.execute(
+                    "UPDATE teams SET lead_agent_id = NULL WHERE id = ? AND lead_agent_id = ?",
+                    (old_team, agent_id),
+                )
             conn.execute(
                 "INSERT OR REPLACE INTO team_members (agent_id, team_id, joined_at) VALUES (?, ?, ?)",
                 (agent_id, team_id, _now()),
@@ -462,23 +525,40 @@ class TeamStore:
         return old_team
 
     def remove_member(self, team_id: str, agent_id: str) -> bool:
-        """Remove an agent from a team. Returns True if a row was removed."""
-        with self._conn() as conn:
+        """Remove an agent from a team. Returns True if a row was removed.
+
+        Same-transaction integrity (plan §8 #14): if the removed agent
+        was the team's lead, the pointer is cleared here — a lead who
+        is no longer a member is a broken invariant.
+        """
+        with self._txn() as conn:
             cur = conn.execute(
                 "DELETE FROM team_members WHERE agent_id = ? AND team_id = ?",
                 (agent_id, team_id),
             )
-            return cur.rowcount > 0
+            removed = cur.rowcount > 0
+            if removed:
+                conn.execute(
+                    "UPDATE teams SET lead_agent_id = NULL WHERE id = ? AND lead_agent_id = ?",
+                    (team_id, agent_id),
+                )
+            return removed
 
     def remove_agent(self, agent_id: str) -> str | None:
         """Drop an agent's membership + standing goals (agent deletion).
 
-        Returns the team it was removed from, if any.
+        Returns the team it was removed from, if any. Same-transaction
+        integrity (plan §8 #14): clears ``lead_agent_id`` on any team
+        that pointed at this agent (there can only be one, since lead
+        implies real membership, but the clear is unconditional on
+        agent_id — not scoped to the removed team_id — for defense in
+        depth against a prior inconsistency).
         """
         with self._txn() as conn:
             row = conn.execute("SELECT team_id FROM team_members WHERE agent_id = ?", (agent_id,)).fetchone()
             conn.execute("DELETE FROM team_members WHERE agent_id = ?", (agent_id,))
             conn.execute("DELETE FROM agent_goals WHERE agent_id = ?", (agent_id,))
+            conn.execute("UPDATE teams SET lead_agent_id = NULL WHERE lead_agent_id = ?", (agent_id,))
             return row[0] if row else None
 
     def team_of(self, agent_id: str) -> str | None:
@@ -600,7 +680,8 @@ class TeamStore:
 
     _REVIEW_COLS = (
         "id, team_id, branch, author, title, summary, status, "
-        "reviewer, merge_commit, head_sha, created_at, resolved_at"
+        "reviewer, merge_commit, head_sha, created_at, resolved_at, "
+        "lead_verdict, lead_verdict_note, lead_verdict_at"
     )
 
     @staticmethod
@@ -621,6 +702,11 @@ class TeamStore:
             "head_sha_short": (head_sha[:10] if head_sha else None),
             "created_at": row[10],
             "resolved_at": row[11],
+            # Lead advisory verdict (plan §8 #13) — ZERO enforcement effect;
+            # purely informational for the operator's merge/reject decision.
+            "lead_verdict": row[12],
+            "lead_verdict_note": row[13],
+            "lead_verdict_at": row[14],
         }
 
     def create_review(
@@ -675,6 +761,42 @@ class TeamStore:
                     (team_id,),
                 ).fetchall()
         return [self._row_to_review(r) for r in rows]
+
+    def record_lead_verdict(
+        self,
+        review_id: str,
+        verdict: str,
+        note: str | None,
+        reviewer: str,
+    ) -> dict:
+        """Record the team lead's advisory approve/reject verdict.
+
+        Plan §8 #13: this has ZERO enforcement effect — the merge/reject
+        gates and their operator-or-internal check are untouched and
+        keep governing integration. Allowed only while the review is
+        still ``open`` (a verdict on an already-resolved review can't
+        change anything and would just be confusing state); raises
+        ``ValueError`` otherwise. ``reviewer`` is the verified lead
+        identity the endpoint already checked against
+        ``teams.lead_agent_id`` — recorded here only for the debug
+        trail, not a separate column (the timestamp + verdict + note
+        are the durable record).
+        """
+        if verdict not in ("approve", "reject"):
+            raise ValueError(f"Invalid verdict '{verdict}'")
+        with self._txn() as conn:
+            row = conn.execute("SELECT status FROM drive_reviews WHERE id = ?", (review_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"Review '{review_id}' not found")
+            if row[0] != "open":
+                raise ValueError(f"Review '{review_id}' is already {row[0]}")
+            conn.execute(
+                "UPDATE drive_reviews SET lead_verdict = ?, lead_verdict_note = ?, lead_verdict_at = ? "
+                "WHERE id = ?",
+                (verdict, note, _now(), review_id),
+            )
+        logger.debug("lead verdict recorded on review %s by %s: %s", review_id, reviewer, verdict)
+        return self.get_review(review_id)  # type: ignore[return-value]
 
     def resolve_review(
         self,

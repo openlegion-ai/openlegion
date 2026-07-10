@@ -5617,6 +5617,9 @@ def create_dashboard_router(
                     # Team goal (set via the operator's set_team_goal tool). Surfaced
                     # so the team hub can show it; null until set.
                     "north_star": pdata.get("north_star"),
+                    # Team lead (plan §8 #14) — team data, not a permission
+                    # tier. Null until assigned.
+                    "lead_agent_id": pdata.get("lead_agent_id"),
                 }
             )
         return {"teams": result}
@@ -5771,6 +5774,14 @@ def create_dashboard_router(
                     team_name,
                     e,
                 )
+            try:
+                cron_scheduler.remove_standup_job(team_name)
+            except Exception as e:
+                logger.warning(
+                    "remove standup cron on dashboard team-delete %s failed: %s",
+                    team_name,
+                    e,
+                )
         _emit_team_event(
             "team_deleted",
             agent="operator",
@@ -5858,6 +5869,85 @@ def create_dashboard_router(
             "agent": agent,
             "restarted": restarted,
         }
+
+    def _sync_standup_job_on_lead_change(team_name: str, lead_agent_id: str | None) -> None:
+        """Live cron sync for a dashboard lead assign/unassign (§8 #14).
+
+        Mirrors the mesh endpoint's helper. Best-effort — a cron hiccup
+        must not fail the lead-assignment response.
+        """
+        if cron_scheduler is None:
+            return
+        try:
+            if lead_agent_id is None:
+                cron_scheduler.remove_standup_job(team_name)
+                return
+            team = teams_store.get_team(team_name) or {}
+            schedule = (team.get("settings") or {}).get("standup_schedule")
+            cron_scheduler.ensure_standup_job(team_name, lead_agent_id, schedule=schedule)
+        except Exception as e:
+            logger.warning("standup cron sync for team %s failed: %s", team_name, e)
+
+    @api_router.put("/api/teams/{team_name}/lead")
+    async def api_teams_set_lead(team_name: str, request: Request) -> dict:
+        """Assign the team's lead.
+
+        Lead is team data, not a permission tier (plan §8 #14) — this
+        grants no permission elevation. No restart needed: this is
+        mesh-side data only, not a scope/ACL change (unlike member
+        add/remove, which restarts the agent). ``set_lead`` validates
+        the agent is a real member of the team.
+        """
+        from src.host.teams import TeamNotFound
+
+        body = await request.json()
+        agent = str(body.get("agent_id", "")).strip()
+        if not agent:
+            raise HTTPException(status_code=400, detail="agent_id is required")
+        try:
+            team = teams_store.set_lead(team_name, agent)
+        except TeamNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        _sync_standup_job_on_lead_change(team_name, agent)
+        _emit_team_event(
+            "team_updated",
+            agent="operator",
+            data={
+                "team_id": team_name,
+                "name": team_name,
+                "field": "lead",
+                "lead_agent_id": agent,
+            },
+        )
+        return {
+            "success": True,
+            "team_name": team_name,
+            "lead_agent_id": team.get("lead_agent_id"),
+        }
+
+    @api_router.delete("/api/teams/{team_name}/lead")
+    async def api_teams_clear_lead(team_name: str) -> dict:
+        """Clear the team's lead."""
+        from src.host.teams import TeamNotFound
+
+        try:
+            teams_store.set_lead(team_name, None)
+        except TeamNotFound as e:
+            raise HTTPException(status_code=404, detail=str(e))
+        _sync_standup_job_on_lead_change(team_name, None)
+        _emit_team_event(
+            "team_updated",
+            agent="operator",
+            data={
+                "team_id": team_name,
+                "name": team_name,
+                "field": "lead",
+                "lead_agent_id": None,
+            },
+        )
+        return {"success": True, "team_name": team_name, "lead_agent_id": None}
 
     # ── Team TEAM brief (team.md) ──────────────────────────
 
@@ -8193,6 +8283,7 @@ def create_dashboard_router(
                     "status": pdata.get("status", "active"),
                     "north_star": pdata.get("north_star"),
                     "success_criteria": pdata.get("success_criteria"),
+                    "lead_agent_id": pdata.get("lead_agent_id"),
                     "counts": counts,
                     "total": len(rows),
                     "blockers": blockers,

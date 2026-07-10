@@ -5992,6 +5992,7 @@ def create_mesh_app(
                     "members": pdata.get("members", []),
                     "created_at": pdata.get("created_at", ""),
                     "status": pdata.get("status", "active") or "active",
+                    "lead_agent_id": pdata.get("lead_agent_id"),
                 }
             )
         return {"teams": result}
@@ -6200,6 +6201,14 @@ def create_mesh_app(
             except Exception as e:
                 logger.warning(
                     "remove summary cron on mesh team-delete %s failed: %s",
+                    team_name,
+                    e,
+                )
+            try:
+                cron_scheduler.remove_standup_job(team_name)
+            except Exception as e:
+                logger.warning(
+                    "remove standup cron on mesh team-delete %s failed: %s",
                     team_name,
                     e,
                 )
@@ -6580,6 +6589,58 @@ def create_mesh_app(
         )
         return {"rejected": True, "review": resolved}
 
+    @app.post("/mesh/teams/{team_id}/drive/reviews/{review_id}/verdict")
+    async def drive_record_lead_verdict(team_id: str, review_id: str, request: Request) -> dict:
+        """Record the team lead's advisory approve/reject verdict (plan §8 #13).
+
+        The verified caller MUST equal this team's ``lead_agent_id`` —
+        everyone else (a non-lead member, another team's lead, or even
+        the operator acting as itself) gets 403. Internal callers may
+        pass an ``X-Agent-ID`` identity the same way every other
+        internal-loopback path does (``_extract_verified_agent_id``) —
+        that is the existing trust boundary, not a new carve-out.
+
+        This has ZERO enforcement effect: the merge/reject endpoints
+        and their operator-or-internal gates are UNTOUCHED. Only open
+        reviews accept a verdict (409 otherwise).
+        """
+        caller = _extract_verified_agent_id(request)
+        if not teams_store.team_exists(team_id):
+            raise HTTPException(404, f"Team '{team_id}' not found")
+        team = teams_store.get_team(team_id) or {}
+        lead_agent_id = team.get("lead_agent_id")
+        if not lead_agent_id or caller != lead_agent_id:
+            _record_denial("permission", caller=caller, target=team_id, gate="drive:verdict:not_lead")
+            raise HTTPException(403, "Only this team's lead can record a drive-review verdict")
+        await _check_rate_limit("drive", caller)
+        review = teams_store.get_review(review_id)
+        if review is None or review["team_id"] != team_id:
+            raise HTTPException(404, f"Review '{review_id}' not found for team '{team_id}'")
+        body = await request.json()
+        verdict = str(body.get("verdict", "")).strip().lower()
+        if verdict not in ("approve", "reject"):
+            raise HTTPException(400, "verdict must be 'approve' or 'reject'")
+        note_raw = body.get("note")
+        note: str | None = None
+        if note_raw is not None:
+            note = sanitize_for_prompt(str(note_raw)).strip()
+            if len(note) > 2000:
+                raise HTTPException(400, "note must be 2000 characters or fewer")
+            note = note or None
+        try:
+            resolved = teams_store.record_lead_verdict(review_id, verdict, note, reviewer=caller)
+        except ValueError as e:
+            raise HTTPException(409, str(e))
+        blackboard.log_audit(
+            action="drive_review_lead_verdict",
+            actor=caller,
+            target=team_id,
+            field=resolved["branch"],
+            after_value=f"{verdict}:{review_id}",
+            provenance="agent",
+        )
+        return {"recorded": True, "review": resolved}
+
     # Direct-commit artifact store (Phase-2 unit 4). Handoff-data payloads
     # and save_artifact registration commit STRAIGHT to main here — this is
     # deliberate: artifacts are deliverable REGISTRATION, not reviewed
@@ -6927,6 +6988,104 @@ def create_mesh_app(
             "team_id": team_name,
             "north_star": north_star,
             "success_criteria": success_criteria,
+        }
+
+    def _sync_standup_job_on_lead_change(team_name: str, lead_agent_id: str | None) -> None:
+        """Live cron sync for a lead assign/unassign (plan §8 #14).
+
+        Best-effort — a cron hiccup must not fail the lead-assignment
+        response; the boot reconcile (``_reconcile_standup_jobs`` in
+        ``cli/runtime``) catches any drift this misses (e.g. a lead
+        removed via the team-membership endpoint rather than this one).
+        """
+        if cron_scheduler is None:
+            return
+        try:
+            if lead_agent_id is None:
+                cron_scheduler.remove_standup_job(team_name)
+                return
+            team = teams_store.get_team(team_name) or {}
+            schedule = (team.get("settings") or {}).get("standup_schedule")
+            cron_scheduler.ensure_standup_job(team_name, lead_agent_id, schedule=schedule)
+        except Exception as e:
+            logger.warning("standup cron sync for team %s failed: %s", team_name, e)
+
+    @app.put("/mesh/teams/{team_name}/lead")
+    async def mesh_set_team_lead(team_name: str, request: Request) -> dict:
+        """Assign the team's lead (mesh-authed proxy).
+
+        Same operator-or-internal gate as the sibling team-metadata
+        writes (goal/context/brief). The lead is TEAM DATA, not a
+        permission tier (plan §8 #14) — this grants zero permission
+        elevation to the assigned agent. Validates real membership
+        (``set_lead`` rejects non-members and ``operator``); ensures the
+        team's standup cron job so the new lead starts receiving standup
+        duty immediately, not at the next mesh restart.
+        """
+        caller = _extract_verified_agent_id(request)
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can manage teams")
+        body = await request.json()
+        agent_id = str(body.get("agent_id", "")).strip()
+        if not agent_id:
+            raise HTTPException(400, "agent_id is required")
+        try:
+            team = teams_store.set_lead(team_name, agent_id)
+        except TeamNotFound as e:
+            raise HTTPException(404, str(e))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        _sync_standup_job_on_lead_change(team_name, agent_id)
+        blackboard.log_audit(
+            action="team_lead_set",
+            actor=caller,
+            target=team_name,
+            after_value=agent_id,
+            provenance="user",
+        )
+        _emit_team_event(
+            event_bus,
+            "team_updated",
+            agent="operator",
+            name=team_name,
+            extra={"field": "lead", "lead_agent_id": agent_id},
+        )
+        return {
+            "success": True,
+            "team_name": team_name,
+            "team_id": team_name,
+            "lead_agent_id": team.get("lead_agent_id"),
+        }
+
+    @app.delete("/mesh/teams/{team_name}/lead")
+    async def mesh_clear_team_lead(team_name: str, request: Request) -> dict:
+        """Clear the team's lead (mesh-authed proxy). Operator-or-internal."""
+        caller = _extract_verified_agent_id(request)
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can manage teams")
+        try:
+            teams_store.set_lead(team_name, None)
+        except TeamNotFound as e:
+            raise HTTPException(404, str(e))
+        _sync_standup_job_on_lead_change(team_name, None)
+        blackboard.log_audit(
+            action="team_lead_cleared",
+            actor=caller,
+            target=team_name,
+            provenance="user",
+        )
+        _emit_team_event(
+            event_bus,
+            "team_updated",
+            agent="operator",
+            name=team_name,
+            extra={"field": "lead", "lead_agent_id": None},
+        )
+        return {
+            "success": True,
+            "team_name": team_name,
+            "team_id": team_name,
+            "lead_agent_id": None,
         }
 
     # === Orchestration Tasks ===

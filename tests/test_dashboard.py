@@ -3348,6 +3348,73 @@ class TestDashboardProjectCRUD:
         resp = self.client.delete("/dashboard/api/teams/ghost/members/alpha")
         assert resp.status_code == 400
 
+    def test_teams_list_carries_lead_agent_id(self):
+        """GET /api/teams surfaces lead_agent_id (null until assigned)."""
+        self.components["teams_store"].create_team("team")
+        self.components["teams_store"].add_member("team", "alpha")
+        resp = self.client.get("/dashboard/api/teams")
+        assert resp.status_code == 200
+        row = next(t for t in resp.json()["teams"] if t["name"] == "team")
+        assert row["lead_agent_id"] is None
+
+        self.components["teams_store"].set_lead("team", "alpha")
+        resp = self.client.get("/dashboard/api/teams")
+        row = next(t for t in resp.json()["teams"] if t["name"] == "team")
+        assert row["lead_agent_id"] == "alpha"
+
+    def test_set_lead(self):
+        """PUT /api/teams/{name}/lead assigns the lead — no restart
+        (mesh-side data only, unlike member add/remove)."""
+        self.components["teams_store"].create_team("team")
+        self.components["teams_store"].add_member("team", "alpha")
+        resp = self.client.put("/dashboard/api/teams/team/lead", json={"agent_id": "alpha"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert data["lead_agent_id"] == "alpha"
+        assert self.components["teams_store"].get_team("team")["lead_agent_id"] == "alpha"
+        # Standup cron sync fired.
+        self.components["cron_scheduler"].ensure_standup_job.assert_called_once()
+
+    def test_set_lead_non_member_400(self):
+        self.components["teams_store"].create_team("team")
+        resp = self.client.put("/dashboard/api/teams/team/lead", json={"agent_id": "alpha"})
+        assert resp.status_code == 400
+
+    def test_set_lead_unknown_team_404(self):
+        resp = self.client.put("/dashboard/api/teams/ghost/lead", json={"agent_id": "alpha"})
+        assert resp.status_code == 404
+
+    def test_set_lead_missing_agent_id_400(self):
+        self.components["teams_store"].create_team("team")
+        resp = self.client.put("/dashboard/api/teams/team/lead", json={})
+        assert resp.status_code == 400
+
+    def test_clear_lead(self):
+        self.components["teams_store"].create_team("team")
+        self.components["teams_store"].add_member("team", "alpha")
+        self.components["teams_store"].set_lead("team", "alpha")
+        resp = self.client.delete("/dashboard/api/teams/team/lead")
+        assert resp.status_code == 200
+        assert resp.json()["lead_agent_id"] is None
+        assert self.components["teams_store"].get_team("team")["lead_agent_id"] is None
+        self.components["cron_scheduler"].remove_standup_job.assert_called_once_with("team")
+
+    def test_clear_lead_unknown_team_404(self):
+        resp = self.client.delete("/dashboard/api/teams/ghost/lead")
+        assert resp.status_code == 404
+
+    def test_workplace_teams_carries_lead_agent_id(self):
+        """GET /api/workplace/teams (Team Room rollup) also surfaces
+        lead_agent_id."""
+        self.components["teams_store"].create_team("team")
+        self.components["teams_store"].add_member("team", "alpha")
+        self.components["teams_store"].set_lead("team", "alpha")
+        resp = self.client.get("/dashboard/api/workplace/teams")
+        assert resp.status_code == 200
+        row = next(t for t in resp.json()["teams"] if t["name"] == "team")
+        assert row["lead_agent_id"] == "alpha"
+
 
 class TestDashboardAgentProjectField:
     """Tests for project field in /api/agents response."""
