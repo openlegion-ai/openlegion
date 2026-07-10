@@ -468,6 +468,109 @@ Status: **RATIFIED** except items 1 and 4, which stand at their safe defaults pe
       events, probe alerts) always escalate — that is work responding to work, and pre-B2 behavior
       already dispatched the LLM on activity/probes. Deployment guidance: set `llm.utility_model`
       to enable initiative.
+12. ✅ **RATIFIED (2026-07-11) — Phase-4 lead-goals reading: "owns team goals" is ACCOUNTABILITY,
+    not a write path.** "Lead owns team goals" (§6 Phase 4) is read consistently with "influence,
+    not privilege — zero extra permission ceiling": the lead gets goal accountability plus
+    proposal/curation duties (goal staleness surfaced on its plate; proposals go to the team
+    thread or the operator), NOT a goals write path. Code recon confirms the invariant this
+    preserves: BOTH goal kinds are operator-write-only today — team goals
+    (`POST /mesh/teams/{name}/goal` + the operator-only `set_team_goal` tool, inline
+    operator-or-internal gates) and per-agent standing goals (`_require_goals_writer`, exactly
+    two call sites, and NO agent-facing goals-write tool exists at all). The standing gate stands
+    unchanged: any goals agent-write carve-out (team or standing) is a NEW decision requiring
+    explicit ratification — nothing in Phase 4 may add an agent-reachable goals write. Also
+    recorded out of scope: §5's "the lead allocates per-agent budgets within it" (team-budget
+    row) IS a lead write path and is NOT built in Phase 4 — it waits for Phase 5's
+    earned-autonomy machinery or its own ratification.
+13. ✅ **RATIFIED (2026-07-11) — lead drive-review duty is a RECORDED ADVISORY VERDICT; merge
+    execution stays operator-tier.** Code recon: approve→merge is ONE operator-only action today —
+    `POST .../reviews/{id}/merge` and `.../reject` are both gated `_require_operator_or_internal`,
+    there is no "approved" state (statuses `open|merging|merged|rejected|superseded`), and no
+    agent tool or mesh-client method can reach either (pinned by test_team_drive.py's
+    `test_merge_reject_are_operator_only`). "Lead reviews Team Drive merges" therefore lands
+    additively: advisory verdict fields on `drive_reviews` (`lead_verdict` approve/reject + note
+    + timestamp), an agent-reachable record-verdict surface gated to the caller being that team's
+    lead (verified identity == `teams.lead_agent_id`), open reviews surfaced on the lead's plate
+    via the existing `list_reviews(team_id, status="open")`, and the verdict shown to the
+    operator (review listing / dashboard / merge response). The verdict has ZERO enforcement
+    effect — the merge/reject gates stay untouched and the pinned test keeps passing unmodified;
+    §6's security note holds (a compromised lead is socially loud, technically a worker).
+    Recording an opinion is influence-shaped, consistent with amended Constraint #12.
+14. ✅ **RATIFIED (2026-07-11) — lead is TEAM DATA, not an identity tier: `teams.lead_agent_id`,
+    operator-only assignment; standup posts are HOST-PUBLISHED.** Shape: a nullable
+    `lead_agent_id` column on the `teams` row — matching every existing per-team singleton
+    (`drive_ref`, `thread_ref`, `north_star`, budget columns; the §3 diagram already lists `lead`
+    as a team attribute) — with a `set_lead()` that validates real membership; assign/unassign is
+    operator-only (the same inline gate every sibling team-metadata write uses). Integrity rule:
+    every path that removes the lead from its team (remove_member / remove_agent / delete_team /
+    offboarding) clears the pointer. "Default human contact" is a dashboard default ONLY — never
+    message routing. Standup: recon confirms the team channel thread is WRITE-LESS today and
+    thread writers are host-side only (a pinned invariant that SURVIVES): a standup is an
+    ordinary cron MESSAGE job on the lead's own container (followup-lane `/chat` turn), and a new
+    `CronJob.post_to_channel` field tells the cron executor — host-side, in-process with the
+    ThreadStore — to post the turn's returned text into the team channel thread on the lead's
+    behalf (mirroring the three existing host-side writers; bootstrap + boot-reconcile mirror
+    `ensure_summary_job` / `_reconcile_work_summary_jobs`). NO agent-facing thread-posting
+    endpoint is added. Recorded residual: teammates are not notified of channel posts (no
+    agent-side thread read surface exists); pushing channel traffic into agent turns is a future
+    decision, not Phase 4. Constitution amendment text (lands with unit 1, in CLAUDE.md plus its
+    pinning test per B5): **Constraint #1** → "Fleet model, no *router* hierarchy. No CEO agent
+    and no routing through a lead: users talk to any agent directly; agents coordinate through
+    the blackboard. A team lead is an accountability owner (standup, advisory review verdicts,
+    goal stewardship) — never a message router and never a permission tier." **Constraint #12** →
+    append "Team leads gain no permission carve-out — lead is team data (§8 #14), not an identity
+    tier; the operator remains the only trust-tier bypass."
+15. ✅ **RATIFIED (2026-07-11) — offboarding-with-handover hooks at ARCHIVE time (recon-corrected);
+    all three delete surfaces converge on it.** Recon correction to §6's "before deletion": the
+    host reads agent workspace ONLY over HTTP through the running container (the export bundle's
+    `GET /workspace` proxy; there is no direct FS path), and archive STOPS the container — so the
+    handover window closes at archive, not delete. Offboard flow for team members with a live
+    container: (1) a handover TURN on the still-live agent via the existing followup-lane
+    system-note wake — the agent distills its own SOUL/MEMORY/INSTRUCTIONS/learnings into a
+    handover doc (recon correction: this is a normal turn on the agent's own model billed to the
+    work ledger — one-off, bounded by the existing preflight; no force-utility-model chat surface
+    exists and none is built for a one-shot turn); (2) a mesh-side raw snapshot fallback (the
+    existing export-agent bundle: config + ACL + cron jobs + workspace markdown best-effort +
+    goals); (3) both committed to the Team Drive via IN-PROCESS `team_drive.commit_file` (author
+    = the departing agent; needs no token — mirrors the artifact endpoint's own internal call)
+    under a dedicated `handovers/{agent_id}/` path; (4) THEN archive. Delete keeps its existing
+    archived-precondition + human-origin confirm chain. Unification (recon found the three delete
+    surfaces asymmetric): the dashboard `DELETE /api/agents/{id}` (destroys the volume
+    immediately, and skips `teams_store.remove_agent` — a live dangling-membership/goals-row bug)
+    and the CLI `/remove` (never removes the volume at all) BOTH converge on the same
+    offboard→archive→delete discipline, fixing both pre-existing bugs in-unit. Limitations
+    recorded: solo/teamless agents have no Team Drive — export surface only, no handover commit;
+    the binary memory DB (embeddings) stays out of the bundle (already a recorded deferred
+    follow-up — MEMORY.md carries the distilled facts). Onboarding rides the same primitives:
+    first-boot ritual (read TEAM.md + team goals; introduce itself in the team thread via the
+    SAME host-published channel-post primitive as §8 #14; probationary first task created by the
+    lead if present else the operator — creator attribution only, no privilege implication).
+16. ✅ **RATIFIED (2026-07-11) — hiring wizard v2 is OPERATOR-TIER; B-pre #2's file-lock is an
+    in-unit prerequisite (recon-widened); "role unfrozen" is a plan correction.** (a) Recon
+    widened B-pre #2: `config/permissions.json` is already atomic per individual write
+    (tempfile+rename) — the REAL exposure is `config/agents.yaml`, where EVERY writer is a bare
+    truncate-and-write (no lock, no atomic rename) and the one existing `_creation_lock` is
+    asyncio-only, covering two of FIVE creation entry points (dashboard creates, the CLI REPL
+    thread, and the setup-wizard process are all unguarded). Fix, built FIRST inside the hiring
+    unit: a sidecar `fcntl.flock` advisory lock held across each helper's full load→mutate→save
+    (in-repo precedent: browser/profile_schema.py) + tempfile+`os.replace` atomic writes for
+    agents.yaml, and the same lock wrapping permissions.json's load→mutate→save (closing its own
+    documented lost-update caveat). (b) Plan correction — `role` is ALREADY operator-editable
+    (it sits in `SOFT_EDIT_FIELDS`; edit_agent, the dashboard config PUT, and the CLI wizard all
+    write it); the ONLY freeze is the fleet-template `agent_overrides` allowlist
+    (`_ALLOWED_OVERRIDE_FIELDS` excludes it; one pinned test). "Unfreezing" = add `role` to that
+    allowlist + update the pinned test + the two tool docstrings. Role is descriptive/coordination
+    text only (no tool gating reads it) — zero permission surface. Staleness recorded: role edits
+    do not hot-reload (restart refreshes; the pinned skip-hot-reload test stands); the
+    health-monitor rebuild re-registers WITHOUT `role=`, leaving the mesh roster cache stale —
+    fixed in-unit (one line + a test). (c) Wizard v2 keeps wizard v1's shape — the dashboard
+    drives the OPERATOR AGENT'S own operator-tier tools (the wizard UI never calls create APIs):
+    team goals → derived job descriptions → `create_agent`/`apply_template`; templates become
+    starting resumes (their instructions/soul/interface seed the new hire's workspace). No new
+    privilege tier, no new agent-reachable creation surface. (d) Discovered dead config: the
+    template `resources` key round-trips into agents.yaml with NO reader anywhere — DELETED
+    in-unit (destructive-cleanup mandate: write-only config is cruft; per-agent container limits,
+    if ever wanted, are their own feature).
 
 Chronological record of what has actually landed on the branch, and any plan
 corrections discovered during implementation. Keeps this doc the source of truth
@@ -1220,6 +1323,28 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   finding (missing unit-4 landed entry) was already fixed by #1211 before the review completed.
   Regression tests for every fix; full local suite 8313 passed / 26 skipped / 0 failed.
 
+- **✅ Landed — Phase-4 pre-decisions ratified (§8 #12–#16) + build order.** Recon pass first
+  (seven parallel read-only sweeps: drive-review privileges, goals/membership schemas, role
+  freeze + pinned tests, creation paths + config race, deletion path + handover surfaces,
+  dashboard/plate exposure, standup/thread-posting mechanics) grounded the §6 Phase-4 sketch in
+  code; the §8 entries record the corrected designs. Highlights the appendices don't carry:
+  approve→merge is one operator-only action with no "approved" state → lead verdicts are
+  additive advisory metadata (§8 #13); the team channel thread is WRITE-LESS today → standups
+  and onboarding introductions are host-published, preserving the writers-host-side-only
+  invariant (§8 #14); the handover window closes at ARCHIVE, not delete (container-stop kills
+  workspace reads) → offboarding hooks pre-archive and the three asymmetric delete surfaces
+  (mesh nonce path / dashboard immediate-wipe / CLI no-volume-removal) converge (§8 #15);
+  `role` was never generally frozen — only the fleet-override allowlist — and role edits never
+  hot-reload (§8 #16); B-pre #2's real target is `config/agents.yaml`, where every writer is a
+  bare truncate-write and `_creation_lock` covers two of five entry points (§8 #16). Build
+  order: unit 1 Lead role core (+ Constraint #1/#12 amendments + the host-side channel-post
+  primitive) → unit 2 hiring wizard v2 (file-lock FIRST) → unit 3 onboarding +
+  offboarding-with-handover → unit 4 Team Room (Team Hub sub-tab; in-memory plate snapshot on
+  the CronScheduler + one dashboard endpoint — the four frozen top-nav tab IDs are untouched)
+  → unit 5 (small) streaming/broadcast steer-routing (the recorded Phase-3 residual;
+  re-deferred with a recorded gate if the design balloons) → phase exit + consolidated
+  end-of-phase review (the Phase-3 pattern that caught two CRITICALs).
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|
@@ -1260,6 +1385,11 @@ without `await` after unit 1's review-fix — fixed pre-merge). Phase-3 units 3�
 per-unit gates; the phase closes with a consolidated adversarial review of ALL Phase-3 PRs —
 findings, if any, land as a follow-up fix PR recorded in this ledger.
 
+### PR ledger — Phase 4 (as of 2026-07-11)
+| PR | Unit | CI |
+|---|---|---|
+| #1217 | Phase-4 pre-decisions ratified (§8 #12–#16) + build order | merged |
+
 ### YOU ARE HERE → Phase 4
 
 **Phase 3 (the workday) is COMPLETE.** All four units landed as separate green PRs off `main`,
@@ -1284,21 +1414,25 @@ survives only as plate-gate/message input (by design), never as skip logic.
 unratified) — do not build it without an explicit user decision; any future scratch ratification
 MUST resolve the SandboxBackend story at the same time (recorded in §8 #9).
 
-**Phase 4 (org model) is next** — see §6 Phase 4: **Lead** role (influence, not privilege — zero
-extra permission ceiling), **hiring wizard v2** (goals → job descriptions → agents; `role`
-unfrozen; templates as starting resumes), **onboarding** + **offboarding-with-handover** (distill
-memory/workspace to a handover doc in the Team Drive before deletion), **Team Room** dashboard.
-Constitution amendments land WITH the units that make them true: Constraint #1 → "no *router*
-hierarchy", Constraint #12 → leads gain no permission carve-out. Standing gates carried forward:
-Personnel-file *import* still needs B-pre #2's config file-lock first; Phase-5 hibernation still
-needs B3's three-subsystem scoping; a standing-goals agent-write carve-out remains UNRATIFIED —
-do not build it without an explicit user decision; dashboard streaming chat + broadcast still
-call the agent endpoints directly (single-lane-safe after #1213, but not steer-routed — routing
-them through `deliver_chat` is an open Phase-4 follow-up).
+**Phase 4 (org model) is IN PROGRESS** — pre-decisions ratified as **§8 #12–#16**: lead-goals =
+accountability, not a write path (#12); lead review = recorded advisory verdict, not merge power
+(#13); lead = `teams.lead_agent_id` team data + host-published standup (#14); offboarding hooks
+at ARCHIVE time with all three delete surfaces converging (#15); hiring wizard v2 is
+operator-tier with the agents.yaml file-lock built first (#16). Build order: **unit 1** Lead
+role core + Constraint #1/#12 amendments + the host-side channel-post primitive → **unit 2**
+hiring wizard v2 (file-lock FIRST) → **unit 3** onboarding + offboarding-with-handover →
+**unit 4** Team Room dashboard → **unit 5** (small) streaming/broadcast steer-routing (the
+recorded Phase-3 residual: dashboard streaming chat + broadcast still call agent endpoints
+directly — single-lane-safe after #1213, but not steer-routed through `deliver_chat`;
+re-deferred with a recorded gate if the design balloons). Standing gates carried forward:
+Personnel-file *import* still needs B-pre #2's config file-lock first (unit 2 builds it);
+Phase-5 hibernation still needs B3's three-subsystem scoping; a goals agent-write carve-out
+(team or standing) remains UNRATIFIED — do not build one without an explicit user decision;
+per-agent budget allocation by the lead (§5) is NOT built this phase (§8 #12).
 
 **Handoff note:** this doc is the source of truth — a fresh session can continue from here without
 this session's chat history. Read §5 (keep/refactor/remove), Appendices A–C, §8 (ratified
-decisions), and the Phase-1/2/3 landed entries above (they record implementation corrections,
+decisions), and the Phase-1/2/3/4 landed entries above (they record implementation corrections,
 recorded deviations, and review findings the appendices don't).
 
 ---
