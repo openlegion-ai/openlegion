@@ -165,7 +165,8 @@ class CostTracker:
                 total_tokens INTEGER DEFAULT 0,
                 cost_usd REAL DEFAULT 0.0,
                 timestamp TEXT DEFAULT (datetime('now')),
-                trace_id TEXT
+                trace_id TEXT,
+                kind TEXT NOT NULL DEFAULT 'work'
             );
             CREATE INDEX IF NOT EXISTS idx_usage_agent_ts ON usage(agent, timestamp);
         """)
@@ -179,6 +180,14 @@ class CostTracker:
         }
         if "trace_id" not in existing:
             self.db.execute("ALTER TABLE usage ADD COLUMN trace_id TEXT")
+        # B2 spend split (Phase-3 unit 1): coordination vs work ledger.
+        # Same introspection-migration pattern as trace_id; legacy rows
+        # take the 'work' default, which preserves their enforcement
+        # semantics exactly (everything was work before the split).
+        if "kind" not in existing:
+            self.db.execute(
+                "ALTER TABLE usage ADD COLUMN kind TEXT NOT NULL DEFAULT 'work'"
+            )
         self.db.commit()
 
     def close(self) -> None:
@@ -210,14 +219,14 @@ class CostTracker:
         if not budget:
             return False
         over = False
-        daily_spent = self.get_spend(agent, "today").get("total_cost", 0)
+        daily_spent = self.get_spend(agent, "today", kind="work").get("total_cost", 0)
         if daily_spent > budget["daily_usd"]:
             logger.warning(
                 "Agent '%s' exceeded daily budget: $%.4f / $%.2f",
                 agent, daily_spent, budget["daily_usd"],
             )
             over = True
-        monthly_spent = self.get_spend(agent, "month").get("total_cost", 0)
+        monthly_spent = self.get_spend(agent, "month", kind="work").get("total_cost", 0)
         if monthly_spent > budget["monthly_usd"]:
             logger.warning(
                 "Agent '%s' exceeded monthly budget: $%.4f / $%.2f",
@@ -228,7 +237,7 @@ class CostTracker:
 
     def track(
         self, agent: str, model: str, prompt_tokens: int, completion_tokens: int,
-        *, bill: bool = True,
+        *, bill: bool = True, kind: str = "work",
     ) -> dict:
         """Record a single LLM call. Returns {"cost": float, "over_budget": bool}.
 
@@ -237,6 +246,11 @@ class CostTracker:
         per-call dollar cost. Operators keep token visibility, while the
         spend total stays $0 so subscription usage never accrues cost and
         never trips a daily/monthly budget cap (the cap reads SUM(cost_usd)).
+
+        ``kind`` is the B2 spend-split ledger tag: ``"work"`` (default) or
+        ``"coordination"`` (utility-model traffic, classified mesh-side at
+        the LLM proxy). Enforcement reads filter ``kind='work'``; reporting
+        stays spend-inclusive.
         """
         total = prompt_tokens + completion_tokens
         cost = (
@@ -251,9 +265,9 @@ class CostTracker:
         from src.shared.trace import current_trace_id
         trace_id = current_trace_id.get()
         self.db.execute(
-            "INSERT INTO usage (agent, model, prompt_tokens, completion_tokens, total_tokens, cost_usd, trace_id) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (agent, model, prompt_tokens, completion_tokens, total, cost, trace_id),
+            "INSERT INTO usage (agent, model, prompt_tokens, completion_tokens, "
+            "total_tokens, cost_usd, trace_id, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (agent, model, prompt_tokens, completion_tokens, total, cost, trace_id, kind),
         )
         self.db.commit()
 
@@ -282,13 +296,13 @@ class CostTracker:
         return {"cost": cost_usd, "over_budget": self._check_budget_post_hoc(agent)}
 
     def check_budget(self, agent: str) -> dict:
-        """Check if agent is within budget.
+        """Check if agent is within budget (WORK ledger only — B2 split).
 
         Returns {"allowed": bool, "daily_used": float, "daily_limit": float, ...}.
         """
         budget = self.budgets.get(agent) or _default_budget()
-        daily_used = self.get_spend(agent, "today").get("total_cost", 0)
-        monthly_used = self.get_spend(agent, "month").get("total_cost", 0)
+        daily_used = self.get_spend(agent, "today", kind="work").get("total_cost", 0)
+        monthly_used = self.get_spend(agent, "month", kind="work").get("total_cost", 0)
 
         allowed = (daily_used < budget["daily_usd"]) and (monthly_used < budget["monthly_usd"])
 
@@ -308,8 +322,8 @@ class CostTracker:
         """
         estimated_cost = estimate_cost(model, total_tokens=estimated_tokens)
         budget = self.budgets.get(agent) or _default_budget()
-        daily_used = self.get_spend(agent, "today").get("total_cost", 0)
-        monthly_used = self.get_spend(agent, "month").get("total_cost", 0)
+        daily_used = self.get_spend(agent, "today", kind="work").get("total_cost", 0)
+        monthly_used = self.get_spend(agent, "month", kind="work").get("total_cost", 0)
 
         daily_ok = (daily_used + estimated_cost) <= budget["daily_usd"]
         monthly_ok = (monthly_used + estimated_cost) <= budget["monthly_usd"]
@@ -332,8 +346,63 @@ class CostTracker:
             "monthly_limit": budget["monthly_usd"],
         }
 
-    def get_spend(self, agent: str | None = None, period: str = "today") -> dict:
-        """Get spend breakdown for an agent or all agents."""
+    # ── Coordination ledger (B2 spend split, plan §8 #11) ─────────────
+    #
+    # Utility-model LLM traffic (heartbeats, summarization, agenda
+    # ticks) is classified COORDINATION at the mesh proxy and lands in
+    # the usage ledger with kind='coordination'. It is exempt from the
+    # per-agent work preflight and the team envelope — the whole point
+    # of B2 is that coordination churn can never starve real work — and
+    # is instead gated by its own per-agent daily cap
+    # (limits.coordination_daily_cap_usd; 0 = tier blocked).
+
+    def coordination_preflight_check(
+        self, agent: str, model: str, estimated_tokens: int = 4096,
+    ) -> dict:
+        """Pre-flight check for a coordination (utility-model) LLM call.
+
+        Same estimate convention as ``preflight_check``. A cap ≤ 0 blocks
+        the coordination tier outright (operator kill-switch).
+        """
+        from src.shared.limits import coordination_daily_cap_usd
+
+        cap = coordination_daily_cap_usd()
+        estimated_cost = estimate_cost(model, total_tokens=estimated_tokens)
+        daily_used = self.get_spend(agent, "today", kind="coordination").get("total_cost", 0)
+        allowed = cap > 0 and (daily_used + estimated_cost) <= cap
+        if not allowed:
+            logger.warning(
+                "Coordination pre-flight check failed for agent '%s': "
+                "estimated $%.4f would exceed the daily coordination cap ($%.4f/$%.2f)",
+                agent, estimated_cost, daily_used, cap,
+            )
+        return {
+            "allowed": allowed,
+            "estimated_cost": round(estimated_cost, 6),
+            "daily_used": round(daily_used, 4),
+            "daily_limit": cap,
+        }
+
+    def get_coordination_spend(self, agent: str) -> dict:
+        """Today's coordination spend + the daily cap (introspect breakout)."""
+        from src.shared.limits import coordination_daily_cap_usd
+
+        cap = coordination_daily_cap_usd()
+        daily_used = self.get_spend(agent, "today", kind="coordination").get("total_cost", 0)
+        return {"daily_used": round(daily_used, 4), "daily_limit": cap}
+
+    def get_spend(
+        self, agent: str | None = None, period: str = "today",
+        kind: str | None = None,
+    ) -> dict:
+        """Get spend breakdown for an agent or all agents.
+
+        ``kind=None`` (default) includes ALL rows — reporting surfaces
+        (dashboard, get_team_spend, introspect display) stay
+        spend-inclusive across the B2 split. Enforcement callers pass
+        ``kind="work"`` so coordination traffic never counts against the
+        work budget (and vice versa).
+        """
         since = _period_to_since(period)
 
         query = (
@@ -344,6 +413,9 @@ class CostTracker:
         if agent:
             query += " AND agent = ?"
             params.append(agent)
+        if kind:
+            query += " AND kind = ?"
+            params.append(kind)
         query += " GROUP BY model"
 
         rows = self.db.execute(query, params).fetchall()
@@ -378,13 +450,19 @@ class CostTracker:
     # exact failure mode B4 warns about.
 
     def _members_spend_totals(self, members: list[str], since: str) -> tuple[float, int]:
-        """Sum (cost, tokens) across member agents since a timestamp."""
+        """Sum WORK (cost, tokens) across member agents since a timestamp.
+
+        Feeds ``team_envelope_check`` — enforcement, so coordination rows
+        are excluded (B2): utility-model churn must never eat the team's
+        work envelope. Display aggregation (``get_team_spend``) stays
+        spend-inclusive via ``get_spend``.
+        """
         if not members:
             return 0.0, 0
         placeholders = ",".join("?" for _ in members)
         row = self.db.execute(
             "SELECT SUM(cost_usd), SUM(total_tokens) FROM usage "
-            f"WHERE timestamp >= ? AND agent IN ({placeholders})",
+            f"WHERE timestamp >= ? AND kind = 'work' AND agent IN ({placeholders})",
             [since, *members],
         ).fetchone()
         return float(row[0] or 0.0), int(row[1] or 0)

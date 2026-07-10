@@ -1405,6 +1405,14 @@ def create_mesh_app(
             return ""
         return value if isinstance(value, str) else ""
 
+    # B2 spend split (Phase-3 unit 1): the vault classifies utility-model
+    # LLM calls as COORDINATION through this seam — the same mesh-held
+    # config read the model pin uses, resolved fresh per call so a config
+    # edit applies without a restart. hasattr-guarded like
+    # set_bill_resolver above (test harnesses pass duck-typed vaults).
+    if credential_vault is not None and hasattr(credential_vault, "set_utility_model_provider"):
+        credential_vault.set_utility_model_provider(_deployment_utility_model)
+
     def _enforce_model_pin(agent_id: str, request: Request, api_request: APIProxyRequest) -> None:
         """403 when an agent requests an LLM model it isn't pinned to.
 
@@ -3985,6 +3993,11 @@ def create_mesh_app(
 
         if section in ("budget", "all") and cost_tracker:
             result["budget"] = cost_tracker.check_budget(agent_id)
+            # B2 coordination breakout: utility-model spend runs on its
+            # own ledger + daily cap, so surface that headroom alongside
+            # the work budget (Phase-3 unit 4 consumes this).
+            if hasattr(cost_tracker, "get_coordination_spend"):
+                result["budget"]["coordination"] = cost_tracker.get_coordination_spend(agent_id)
             # Include team budget if the agent belongs to a team
             agent_proj = teams_store.team_of(agent_id)
             if agent_proj:
