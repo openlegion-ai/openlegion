@@ -36,6 +36,8 @@ from src.browser.captcha import (
     _classify_behavioral,
     _classify_cf_state,
     _classify_recaptcha,
+    _classify_slider,
+    _datadome_slider_frame,
     _redact_clientkey_text,
     get_solver,
 )
@@ -236,6 +238,12 @@ _VALID_CAPTCHA_KINDS: frozenset[str] = frozenset({
     "cf-interstitial-auto", "cf-interstitial-behavioral",
     "cf-interstitial-turnstile",
     "px-press-hold", "datadome-behavioral",
+    # §11.5 — DataDome SOLVABLE image-slider. Detected + solved in-house
+    # via the trusted X11 drag (no provider cost). NOT behavioral: it is
+    # deliberately absent from ``_BEHAVIORAL_KINDS`` because it CAN be
+    # solved. A solvable slider that isn't solved escalates like a
+    # behavioral kind, but the kind itself stays solver-attemptable.
+    "datadome-slider",
     # §19 — tier-1 anti-bot JS-challenge frameworks. Detection-only;
     # never solver-attempted. Caller routes to ``request_captcha_help``
     # for operator intervention via the VNC handoff.
@@ -10139,6 +10147,156 @@ class BrowserManager:
             lambda t, _inst=inst: _inst._fingerprint_monitor_tasks.discard(t),
         )
 
+    async def _solve_slider(
+        self, inst: CamoufoxInstance, page_url: str,
+    ) -> dict | None:
+        """In-house solve of the DataDome image-slider puzzle (§11.5).
+
+        Returns a SOLVED :func:`_captcha_envelope` on confirmed success, or
+        ``None`` to mean "I did not solve — caller should escalate to
+        ``request_captcha_help``". NEVER raises: any exception is swallowed
+        and reported as ``None`` so ``_check_captcha`` falls through to the
+        identical human-escalation path.
+
+        Fully gated:
+          1. ``CAPTCHA_INHOUSE_SLIDER_ENABLED`` — DEFAULT OFF. Off ⇒ ``None``
+             immediately ⇒ behavior is byte-for-byte the current escalate.
+          2. Trusted X11 input path (``inst.x11_wid`` + ``_is_x11_site``).
+             Without it, dragging would go via CDP (``isTrusted=false``),
+             which DataDome reads as a bot — worse than escalating.
+
+        Pipeline: locate the puzzle frame → grab the background raster + the
+        drag handle → CV the gap offset (``compute_slider_offset``) → drive
+        the trusted human-like ``_x11_drag`` → re-probe. Success is decided
+        by re-classification (the solvable slider is gone), NOT by the CV
+        confidence alone — a correct offset can still be rejected because
+        DataDome binds success to behavioral telemetry.
+
+        There is NO provider cost, so this deliberately bypasses the
+        ``_metered_solve`` / cost-counter / circuit-breaker gate stack.
+        """
+        try:
+            from src.browser.flags import get_bool
+
+            # Gate 1 — DEFAULT-OFF flag.
+            if not get_bool(
+                "CAPTCHA_INHOUSE_SLIDER_ENABLED", False, agent_id=inst.agent_id,
+            ):
+                return None
+            # Gate 2 — trusted X11 input path.
+            if not (getattr(inst, "x11_wid", None) and self._is_x11_site(inst)):
+                return None
+
+            frame = _datadome_slider_frame(inst.page)
+            if frame is None:
+                return None
+
+            # Best-effort structural selectors for the puzzle background (the
+            # CV target) and the draggable handle, both inside the
+            # cross-origin ``captcha-delivery.com`` frame. DataDome
+            # obfuscates class names; a miss returns None and escalates
+            # (never a false "solved"). GeeTest/canvas + FunCaptcha are out
+            # of scope — they need ``toDataURL`` extraction.  # deferred
+            bg_selectors = (
+                "canvas",
+                '[class*="puzzle"]',
+                '[class*="background"]',
+                '[class*="captcha__image"]',
+                "img",
+            )
+            handle_selectors = (
+                '[class*="slider"]',
+                '[class*="sliderContainer"]',
+                '[class*="slide-button"]',
+                '[aria-label*="slider" i]',
+                '[class*="puzzle"]',
+            )
+
+            async def _first(selectors: tuple[str, ...]):
+                for sel in selectors:
+                    try:
+                        el = await frame.query_selector(sel)
+                    except Exception:
+                        continue
+                    if el is not None:
+                        return el
+                return None
+
+            bg_el = await _first(bg_selectors)
+            handle_el = await _first(handle_selectors)
+            if bg_el is None or handle_el is None:
+                return None
+
+            bg_box = await bg_el.bounding_box()
+            handle_box = await handle_el.bounding_box()
+            if not bg_box or not handle_box:
+                return None
+
+            bg_bytes = await bg_el.screenshot()
+            if not bg_bytes:
+                return None
+
+            from src.browser.slider_solver import compute_slider_offset
+
+            res = compute_slider_offset(bg_bytes)
+            if res is None:
+                return None
+            gap_fraction, conf = res
+
+            # ``bounding_box`` returns main-viewport CSS pixels — exactly
+            # what ``_x11_drag`` wants (window/viewport-relative pixels).
+            hx = handle_box["x"] + handle_box["width"] / 2.0
+            hy = handle_box["y"] + handle_box["height"] / 2.0
+            # ``compute_slider_offset`` returns a DPR-independent WIDTH
+            # FRACTION (the element screenshot may be captured at 2× under a
+            # HiDPI profile). Convert it to CSS pixels against the
+            # background's OWN CSS box so the target is correct regardless of
+            # ``deviceScaleFactor``.
+            target_css_x = gap_fraction * bg_box["width"]
+            # The piece rests at the same horizontal offset as the handle
+            # within the background image; measure it from geometry rather
+            # than guessing. Falls back to 0 (piece at the left edge) when
+            # geometry is degenerate.
+            piece_resting_x = max(0.0, hx - bg_box["x"])
+            delta = target_css_x - piece_resting_x
+            # Can't drag left; clamp inside the background's width.
+            max_delta = max(0.0, bg_box["width"] - 1.0)
+            delta = min(max(delta, 0.0), max_delta)
+            end_x = hx + delta
+            end_y = hy
+
+            await self._x11_drag(
+                inst, int(hx), int(hy), int(end_x), int(end_y),
+            )
+            # Let DataDome validate the drag + the page settle.
+            await asyncio.sleep(1.0)
+
+            # Success = the solvable slider is no longer classifiable. A
+            # geometrically-correct offset can still be rejected, so we
+            # confirm via re-probe rather than trusting the CV verdict.
+            still = await _classify_slider(inst.page)
+            if still is not None:
+                return None
+
+            await _record_captcha_audit_event(
+                inst.agent_id, "solved", "datadome-slider", page_url,
+            )
+            confidence = "high" if conf >= 0.6 else "medium"
+            return _captcha_envelope(
+                kind="datadome-slider",
+                solver_attempted=True,
+                solver_outcome="solved",
+                solver_confidence=confidence,
+                next_action="solved",
+            )
+        except Exception:
+            logger.debug(
+                "_solve_slider raised; returning None so the caller "
+                "escalates to request_captcha_help",
+                exc_info=True,
+            )
+            return None
+
     async def _check_captcha(self, inst: CamoufoxInstance) -> dict:
         """Check for CAPTCHA elements and attempt auto-solve if configured.
 
@@ -10390,6 +10548,50 @@ class BrowserManager:
                                     solver_confidence="behavioral-only",
                                     next_action="request_captcha_help",
                                 )
+
+                    # §11.5 — DataDome SOLVABLE image-slider puzzle. Runs
+                    # AFTER the behavioral pass so the ``/blocker`` wall is
+                    # already claimed as ``datadome-behavioral`` above and
+                    # never reaches here (invariant: ``/blocker`` stays
+                    # behavioral). Only the solvable puzzle — a
+                    # ``captcha-delivery.com`` frame WITHOUT ``/blocker`` and
+                    # WITH a draggable handle — is classified here.
+                    #
+                    # ``_solve_slider`` is fully gated on a DEFAULT-OFF flag
+                    # AND the trusted X11 input path; it returns a solved
+                    # envelope on success or ``None`` to mean "not solved —
+                    # escalate". When it returns ``None`` (flag off / no X11 /
+                    # low CV confidence / any failure) we fall through to the
+                    # SAME ``request_captcha_help`` escalation the behavioral
+                    # kinds use, so flag-off behavior is byte-for-byte the
+                    # current escalate-to-human path.
+                    if not antibot_force_low_confidence:
+                        slider_kind = await _classify_slider(inst.page)
+                        if slider_kind:
+                            try:
+                                page_url = inst.page.url or ""
+                            except Exception:
+                                page_url = ""
+                            solved = await self._solve_slider(inst, page_url)
+                            if solved is not None:
+                                return solved
+                            logger.info(
+                                "DataDome solvable slider detected but not "
+                                "solved in-house (flag off / no X11 / low "
+                                "confidence / failure); escalating to "
+                                "request_captcha_help",
+                            )
+                            await _record_captcha_audit_event(
+                                inst.agent_id, "skipped_behavioral",
+                                slider_kind, page_url,
+                            )
+                            return _captcha_envelope(
+                                kind=slider_kind,
+                                solver_attempted=False,
+                                solver_outcome="skipped_behavioral",
+                                solver_confidence="behavioral-only",
+                                next_action="request_captcha_help",
+                            )
 
                     # §11.3 — Cloudflare interstitial tri-state classifier.
                     # ``auto`` waits once and re-checks; ``behavioral``

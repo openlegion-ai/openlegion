@@ -1449,6 +1449,119 @@ async def _classify_behavioral(page) -> str | None:
     return None
 
 
+# ── §11.5 DataDome SOLVABLE image-slider classifier ───────────────────────
+#
+# DataDome serves TWO distinct challenges from ``captcha-delivery.com``:
+#   * the ``/blocker`` behavioral wall — no draggable widget, only a
+#     fingerprint verdict. Caught by ``_classify_behavioral`` above and
+#     kept as ``datadome-behavioral`` (escalate to a human). Do NOT relabel.
+#   * the image-slider puzzle — a piece the user drags into a notch. This
+#     one is solvable in-house via the trusted X11 drag, so it earns its
+#     own kind ``datadome-slider`` and a solve dispatch in the service.
+#
+# The top-page ``page.evaluate`` probe can only read the iframe ELEMENT's
+# ``src`` (the frame CONTENT is cross-origin), which is enough to tell the
+# ``/blocker`` wall apart from the puzzle host. To positively confirm the
+# draggable slider handle we then pierce the cross-origin frame with
+# Playwright's frame API (``page.frames`` → ``frame.query_selector``).
+
+_SLIDER_PROBE_JS = r"""
+() => {
+  const out = { dd_iframe: false, dd_blocker: false };
+  try {
+    // The iframe element lives in the TOP document; its ``src`` attribute
+    // is readable even though the framed document is cross-origin.
+    const dd = document.querySelectorAll(
+      'iframe[src*="captcha-delivery.com"]'
+    );
+    if (dd.length > 0) out.dd_iframe = true;
+    // Flag the behavioral ``/blocker`` wall so the caller can exclude it —
+    // that path stays ``datadome-behavioral``.
+    const blocker = document.querySelectorAll(
+      'iframe[src*="captcha-delivery.com/blocker"]'
+    );
+    if (blocker.length > 0) out.dd_blocker = true;
+  } catch (e) { /* defensive */ }
+  return out;
+}
+"""
+
+
+# Selectors that mark the SOLVABLE slider control inside the puzzle frame.
+# DataDome obfuscates class names, so these are best-effort structural
+# guesses (the draggable handle + its track). If the class-name heuristics
+# ever stop matching, ``_classify_slider`` returns None and the caller
+# escalates — never a false ``solved``.
+_SLIDER_HANDLE_SELECTORS: tuple[str, ...] = (
+    '[class*="slider"]',
+    '[class*="sliderContainer"]',
+    '[class*="slide-button"]',
+    '[aria-label*="slider" i]',
+    '[class*="puzzle"]',
+)
+
+
+def _datadome_slider_frame(page):
+    """Return the first ``captcha-delivery.com`` puzzle frame, or None.
+
+    Excludes the ``/blocker`` behavioral wall (which shares the host).
+    Never raises — best-effort frame discovery for both the classifier and
+    the in-house solver.
+    """
+    try:
+        frames = page.frames
+    except Exception:
+        return None
+    if not frames:
+        return None
+    for frame in frames:
+        try:
+            url = frame.url or ""
+        except Exception:
+            continue
+        if "captcha-delivery.com" in url and "/blocker" not in url:
+            return frame
+    return None
+
+
+async def _classify_slider(page) -> str | None:
+    """Positively detect the SOLVABLE DataDome image-slider puzzle.
+
+    Returns ``"datadome-slider"`` when a draggable slider handle is present
+    inside a ``captcha-delivery.com`` frame that is NOT the behavioral
+    ``/blocker`` wall; otherwise ``None``. Never raises.
+
+    This fills the §11.5 deferred hook that ``_classify_behavioral``'s
+    docstring points at: the behavioral classifier deliberately matches
+    ONLY ``/blocker`` and routes the solvable slider here.
+    """
+    try:
+        probe = await page.evaluate(_SLIDER_PROBE_JS)
+    except Exception:
+        logger.debug("_classify_slider: page.evaluate failed", exc_info=True)
+        return None
+    if not isinstance(probe, dict):
+        return None
+    # The ``/blocker`` wall is behavioral-only — never claim it as solvable.
+    if probe.get("dd_blocker"):
+        return None
+    if not probe.get("dd_iframe"):
+        return None
+    # Confirm the draggable handle lives inside the cross-origin puzzle
+    # frame via Playwright's frame API (top-page JS cannot see into it).
+    frame = _datadome_slider_frame(page)
+    if frame is None:
+        return None
+    for sel in _SLIDER_HANDLE_SELECTORS:
+        try:
+            handle = await frame.query_selector(sel)
+        except Exception:
+            continue
+        if handle is not None:
+            return "datadome-slider"
+    return None
+
+
 class CaptchaSolver:
     """Async CAPTCHA solver using 2Captcha or CapSolver HTTP APIs."""
 
