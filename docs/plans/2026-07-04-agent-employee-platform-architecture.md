@@ -1370,6 +1370,32 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   lead endpoints + team delete; a lead cleared via the team-membership endpoints is pruned by the
   boot reconcile. 92 new tests; full local suite 8448 passed / 26 skipped / 0 failed.
 
+- **✅ Landed — Phase-4 unit 2: hiring wizard v2 (#1220; §8 #16 implemented in its ratified order —
+  file-lock FIRST).** B-pre #2 closed (recon-widened target): a sidecar `config/.config.lock`
+  acquired with blocking `fcntl.flock(LOCK_EX)` on a fresh fd per outermost acquisition
+  (same-thread reentrant via a threading.local depth counter — nested helpers like
+  `_remove_agent` → `_remove_team_blackboard_permissions` would otherwise self-deadlock;
+  cross-thread/cross-process exclusion is kernel-enforced). EVERY `config/agents.yaml` and
+  `config/permissions.json` load→mutate→save runs under it — the eleven cli/config.py helpers
+  (`_ensure_operator_agent` split into locked wrapper + unlocked body rather than a mass
+  re-indent) plus host/server.py `_apply_pending_change` (both branches), the dashboard
+  agent-delete, and setup_wizard.py (its interactive confirm stays OUTSIDE the lock). agents.yaml
+  writes are now atomic (`atomic_write_text`: tempfile+fsync+os.replace) — previously every
+  writer was a bare truncate-and-write. Lock tests were verified against negative controls
+  (neutered lock → tests fail). Role unfrozen exactly as corrected: `role` added to
+  `_ALLOWED_OVERRIDE_FIELDS` (+ `_apply_template` now honors the override — it was silently
+  ignored before, a second latent gap recon missed); the pinned rejection test deliberately
+  flipped to a positive end-to-end test + a still-unknown-field negative; fleet_tool
+  docstrings/schema updated; health.py `_try_restart` now passes `role=` on re-register (roster
+  staleness bug fixed, regression-tested). Dead `resources` template key deleted from
+  cli/config.py round-trips, all 13 templates, and `AgentConfig` — grep-zero. Hiring surface in
+  the wizard-v1 shape (operator-tier, UI never calls create APIs): Team Hub "Hire teammate"
+  button seeds the operator chat via the existing `sendChatTo` pipeline (no new wizard states);
+  the `team_build` operator playbook gains the v2 flow — job descriptions derived from team
+  goals, templates as starting resumes via `apply_template(agent_overrides={"role": ...})`,
+  propose-then-confirm, `add_agents_to_team` after creation. Full local suite 8462 passed /
+  26 skipped / 0 failed.
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|
@@ -1415,6 +1441,7 @@ findings, if any, land as a follow-up fix PR recorded in this ledger.
 |---|---|---|
 | #1217 | Phase-4 pre-decisions ratified (§8 #12–#16) + build order | merged |
 | #1218 | Lead role core — designation, advisory verdicts, host-published standup (unit 1) | merged |
+| #1220 | hiring wizard v2 — config file-lock (B-pre #2), role unfrozen, goals-driven hiring (unit 2) | merged |
 
 ### YOU ARE HERE → Phase 4
 
@@ -1451,7 +1478,8 @@ hiring wizard v2 (file-lock FIRST) → **unit 3** onboarding + offboarding-with-
 recorded Phase-3 residual: dashboard streaming chat + broadcast still call agent endpoints
 directly — single-lane-safe after #1213, but not steer-routed through `deliver_chat`;
 re-deferred with a recorded gate if the design balloons). Standing gates carried forward:
-Personnel-file *import* still needs B-pre #2's config file-lock first (unit 2 builds it);
+Personnel-file *import* is UNBLOCKED — B-pre #2's config file-lock landed in unit 2 (#1220), the
+import feature itself remains unbuilt/unscheduled;
 Phase-5 hibernation still needs B3's three-subsystem scoping; a goals agent-write carve-out
 (team or standing) remains UNRATIFIED — do not build one without an explicit user decision;
 per-agent budget allocation by the lead (§5) is NOT built this phase (§8 #12).
@@ -1772,7 +1800,10 @@ and is it gone?"*
    the ~90s auto-restart. Latent today; blocks hibernation until fixed.
 2. **Config write lost-update race** — non-atomic load→mutate→save in `cli/config.py:246-260`
    (documented). The Personnel-File import path would widen the window; fix with a file lock or
-   atomic temp+rename before adding import.
+   atomic temp+rename before adding import. ✅ **FIXED (Phase-4 unit 2, #1220)** — recon widened
+   the target to `config/agents.yaml` (bare truncate-writes everywhere); the sidecar
+   `config/.config.lock` flock + atomic writes now cover every agents.yaml/permissions.json
+   writer (§8 #16a).
 3. **`config/settings.json` absent → $10/day effective budget default** (`costs.py:36`), while the
    dashboard's saved default is $50/200. Silent, surprisingly low cap; make the default explicit.
 4. **`MessageRouter.message_log` is an in-memory `deque(10000)`** (`mesh.py:759`) — inter-agent
