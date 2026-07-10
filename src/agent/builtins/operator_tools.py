@@ -1663,9 +1663,14 @@ async def manage_task(
     name="manage_agent",
     operator_only=True,
     description=(
-        "Archive or delete an agent. action='archive' is reversible and "
-        "stops scheduling. action='delete' returns a confirmation nonce; "
-        "the agent must already be archived."
+        "Archive, offboard, or delete an agent. action='archive' is "
+        "reversible and stops scheduling. action='offboard' runs a "
+        "handover turn on the still-live agent plus a snapshot, commits "
+        "both to the Team Drive, then archives — the preferred way to "
+        "retire a team member without losing its knowledge. "
+        "action='delete' returns a confirmation nonce; the agent must "
+        "already be archived (delete afterwards keeps its own confirm "
+        "chain regardless of whether offboard ran first)."
     ),
     parameters={
         "agent_id": {
@@ -1674,8 +1679,8 @@ async def manage_task(
         },
         "action": {
             "type": "string",
-            "description": "archive | delete",
-            "enum": ["archive", "delete"],
+            "description": "archive | offboard | delete",
+            "enum": ["archive", "offboard", "delete"],
         },
     },
 )
@@ -1687,12 +1692,14 @@ async def manage_agent(
     _messages=None,
     **_kw,
 ) -> dict:
-    """Consolidated agent lifecycle tool (archive | delete).
+    """Consolidated agent lifecycle tool (archive | offboard | delete).
 
-    Archive is reversible and applies immediately. Delete still goes
-    through a brief confirmation window (mesh-side propose_delete with
-    a short TTL); a follow-up PR will convert delete to immediate-apply
-    with a 72h undo. Operator can call either autonomously.
+    Archive is reversible and applies immediately. Offboard runs the
+    handover + snapshot flow (plan §8 #15) then archives. Delete still
+    goes through a brief confirmation window (mesh-side propose_delete
+    with a short TTL); a follow-up PR will convert delete to
+    immediate-apply with a 72h undo. Operator can call any of these
+    autonomously.
     """
     if not _is_operator():
         return {"error": "This tool is only available to the operator agent."}
@@ -1706,6 +1713,12 @@ async def manage_agent(
             return await mesh_client.archive_agent(agent_id)
         except Exception as e:
             return {"error": f"Failed to archive agent: {e}"}
+
+    if action == "offboard":
+        try:
+            return await mesh_client.offboard_agent(agent_id)
+        except Exception as e:
+            return {"error": f"Failed to offboard agent: {e}"}
 
     if action == "delete":
         try:
@@ -1724,7 +1737,7 @@ async def manage_agent(
                 }
             return {"error": f"Failed to propose delete: {e}"}
 
-    return {"error": f"Unknown action {action!r}; use archive|delete"}
+    return {"error": f"Unknown action {action!r}; use archive|offboard|delete"}
 
 
 # ── Self-cleanup tools ──────────────────────────────────────

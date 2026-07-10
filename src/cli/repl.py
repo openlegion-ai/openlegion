@@ -1490,9 +1490,40 @@ class REPLSession:
         if not click.confirm(f"Remove agent '{name}'?"):
             return
 
-        # Stop the container
+        # Offboarding-with-handover (plan §8 #15) — best-effort, ATTEMPTED
+        # before the volume-destroying stop below (the data-loss
+        # invariant every delete surface must honor). The REPL runs in
+        # this same mesh process; the async mesh-side helper is reached
+        # via the runtime context's dispatch loop, mirroring how
+        # ``/steer`` already bridges a sync command into an async mesh
+        # call (``asyncio.run_coroutine_threadsafe``).
+        offboard_agent = getattr(self.ctx, "offboard_agent", None)
+        if offboard_agent is not None and self.ctx.dispatch_loop is not None:
+            from src.shared import limits as _limits_mod
+
+            wait_s = _limits_mod.resolve("offboard_handover_timeout_seconds") + 30
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    offboard_agent(name, reason="delete"),
+                    self.ctx.dispatch_loop,
+                )
+                manifest = future.result(timeout=wait_s)
+                if manifest.get("errors"):
+                    click.echo(f"  Offboard notes: {'; '.join(manifest['errors'])}")
+            except Exception as e:
+                click.echo(f"  Warning: offboard attempt failed: {e}")
+        else:
+            click.echo(
+                "  Note: offboarding via the dashboard or the operator's "
+                "manage_agent(action='offboard') tool is preferred — it "
+                "can run a live handover turn before removal."
+            )
+
+        # Stop the container. remove_data=True (bug fix — this previously
+        # left the agent's ``openlegion_data_*`` volume behind forever;
+        # H12 parity with the mesh and dashboard delete paths).
         try:
-            self.ctx.runtime.stop_agent(name)
+            self.ctx.runtime.stop_agent(name, remove_data=True)
         except Exception as e:
             logger.debug("Stop agent failed during removal of %s: %s", name, e)
 

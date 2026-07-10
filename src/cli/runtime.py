@@ -272,6 +272,11 @@ class RuntimeContext:
         self.lifecycle_store = None
         self.teams_store = None
         self.thread_store = None
+        # Offboarding-with-handover helper (plan §8 #15) — wired from the
+        # mesh app's ``_offboard_agent`` once ``_start_mesh_server`` runs;
+        # ``None`` until then (mirrors every other subsystem attribute
+        # above).
+        self.offboard_agent = None
         self.agent_urls: dict[str, str] = {}
         self._dispatch_loop = None
         # Post-completion verification wakes (success path) — sliding
@@ -1944,10 +1949,21 @@ class RuntimeContext:
             intent_store=self.intent_store,
             teams_store=self.teams_store,
             thread_store=self.thread_store,
+            # Offboarding-with-handover + onboarding wake (plan §8 #15):
+            # cross-router seams into the mesh app's own closures, same
+            # ``getattr(app, ...)`` injection pattern as pending_actions/
+            # tasks_store above.
+            offboard_agent=getattr(app, "_offboard_agent", None),
+            onboarding_wake=getattr(app, "_schedule_onboarding_wake", None),
         )
         app.include_router(dashboard_router)
         app.include_router(create_spa_catchall_router())  # Must be last — SPA deep linking
         self._app = app
+        # CLI REPL access to the same offboard helper (plan §8 #15) — the
+        # REPL runs in this process and reaches it via ``self.ctx.
+        # offboard_agent`` (mirrors how the REPL already reads
+        # ``self.ctx.lane_manager`` / ``self.ctx.teams_store``).
+        self.offboard_agent = getattr(app, "_offboard_agent", None)
 
         server_config = uvicorn.Config(app, host="0.0.0.0", port=mesh_port, log_level="warning")
         self._server = uvicorn.Server(server_config)

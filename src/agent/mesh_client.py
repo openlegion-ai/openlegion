@@ -2006,6 +2006,17 @@ class MeshClient:
         _raise_with_body(response)
         return response.json()
 
+    async def offboard_agent(self, agent_id: str) -> dict:
+        """Offboard an agent: handover + Team Drive snapshot, then archive
+        (plan §8 #15)."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/offboard",
+            headers=self._trace_headers(),
+        )
+        _raise_with_body(response)
+        return response.json()
+
     async def propose_delete_team(self, name: str) -> dict:
         """Propose deletion of an archived team. Returns nonce for human confirm."""
         client = await self._get_client()
