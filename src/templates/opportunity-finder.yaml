@@ -146,9 +146,6 @@ agents:
       blackboard_write: ["gaps/raw/*", "tasks/*", "status/*"]
       can_publish: ["gaps_ready", "new_gap_found"]
       can_subscribe: ["research_requested", "evaluation_complete"]
-    resources:
-      memory_limit: "768m"
-      cpu_limit: 0.5
     budget:
       daily_usd: 8.0
       monthly_usd: 160.0
@@ -299,9 +296,6 @@ agents:
       blackboard_write: ["evaluations/*", "tasks/*", "status/*"]
       can_publish: ["evaluation_complete", "more_evidence_needed"]
       can_subscribe: ["gaps_ready", "new_gap_found"]
-    resources:
-      memory_limit: "512m"
-      cpu_limit: 0.5
     budget:
       daily_usd: 8.0
       monthly_usd: 160.0
@@ -511,9 +505,6 @@ agents:
       blackboard_write: ["models/*", "tasks/*", "status/*"]
       can_publish: ["model_complete"]
       can_subscribe: ["evaluation_complete"]
-    resources:
-      memory_limit: "512m"
-      cpu_limit: 0.5
     budget:
       daily_usd: 10.0
       monthly_usd: 200.0

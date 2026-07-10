@@ -75,9 +75,6 @@ agents:
       blackboard_write: ["tasks/*", "status/*"]
       can_publish: ["tasks_ready", "review_requested"]
       can_subscribe: ["task_complete", "review_complete"]
-    resources:
-      memory_limit: "512m"
-      cpu_limit: 0.5
     budget:
       daily_usd: 5.0
       monthly_usd: 100.0
@@ -156,9 +153,6 @@ agents:
       blackboard_write: ["tasks/*", "status/*"]
       can_publish: ["task_complete"]
       can_subscribe: ["tasks_ready"]
-    resources:
-      memory_limit: "1g"
-      cpu_limit: 1.0
     budget:
       daily_usd: 10.0
       monthly_usd: 200.0
@@ -237,9 +231,6 @@ agents:
       blackboard_write: ["reviews/*", "tasks/*", "status/*"]
       can_publish: ["review_complete"]
       can_subscribe: ["task_complete"]
-    resources:
-      memory_limit: "512m"
-      cpu_limit: 0.5
     budget:
       daily_usd: 5.0
       monthly_usd: 100.0

@@ -6598,6 +6598,24 @@ function dashboard() {
       } catch (e) { this.showToast(`Clear lead failed: ${e.message}`); }
     },
 
+    /** Hiring wizard v2 (Phase-4 §8 #16) — Team Hub "Hire teammate" entry
+     * point. This is a chat-seeding shortcut, NOT a new wizard state: it
+     * reuses the same sendChatTo('operator', …) pipeline the wizard v1
+     * chips use (wizardChipClicked above) and never calls a create API
+     * directly — the operator agent drives create_agent/apply_template
+     * itself, gated on the user's confirmation in chat. Wizard v1's
+     * idle|ask|confirming|building|first-output|build_failed state
+     * machine is untouched. */
+    hireForTeam(team) {
+      if (!team) return;
+      this.track('hire_teammate_clicked', { team: team });
+      const msg = `I want to hire for team ${team}. Review the team's goals (north_star / success criteria) and current members, ` +
+        `draft 1-3 job descriptions that close the biggest gaps, and propose the hires — pick a fitting template as each hire's starting resume, ` +
+        `set role from the job description, and wait for my confirmation before creating anyone.`;
+      this.switchTab('chat');
+      this.$nextTick(() => this.sendChatTo('operator', msg));
+    },
+
     /** Agents in the registry that are not in any team. Excludes operator (system agent, not team-assignable). */
     get soloAgents() {
       const assigned = new Set();

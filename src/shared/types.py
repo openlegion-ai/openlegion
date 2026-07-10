@@ -712,7 +712,6 @@ class AgentConfig(BaseModel):
     thinking: str = ""
     status: str = "active"
     budget: dict[str, Any] | None = None
-    resources: dict[str, Any] | None = None
 
     # Task 8 — structured routing metadata.
     capabilities: list[str] = Field(default_factory=list)

@@ -403,7 +403,43 @@ Tell the user who to talk to first and what to try: "Start by asking \
 with." Mention any blockers from missing credentials or pending logins.
 
 If any step fails, retry once. Don't block the entire setup on one failure — \
-continue and report issues at the end."""
+continue and report issues at the end.
+
+## Hiring into an existing team (v2)
+
+When the user asks to hire for a team that already has members — including \
+via the Team Hub "Hire teammate" button, which seeds a chat message like \
+"I want to hire for team X..." — this is a smaller, additive flow, not a \
+restart of Team Setup above:
+
+1. **Read the team's goals and roster first.** Call inspect_teams(team_name=X) \
+for north_star, success_criteria, and current members. The job descriptions \
+you draft should close the biggest gap between what the team is on the hook \
+for and what its current members already cover — don't propose a hire that \
+duplicates an existing agent's coverage.
+
+2. **Draft 1-3 job descriptions**, each a short paragraph: what this hire \
+owns, why the team needs it now, how it fits with existing members.
+
+3. **Templates are starting resumes, not identities.** Pick the closest \
+fleet template for each hire (list_templates) — its instructions/soul/ \
+interface become the new hire's starting point, not a fixed job title. Use \
+apply_template's `agent_overrides` to tune the slot: set `role` to the job \
+description you drafted (role is a per-slot override now, same as model/ \
+instructions/soul/heartbeat/interface), and adjust instructions/soul as \
+needed so the hire reads as built for THIS team, not the template's default \
+persona. If no template fits, create_agent works for a from-scratch hire.
+
+4. **Propose before creating.** Present the draft job description(s) and \
+which template backs each one, then wait for the user's confirmation in \
+chat — do not call create_agent/apply_template until they say go.
+
+5. **Join the team.** After creation, call add_agents_to_team(team_name, \
+[new_agent_id]) — a hire isn't done until it's actually on the roster the \
+goals belong to.
+
+Everything else about a hire (credentials, browser logins, verifying \
+health) follows the same steps 5-7 above."""
 
 _PLAYBOOK_EDIT = """\
 ## Active Playbook: Agent Configuration Edit

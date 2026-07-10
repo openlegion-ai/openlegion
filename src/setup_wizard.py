@@ -276,22 +276,31 @@ class SetupWizard:
         if existing_agents:
             click.echo(f"  Existing agents: {', '.join(existing_agents)}")
 
-            from src.cli.config import AGENTS_FILE
+            from src.cli.config import AGENTS_FILE, _config_lock, _load_agents_yaml, _save_agents_yaml
             if AGENTS_FILE.exists():
-                with open(AGENTS_FILE) as f:
-                    agents_data = yaml.safe_load(f) or {}
+                with _config_lock():
+                    agents_data = _load_agents_yaml()
                 stale = [
                     n for n, a in agents_data.get("agents", {}).items()
                     if a.get("model") != selected_model
                 ]
                 if stale:
                     click.echo(f"\n  These agents use a different model: {', '.join(stale)}")
+                    # Interactive confirm runs OUTSIDE the lock (B-pre #2 —
+                    # the critical section must stay a short load->mutate->
+                    # save, not block other writers on a human answering a
+                    # prompt). Re-load fresh right before mutating in case
+                    # something else changed agents.yaml while we waited.
                     if click.confirm(f"  Update all agents to {selected_model}?", default=True):
-                        for n in stale:
-                            agents_data["agents"][n]["model"] = selected_model
-                        with open(AGENTS_FILE, "w") as f:
-                            yaml.dump(agents_data, f, default_flow_style=False, sort_keys=False)
-                        click.echo(f"  Updated {len(stale)} agent(s).")
+                        with _config_lock():
+                            agents_data = _load_agents_yaml()
+                            updated = 0
+                            for n in stale:
+                                if n in agents_data.get("agents", {}):
+                                    agents_data["agents"][n]["model"] = selected_model
+                                    updated += 1
+                            _save_agents_yaml(agents_data)
+                        click.echo(f"  Updated {updated} agent(s).")
 
             if not click.confirm("  Add another agent?", default=False):
                 click.echo("  Keeping existing agents.")

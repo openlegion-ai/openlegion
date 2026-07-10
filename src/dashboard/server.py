@@ -2731,20 +2731,25 @@ def create_dashboard_router(
 
         # Remove from config and permissions (best-effort — don't fail if files are missing)
         try:
-            import yaml
+            from src.cli.config import (
+                _config_lock,
+                _load_agents_yaml,
+                _load_permissions,
+                _save_agents_yaml,
+                _save_permissions,
+            )
 
-            from src.cli.config import AGENTS_FILE, _load_permissions, _save_permissions
-
-            if AGENTS_FILE.exists():
-                with open(AGENTS_FILE) as f:
-                    agents_data = yaml.safe_load(f) or {}
+            # B-pre #2: both files' load->mutate->save happen under ONE
+            # lock acquisition — closes the lost-update race this used to
+            # run as two independent bare-``open(..., "w")`` writes.
+            with _config_lock():
+                agents_data = _load_agents_yaml()
                 agents_data.get("agents", {}).pop(agent_id, None)
-                with open(AGENTS_FILE, "w") as f:
-                    yaml.dump(agents_data, f, default_flow_style=False, sort_keys=False)
+                _save_agents_yaml(agents_data)
 
-            perms = _load_permissions()
-            perms.get("permissions", {}).pop(agent_id, None)
-            _save_permissions(perms)
+                perms = _load_permissions()
+                perms.get("permissions", {}).pop(agent_id, None)
+                _save_permissions(perms)
             if permissions is not None:
                 permissions.reload()
         except Exception as e:

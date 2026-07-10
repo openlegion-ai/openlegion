@@ -53,9 +53,6 @@ agents:
       blackboard_write: ["sources/*", "tasks/*", "status/*"]
       can_publish: ["research_complete"]
       can_subscribe: ["content_requested"]
-    resources:
-      memory_limit: "512m"
-      cpu_limit: 0.5
     budget:
       daily_usd: 5.0
       monthly_usd: 100.0
@@ -120,9 +117,6 @@ agents:
       blackboard_write: ["drafts/*", "tasks/*", "status/*"]
       can_publish: ["draft_ready"]
       can_subscribe: ["research_complete", "revision_requested"]
-    resources:
-      memory_limit: "512m"
-      cpu_limit: 0.5
     budget:
       daily_usd: 5.0
       monthly_usd: 100.0
@@ -185,9 +179,6 @@ agents:
       blackboard_write: ["feedback/*", "tasks/*", "status/*"]
       can_publish: ["edit_complete", "revision_requested"]
       can_subscribe: ["draft_ready"]
-    resources:
-      memory_limit: "512m"
-      cpu_limit: 0.5
     budget:
       daily_usd: 3.0
       monthly_usd: 60.0

@@ -112,9 +112,6 @@ agents:
       blackboard_write: ["research/*", "sources/*", "tasks/*", "status/*"]
       can_publish: ["research_complete"]
       can_subscribe: ["research_requested"]
-    resources:
-      memory_limit: "512m"
-      cpu_limit: 0.5
     budget:
       daily_usd: 8.0
       monthly_usd: 160.0

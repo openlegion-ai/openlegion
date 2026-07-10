@@ -622,7 +622,14 @@ class HealthMonitor:
                 )
                 await loop.run_in_executor(None, self.runtime.stop_agent, agent_id)
                 return
-            self.router.register_agent(agent_id, url)
+            # Pass the fresh role through — the container above already
+            # started with ``role=info.get("role", "")``, but re-registering
+            # without it left the mesh roster cache (``router.agent_roles``)
+            # stale after an auto-rebuild: register_agent only overwrites
+            # agent_roles when ``role`` is truthy, so an omitted role here
+            # silently kept whatever (possibly outdated, or absent) role was
+            # cached before the restart.
+            self.router.register_agent(agent_id, url, role=info.get("role", ""))
             health.consecutive_failures = 0
             health.restart_count += 1
             health.restart_timestamps.append(now)

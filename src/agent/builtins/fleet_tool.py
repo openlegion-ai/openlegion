@@ -41,8 +41,10 @@ async def list_templates(*, mesh_client=None, **_kw) -> dict:
         "to see available templates. This creates all agents defined in the template "
         "and starts them. Returns the list of created agent IDs. Pass "
         "`agent_overrides` to tune individual slots (model, instructions, soul, "
-        "heartbeat, interface) at creation time -- avoids 5+ follow-up edit_agent "
-        "round-trips. Note: `role` is fixed by the template and cannot be overridden. "
+        "heartbeat, interface, role) at creation time -- avoids 5+ follow-up "
+        "edit_agent round-trips. Hiring into an existing team: pick the closest "
+        "template as the hire's starting resume, override `role` from the job "
+        "description you drafted, then call add_agents_to_team to join it. "
         "Note: agent creation is per-slot -- a mid-loop failure leaves earlier-created "
         "agents in place. Verify the returned `created` list matches your intent and "
         "inspect the on-disk fleet."
@@ -63,10 +65,10 @@ async def list_templates(*, mesh_client=None, **_kw) -> dict:
                 "Optional per-agent overrides keyed by agent name from the template. "
                 "Each value is an object with any of: 'model', 'instructions' "
                 "(<=12000 chars), 'soul' (<=4000 chars), 'heartbeat' (no cap), "
-                "'interface' (<=4000 chars). Unknown agent names or fields are "
-                "rejected with HTTP 400; oversized fields with HTTP 413. "
-                "Note: `role` is intentionally NOT overrideable; templates fix the "
-                "role per slot. Use a separate fleet template if you need different roles."
+                "'interface' (<=4000 chars), 'role' (no cap). Unknown agent names or "
+                "fields are rejected with HTTP 400; oversized fields with HTTP 413. "
+                "Set `role` here to the job description you drafted for the hire -- "
+                "it no longer has to match the template slot's default role."
             ),
             "additionalProperties": {
                 "type": "object",
@@ -76,6 +78,7 @@ async def list_templates(*, mesh_client=None, **_kw) -> dict:
                     "soul": {"type": "string"},
                     "heartbeat": {"type": "string"},
                     "interface": {"type": "string"},
+                    "role": {"type": "string"},
                 },
                 "additionalProperties": False,
             },

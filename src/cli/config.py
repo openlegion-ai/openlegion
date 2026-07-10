@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -20,7 +21,7 @@ import yaml
 from src.shared.limits import THINKING_LEVELS
 from src.shared.operator_playbooks import _OPERATOR_CORE
 from src.shared.types import RESERVED_AGENT_IDS
-from src.shared.utils import truncate
+from src.shared.utils import atomic_write_text, truncate
 
 logger = logging.getLogger("cli")
 
@@ -218,20 +219,144 @@ def _load_config(mesh_path: Path | None = None) -> dict:
     return cfg
 
 
-# Guards individual reads/writes of permissions.json. Held internally by
-# _load_permissions and _save_permissions so a save never interleaves with a
-# read, and pairs with the atomic os.replace below so a reader never observes a
-# half-written file (the boot-crash / torn-read protection — finding M14).
+# ── Cross-thread / cross-process config lock (B-pre #2) ────────
 #
-# NOTE: this does NOT by itself prevent the lost-update race. Callers do
-# ``perms = _load_permissions(); ...mutate...; _save_permissions(perms)`` as
-# two separate lock acquisitions, so two concurrent writers (e.g. a template
-# apply touching agent B while the dashboard edits agent A) can both load the
-# same baseline and the second save clobbers the first. The lock is REENTRANT
-# precisely so a caller CAN close that gap by holding it across the whole
-# load→mutate→save (``with _PERMISSIONS_LOCK: ...``); today no caller does.
-# Low risk under the single-operator model; wrapping the hot call sites is a
-# tracked follow-up, not part of M14's torn-read/atomicity fix.
+# Recon widened B-pre #2: every ``config/agents.yaml`` writer was a bare
+# ``open(..., "w")`` truncate-and-write — no lock, no atomic rename — and
+# ``config/permissions.json``'s load->mutate->save was spread across
+# helpers that each independently re-read the file, so two concurrent
+# writers could both load the same baseline and the second save would
+# silently clobber the first (the lost-update race this module used to
+# just document below, unfixed). ``_config_lock()`` closes both gaps: ONE
+# sidecar lock file guards the FULL load->mutate->save critical section
+# for BOTH agents.yaml and permissions.json. A single shared lock (not one
+# per file) because several flows write both in one logical operation
+# (creating an agent touches agents.yaml, then permissions.json) — two
+# separate locks would need a fixed acquisition order to avoid deadlock;
+# one lock sidesteps that entirely.
+#
+# Built on ``fcntl.flock(LOCK_EX)`` (blocking), not a ``threading`` /
+# ``asyncio`` primitive, because the CLI REPL, the dashboard process, the
+# setup-wizard process, and the mesh host can all mutate these files from
+# DIFFERENT PROCESSES — a Python-level lock only ever serializes within
+# one process. Mirrors the flock context-manager precedent in
+# ``src/browser/profile_schema.py`` (``_LockHandle``), with two
+# deliberate differences: this lock BLOCKS (not ``LOCK_NB`` — callers need
+# the critical section to eventually run, not to skip it under
+# contention), and it is REENTRANT within a single thread via a
+# ``threading.local`` depth counter. Reentrancy is required because
+# several of the locked helpers below call each other synchronously
+# (e.g. ``_remove_agent`` calls ``_remove_team_blackboard_permissions``,
+# ``_ensure_all_agent_permissions`` calls ``_add_agent_permissions``) —
+# flock is scoped to the OPEN FILE DESCRIPTION, so acquiring a second,
+# independent fd for the same path from the same thread would
+# self-deadlock without the depth guard. Only the OUTERMOST
+# ``with _config_lock():`` in a thread's call stack opens an fd and
+# flocks it; nested acquisitions from that same thread reuse it and are
+# free. A different thread (or process) entering concurrently still opens
+# its OWN fresh fd and genuinely blocks on the OS-level lock until the
+# outermost holder's fd is unlocked — so cross-thread and cross-process
+# mutual exclusion is real (enforced by the kernel), not just Python-level
+# bookkeeping.
+#
+# The lock path is derived from ``AGENTS_FILE.parent`` at ACQUISITION time
+# (not frozen into a module-level constant at import time) so it always
+# sits next to whichever agents.yaml/permissions.json pair is actually in
+# play — tests redirect ``AGENTS_FILE``/``PERMISSIONS_FILE`` to a temp
+# ``config/`` dir per-test, and a frozen constant would silently keep
+# locking the real repo's config dir instead of following that redirect.
+
+
+def _config_lock_path() -> Path:
+    """Return the sidecar lock file path, next to the live agents.yaml."""
+    return AGENTS_FILE.parent / ".config.lock"
+
+
+_config_lock_state = threading.local()
+
+
+class _ConfigLock:
+    """Context manager for the shared agents.yaml + permissions.json lock.
+
+    Obtain via the ``_config_lock()`` factory: ``with _config_lock(): ...``.
+    See the module comment above for the full design rationale (blocking +
+    reentrant fcntl.flock on a fresh fd per outermost acquisition).
+    """
+
+    def __enter__(self) -> "_ConfigLock":
+        depth = getattr(_config_lock_state, "depth", 0)
+        if depth == 0:
+            lock_path = _config_lock_path()
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX)  # blocks until any holder releases
+            _config_lock_state.fd = fd
+        _config_lock_state.depth = depth + 1
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        depth = _config_lock_state.depth - 1
+        _config_lock_state.depth = depth
+        if depth == 0:
+            fd = _config_lock_state.fd
+            _config_lock_state.fd = None
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+
+
+def _config_lock() -> _ConfigLock:
+    """Return the shared agents.yaml/permissions.json lock as a context manager.
+
+    Every load->mutate->save helper for either file acquires this for its
+    full critical section — see the module comment above ``_config_lock_path``.
+    """
+    return _ConfigLock()
+
+
+def _load_agents_yaml() -> dict:
+    """Load the raw agents.yaml document (``{"agents": {...}, ...}``).
+
+    Read-only I/O helper — does NOT itself acquire ``_config_lock()``.
+    Callers doing load->mutate->save MUST wrap the whole sequence in
+    ``with _config_lock(): ...`` (locking only the read half wouldn't
+    close the lost-update race — mirrors why ``_load_permissions``
+    alone was never sufficient either).
+    """
+    if not AGENTS_FILE.exists():
+        return {"agents": {}}
+    with open(AGENTS_FILE) as f:
+        return yaml.safe_load(f) or {"agents": {}}
+
+
+def _save_agents_yaml(agents_cfg: dict) -> None:
+    """Persist agents.yaml atomically (tempfile in the same dir + fsync +
+    os.replace, via the shared ``atomic_write_text`` helper) — a concurrent
+    reader always sees the old or the new complete file, never a torn one.
+
+    Does NOT itself acquire ``_config_lock()`` — callers doing
+    load->mutate->save MUST hold it across the whole sequence; this
+    function alone only protects against torn reads, not lost updates.
+    """
+    AGENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    content = yaml.dump(agents_cfg, default_flow_style=False, sort_keys=False)
+    atomic_write_text(AGENTS_FILE, content)
+
+
+# Guards individual reads/writes of permissions.json against torn reads —
+# held internally by _load_permissions and _save_permissions so a save
+# never interleaves with a read, pairing with the atomic os.replace below
+# so a reader never observes a half-written file (finding M14).
+#
+# This is now belt-and-suspenders: the real lost-update fix is the shared
+# ``_config_lock()`` above, which every load->mutate->save call site holds
+# across its FULL critical section (e.g. ``with _config_lock(): perms =
+# _load_permissions(); ...mutate...; _save_permissions(perms)``) — and,
+# being fcntl-based, also serializes across PROCESSES, which this
+# in-process-only ``RLock`` never could. ``_PERMISSIONS_LOCK`` stays
+# in place rather than being removed (B-pre #2's ratified decision keeps
+# it as harmless belt-and-suspenders for this unit).
 _PERMISSIONS_LOCK = threading.RLock()
 
 
@@ -470,7 +595,6 @@ def _add_agent_to_config(
     initial_interface: str = "",
     thinking: str = "",
     budget: dict | None = None,
-    resources: dict | None = None,
     capabilities: list[str] | None = None,
     preferred_inputs: list[str] | None = None,
     expected_outputs: list[str] | None = None,
@@ -486,13 +610,6 @@ def _add_agent_to_config(
     only persisted when non-empty so untouched yaml entries don't grow
     noisy default keys.
     """
-    agents_cfg: dict = {"agents": {}}
-    if AGENTS_FILE.exists():
-        with open(AGENTS_FILE) as f:
-            agents_cfg = yaml.safe_load(f) or {"agents": {}}
-    if "agents" not in agents_cfg:
-        agents_cfg["agents"] = {}
-
     entry: dict = {
         "role": role,
         "model": model,
@@ -510,8 +627,6 @@ def _add_agent_to_config(
         entry["thinking"] = thinking
     if budget:
         entry["budget"] = budget
-    if resources:
-        entry["resources"] = resources
     # Task 8 — structured routing fields. Persist only when non-empty
     # so existing minimal yaml entries don't grow empty default keys.
     if capabilities:
@@ -524,10 +639,13 @@ def _add_agent_to_config(
         entry["escalation_to"] = escalation_to
     if forbidden:
         entry["forbidden"] = list(forbidden)
-    agents_cfg["agents"][name] = entry
-    AGENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with open(AGENTS_FILE, "w") as f:
-        yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
+
+    with _config_lock():
+        agents_cfg = _load_agents_yaml()
+        if "agents" not in agents_cfg:
+            agents_cfg["agents"] = {}
+        agents_cfg["agents"][name] = entry
+        _save_agents_yaml(agents_cfg)
 
 
 # Coordination grants layered on top of the base defaults for a fully-fledged
@@ -566,176 +684,179 @@ def _add_agent_permissions(name: str, permissions: dict | None = None, *, from_t
     ``blackboard_write``, ``can_publish``, and ``can_subscribe`` entries
     are merged into the defaults.
     """
-    cfg = _load_config()
-    collab = cfg.get("collaboration", True)
+    with _config_lock():
+        cfg = _load_config()
+        collab = cfg.get("collaboration", True)
 
-    perms = _load_permissions()
-    if collab:
-        other_agents = [a for a in cfg.get("agents", {}) if a != name]
-        can_message = ["*"] if other_agents else []
-    else:
-        can_message = []
+        perms = _load_permissions()
+        if collab:
+            other_agents = [a for a in cfg.get("agents", {}) if a != name]
+            can_message = ["*"] if other_agents else []
+        else:
+            can_message = []
 
-    # Self pattern: every WORKER always holds ``teams/{name}/*`` on both
-    # blackboard fields — its private team-of-one namespace (ratified #5).
-    # Invariant: "self always; team while member". The operator keeps its
-    # explicit ["*"] grants from _ensure_operator_agent instead.
-    self_patterns = [f"teams/{name}/*"] if name != _OPERATOR_AGENT_ID else []
+        # Self pattern: every WORKER always holds ``teams/{name}/*`` on both
+        # blackboard fields — its private team-of-one namespace (ratified #5).
+        # Invariant: "self always; team while member". The operator keeps its
+        # explicit ["*"] grants from _ensure_operator_agent instead.
+        self_patterns = [f"teams/{name}/*"] if name != _OPERATOR_AGENT_ID else []
 
-    agent_perms: dict = {
-        "can_message": can_message,
-        "can_publish": ["*"] if collab else [f"{name}_complete"],
-        "can_subscribe": ["*"] if collab else [],
-        "blackboard_read": list(self_patterns),
-        "blackboard_write": list(self_patterns),
-        "allowed_apis": ["llm", "image_gen"],
-        "allowed_credentials": ["*"],
-        # Default capability set for every new agent: browser + internet +
-        # schedules (cron) + ephemeral fleet-spawn ON; wallet OFF (the sole
-        # privileged grant — spending money requires explicit user setup).
-        # NOTE: ``can_spawn=True`` applies to NAMED agents created here. The
-        # ephemeral ``spawn-*`` agents they create resolve permissions via
-        # ``PermissionMatrix.get_permissions`` ("default" record / bare
-        # fallback → field default False), so a spawned agent CANNOT itself
-        # spawn — the recursion wall is bounded at one level. A template may
-        # flip any of these off via the merge below.
-        "can_use_browser": True,
-        "can_use_internet": True,
-        "can_manage_cron": True,
-        "can_spawn": True,
-        "can_use_wallet": False,
-    }
+        agent_perms: dict = {
+            "can_message": can_message,
+            "can_publish": ["*"] if collab else [f"{name}_complete"],
+            "can_subscribe": ["*"] if collab else [],
+            "blackboard_read": list(self_patterns),
+            "blackboard_write": list(self_patterns),
+            "allowed_apis": ["llm", "image_gen"],
+            "allowed_credentials": ["*"],
+            # Default capability set for every new agent: browser + internet +
+            # schedules (cron) + ephemeral fleet-spawn ON; wallet OFF (the sole
+            # privileged grant — spending money requires explicit user setup).
+            # NOTE: ``can_spawn=True`` applies to NAMED agents created here. The
+            # ephemeral ``spawn-*`` agents they create resolve permissions via
+            # ``PermissionMatrix.get_permissions`` ("default" record / bare
+            # fallback → field default False), so a spawned agent CANNOT itself
+            # spawn — the recursion wall is bounded at one level. A template may
+            # flip any of these off via the merge below.
+            "can_use_browser": True,
+            "can_use_internet": True,
+            "can_manage_cron": True,
+            "can_spawn": True,
+            "can_use_wallet": False,
+        }
 
-    # Merge template permissions into defaults
-    if permissions:
-        for key in ("blackboard_read", "blackboard_write", "can_publish", "can_subscribe"):
-            tpl_values = permissions.get(key)
-            if tpl_values and isinstance(tpl_values, list):
-                existing = set(agent_perms.get(key, []))
-                existing.update(tpl_values)
-                agent_perms[key] = sorted(existing)
-        # Defense in depth (ratified #5): no create path may hand a WORKER a
-        # blackboard wildcard — the host ACL is the read boundary now that
-        # the agent-side standalone guards are gone, and team joins strip
-        # ``*`` anyway (an agent must never start wider than a team member
-        # ends up). The operator's explicit ["*"] comes from
-        # _ensure_operator_agent, not this path.
-        if name != _OPERATOR_AGENT_ID:
-            for key in ("blackboard_read", "blackboard_write"):
-                agent_perms[key] = [p for p in agent_perms.get(key, []) if p != "*"]
-        # Boolean flags — template can override defaults. Includes the
-        # six control-plane permissions from Task 3 so the operator's
-        # explicit grants in ``_ensure_operator_agent`` get persisted to
-        # permissions.json instead of being silently dropped.
-        for key in (
-            "can_use_browser",
-            "can_use_internet",
-            "can_spawn",
-            "can_manage_cron",
-            "can_manage_fleet",
-            "can_manage_teams",
-            "can_edit_agent_config",
-            "can_view_fleet_metrics",
-            "can_request_user_credentials",
-            "can_use_wallet",
-        ):
-            if key in permissions:
-                value = bool(permissions[key])
-                # L4: clamp the irreversible-grant ceiling. A fleet template
-                # must never mint an agent that can spawn other agents or
-                # spend from the wallet — those are operator/user-only grants
-                # (mirrors _OPERATOR_PERMISSION_CEILING in operator_tools.py).
-                # None of the shipped templates set these true, so legitimate
-                # template application is unaffected.
-                if from_template and key in _TEMPLATE_PERMISSION_CEILING and value:
-                    logger.warning(
-                        "Template for agent '%s' tried to grant '%s'=true; "
-                        "clamping to false (irreversible-grant ceiling)",
-                        name,
-                        key,
-                    )
-                    value = False
-                agent_perms[key] = value
+        # Merge template permissions into defaults
+        if permissions:
+            for key in ("blackboard_read", "blackboard_write", "can_publish", "can_subscribe"):
+                tpl_values = permissions.get(key)
+                if tpl_values and isinstance(tpl_values, list):
+                    existing = set(agent_perms.get(key, []))
+                    existing.update(tpl_values)
+                    agent_perms[key] = sorted(existing)
+            # Defense in depth (ratified #5): no create path may hand a WORKER a
+            # blackboard wildcard — the host ACL is the read boundary now that
+            # the agent-side standalone guards are gone, and team joins strip
+            # ``*`` anyway (an agent must never start wider than a team member
+            # ends up). The operator's explicit ["*"] comes from
+            # _ensure_operator_agent, not this path.
+            if name != _OPERATOR_AGENT_ID:
+                for key in ("blackboard_read", "blackboard_write"):
+                    agent_perms[key] = [p for p in agent_perms.get(key, []) if p != "*"]
+            # Boolean flags — template can override defaults. Includes the
+            # six control-plane permissions from Task 3 so the operator's
+            # explicit grants in ``_ensure_operator_agent`` get persisted to
+            # permissions.json instead of being silently dropped.
+            for key in (
+                "can_use_browser",
+                "can_use_internet",
+                "can_spawn",
+                "can_manage_cron",
+                "can_manage_fleet",
+                "can_manage_teams",
+                "can_edit_agent_config",
+                "can_view_fleet_metrics",
+                "can_request_user_credentials",
+                "can_use_wallet",
+            ):
+                if key in permissions:
+                    value = bool(permissions[key])
+                    # L4: clamp the irreversible-grant ceiling. A fleet template
+                    # must never mint an agent that can spawn other agents or
+                    # spend from the wallet — those are operator/user-only grants
+                    # (mirrors _OPERATOR_PERMISSION_CEILING in operator_tools.py).
+                    # None of the shipped templates set these true, so legitimate
+                    # template application is unaffected.
+                    if from_template and key in _TEMPLATE_PERMISSION_CEILING and value:
+                        logger.warning(
+                            "Template for agent '%s' tried to grant '%s'=true; "
+                            "clamping to false (irreversible-grant ceiling)",
+                            name,
+                            key,
+                        )
+                        value = False
+                    agent_perms[key] = value
 
-    perms["permissions"][name] = agent_perms
-    _save_permissions(perms)
+        perms["permissions"][name] = agent_perms
+        _save_permissions(perms)
 
 
 def _ensure_all_agent_permissions() -> None:
     """Backfill permissions for agents missing from permissions.json, and
     forward-migrate any missing boolean capability flags for existing agents."""
-    cfg = _load_config()
-    perms = _load_permissions()
-    existing = set(perms.get("permissions", {}).keys())
-    for name in cfg.get("agents", {}):
-        if name not in existing:
-            _add_agent_permissions(name)
+    with _config_lock():
+        cfg = _load_config()
+        perms = _load_permissions()
+        existing = set(perms.get("permissions", {}).keys())
+        for name in cfg.get("agents", {}):
+            if name not in existing:
+                _add_agent_permissions(name)
 
-    # Reload after potentially writing new agents so the migration sees all
-    # agents, including ones just added above.
-    perms = _load_permissions()
+        # Reload after potentially writing new agents so the migration sees all
+        # agents, including ones just added above.
+        perms = _load_permissions()
 
-    # Forward-migrate: add any permission flags introduced after an agent's
-    # initial permissions entry was created (keyed in _AGENT_PERMISSION_DEFAULTS).
-    changed = False
-    for agent_id, agent_perms in perms.get("permissions", {}).items():
-        if agent_id == "default":
-            continue
-        for flag, default_val in _AGENT_PERMISSION_DEFAULTS.items():
-            if flag not in agent_perms:
-                agent_perms[flag] = default_val
+        # Forward-migrate: add any permission flags introduced after an agent's
+        # initial permissions entry was created (keyed in _AGENT_PERMISSION_DEFAULTS).
+        changed = False
+        for agent_id, agent_perms in perms.get("permissions", {}).items():
+            if agent_id == "default":
+                continue
+            for flag, default_val in _AGENT_PERMISSION_DEFAULTS.items():
+                if flag not in agent_perms:
+                    agent_perms[flag] = default_val
+                    changed = True
+
+        # Solo self-pattern default (ratified #5 — solo agent = team-of-one):
+        # every TEAMLESS worker holds its private ``teams/{agent_id}/*``
+        # pattern on both blackboard fields ("self always"). Additive only —
+        # existing patterns are never removed except the untouched pre-#5
+        # default read wildcard (below). The live enforcement is the
+        # resolution-time carve-out in PermissionMatrix._is_own_namespace;
+        # this keeps the FILE state matching the invariant.
+        try:
+            team_map = _open_teams_store().agent_team_map()
+        except Exception:
+            team_map = {}
+        for agent_id, agent_perms in perms.get("permissions", {}).items():
+            if agent_id in ("default", _OPERATOR_AGENT_ID):
+                continue
+            if team_map.get(agent_id):
+                continue
+            self_pattern = f"teams/{agent_id}/*"
+            # Narrow the pre-#5 default read wildcard: a teamless worker whose
+            # blackboard_read is exactly the untouched old default shape
+            # (["*"], or ["*"] + its own self pattern) drops the ``*`` — with
+            # the agent-side standalone guards gone, leaving it would grant
+            # fleet-wide reads no team member has. Any other (human-customized)
+            # pattern list is left alone.
+            reads = agent_perms.get("blackboard_read") or []
+            if set(reads) in ({"*"}, {"*", self_pattern}):
+                agent_perms["blackboard_read"] = [self_pattern]
                 changed = True
-
-    # Solo self-pattern default (ratified #5 — solo agent = team-of-one):
-    # every TEAMLESS worker holds its private ``teams/{agent_id}/*``
-    # pattern on both blackboard fields ("self always"). Additive only —
-    # existing patterns are never removed except the untouched pre-#5
-    # default read wildcard (below). The live enforcement is the
-    # resolution-time carve-out in PermissionMatrix._is_own_namespace;
-    # this keeps the FILE state matching the invariant.
-    try:
-        team_map = _open_teams_store().agent_team_map()
-    except Exception:
-        team_map = {}
-    for agent_id, agent_perms in perms.get("permissions", {}).items():
-        if agent_id in ("default", _OPERATOR_AGENT_ID):
-            continue
-        if team_map.get(agent_id):
-            continue
-        self_pattern = f"teams/{agent_id}/*"
-        # Narrow the pre-#5 default read wildcard: a teamless worker whose
-        # blackboard_read is exactly the untouched old default shape
-        # (["*"], or ["*"] + its own self pattern) drops the ``*`` — with
-        # the agent-side standalone guards gone, leaving it would grant
-        # fleet-wide reads no team member has. Any other (human-customized)
-        # pattern list is left alone.
-        reads = agent_perms.get("blackboard_read") or []
-        if set(reads) in ({"*"}, {"*", self_pattern}):
-            agent_perms["blackboard_read"] = [self_pattern]
-            changed = True
-        for field in ("blackboard_read", "blackboard_write"):
-            patterns = agent_perms.get(field) or []
-            if self_pattern not in patterns:
-                agent_perms[field] = [*patterns, self_pattern]
-                changed = True
-    if changed:
-        _save_permissions(perms)
+            for field in ("blackboard_read", "blackboard_write"):
+                patterns = agent_perms.get(field) or []
+                if self_pattern not in patterns:
+                    agent_perms[field] = [*patterns, self_pattern]
+                    changed = True
+        if changed:
+            _save_permissions(perms)
 
 
 def _set_collaborative_permissions() -> None:
     """Update all agent permissions to allow inter-agent messaging and pub/sub."""
-    perms = _load_permissions()
-    for name, p in perms.get("permissions", {}).items():
-        if name == "default":
-            continue
-        if "*" not in p.get("can_message", []):
-            p["can_message"] = list({*p.get("can_message", []), "*"})
-        if "*" not in p.get("can_publish", []):
-            p["can_publish"] = list({*p.get("can_publish", []), "*"})
-        if "*" not in p.get("can_subscribe", []):
-            p["can_subscribe"] = list({*p.get("can_subscribe", []), "*"})
-        p["allowed_credentials"] = ["*"]
-    _save_permissions(perms)
+    with _config_lock():
+        perms = _load_permissions()
+        for name, p in perms.get("permissions", {}).items():
+            if name == "default":
+                continue
+            if "*" not in p.get("can_message", []):
+                p["can_message"] = list({*p.get("can_message", []), "*"})
+            if "*" not in p.get("can_publish", []):
+                p["can_publish"] = list({*p.get("can_publish", []), "*"})
+            if "*" not in p.get("can_subscribe", []):
+                p["can_subscribe"] = list({*p.get("can_subscribe", []), "*"})
+            p["allowed_credentials"] = ["*"]
+        _save_permissions(perms)
 
 
 def _validate_agent_name(name: str) -> str:
@@ -886,62 +1007,62 @@ def _backfill_capabilities_for_existing_agents() -> None:
     """
     if not AGENTS_FILE.exists():
         return
-    try:
-        with open(AGENTS_FILE) as f:
-            agents_cfg = yaml.safe_load(f) or {"agents": {}}
-    except Exception:
-        return
-
-    agents = agents_cfg.get("agents", {})
-    if not isinstance(agents, dict) or not agents:
-        return
 
     from src.agent.workspace import _parse_interface_text
 
-    changed = False
-    for _agent_name, entry in agents.items():
-        if not isinstance(entry, dict):
-            continue
-        # Already declared — structured field wins, do nothing.
-        if entry.get("capabilities"):
-            continue
-        interface_text = entry.get("initial_interface") or ""
-        if not interface_text:
-            continue
-
+    with _config_lock():
         try:
-            derived = _parse_interface_text(interface_text)
+            agents_cfg = _load_agents_yaml()
         except Exception:
-            continue
+            return
 
-        # Only persist when the derivation produced something useful.
-        if not (
-            derived.get("capabilities")
-            or derived.get("preferred_inputs")
-            or derived.get("expected_outputs")
-            or derived.get("escalation_to")
-            or derived.get("forbidden")
-        ):
-            continue
+        agents = agents_cfg.get("agents", {})
+        if not isinstance(agents, dict) or not agents:
+            return
 
-        if derived.get("capabilities"):
-            entry["capabilities"] = list(derived["capabilities"])
-        if derived.get("preferred_inputs"):
-            entry["preferred_inputs"] = list(derived["preferred_inputs"])
-        if derived.get("expected_outputs"):
-            entry["expected_outputs"] = list(derived["expected_outputs"])
-        if derived.get("escalation_to"):
-            entry["escalation_to"] = derived["escalation_to"]
-        if derived.get("forbidden"):
-            entry["forbidden"] = list(derived["forbidden"])
-        changed = True
+        changed = False
+        for _agent_name, entry in agents.items():
+            if not isinstance(entry, dict):
+                continue
+            # Already declared — structured field wins, do nothing.
+            if entry.get("capabilities"):
+                continue
+            interface_text = entry.get("initial_interface") or ""
+            if not interface_text:
+                continue
 
-    if changed:
-        try:
-            with open(AGENTS_FILE, "w") as f:
-                yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
-        except Exception:
-            logger.exception("Failed to persist back-filled agent capabilities")
+            try:
+                derived = _parse_interface_text(interface_text)
+            except Exception:
+                continue
+
+            # Only persist when the derivation produced something useful.
+            if not (
+                derived.get("capabilities")
+                or derived.get("preferred_inputs")
+                or derived.get("expected_outputs")
+                or derived.get("escalation_to")
+                or derived.get("forbidden")
+            ):
+                continue
+
+            if derived.get("capabilities"):
+                entry["capabilities"] = list(derived["capabilities"])
+            if derived.get("preferred_inputs"):
+                entry["preferred_inputs"] = list(derived["preferred_inputs"])
+            if derived.get("expected_outputs"):
+                entry["expected_outputs"] = list(derived["expected_outputs"])
+            if derived.get("escalation_to"):
+                entry["escalation_to"] = derived["escalation_to"]
+            if derived.get("forbidden"):
+                entry["forbidden"] = list(derived["forbidden"])
+            changed = True
+
+        if changed:
+            try:
+                _save_agents_yaml(agents_cfg)
+            except Exception:
+                logger.exception("Failed to persist back-filled agent capabilities")
 
 
 def _set_agent_status(name: str, status: str) -> None:
@@ -952,16 +1073,15 @@ def _set_agent_status(name: str, status: str) -> None:
     operator tools that archive an agent should also stop the container
     via the runtime backend (the host endpoint handles that).
     """
-    if not AGENTS_FILE.exists():
-        raise ValueError("Agents config not found")
-    with open(AGENTS_FILE) as f:
-        agents_cfg = yaml.safe_load(f) or {"agents": {}}
-    agents = agents_cfg.get("agents", {})
-    if name not in agents:
-        raise ValueError(f"Agent '{name}' not found")
-    agents[name]["status"] = status
-    with open(AGENTS_FILE, "w") as f:
-        yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
+    with _config_lock():
+        if not AGENTS_FILE.exists():
+            raise ValueError("Agents config not found")
+        agents_cfg = _load_agents_yaml()
+        agents = agents_cfg.get("agents", {})
+        if name not in agents:
+            raise ValueError(f"Agent '{name}' not found")
+        agents[name]["status"] = status
+        _save_agents_yaml(agents_cfg)
 
 
 def _archive_agent(name: str) -> None:
@@ -1002,27 +1122,28 @@ def _add_team_blackboard_permissions(agent: str, team: str) -> None:
     in-place ``*`` ACLs that haven't been touched stay intact until
     enforce mode tightens the read/write hot path.
     """
-    perms = _load_permissions()
-    agent_perms = perms.get("permissions", {}).get(agent)
-    if agent_perms is None:
-        return
-    team_pattern = f"teams/{team}/*"
-    self_pattern = f"teams/{agent}/*"
-    for field in ("blackboard_read", "blackboard_write"):
-        patterns = agent_perms.get(field, [])
-        # Strip any wildcard — replaced by the explicit team pattern
-        # below. This is the active narrowing for Task 5: an agent that
-        # previously had ``["*"]`` and is then added to a team ends
-        # up with its self + team patterns.
-        narrowed = [p for p in patterns if p != "*"]
-        if team_pattern not in narrowed:
-            narrowed.append(team_pattern)
-        # Invariant (ratified #5): "self always; team while member" — the
-        # private team-of-one pattern rides alongside the team pattern.
-        if self_pattern not in narrowed:
-            narrowed.append(self_pattern)
-        agent_perms[field] = narrowed
-    _save_permissions(perms)
+    with _config_lock():
+        perms = _load_permissions()
+        agent_perms = perms.get("permissions", {}).get(agent)
+        if agent_perms is None:
+            return
+        team_pattern = f"teams/{team}/*"
+        self_pattern = f"teams/{agent}/*"
+        for field in ("blackboard_read", "blackboard_write"):
+            patterns = agent_perms.get(field, [])
+            # Strip any wildcard — replaced by the explicit team pattern
+            # below. This is the active narrowing for Task 5: an agent that
+            # previously had ``["*"]`` and is then added to a team ends
+            # up with its self + team patterns.
+            narrowed = [p for p in patterns if p != "*"]
+            if team_pattern not in narrowed:
+                narrowed.append(team_pattern)
+            # Invariant (ratified #5): "self always; team while member" — the
+            # private team-of-one pattern rides alongside the team pattern.
+            if self_pattern not in narrowed:
+                narrowed.append(self_pattern)
+            agent_perms[field] = narrowed
+        _save_permissions(perms)
 
 
 def _remove_team_blackboard_permissions(agent: str, team: str) -> None:
@@ -1037,23 +1158,24 @@ def _remove_team_blackboard_permissions(agent: str, team: str) -> None:
     reacquire fleet-wide reach by being added to and then removed from
     a team (Task 5).
     """
-    perms = _load_permissions()
-    agent_perms = perms.get("permissions", {}).get(agent)
-    if agent_perms is None:
-        return
-    team_pattern = f"teams/{team}/*"
-    self_pattern = f"teams/{agent}/*"
-    for field in ("blackboard_read", "blackboard_write"):
-        patterns = agent_perms.get(field, [])
-        # Drop both the target team pattern and any surviving ``*``.
-        # The wildcard strip is the safety net for an agent whose ACL
-        # was never re-narrowed (e.g. config-edited directly): once the
-        # membership system touches it on remove, the wildcard goes.
-        remaining = [p for p in patterns if p != team_pattern and p != "*"]
-        if self_pattern not in remaining:
-            remaining.append(self_pattern)
-        agent_perms[field] = remaining
-    _save_permissions(perms)
+    with _config_lock():
+        perms = _load_permissions()
+        agent_perms = perms.get("permissions", {}).get(agent)
+        if agent_perms is None:
+            return
+        team_pattern = f"teams/{team}/*"
+        self_pattern = f"teams/{agent}/*"
+        for field in ("blackboard_read", "blackboard_write"):
+            patterns = agent_perms.get(field, [])
+            # Drop both the target team pattern and any surviving ``*``.
+            # The wildcard strip is the safety net for an agent whose ACL
+            # was never re-narrowed (e.g. config-edited directly): once the
+            # membership system touches it on remove, the wildcard goes.
+            remaining = [p for p in patterns if p != team_pattern and p != "*"]
+            if self_pattern not in remaining:
+                remaining.append(self_pattern)
+            agent_perms[field] = remaining
+        _save_permissions(perms)
 
 
 def _remove_agent(name: str, stop_container: bool = False) -> None:
@@ -1074,24 +1196,27 @@ def _remove_agent(name: str, stop_container: bool = False) -> None:
         except Exception as e:
             logger.warning("Failed to stop/remove container for '%s': %s", name, e)
 
-    # Remove from team if member (also clears standing goals)
-    with contextlib.suppress(Exception):
-        team = _open_teams_store().remove_agent(name)
-        if team:
-            _remove_team_blackboard_permissions(name, team)
+    # Remove from team if member (also clears standing goals). Wraps the
+    # blackboard-permission narrowing AND the agents.yaml/permissions.json
+    # removal below in ONE lock acquisition so a concurrent writer can't
+    # observe (or clobber) a half-removed agent — reentrant on
+    # ``_remove_team_blackboard_permissions``'s own inner acquisition.
+    with _config_lock():
+        with contextlib.suppress(Exception):
+            team = _open_teams_store().remove_agent(name)
+            if team:
+                _remove_team_blackboard_permissions(name, team)
 
-    # Remove from agents.yaml
-    if AGENTS_FILE.exists():
-        with open(AGENTS_FILE) as f:
-            agents_cfg = yaml.safe_load(f) or {}
-        agents_cfg.get("agents", {}).pop(name, None)
-        with open(AGENTS_FILE, "w") as f:
-            yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
+        # Remove from agents.yaml
+        if AGENTS_FILE.exists():
+            agents_cfg = _load_agents_yaml()
+            agents_cfg.get("agents", {}).pop(name, None)
+            _save_agents_yaml(agents_cfg)
 
-    # Remove from permissions
-    perms = _load_permissions()
-    perms.get("permissions", {}).pop(name, None)
-    _save_permissions(perms)
+        # Remove from permissions
+        perms = _load_permissions()
+        perms.get("permissions", {}).pop(name, None)
+        _save_permissions(perms)
 
 
 def _pick_model_interactive(
@@ -1214,9 +1339,9 @@ def _apply_template(
 
     ``agent_overrides`` (PR-N) is an optional ``{agent_name: {field: value}}``
     map. v2 supports per-agent ``model``, ``instructions``, ``soul``,
-    ``heartbeat`` and ``interface`` overrides applied on top of the template's
-    defaults. The mesh route validates the shape and contents UPFRONT — by the
-    time we get here, the input is trusted.
+    ``heartbeat``, ``interface``, and ``role`` overrides applied on top of
+    the template's defaults. The mesh route validates the shape and
+    contents UPFRONT — by the time we get here, the input is trusted.
     """
     cfg = _load_config()
     default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
@@ -1230,11 +1355,7 @@ def _apply_template(
         _reject_agent_team_collision(_validate_agent_name(slot_name))
 
     # Load existing agents to avoid silent overwrites
-    existing_agents: set[str] = set()
-    if AGENTS_FILE.exists():
-        with open(AGENTS_FILE) as f:
-            existing_cfg = yaml.safe_load(f) or {}
-        existing_agents = set(existing_cfg.get("agents", {}).keys())
+    existing_agents: set[str] = set(_load_agents_yaml().get("agents", {}).keys())
 
     # Lazy import — keeps the CLI-only path from pulling in shared/models
     # at module-import time (template loader runs from setup wizard too).
@@ -1271,14 +1392,16 @@ def _apply_template(
         interface = agent_def.get("initial_interface", "") or agent_def.get("interface", "")
         if "interface" in per_agent_override:
             interface = per_agent_override["interface"]
+        role = agent_def.get("role", agent_name)
+        if "role" in per_agent_override:
+            role = per_agent_override["role"]
         thinking = agent_def.get("thinking", "")
         budget = agent_def.get("budget")
         agent_permissions = agent_def.get("permissions")
-        resources = agent_def.get("resources")
 
         _add_agent_to_config(
             name=agent_name,
-            role=agent_def.get("role", agent_name),
+            role=role,
             model=model,
             initial_instructions=instructions,
             initial_soul=soul,
@@ -1286,7 +1409,6 @@ def _apply_template(
             initial_interface=interface,
             thinking=thinking,
             budget=budget,
-            resources=resources,
             capabilities=agent_def.get("capabilities") or [],
             preferred_inputs=agent_def.get("preferred_inputs") or [],
             expected_outputs=agent_def.get("expected_outputs") or [],
@@ -1402,7 +1524,6 @@ def _create_agent_from_template(
     interface = agent_def.get("initial_interface", "") or agent_def.get("interface", "")
     thinking = agent_def.get("thinking", "")
     budget = agent_def.get("budget")
-    resources = agent_def.get("resources")
     agent_permissions = agent_def.get("permissions")
 
     _add_agent_to_config(
@@ -1415,7 +1536,6 @@ def _create_agent_from_template(
         initial_interface=interface,
         thinking=thinking,
         budget=budget,
-        resources=resources,
         capabilities=agent_def.get("capabilities") or [],
         preferred_inputs=agent_def.get("preferred_inputs") or [],
         expected_outputs=agent_def.get("expected_outputs") or [],
@@ -1434,15 +1554,11 @@ def _default_description(name: str) -> str:
 
 def _update_agent_field(name: str, field: str, value) -> None:
     """Update a single field in agents.yaml for an agent."""
-    if AGENTS_FILE.exists():
-        with open(AGENTS_FILE) as f:
-            agents_cfg = yaml.safe_load(f) or {"agents": {}}
-    else:
-        agents_cfg = {"agents": {}}
-    if name in agents_cfg.get("agents", {}):
-        agents_cfg["agents"][name][field] = value
-        with open(AGENTS_FILE, "w") as f:
-            yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
+    with _config_lock():
+        agents_cfg = _load_agents_yaml()
+        if name in agents_cfg.get("agents", {}):
+            agents_cfg["agents"][name][field] = value
+            _save_agents_yaml(agents_cfg)
 
 
 def _update_network_config(field: str, value) -> None:
@@ -1982,11 +2098,22 @@ to drop a goal.
 
 
 def _ensure_operator_agent(config_path: Path | None = None, default_model: str = "") -> None:
-    """Create the operator agent if it doesn't exist. Handles concierge->operator migration."""
-    agents_cfg: dict = {"agents": {}}
-    if AGENTS_FILE.exists():
-        with open(AGENTS_FILE) as f:
-            agents_cfg = yaml.safe_load(f) or {"agents": {}}
+    """Create the operator agent if it doesn't exist. Handles concierge->operator migration.
+
+    Thin locked wrapper: the whole function body (several load->mutate->save
+    sites across agents.yaml AND permissions.json, with multiple early
+    returns) runs inside ONE ``_config_lock()`` acquisition via
+    ``_ensure_operator_agent_locked`` — delegating rather than reindenting
+    every branch keeps this diff reviewable and avoids a mass-reindent of a
+    ~250-line function.
+    """
+    with _config_lock():
+        _ensure_operator_agent_locked(config_path, default_model)
+
+
+def _ensure_operator_agent_locked(config_path: Path | None, default_model: str) -> None:
+    """Body of ``_ensure_operator_agent`` — ONLY called with the lock held."""
+    agents_cfg: dict = _load_agents_yaml()
     if "agents" not in agents_cfg:
         agents_cfg["agents"] = {}
 
@@ -1996,9 +2123,7 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
     # Migration: rename concierge -> operator
     if has_concierge and not has_operator:
         agents_cfg["agents"][_OPERATOR_AGENT_ID] = agents_cfg["agents"].pop("concierge")
-        AGENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(AGENTS_FILE, "w") as f:
-            yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
+        _save_agents_yaml(agents_cfg)
         # Also rename in permissions
         perms = _load_permissions()
         if "concierge" in perms.get("permissions", {}):
@@ -2008,8 +2133,7 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
     elif has_concierge and has_operator:
         # Both exist — keep operator, remove concierge
         del agents_cfg["agents"]["concierge"]
-        with open(AGENTS_FILE, "w") as f:
-            yaml.dump(agents_cfg, f, default_flow_style=False, sort_keys=False)
+        _save_agents_yaml(agents_cfg)
         return
 
     if has_operator:
@@ -2068,14 +2192,7 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
             op_entry["heartbeat"] = _OPERATOR_HEARTBEAT
             op_entry["initial_heartbeat"] = _OPERATOR_HEARTBEAT
             agents_cfg["agents"][_OPERATOR_AGENT_ID] = op_entry
-            AGENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-            with open(AGENTS_FILE, "w") as f:
-                yaml.dump(
-                    agents_cfg,
-                    f,
-                    default_flow_style=False,
-                    sort_keys=False,
-                )
+            _save_agents_yaml(agents_cfg)
             logger.info(
                 "Refreshed operator heartbeat to versioned template%s",
                 " (was empty — bootstrapped)" if existing_is_empty else "",
@@ -2113,14 +2230,7 @@ def _ensure_operator_agent(config_path: Path | None = None, default_model: str =
         if pb_new_has_latest and ((not pb_old_has_latest and pb_old_has_any) or pb_existing_empty):
             op_entry["initial_instructions"] = _OPERATOR_CORE
             agents_cfg["agents"][_OPERATOR_AGENT_ID] = op_entry
-            AGENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-            with open(AGENTS_FILE, "w") as f:
-                yaml.dump(
-                    agents_cfg,
-                    f,
-                    default_flow_style=False,
-                    sort_keys=False,
-                )
+            _save_agents_yaml(agents_cfg)
             logger.info(
                 "Refreshed operator instructions payload to versioned playbook%s",
                 " (was empty — bootstrapped)" if pb_existing_empty else "",

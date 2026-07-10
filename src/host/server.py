@@ -4403,9 +4403,13 @@ def create_mesh_app(
         model_override = data.get("model", "")
 
         # Optional per-agent overrides (PR-N v2): allowed fields are
-        # {model, instructions, soul, heartbeat, interface}. `role` is
-        # intentionally NOT overrideable here — templates define role per slot
-        # and changing it post-creation is a different operation (rename).
+        # {model, instructions, soul, heartbeat, interface, role}. `role`
+        # was unfrozen in the hiring-wizard-v2 unit (§8 #16b) — role is
+        # descriptive/coordination text only (no tool gating reads it,
+        # SOFT_EDIT_FIELDS already lets edit_agent set it post-creation),
+        # so a per-slot override at creation time is zero extra permission
+        # surface; it just lets a hire's job-description-derived role land
+        # without a follow-up edit_agent round-trip.
         # Validated UPFRONT — no agent is created if any override is invalid.
         agent_overrides = data.get("agent_overrides") or {}
         if agent_overrides:
@@ -4417,15 +4421,19 @@ def create_mesh_app(
                 "soul",
                 "heartbeat",
                 "interface",
+                "role",
             }
             # Per-field length caps mirror src/agent/server.py _FILE_CAPS:
             #   INSTRUCTIONS.md: 12000, SOUL.md: 4000, INTERFACE.md: 4000,
-            #   HEARTBEAT.md: None (uncapped).
+            #   HEARTBEAT.md: None (uncapped). `role` has no cap anywhere
+            #   else in the config-edit surface (edit_agent's `role` field
+            #   is likewise uncapped) — mirrored here for consistency.
             _STRING_FIELD_CAPS: dict[str, int | None] = {
                 "instructions": 12000,
                 "soul": 4000,
                 "heartbeat": None,
                 "interface": 4000,
+                "role": None,
             }
 
             # 1. Unknown agent names
@@ -10047,9 +10055,7 @@ def create_mesh_app(
         old_value = change["old_value"]
         new_value = change["new_value"]
 
-        import yaml
-
-        from src.cli.config import AGENTS_FILE, _load_config
+        from src.cli.config import _load_config
 
         agent_cfg = _load_config()
         agents = agent_cfg.get("agents", {})
@@ -10057,30 +10063,35 @@ def create_mesh_app(
             raise HTTPException(404, f"Agent '{agent_id}' not found")
 
         if field == "permissions":
-            from src.cli.config import _load_permissions, _save_permissions
+            from src.cli.config import _config_lock, _load_permissions, _save_permissions
 
-            perms = _load_permissions()
-            # Apply semantics differ between forward and undo paths:
-            #   * Forward apply (caller passed partial dict): MERGE the
-            #     keys into the agent's existing perms so other granted
-            #     bits aren't clobbered. `setdefault` covers the rare
-            #     case of a never-backfilled agent.
-            #   * Undo (``is_undo=True``): REPLACE the agent's perms
-            #     dict with the stored old full state. A merge would
-            #     leave the granted keys in place — the original edit
-            #     only wrote keys that changed, so a merge of the old
-            #     full dict doesn't unset what was added. REPLACE
-            #     restores correctly. The dashboard already warns when
-            #     undoing an older receipt would discard newer edits.
-            if isinstance(new_value, dict):
-                if is_undo:
-                    perms.setdefault("permissions", {})[agent_id] = new_value
-                else:
-                    perms.setdefault("permissions", {}).setdefault(
-                        agent_id,
-                        {},
-                    ).update(new_value)
-                _save_permissions(perms)
+            # B-pre #2: hold the shared config lock across the full
+            # load->mutate->save so a concurrent writer (another edit,
+            # a template apply, a team-membership change) can't clobber
+            # this update — mirrors the agents.yaml branch below.
+            with _config_lock():
+                perms = _load_permissions()
+                # Apply semantics differ between forward and undo paths:
+                #   * Forward apply (caller passed partial dict): MERGE the
+                #     keys into the agent's existing perms so other granted
+                #     bits aren't clobbered. `setdefault` covers the rare
+                #     case of a never-backfilled agent.
+                #   * Undo (``is_undo=True``): REPLACE the agent's perms
+                #     dict with the stored old full state. A merge would
+                #     leave the granted keys in place — the original edit
+                #     only wrote keys that changed, so a merge of the old
+                #     full dict doesn't unset what was added. REPLACE
+                #     restores correctly. The dashboard already warns when
+                #     undoing an older receipt would discard newer edits.
+                if isinstance(new_value, dict):
+                    if is_undo:
+                        perms.setdefault("permissions", {})[agent_id] = new_value
+                    else:
+                        perms.setdefault("permissions", {}).setdefault(
+                            agent_id,
+                            {},
+                        ).update(new_value)
+                    _save_permissions(perms)
             # Hot-reload the in-memory permission matrix
             if permissions is not None:
                 permissions.reload()
@@ -10091,10 +10102,21 @@ def create_mesh_app(
             # both write paths converge on the same scheduler call).
             pass
         else:
+            from src.cli.config import _config_lock, _load_agents_yaml, _save_agents_yaml
+
             yaml_key = _CONFIG_FIELD_MAP.get(field, field)
-            agents[agent_id][yaml_key] = new_value
-            with open(AGENTS_FILE, "w") as f:
-                yaml.dump(agent_cfg, f, default_flow_style=False, sort_keys=False)
+            # B-pre #2: load->mutate->save under the shared lock, re-reading
+            # agents.yaml fresh (not the ``agent_cfg`` snapshot from above,
+            # which could already be stale by the time we get here) and
+            # writing it back atomically (tempfile + os.replace) instead of
+            # the old bare truncate-and-write.
+            with _config_lock():
+                fresh_cfg = _load_agents_yaml()
+                fresh_agents = fresh_cfg.get("agents", {})
+                if agent_id not in fresh_agents:
+                    raise HTTPException(404, f"Agent '{agent_id}' not found")
+                fresh_agents[agent_id][yaml_key] = new_value
+                _save_agents_yaml(fresh_cfg)
 
         # Budget sync: update the in-memory cost tracker immediately
         if field == "budget" and cost_tracker is not None and isinstance(new_value, dict):
