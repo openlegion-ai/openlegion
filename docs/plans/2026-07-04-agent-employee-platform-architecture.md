@@ -1159,7 +1159,10 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   entry — the mesh waits on one HTTP call, the same RPC-wait pattern `/mesh/ask` uses — rather
   than mesh-held (a mesh-held future would have required a new agent→mesh callback endpoint);
   and only the non-streaming dashboard chat endpoint was re-routed per the unit's gap list
-  (streaming/broadcast/channel paths were already lane-aware). Tests: pinned test_lanes.py (68)
+  (channel paths were already lane-aware; the dashboard's STREAMING endpoint and broadcast still
+  call the agent endpoints directly — the original "already lane-aware" claim here was wrong and
+  was corrected by the end-of-phase review; they are single-lane-safe after #1213's heartbeat
+  lock fix but not steer-routed — recorded Phase-4 follow-up). Tests: pinned test_lanes.py (68)
   and test_ask_teammate.py (51, `TestLanePrimitives` untouched) green; 10 new back-edge/race
   tests in test_chat.py; new dashboard busy/idle routing class. Full local suite 8297 passed /
   26 skipped / 0 failed.
@@ -1181,6 +1184,41 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   breakout + omission-when-absent, agenda-prompt goal-driven self-tasking + budget surfacing,
   cron rule copy, set_cron copy pins (existing pinned substrings kept intact). Full local suite
   8303 passed / 0 failed.
+
+- **✅ Landed — Phase-3 end-of-phase review + fixes (#1213).** Consolidated adversarial review of
+  all Phase-3 PRs (#1202/#1206/#1208/#1210) on the merged tree — three independent passes (unit-3
+  concurrency deep-dive with repro scripts, unit-4 + cross-unit integration, phase-wide invariant
+  sweep). Five confirmed findings, all fixed in #1213:
+  1. **CRITICAL — heartbeat single-lane (B1):** `execute_heartbeat` never acquired `_chat_lock`
+     (only checked `.locked()` at entry), so direct `/chat`//`/chat/stream` callers — including
+     the dashboard's actual streaming UI, REPL, broadcast, and lane-worker followups — could run
+     a second concurrent LLM turn during an agenda tick (reproduced; unit 2 made agenda ticks
+     full turns, turning a negligible window into a routine one). The agenda turn now holds
+     `_chat_lock` for its duration (skip-if-busy entry semantics preserved; release in `finally`).
+  2. **CRITICAL — steer-reply integrity:** heartbeat drains folded `wait_reply` chat futures into
+     `_turn_steer_futures` but only `chat()`/`chat_stream()` run the resolving sweep — a
+     dashboard message steered during an agenda tick hung its caller the full 150s and could
+     later be answered with an UNRELATED turn's reply (both modes reproduced). Fixed semantic: a
+     chat message is never answered by an agenda turn — heartbeat-mode drains resolve live reply
+     futures `None` and consume the entry (mesh promptly dispatches a dedicated followup); an
+     end-of-turn sweep covers late arrivals; plain fire-and-forget steers keep agenda injection.
+  3. **MAJOR — budget flags:** the coordination line now renders `[EXCEEDED]` (used ≥ limit > 0)
+     and `[BLOCKED: coordination kill-switch]` (limit ≤ 0) — "$2.00/$2.00" no longer reads as
+     headroom.
+  4. **MAJOR — inert-tier truthfulness:** with no `llm.utility_model` nothing can classify as
+     coordination (all spend is work), yet introspect still emitted the `coordination` block and
+     the self-tasking copy pointed at it. Introspect now omits the block when the tier is inert;
+     both copy sites state that self-created work ALWAYS spends work budget.
+  5. **MAJOR — stale docs:** docs/triggering.md still taught the deleted `force_llm`/skip-LLM
+     mechanism (its curl example silently no-ops post-#1206); rewritten as plate-gated agenda
+     dispatch (customized HEARTBEAT.md = the supported always-run path).
+  **Recorded residuals (no code change):** dashboard streaming chat + broadcast are direct-call
+  (single-lane-safe post-#1213, steer-routing = Phase-4 follow-up); `_HEARTBEAT_TOOLS` excludes
+  `hand_off` while shared agenda copy mentions it — only the operator role uses that restricted
+  set and operators cannot hold standing goals, so inert (pre-existing); prompt-copy substring
+  pins are advisory by nature — the enforcing layer is the LLM-proxy preflight. One reviewer
+  finding (missing unit-4 landed entry) was already fixed by #1211 before the review completed.
+  Regression tests for every fix; full local suite 8313 passed / 26 skipped / 0 failed.
 
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
@@ -1211,6 +1249,7 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
 | #1206 | plate-gated agenda loop replaces heartbeat suppression (unit 2) | merged |
 | #1208 | priority steer lane — busy chat steers the running turn with reply back-edge (unit 3) | merged |
 | #1210 | budget-governed initiative — budget-aware agenda context + goal-driven self-tasking (unit 4) | merged |
+| #1213 | end-of-phase review fixes — heartbeat single-lane, steer-reply integrity, truthful budget surface | merged |
 
 *CI note:* workflow runs on app-authored PRs in this repo require the maintainer's one-click
 approval and did not auto-run; every unit was landed on a green full local suite (the exact
@@ -1253,7 +1292,9 @@ Constitution amendments land WITH the units that make them true: Constraint #1 �
 hierarchy", Constraint #12 → leads gain no permission carve-out. Standing gates carried forward:
 Personnel-file *import* still needs B-pre #2's config file-lock first; Phase-5 hibernation still
 needs B3's three-subsystem scoping; a standing-goals agent-write carve-out remains UNRATIFIED —
-do not build it without an explicit user decision.
+do not build it without an explicit user decision; dashboard streaming chat + broadcast still
+call the agent endpoints directly (single-lane-safe after #1213, but not steer-routed — routing
+them through `deliver_chat` is an open Phase-4 follow-up).
 
 **Handoff note:** this doc is the source of truth — a fresh session can continue from here without
 this session's chat history. Read §5 (keep/refactor/remove), Appendices A–C, §8 (ratified
