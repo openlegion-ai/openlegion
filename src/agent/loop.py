@@ -885,10 +885,22 @@ class AgentLoop:
             # initiative decisions can weigh it independently (Phase-3 unit 4).
             coordination = budget.get("coordination")
             if coordination:
+                c_used = coordination.get("daily_used", 0)
+                c_limit = coordination.get("daily_limit", 0)
+                # Match the work-line convention: a healthy tier reads as
+                # bare "$used/$limit", but an exhausted or kill-switched tier
+                # must be flagged so "$2.00/$2.00" or "$0.00/$0.00" can't read
+                # as headroom. daily_limit <= 0 is the kill-switch (limit 0);
+                # daily_used >= daily_limit > 0 is exhausted.
+                if c_limit <= 0:
+                    c_flag = " [BLOCKED: coordination kill-switch]"
+                elif c_used >= c_limit:
+                    c_flag = " [EXCEEDED]"
+                else:
+                    c_flag = ""
                 lines.append(
                     f"- Coordination budget (agenda/summaries, separate from "
-                    f"work above): daily ${coordination.get('daily_used', 0):.2f}"
-                    f"/${coordination.get('daily_limit', 0):.2f}"
+                    f"work above): daily ${c_used:.2f}/${c_limit:.2f}{c_flag}"
                 )
 
         if not exclude_fleet:
@@ -1038,7 +1050,9 @@ class AgentLoop:
         """Check if steer messages are waiting without draining them."""
         return not self._steer_queue.empty()
 
-    def _drain_steer_messages(self) -> list[tuple[str, bool]]:
+    def _drain_steer_messages(
+        self, *, heartbeat: bool = False,
+    ) -> list[tuple[str, bool]]:
         """Non-blocking drain of pending steers as (text, system_note).
 
         Entries may carry a reply future as a third element
@@ -1047,6 +1061,16 @@ class AgentLoop:
         response text once it returns (see
         ``_resolve_turn_steer_futures``). Plain 2-tuple entries (wakes,
         asks, REPL) are unaffected.
+
+        Finding 2: a chat message must never be answered by an AGENDA turn.
+        In ``heartbeat`` mode a reply-future (3-tuple) entry is NOT injected
+        into the agenda prompt and NOT folded into ``_turn_steer_futures``;
+        its live future is resolved with ``None`` and the entry consumed, so
+        ``inject_steer_and_wait`` returns ``(False, None)`` and the mesh's
+        ``deliver_chat`` dispatches the message as its own followup turn
+        (exactly-once delivery, answered right after the heartbeat). Plain
+        2-tuple entries (wakes/asks — answered via tools, not turn text) keep
+        the by-design agenda-prompt injection.
         """
         messages: list[tuple[str, bool]] = []
         while not self._steer_queue.empty():
@@ -1054,11 +1078,62 @@ class AgentLoop:
                 entry = self._steer_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-            messages.append((entry[0], entry[1]))
             reply_future = entry[2] if len(entry) > 2 else None
+            if heartbeat and reply_future is not None:
+                # Wait-reply chat steer drained by an agenda turn: consume it
+                # without injecting its text or folding its future. Resolving
+                # the live future None routes the caller to a dedicated
+                # followup turn instead of the agenda prompt.
+                if not reply_future.done():
+                    reply_future.set_result(None)
+                continue
+            messages.append((entry[0], entry[1]))
             if reply_future is not None and not reply_future.done():
                 self._turn_steer_futures.append(reply_future)
         return messages
+
+    def _sweep_heartbeat_steer_futures(self) -> None:
+        """End-of-heartbeat steer sweep (Finding 2 — race-proof layer).
+
+        A heartbeat turn must leave nothing with a live reply future behind.
+        An entry that arrived AFTER the turn's single drain but BEFORE it
+        finished (state was still ``working``, so ``inject_steer_and_wait``
+        enqueued it), or any future somehow left in ``_turn_steer_futures``,
+        would otherwise be picked up — and mis-answered — by the NEXT
+        unrelated chat/task turn's ``_resolve_turn_steer_futures``
+        (cross-conversation reply bleed). Called in the heartbeat's
+        ``finally`` while ``_chat_lock`` is still held and ``state`` is back
+        to ``idle``, so no chat can interleave the queue between here and the
+        lock release.
+
+        Live reply futures resolve to ``None`` (caller falls back to a fresh
+        followup turn — ``(False, None)``) and their entries are consumed;
+        plain 2-tuple entries (wakes/asks/REPL) are left on the queue for the
+        normal next-turn catch-all drain — never dropped, never mis-answered.
+        """
+        # Defensive: a heartbeat drain never folds, but never let a stray
+        # future ride into an unrelated later turn's resolve.
+        for fut in self._turn_steer_futures:
+            if not fut.done():
+                fut.set_result(None)
+        self._turn_steer_futures = []
+
+        if self._steer_queue.empty():
+            return
+        leftover = []
+        while not self._steer_queue.empty():
+            try:
+                leftover.append(self._steer_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        for entry in leftover:
+            reply_future = entry[2] if len(entry) > 2 else None
+            if reply_future is not None:
+                if not reply_future.done():
+                    reply_future.set_result(None)
+                # Consumed — a chat message is never answered by an agenda turn.
+            else:
+                self._steer_queue.put_nowait(entry)
 
     def _resolve_turn_steer_futures(self, result: dict | None) -> None:
         """Settle every steer reply future this turn folded in.
@@ -2471,453 +2546,475 @@ class AgentLoop:
             tools_used: list[str] = []
             notifications: list[str] = []
             self._loop_detector.reset()
-            self.state = "working"
-
+            # Finding 1 (B1 single-lane): hold ``_chat_lock`` for the whole
+            # agenda turn. ``chat``/``chat_stream`` are its only other
+            # holders, and a heartbeat runs full LLM turns now, so without
+            # the lock a concurrent ``/chat`` could run a second turn against
+            # the shared ``state`` / ``_loop_detector`` / volatile prompt
+            # suffix mid-heartbeat. The entry busy-check already skipped if
+            # the lock was held; acquiring a free lock here does not yield
+            # (no await since that check), so a heartbeat never queues
+            # behind a chat.
+            await self._chat_lock.acquire()
             try:
-                # Parallel fetch of goals + introspect + fleet roster.
-                # Every agent has a roster now — a solo worker's resolves
-                # to itself plus the operator.
-                goals, roster, introspect_data = await asyncio.gather(
-                    self._fetch_goals(), self._fetch_fleet_roster(),
-                    self._fetch_introspect_cached(),
-                )
+                self.state = "working"
 
-                parts: list[str] = []
-                # Heartbeat builds its own system prompt (not via
-                # _build_*_system_prompt); clear any suffix stashed by a prior
-                # chat/task build so stale volatile content can't leak in.
-                self._volatile_prompt_suffix = ""
+                try:
+                    # Parallel fetch of goals + introspect + fleet roster.
+                    # Every agent has a roster now — a solo worker's resolves
+                    # to itself plus the operator.
+                    goals, roster, introspect_data = await asyncio.gather(
+                        self._fetch_goals(), self._fetch_fleet_roster(),
+                        self._fetch_introspect_cached(),
+                    )
 
-                # 1. Goals — the agent's north star
-                if goals:
-                    parts.append(f"## Your Current Goals\n\n{sanitize_for_prompt(format_dict(goals))}")
+                    parts: list[str] = []
+                    # Heartbeat builds its own system prompt (not via
+                    # _build_*_system_prompt); clear any suffix stashed by a prior
+                    # chat/task build so stale volatile content can't leak in.
+                    self._volatile_prompt_suffix = ""
 
-                # 2. Bootstrap (identity, instructions, team)
-                if self.workspace:
-                    bootstrap = self.workspace.get_bootstrap_content()
-                    if bootstrap:
-                        parts.append(bootstrap)  # pre-sanitized by workspace cache
+                    # 1. Goals — the agent's north star
+                    if goals:
+                        parts.append(f"## Your Current Goals\n\n{sanitize_for_prompt(format_dict(goals))}")
 
-                # 3. Core rules
-                inbox_line = "- Call check_inbox() to see if teammates sent you tasks.\n"
-                parts.append(
-                    f"You are the '{self.role}' agent.\n\n"
-                    f"## Operating Rules\n"
-                    f"- This is a HEARTBEAT wakeup. Review your plate — your "
-                    f"HEARTBEAT.md rules, your goals, and your inbox — then "
-                    f"prioritize and act on what matters most.\n"
-                    f"- Follow HEARTBEAT.md strictly. Do not infer tasks from prior sessions.\n"
-                    f"{inbox_line}"
-                    f"- You may create goal-directed work toward your goals "
-                    f"(hand_off to yourself) once your plate has capacity — "
-                    f"never let it crowd out pending tasks, inbox events, or "
-                    f"probe alerts. Check the Budget line in Runtime Context "
-                    f"below (work AND coordination) before adding new "
-                    f"self-directed work.\n"
-                    f"- If your plate is empty and nothing advances your goals, "
-                    f"end the turn without making tool calls.\n"
-                    f"- You have max {max_iters} iterations.\n"
-                    f"- Use notify_user to report results to the user.\n"
-                )
+                    # 2. Bootstrap (identity, instructions, team)
+                    if self.workspace:
+                        bootstrap = self.workspace.get_bootstrap_content()
+                        if bootstrap:
+                            parts.append(bootstrap)  # pre-sanitized by workspace cache
 
-                # 4. Learnings — avoid repeating past mistakes (half of chat cap)
-                if self.workspace:
-                    learnings = self.workspace.get_learnings_context(max_chars=1500)
-                    if learnings:
-                        parts.append(f"## Learnings from Past Sessions\n\n{learnings}")
-
-                # 4b. Recent tool outcomes — evidence for the Self-Evolution
-                # step below. Task and chat prompts already inject this;
-                # without it the heartbeat's self-evolution nudge asked the
-                # agent to fix repeating failures it could not see.
-                tool_history = self._build_tool_history_context()
-                if tool_history:
-                    parts.append(sanitize_for_prompt(tool_history))
-
-                # 5. Fleet context — know your teammates (multi-agent only)
-                has_fleet_ctx = False
-                if roster:
-                    fleet_ctx = self._build_fleet_context(roster)
-                    if fleet_ctx:
-                        parts.append(fleet_ctx)
-                        has_fleet_ctx = True
-
-                # 6. Self-evolution nudge — only when update_workspace is
-                # actually callable under this heartbeat's effective
-                # allowlist. The operator's heartbeat toolset denies
-                # workspace writes; claiming otherwise (A5) made the LLM
-                # burn iterations on calls the gate then 403'd.
-                if (
-                    self._allowed_tools is None
-                    or "update_workspace" in self._allowed_tools
-                ):
+                    # 3. Core rules
+                    inbox_line = "- Call check_inbox() to see if teammates sent you tasks.\n"
                     parts.append(
-                        "## Self-Evolution\n"
-                        "You can update INSTRUCTIONS.md, SOUL.md, USER.md, and HEARTBEAT.md "
-                        "during heartbeats to improve future sessions.\n"
-                        "If Recent Tool History or Learnings show the SAME failure repeating, "
-                        "record the fix as ONE short dated bullet under a '## Lessons' heading "
-                        "in INSTRUCTIONS.md. Append only — never rewrite the file, never paste "
-                        "raw error text."
+                        f"You are the '{self.role}' agent.\n\n"
+                        f"## Operating Rules\n"
+                        f"- This is a HEARTBEAT wakeup. Review your plate — your "
+                        f"HEARTBEAT.md rules, your goals, and your inbox — then "
+                        f"prioritize and act on what matters most.\n"
+                        f"- Follow HEARTBEAT.md strictly. Do not infer tasks from prior sessions.\n"
+                        f"{inbox_line}"
+                        f"- You may create goal-directed work toward your goals "
+                        f"(hand_off to yourself) once your plate has capacity — "
+                        f"never let it crowd out pending tasks, inbox events, or "
+                        f"probe alerts. Self-created work (hand_off to yourself) "
+                        f"ALWAYS spends your WORK budget, so check the work Budget "
+                        f"line in Runtime Context below before adding new "
+                        f"self-directed work (any Coordination line, when shown, "
+                        f"governs only agenda/summary cadence).\n"
+                        f"- If your plate is empty and nothing advances your goals, "
+                        f"end the turn without making tool calls.\n"
+                        f"- You have max {max_iters} iterations.\n"
+                        f"- Use notify_user to report results to the user.\n"
                     )
 
-                # 7. Runtime context (budget, permissions, cron)
-                if introspect_data:
-                    runtime_ctx = self._format_runtime_context(
-                        introspect_data, exclude_fleet=has_fleet_ctx,
-                    )
-                    if runtime_ctx:
-                        parts.append(runtime_ctx)
+                    # 4. Learnings — avoid repeating past mistakes (half of chat cap)
+                    if self.workspace:
+                        learnings = self.workspace.get_learnings_context(max_chars=1500)
+                        if learnings:
+                            parts.append(f"## Learnings from Past Sessions\n\n{learnings}")
 
-                # A heartbeat is a fresh external turn — promote pending loads.
-                index_text = self._refresh_grouped_plan(promote_pending=True)
-                if index_text:
-                    parts.append(index_text)
+                    # 4b. Recent tool outcomes — evidence for the Self-Evolution
+                    # step below. Task and chat prompts already inject this;
+                    # without it the heartbeat's self-evolution nudge asked the
+                    # agent to fix repeating failures it could not see.
+                    tool_history = self._build_tool_history_context()
+                    if tool_history:
+                        parts.append(sanitize_for_prompt(tool_history))
 
-                system_prompt = "\n\n".join(parts)
+                    # 5. Fleet context — know your teammates (multi-agent only)
+                    has_fleet_ctx = False
+                    if roster:
+                        fleet_ctx = self._build_fleet_context(roster)
+                        if fleet_ctx:
+                            parts.append(fleet_ctx)
+                            has_fleet_ctx = True
 
-                # Drain any pending coordination signals into the heartbeat
-                steered = self._drain_steer_messages()
-                if steered:
-                    steer_context = "\n".join(f"- {text}" for text, _ in steered)
-                    message = (
-                        f"{message}\n\n"
-                        f"## Pending Coordination Signals\n\n{steer_context}"
-                    )
-
-                # Stateless message list — fresh each heartbeat
-                messages: list[dict] = [{"role": "user", "content": message, "_origin": "system:heartbeat"}]
-
-                for _iteration in range(max_iters):
-                    self._bump_liveness()
-                    if self._cancel_requested:
-                        self._cancel_requested = False
-                        self.state = "idle"
-                        duration_ms = int((time.time() - start) * 1000)
-                        if self.workspace:
-                            self.workspace.append_activity(
-                                trigger="heartbeat",
-                                summary="Cancelled",
-                                tools_used=tools_used,
-                                duration_ms=duration_ms,
-                                tokens_used=total_tokens,
-                                outcome="cancelled",
-                            )
-                        return {
-                            "response": "",
-                            "summary": "Cancelled",
-                            "tools_used": tools_used,
-                            "duration_ms": duration_ms,
-                            "tokens_used": total_tokens,
-                            "outcome": "cancelled",
-                            "skipped": False,
-                        }
-
-                    # When approaching the iteration limit, nudge the agent to
-                    # wrap up so it finishes with a proper summary instead of
-                    # being cut off with "Max iterations reached".
-                    _remaining = max_iters - _iteration
-                    if _remaining == 2:
-                        messages.append({
-                            "role": "user",
-                            "content": (
-                                "[SYSTEM] You have 2 iterations remaining. "
-                                "Start wrapping up — use notify_user to report "
-                                "your results, then give your final answer."
-                            ),
-                            "_origin": "system:heartbeat",
-                        })
-                    elif _remaining == 1:
-                        messages.append({
-                            "role": "user",
-                            "content": (
-                                "[SYSTEM] LAST iteration. Give your final answer "
-                                "now. Do NOT call any more tools."
-                            ),
-                            "_origin": "system:heartbeat",
-                        })
-
-                    # On the very last iteration, withhold tools so the LLM is
-                    # forced to produce a text-only response.
-                    iter_tools = (
-                        None if _remaining == 1
-                        else self.tools.get_tool_definitions(
-                            **self._tool_filter_kw,
-                        ) or None
-                    )
-
-                    llm_response = await _llm_call_with_retry(
-                        self.llm.chat_collect,
-                        system=system_prompt,
-                        messages=messages,
-                        tools=iter_tools,
-                        # Heartbeats are coordination traffic, not deep work —
-                        # route to the cheap utility model when configured
-                        # (per-call model tiering hook). No-op when unset.
-                        **utility_model_kwargs(self.llm),
-                    )
-                    # Bug 1 (codex P2 r2): tick after the LLM call returns —
-                    # a single deep-research call can run >5 min, and bumping
-                    # only at iteration head would let the staleness check fire
-                    # during a perfectly healthy turn.
-                    self._bump_liveness()
-                    total_tokens += llm_response.tokens_used
-
-                    # Early cancel check after LLM call
-                    if self._cancel_requested:
-                        self._cancel_requested = False
-                        self.state = "idle"
-                        duration_ms = int((time.time() - start) * 1000)
-                        if self.workspace:
-                            self.workspace.append_activity(
-                                trigger="heartbeat",
-                                summary="Cancelled",
-                                tools_used=tools_used,
-                                duration_ms=duration_ms,
-                                tokens_used=total_tokens,
-                                outcome="cancelled",
-                            )
-                        return {
-                            "response": "",
-                            "summary": "Cancelled",
-                            "tools_used": tools_used,
-                            "duration_ms": duration_ms,
-                            "tokens_used": total_tokens,
-                            "outcome": "cancelled",
-                            "skipped": False,
-                        }
-
-                    # On the last iteration, ignore any tool_calls — the LLM
-                    # shouldn't return them (tools were withheld) but guard
-                    # against provider edge cases.
-                    if _remaining == 1 and llm_response.tool_calls:
-                        llm_response = LLMResponse(
-                            content=llm_response.content or "Heartbeat complete.",
-                            tool_calls=[],
-                            tokens_used=0,
+                    # 6. Self-evolution nudge — only when update_workspace is
+                    # actually callable under this heartbeat's effective
+                    # allowlist. The operator's heartbeat toolset denies
+                    # workspace writes; claiming otherwise (A5) made the LLM
+                    # burn iterations on calls the gate then 403'd.
+                    if (
+                        self._allowed_tools is None
+                        or "update_workspace" in self._allowed_tools
+                    ):
+                        parts.append(
+                            "## Self-Evolution\n"
+                            "You can update INSTRUCTIONS.md, SOUL.md, USER.md, and HEARTBEAT.md "
+                            "during heartbeats to improve future sessions.\n"
+                            "If Recent Tool History or Learnings show the SAME failure repeating, "
+                            "record the fix as ONE short dated bullet under a '## Lessons' heading "
+                            "in INSTRUCTIONS.md. Append only — never rewrite the file, never paste "
+                            "raw error text."
                         )
 
-                    if not llm_response.tool_calls:
-                        # Final answer
-                        content = llm_response.content or ""
-                        duration_ms = int((time.time() - start) * 1000)
+                    # 7. Runtime context (budget, permissions, cron)
+                    if introspect_data:
+                        runtime_ctx = self._format_runtime_context(
+                            introspect_data, exclude_fleet=has_fleet_ctx,
+                        )
+                        if runtime_ctx:
+                            parts.append(runtime_ctx)
 
-                        summary = truncate(content.replace("\n", " ").strip(), 200)
-                        if self.workspace:
-                            tools_str = ", ".join(tools_used) if tools_used else "none"
-                            self.workspace.append_daily_log(
-                                f"Heartbeat complete | {total_tokens} tokens, "
-                                f"{duration_ms}ms | Tools: {tools_str}"
+                    # A heartbeat is a fresh external turn — promote pending loads.
+                    index_text = self._refresh_grouped_plan(promote_pending=True)
+                    if index_text:
+                        parts.append(index_text)
+
+                    system_prompt = "\n\n".join(parts)
+
+                    # Drain any pending coordination signals into the heartbeat.
+                    # Finding 2: heartbeat mode consumes wait-reply chat steers
+                    # (resolve None → dedicated followup turn) instead of folding
+                    # them, so an agenda turn never answers a chat message.
+                    steered = self._drain_steer_messages(heartbeat=True)
+                    if steered:
+                        steer_context = "\n".join(f"- {text}" for text, _ in steered)
+                        message = (
+                            f"{message}\n\n"
+                            f"## Pending Coordination Signals\n\n{steer_context}"
+                        )
+
+                    # Stateless message list — fresh each heartbeat
+                    messages: list[dict] = [{"role": "user", "content": message, "_origin": "system:heartbeat"}]
+
+                    for _iteration in range(max_iters):
+                        self._bump_liveness()
+                        if self._cancel_requested:
+                            self._cancel_requested = False
+                            self.state = "idle"
+                            duration_ms = int((time.time() - start) * 1000)
+                            if self.workspace:
+                                self.workspace.append_activity(
+                                    trigger="heartbeat",
+                                    summary="Cancelled",
+                                    tools_used=tools_used,
+                                    duration_ms=duration_ms,
+                                    tokens_used=total_tokens,
+                                    outcome="cancelled",
+                                )
+                            return {
+                                "response": "",
+                                "summary": "Cancelled",
+                                "tools_used": tools_used,
+                                "duration_ms": duration_ms,
+                                "tokens_used": total_tokens,
+                                "outcome": "cancelled",
+                                "skipped": False,
+                            }
+
+                        # When approaching the iteration limit, nudge the agent to
+                        # wrap up so it finishes with a proper summary instead of
+                        # being cut off with "Max iterations reached".
+                        _remaining = max_iters - _iteration
+                        if _remaining == 2:
+                            messages.append({
+                                "role": "user",
+                                "content": (
+                                    "[SYSTEM] You have 2 iterations remaining. "
+                                    "Start wrapping up — use notify_user to report "
+                                    "your results, then give your final answer."
+                                ),
+                                "_origin": "system:heartbeat",
+                            })
+                        elif _remaining == 1:
+                            messages.append({
+                                "role": "user",
+                                "content": (
+                                    "[SYSTEM] LAST iteration. Give your final answer "
+                                    "now. Do NOT call any more tools."
+                                ),
+                                "_origin": "system:heartbeat",
+                            })
+
+                        # On the very last iteration, withhold tools so the LLM is
+                        # forced to produce a text-only response.
+                        iter_tools = (
+                            None if _remaining == 1
+                            else self.tools.get_tool_definitions(
+                                **self._tool_filter_kw,
+                            ) or None
+                        )
+
+                        llm_response = await _llm_call_with_retry(
+                            self.llm.chat_collect,
+                            system=system_prompt,
+                            messages=messages,
+                            tools=iter_tools,
+                            # Heartbeats are coordination traffic, not deep work —
+                            # route to the cheap utility model when configured
+                            # (per-call model tiering hook). No-op when unset.
+                            **utility_model_kwargs(self.llm),
+                        )
+                        # Bug 1 (codex P2 r2): tick after the LLM call returns —
+                        # a single deep-research call can run >5 min, and bumping
+                        # only at iteration head would let the staleness check fire
+                        # during a perfectly healthy turn.
+                        self._bump_liveness()
+                        total_tokens += llm_response.tokens_used
+
+                        # Early cancel check after LLM call
+                        if self._cancel_requested:
+                            self._cancel_requested = False
+                            self.state = "idle"
+                            duration_ms = int((time.time() - start) * 1000)
+                            if self.workspace:
+                                self.workspace.append_activity(
+                                    trigger="heartbeat",
+                                    summary="Cancelled",
+                                    tools_used=tools_used,
+                                    duration_ms=duration_ms,
+                                    tokens_used=total_tokens,
+                                    outcome="cancelled",
+                                )
+                            return {
+                                "response": "",
+                                "summary": "Cancelled",
+                                "tools_used": tools_used,
+                                "duration_ms": duration_ms,
+                                "tokens_used": total_tokens,
+                                "outcome": "cancelled",
+                                "skipped": False,
+                            }
+
+                        # On the last iteration, ignore any tool_calls — the LLM
+                        # shouldn't return them (tools were withheld) but guard
+                        # against provider edge cases.
+                        if _remaining == 1 and llm_response.tool_calls:
+                            llm_response = LLMResponse(
+                                content=llm_response.content or "Heartbeat complete.",
+                                tool_calls=[],
+                                tokens_used=0,
                             )
-                            self.workspace.append_activity(
-                                trigger="heartbeat",
-                                summary=summary,
-                                tools_used=tools_used,
-                                duration_ms=duration_ms,
-                                tokens_used=total_tokens,
-                                outcome="ok",
-                                notifications=notifications or None,
-                            )
 
-                        self.state = "idle"
-                        return {
-                            "response": content,
-                            "summary": summary,
-                            "tools_used": tools_used,
-                            "duration_ms": duration_ms,
-                            "tokens_used": total_tokens,
-                            "outcome": "ok",
-                            "skipped": False,
-                        }
+                        if not llm_response.tool_calls:
+                            # Final answer
+                            content = llm_response.content or ""
+                            duration_ms = int((time.time() - start) * 1000)
 
-                    # Pre-scan for terminate
-                    terminate_msg = self._check_tool_loop_terminate(llm_response.tool_calls)
-                    if terminate_msg:
-                        self.state = "idle"
-                        duration_ms = int((time.time() - start) * 1000)
-                        if self.workspace:
-                            self.workspace.append_activity(
-                                trigger="heartbeat",
-                                summary=f"Tool loop: {terminate_msg}",
-                                tools_used=tools_used,
-                                duration_ms=duration_ms,
-                                tokens_used=total_tokens,
-                                outcome="error",
-                            )
-                        return {
-                            "response": terminate_msg,
-                            "summary": terminate_msg,
-                            "tools_used": tools_used,
-                            "duration_ms": duration_ms,
-                            "tokens_used": total_tokens,
-                            "outcome": "error",
-                            "skipped": False,
-                        }
+                            summary = truncate(content.replace("\n", " ").strip(), 200)
+                            if self.workspace:
+                                tools_str = ", ".join(tools_used) if tools_used else "none"
+                                self.workspace.append_daily_log(
+                                    f"Heartbeat complete | {total_tokens} tokens, "
+                                    f"{duration_ms}ms | Tools: {tools_str}"
+                                )
+                                self.workspace.append_activity(
+                                    trigger="heartbeat",
+                                    summary=summary,
+                                    tools_used=tools_used,
+                                    duration_ms=duration_ms,
+                                    tokens_used=total_tokens,
+                                    outcome="ok",
+                                    notifications=notifications or None,
+                                )
 
-                    # Execute tool calls
-                    tool_call_entries = [
-                        {
-                            "id": f"call_{generate_id('tc')}",
-                            "type": "function",
-                            "function": {
-                                "name": tc.name,
-                                "arguments": json.dumps(tc.arguments),
-                            },
-                        }
-                        for tc in llm_response.tool_calls
-                    ]
-                    messages.append({
-                        "role": "assistant",
-                        "content": llm_response.content or "",
-                        "tool_calls": tool_call_entries,
-                    })
+                            self.state = "idle"
+                            return {
+                                "response": content,
+                                "summary": summary,
+                                "tools_used": tools_used,
+                                "duration_ms": duration_ms,
+                                "tokens_used": total_tokens,
+                                "outcome": "ok",
+                                "skipped": False,
+                            }
 
-                    # Capture metadata before execution
-                    for tool_call in llm_response.tool_calls:
-                        if tool_call.name not in tools_used:
-                            tools_used.append(tool_call.name)
-                        if tool_call.name == "notify_user":
-                            msg_arg = tool_call.arguments.get("message", "")
-                            if msg_arg:
-                                notifications.append(msg_arg)
+                        # Pre-scan for terminate
+                        terminate_msg = self._check_tool_loop_terminate(llm_response.tool_calls)
+                        if terminate_msg:
+                            self.state = "idle"
+                            duration_ms = int((time.time() - start) * 1000)
+                            if self.workspace:
+                                self.workspace.append_activity(
+                                    trigger="heartbeat",
+                                    summary=f"Tool loop: {terminate_msg}",
+                                    tools_used=tools_used,
+                                    duration_ms=duration_ms,
+                                    tokens_used=total_tokens,
+                                    outcome="error",
+                                )
+                            return {
+                                "response": terminate_msg,
+                                "summary": terminate_msg,
+                                "tools_used": tools_used,
+                                "duration_ms": duration_ms,
+                                "tokens_used": total_tokens,
+                                "outcome": "error",
+                                "skipped": False,
+                            }
 
-                    # Execute tools — parallel-safe tools run concurrently
-                    self._current_messages = messages
-                    tool_results = await self._run_tools_parallel(
-                        llm_response.tool_calls,
-                    )
-                    # Bug 1 (codex P2 r2): tick after tool execution — a
-                    # long-running shell or browser action can sit at the
-                    # 300s _TOOL_TIMEOUT cap. Without this bump the next
-                    # iteration head might already be past the staleness
-                    # threshold even though the loop is healthy.
-                    self._bump_liveness()
-                    for i, (result_str, _result) in enumerate(tool_results):
-                        hb_tool_msg = {
-                            "role": "tool",
-                            "tool_call_id": tool_call_entries[i]["id"],
-                            "content": result_str,
-                        }
-                        # Tag tool results from coordination tools with agent provenance
-                        _hb_tc_name = llm_response.tool_calls[i].name
-                        if _hb_tc_name in ("check_inbox",):
-                            _hb_from = _result.get("from_agent", "unknown") if isinstance(_result, dict) else "unknown"
-                            hb_tool_msg["_origin"] = f"agent:{_hb_from}"
-                        messages.append(hb_tool_msg)
+                        # Execute tool calls
+                        tool_call_entries = [
+                            {
+                                "id": f"call_{generate_id('tc')}",
+                                "type": "function",
+                                "function": {
+                                    "name": tc.name,
+                                    "arguments": json.dumps(tc.arguments),
+                                },
+                            }
+                            for tc in llm_response.tool_calls
+                        ]
+                        messages.append({
+                            "role": "assistant",
+                            "content": llm_response.content or "",
+                            "tool_calls": tool_call_entries,
+                        })
 
-                    # Clear reload flag if set (heartbeat rarely creates tools,
-                    # but the flag must be consumed to avoid stale state).
-                    self._tools_reloaded = False
+                        # Capture metadata before execution
+                        for tool_call in llm_response.tool_calls:
+                            if tool_call.name not in tools_used:
+                                tools_used.append(tool_call.name)
+                            if tool_call.name == "notify_user":
+                                msg_arg = tool_call.arguments.get("message", "")
+                                if msg_arg:
+                                    notifications.append(msg_arg)
 
-                    # Trim if context grows large
-                    messages = self._trim_context(messages, max_tokens=_FALLBACK_MAX_TOKENS)
+                        # Execute tools — parallel-safe tools run concurrently
+                        self._current_messages = messages
+                        tool_results = await self._run_tools_parallel(
+                            llm_response.tool_calls,
+                        )
+                        # Bug 1 (codex P2 r2): tick after tool execution — a
+                        # long-running shell or browser action can sit at the
+                        # 300s _TOOL_TIMEOUT cap. Without this bump the next
+                        # iteration head might already be past the staleness
+                        # threshold even though the loop is healthy.
+                        self._bump_liveness()
+                        for i, (result_str, _result) in enumerate(tool_results):
+                            hb_tool_msg = {
+                                "role": "tool",
+                                "tool_call_id": tool_call_entries[i]["id"],
+                                "content": result_str,
+                            }
+                            # Tag tool results from coordination tools with agent provenance
+                            _hb_tc_name = llm_response.tool_calls[i].name
+                            if _hb_tc_name in ("check_inbox",):
+                                _hb_from = (
+                                    _result.get("from_agent", "unknown")
+                                    if isinstance(_result, dict) else "unknown"
+                                )
+                                hb_tool_msg["_origin"] = f"agent:{_hb_from}"
+                            messages.append(hb_tool_msg)
 
-                # Safety net — should not normally be reached because the last
-                # iteration withholds tools and forces a text response.
-                self.state = "idle"
-                duration_ms = int((time.time() - start) * 1000)
-                if self.workspace:
-                    self.workspace.append_activity(
-                        trigger="heartbeat",
-                        summary=f"Max iterations ({max_iters}) reached",
-                        tools_used=tools_used,
-                        duration_ms=duration_ms,
-                        tokens_used=total_tokens,
-                        outcome="max_iterations",
-                    )
-                return {
-                    "response": f"Max iterations ({max_iters}) reached",
-                    "summary": f"Max iterations ({max_iters}) reached",
-                    "tools_used": tools_used,
-                    "duration_ms": duration_ms,
-                    "tokens_used": total_tokens,
-                    "outcome": "max_iterations",
-                    "skipped": False,
-                }
+                        # Clear reload flag if set (heartbeat rarely creates tools,
+                        # but the flag must be consumed to avoid stale state).
+                        self._tools_reloaded = False
 
-            except asyncio.CancelledError:
-                self.state = "idle"
-                duration_ms = int((time.time() - start) * 1000)
-                if self.workspace:
-                    self.workspace.append_activity(
-                        trigger="heartbeat",
-                        summary="Cancelled",
-                        tools_used=tools_used,
-                        duration_ms=duration_ms,
-                        tokens_used=total_tokens,
-                        outcome="cancelled",
-                    )
-                raise
-            except LLMAuthError as e:
-                # Heartbeat hit a credential failure. Same pattern as
-                # execute_task — mesh-side recording is authoritative,
-                # the agent does NOT self-report to avoid double-counting.
-                self.state = "idle"
-                duration_ms = int((time.time() - start) * 1000)
-                logger.warning("Heartbeat auth failure: %s", e)
-                if self.workspace:
-                    self.workspace.append_activity(
-                        trigger="heartbeat",
-                        summary=f"Auth failure: {e}",
-                        tools_used=tools_used,
-                        duration_ms=duration_ms,
-                        tokens_used=total_tokens,
-                        outcome="error",
-                    )
-                return {
-                    "response": f"Auth failure: {e}",
-                    "summary": f"Auth failure: {e}",
-                    "tools_used": tools_used,
-                    "duration_ms": duration_ms,
-                    "tokens_used": total_tokens,
-                    "outcome": "auth_failure",
-                    "skipped": False,
-                }
-            except LLMConfigError as e:
-                self.state = "idle"
-                duration_ms = int((time.time() - start) * 1000)
-                logger.warning("Heartbeat config error: %s", e)
-                if self.workspace:
-                    self.workspace.append_activity(
-                        trigger="heartbeat",
-                        summary=f"Config error: {e}",
-                        tools_used=tools_used,
-                        duration_ms=duration_ms,
-                        tokens_used=total_tokens,
-                        outcome="error",
-                    )
-                return {
-                    "response": f"Config error: {e}",
-                    "summary": f"Config error: {e}",
-                    "tools_used": tools_used,
-                    "duration_ms": duration_ms,
-                    "tokens_used": total_tokens,
-                    "outcome": "config_error",
-                    "skipped": False,
-                }
-            except Exception as e:
-                self.state = "idle"
-                duration_ms = int((time.time() - start) * 1000)
-                logger.error("Heartbeat failed: %s", e, exc_info=True)
-                if self.workspace:
-                    self.workspace.append_activity(
-                        trigger="heartbeat",
-                        summary=f"Error: {e}",
-                        tools_used=tools_used,
-                        duration_ms=duration_ms,
-                        tokens_used=total_tokens,
-                        outcome="error",
-                    )
-                return {
-                    "response": f"Error: {e}",
-                    "summary": f"Error: {e}",
-                    "tools_used": tools_used,
-                    "duration_ms": duration_ms,
-                    "tokens_used": total_tokens,
-                    "outcome": "error",
-                    "skipped": False,
-                }
+                        # Trim if context grows large
+                        messages = self._trim_context(messages, max_tokens=_FALLBACK_MAX_TOKENS)
+
+                    # Safety net — should not normally be reached because the last
+                    # iteration withholds tools and forces a text response.
+                    self.state = "idle"
+                    duration_ms = int((time.time() - start) * 1000)
+                    if self.workspace:
+                        self.workspace.append_activity(
+                            trigger="heartbeat",
+                            summary=f"Max iterations ({max_iters}) reached",
+                            tools_used=tools_used,
+                            duration_ms=duration_ms,
+                            tokens_used=total_tokens,
+                            outcome="max_iterations",
+                        )
+                    return {
+                        "response": f"Max iterations ({max_iters}) reached",
+                        "summary": f"Max iterations ({max_iters}) reached",
+                        "tools_used": tools_used,
+                        "duration_ms": duration_ms,
+                        "tokens_used": total_tokens,
+                        "outcome": "max_iterations",
+                        "skipped": False,
+                    }
+
+                except asyncio.CancelledError:
+                    self.state = "idle"
+                    duration_ms = int((time.time() - start) * 1000)
+                    if self.workspace:
+                        self.workspace.append_activity(
+                            trigger="heartbeat",
+                            summary="Cancelled",
+                            tools_used=tools_used,
+                            duration_ms=duration_ms,
+                            tokens_used=total_tokens,
+                            outcome="cancelled",
+                        )
+                    raise
+                except LLMAuthError as e:
+                    # Heartbeat hit a credential failure. Same pattern as
+                    # execute_task — mesh-side recording is authoritative,
+                    # the agent does NOT self-report to avoid double-counting.
+                    self.state = "idle"
+                    duration_ms = int((time.time() - start) * 1000)
+                    logger.warning("Heartbeat auth failure: %s", e)
+                    if self.workspace:
+                        self.workspace.append_activity(
+                            trigger="heartbeat",
+                            summary=f"Auth failure: {e}",
+                            tools_used=tools_used,
+                            duration_ms=duration_ms,
+                            tokens_used=total_tokens,
+                            outcome="error",
+                        )
+                    return {
+                        "response": f"Auth failure: {e}",
+                        "summary": f"Auth failure: {e}",
+                        "tools_used": tools_used,
+                        "duration_ms": duration_ms,
+                        "tokens_used": total_tokens,
+                        "outcome": "auth_failure",
+                        "skipped": False,
+                    }
+                except LLMConfigError as e:
+                    self.state = "idle"
+                    duration_ms = int((time.time() - start) * 1000)
+                    logger.warning("Heartbeat config error: %s", e)
+                    if self.workspace:
+                        self.workspace.append_activity(
+                            trigger="heartbeat",
+                            summary=f"Config error: {e}",
+                            tools_used=tools_used,
+                            duration_ms=duration_ms,
+                            tokens_used=total_tokens,
+                            outcome="error",
+                        )
+                    return {
+                        "response": f"Config error: {e}",
+                        "summary": f"Config error: {e}",
+                        "tools_used": tools_used,
+                        "duration_ms": duration_ms,
+                        "tokens_used": total_tokens,
+                        "outcome": "config_error",
+                        "skipped": False,
+                    }
+                except Exception as e:
+                    self.state = "idle"
+                    duration_ms = int((time.time() - start) * 1000)
+                    logger.error("Heartbeat failed: %s", e, exc_info=True)
+                    if self.workspace:
+                        self.workspace.append_activity(
+                            trigger="heartbeat",
+                            summary=f"Error: {e}",
+                            tools_used=tools_used,
+                            duration_ms=duration_ms,
+                            tokens_used=total_tokens,
+                            outcome="error",
+                        )
+                    return {
+                        "response": f"Error: {e}",
+                        "summary": f"Error: {e}",
+                        "tools_used": tools_used,
+                        "duration_ms": duration_ms,
+                        "tokens_used": total_tokens,
+                        "outcome": "error",
+                        "skipped": False,
+                    }
+                finally:
+                    self._sweep_heartbeat_steer_futures()
             finally:
+                self._chat_lock.release()
                 _heartbeat_mode.reset(token)
         finally:
             if saved_allowed is not None:

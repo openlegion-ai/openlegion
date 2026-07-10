@@ -731,8 +731,9 @@ class TestEnrichedHeartbeat:
     @pytest.mark.asyncio
     async def test_heartbeat_self_tasking_rule_is_budget_governed(self):
         """Phase-3 unit 4: rule 2 directs goal-driven self-tasking gated on
-        plate capacity AND budget (incl. the coordination tier), not merely
-        'nothing else pending'."""
+        plate capacity AND budget, not merely 'nothing else pending'. Finding 4:
+        the copy is true in both modes — self-created work ALWAYS spends the
+        WORK budget; the coordination line (when shown) governs only cadence."""
         dispatch = AsyncMock(return_value="Ok")
         context_fn = AsyncMock(return_value={
             "heartbeat_rules": "",
@@ -753,7 +754,7 @@ class TestEnrichedHeartbeat:
         call_msg = dispatch.call_args[0][1]
         assert "hand_off to yourself" in call_msg
         assert "plate has capacity" in call_msg
-        assert "coordination tier" in call_msg
+        assert "ALWAYS spends your WORK budget" in call_msg
         assert "budget is the governor" in call_msg
 
 

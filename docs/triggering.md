@@ -101,7 +101,7 @@ By default, cron jobs suppress empty or trivial agent responses. The complete se
 
 ## Heartbeats
 
-Heartbeats are a cost-efficient form of autonomous monitoring. They run **cheap deterministic probes first**, and only invoke the LLM when probes find actionable items.
+Heartbeats are a cost-efficient form of autonomous monitoring. They run **cheap deterministic probes first**, and only invoke the LLM (as a full agenda turn) when the agent's plate has something actionable — see [Plate-Gated Agenda Dispatch](#plate-gated-agenda-dispatch) below.
 
 The default heartbeat schedule is `"every 15m"` (`DEFAULT_HEARTBEAT_SCHEDULE`, `src/host/cron.py:84`). The **operator agent's heartbeat is forced to `"every 15m"` regardless of `mesh.heartbeat_schedule`** — see `src/cli/runtime.py:973`.
 
@@ -111,7 +111,8 @@ The default heartbeat schedule is `"every 15m"` (`DEFAULT_HEARTBEAT_SCHEDULE`, `
 Cron tick
   → Run deterministic probes (no LLM, zero cost)
   → Fetch agent context (HEARTBEAT.md + daily logs via /heartbeat-context)
-  → All clean + default HEARTBEAT.md + no activity? → Skip entirely (zero cost)
+  → Empty plate (no probes, default HEARTBEAT.md, no activity;
+      and no standing goals OR no utility model)? → Probe-only, no LLM (zero cost)
   → Otherwise → Build enriched message with:
       Rules (HEARTBEAT.md) + Recent activity (daily logs)
       + Probe alerts + Pending signal/task details
@@ -196,29 +197,23 @@ When a heartbeat fires, the agent receives a single message with all the context
 
 This replaces the previous pattern where agents had to waste tool calls reading HEARTBEAT.md and querying the blackboard themselves.
 
-### Skip-LLM Optimization
+### Plate-Gated Agenda Dispatch
 
-Heartbeats skip the LLM dispatch entirely (zero cost) when all four conditions are met:
+A heartbeat is a **plate-gated agenda turn**. Each tick first assembles the agent's **plate** — its triggered probes (disk pressure, pending blackboard signals, pending tasks), its recent activity (daily logs), and any custom `HEARTBEAT.md` rules — and the cron scheduler decides whether the tick is worth a full LLM agenda turn:
 
-1. **Not manually triggered** — manual runs (e.g. `/cron run`, dashboard "Run now") always dispatch so the user sees a result
-2. **HEARTBEAT.md is default** — the file is empty (after stripping whitespace) or its content is **exactly** `# Heartbeat Rules` (exact equality, not prefix matching). A file containing `# Heartbeat Rules` followed by any additional content is considered customized and will be sent to the LLM.
-3. **No recent activity** — daily logs are empty
-4. **No probes triggered** — disk usage normal, no pending signals or tasks
+1. **Actionable plate** — any triggered probe, recent activity, or a customized `HEARTBEAT.md` (non-default) always escalates to an agenda turn. A manual run (e.g. `/cron run`, dashboard "Run now") always dispatches so the user sees a result.
+2. **No actionable items, but standing goals** — a speculative goal-only tick escalates to the LLM **only when a coordination (utility) model is configured** (`llm.utility_model`). Without one, an agenda turn would bill the strong WORK model — the exact B2 starvation vector — so it stays a probe-only tick.
+3. **Truly-empty plate** — no actionable items and (no standing goals *or* no utility model) never reaches the LLM (zero cost).
 
-This makes always-on heartbeats economically viable even at high frequencies. See `src/host/cron.py:543`.
+"Default `HEARTBEAT.md`" means the file is empty (after stripping whitespace) or its content is **exactly** `# Heartbeat Rules` (exact equality, not prefix matching). A file containing `# Heartbeat Rules` followed by any additional content is considered customized.
 
-#### Forcing the LLM to run every tick
+This makes always-on heartbeats economically viable even at high frequencies. See the plate gate in `src/host/cron.py` (`_build_heartbeat_message`).
 
-Pipeline-kicker agents — those whose entire job is to wake up on a schedule and decide what to do next — typically have no probes registered and ship with an empty `HEARTBEAT.md`. Under the four-condition skip-LLM check above they would never actually wake. Set `force_llm: true` on the cron job to bypass the skip and dispatch to the LLM on every tick regardless of the other predicates:
+#### Making the LLM run every tick
 
-```bash
-curl -X PUT http://localhost:8420/mesh/cron/<job_id> \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $MESH_AUTH_TOKEN" \
-  -d '{"force_llm": true}'
-```
+There is **no `force_llm` flag** — the old four-condition skip-LLM check and its `force_llm` bypass were removed when heartbeats became full plate-gated agenda turns (unknown cron fields are now filtered on read, so a stale `force_llm` in a request is silently dropped).
 
-You're opting out of the cost optimization — pick `force_llm: true` only for agents that genuinely need to think every tick. `force_llm` is in `_UPDATABLE_FIELDS` so you can flip it at runtime; it persists across mesh restarts via `config/cron.json`.
+Pipeline-kicker agents — those whose entire job is to wake up on a schedule and decide what to do next — should instead ship with a **customized `HEARTBEAT.md`**. Any non-default content makes the plate actionable on **every** tick (predicate #1 above), so the agenda turn always dispatches to the LLM. That is the supported way to always run the LLM; there is no runtime flag to flip.
 
 ## Tool-Mode Cron
 

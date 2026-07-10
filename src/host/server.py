@@ -3996,7 +3996,16 @@ def create_mesh_app(
             # B2 coordination breakout: utility-model spend runs on its
             # own ledger + daily cap, so surface that headroom alongside
             # the work budget (Phase-3 unit 4 consumes this).
-            if hasattr(cost_tracker, "get_coordination_spend"):
+            #
+            # Finding 4(a): the coordination tier is structurally inert
+            # without a configured ``llm.utility_model`` — nothing can
+            # classify as coordination, so every call (incl. agenda ticks)
+            # bills WORK. Omitting the sub-dict here makes the permanently
+            # $0.00 coordination line disappear (the formatter gates on
+            # presence) instead of implying a healthy separate tier.
+            if _deployment_utility_model() and hasattr(
+                cost_tracker, "get_coordination_spend",
+            ):
                 result["budget"]["coordination"] = cost_tracker.get_coordination_spend(agent_id)
             # Include team budget if the agent belongs to a team
             agent_proj = teams_store.team_of(agent_id)
