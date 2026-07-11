@@ -792,6 +792,33 @@ def create_mesh_app(
     # each executor is registered near where it's defined below.
     app.pending_executors: dict[str, Callable[[dict], Any]] = {}
 
+    def _require_held_queue_capacity(caller: str) -> None:
+        """Fail-closed capacity gate for the POLICY hold producers
+        (notify_user / connector_call / wallet_transfer / wallet_execute).
+
+        Reaps expired rows first so a queue full of dead rows never
+        blocks a legitimate hold, then REFUSES the new proposal (429)
+        when the store already holds ``_MAX_PENDING`` live rows.
+        Deliberately never evicts: the delete producers' evict-oldest
+        behavior is an operator-initiated surface where the newest
+        proposal winning is correct, but these producers are
+        agent-initiated — letting an agent's hold spam evict an
+        operator's pending delete confirmation would be a
+        denial-of-confirmation vector, and unbounded storage (TTL as
+        the only bound) would flood the Needs-you panel.
+        """
+        pending_actions.reap_expired()
+        if len(pending_actions.list_pending()) >= _MAX_PENDING:
+            _record_denial(
+                "limit", caller=caller, gate="policy_hold:queue_full",
+            )
+            raise HTTPException(
+                429,
+                "Approval queue full — too many actions are awaiting human "
+                "confirmation. Retry later, or continue other work until the "
+                "operator clears the pending-approvals queue.",
+            )
+
     # PR 1 — soft-edit receipts + 5-minute Undo. Mirrors the pending_actions
     # plumbing: SQLite-backed, exposed on the app for tests/dashboard,
     # event_bus wired so the dashboard can render receipt cards live.
@@ -3144,6 +3171,7 @@ def create_mesh_app(
             )
             raise HTTPException(403, "Connector call denied by policy")
         if decision.decision == "hold":
+            _require_held_queue_capacity(caller)
             origin = _validated_origin(request, caller)
             nonce = str(_uuid.uuid4())
             payload = {
@@ -3319,6 +3347,7 @@ def create_mesh_app(
             )
             raise HTTPException(403, "Wallet transfer denied by policy")
         if decision.decision == "hold":
+            _require_held_queue_capacity(agent_id)
             origin = _validated_origin(request, agent_id)
             nonce = str(_uuid.uuid4())
             payload = {
@@ -3431,6 +3460,7 @@ def create_mesh_app(
             )
             raise HTTPException(403, "Wallet execute denied by policy")
         if decision.decision == "hold":
+            _require_held_queue_capacity(agent_id)
             origin = _validated_origin(request, agent_id)
             nonce = str(_uuid.uuid4())
             payload = {
@@ -3627,6 +3657,7 @@ def create_mesh_app(
             )
             raise HTTPException(403, "Notification denied by policy")
         if decision.decision == "hold":
+            _require_held_queue_capacity(body.agent_id)
             origin = _validated_origin(request, body.agent_id)
             nonce = str(_uuid.uuid4())
             payload = {"agent_id": body.agent_id, "message": message}

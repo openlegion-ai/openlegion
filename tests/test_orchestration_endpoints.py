@@ -788,6 +788,52 @@ async def test_confirm_dispatches_via_executor_registry(v2_app):
 
 
 @pytest.mark.asyncio
+async def test_delete_proposal_still_evicts_oldest_at_cap(v2_app):
+    """Regression: the DELETE producers keep their evict-oldest-at-cap
+    behavior (operator-initiated surface; newest proposal winning is
+    correct there) — only the new policy hold producers fail closed."""
+    from src.host.server import _MAX_PENDING
+
+    app, _, _ = v2_app
+    pa = app.pending_actions
+    app.teams_store.create_team("doomed")
+    app.teams_store.set_status("doomed", "archived")
+    # Start from a clean table so the eviction target is deterministic.
+    with pa._conn() as conn:
+        conn.execute("DELETE FROM pending_actions")
+    # pre-0 gets the shortest TTL -> smallest expires_at -> eviction target.
+    pa.store(
+        nonce="pre-0", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="delete", payload={},
+        origin_kind="human", ttl=60,
+    )
+    for i in range(1, _MAX_PENDING):
+        pa.store(
+            nonce=f"pre-{i}", actor="operator", target_kind="agent",
+            target_id="alpha", action_kind="delete", payload={},
+            origin_kind="human", ttl=300,
+        )
+    assert len(pa.list_pending()) == _MAX_PENDING
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post(
+                "/mesh/teams/doomed/propose-delete",
+                headers=_human_internal_headers(),
+            )
+        assert r.status_code == 200, r.text
+        new_nonce = r.json()["change_id"]
+        # Evicted exactly the oldest; stored the new proposal; cap held.
+        assert len(pa.list_pending()) == _MAX_PENDING
+        assert pa.peek("pre-0") is None
+        for i in range(1, _MAX_PENDING):
+            assert pa.peek(f"pre-{i}") is not None
+        assert pa.peek(new_nonce) is not None
+    finally:
+        with pa._conn() as conn:
+            conn.execute("DELETE FROM pending_actions")
+
+
+@pytest.mark.asyncio
 async def test_confirm_agent_origin_403_for_non_delete_kind(v2_app):
     """The human-origin confirm gate is unconditional — it fires for ANY
     action kind, not just delete, before the executor is even looked up."""

@@ -366,6 +366,37 @@ class TestWalletTransferPolicyHold:
         assert confirm.status_code == 403
         mock_wallet_service.transfer.assert_not_awaited()
 
+    def test_hold_queue_full_rejected_fail_closed(self, hold_client, mock_wallet_service):
+        """With the pending store at _MAX_PENDING, a hold-decision
+        transfer is REFUSED (429) — never broadcast, never stored, no
+        existing row evicted."""
+        from src.host.server import _MAX_PENDING
+
+        pa = hold_client.app.pending_actions
+        try:
+            for i in range(_MAX_PENDING):
+                pa.store(
+                    nonce=f"pre-xfer-{i}", actor="operator", target_kind="agent",
+                    target_id="alpha", action_kind="delete", payload={},
+                    origin_kind="human",
+                )
+            before = len(pa.list_pending())
+            assert before >= _MAX_PENDING
+            resp = hold_client.post("/mesh/wallet/transfer", json={
+                "agent_id": "test", "chain": "evm:base", "to": "0x1", "amount": "0.1",
+            })
+            assert resp.status_code == 429
+            assert "Approval queue full" in resp.text
+            mock_wallet_service.transfer.assert_not_awaited()
+            assert len(pa.list_pending()) == before  # not stored
+            for i in range(_MAX_PENDING):
+                assert pa.peek(f"pre-xfer-{i}") is not None  # never evicted
+        finally:
+            # The store is a shared cwd data/pending_actions.db — drop the
+            # prefill so later hold tests don't inherit a full queue.
+            with pa._conn() as conn:
+                conn.execute("DELETE FROM pending_actions WHERE nonce LIKE 'pre-xfer-%'")
+
 
 class TestWalletExecutePolicyHold:
     def test_hold_queues_without_executing(self, hold_client, mock_wallet_service):
@@ -425,6 +456,36 @@ class TestWalletExecutePolicyHold:
         )
         assert confirm.status_code == 403
         mock_wallet_service.execute_contract.assert_not_awaited()
+
+    def test_hold_queue_full_rejected_fail_closed(self, hold_client, mock_wallet_service):
+        """With the pending store at _MAX_PENDING, a hold-decision
+        execute is REFUSED (429) — never broadcast, never stored, no
+        existing row evicted."""
+        from src.host.server import _MAX_PENDING
+
+        pa = hold_client.app.pending_actions
+        try:
+            for i in range(_MAX_PENDING):
+                pa.store(
+                    nonce=f"pre-exec-{i}", actor="operator", target_kind="agent",
+                    target_id="alpha", action_kind="delete", payload={},
+                    origin_kind="human",
+                )
+            before = len(pa.list_pending())
+            assert before >= _MAX_PENDING
+            resp = hold_client.post("/mesh/wallet/execute", json={
+                "agent_id": "test", "chain": "evm:base",
+                "contract": "0xRouter", "function": "swap(address,uint256)",
+            })
+            assert resp.status_code == 429
+            assert "Approval queue full" in resp.text
+            mock_wallet_service.execute_contract.assert_not_awaited()
+            assert len(pa.list_pending()) == before  # not stored
+            for i in range(_MAX_PENDING):
+                assert pa.peek(f"pre-exec-{i}") is not None  # never evicted
+        finally:
+            with pa._conn() as conn:
+                conn.execute("DELETE FROM pending_actions WHERE nonce LIKE 'pre-exec-%'")
 
 
 # === WalletService.cleanup_agent Tests ===

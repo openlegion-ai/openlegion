@@ -275,6 +275,36 @@ class TestConnectorCallPolicyGate:
         # not executed.
         assert FakeSession.instances == []
 
+    def test_hold_queue_full_rejected_fail_closed(self, mesh_env_hold):
+        """With the pending store at _MAX_PENDING, a hold-decision
+        connector call is REFUSED (429) — never executed, never stored,
+        no existing row evicted."""
+        from src.host.server import _MAX_PENDING
+
+        client, *_ = mesh_env_hold
+        pa = client.app.pending_actions
+        try:
+            for i in range(_MAX_PENDING):
+                pa.store(
+                    nonce=f"pre-conn-{i}", actor="operator", target_kind="agent",
+                    target_id="alpha", action_kind="delete", payload={},
+                    origin_kind="human",
+                )
+            before = len(pa.list_pending())
+            assert before >= _MAX_PENDING
+            resp = self._call(client, "alpha")
+            assert resp.status_code == 429
+            assert "Approval queue full" in resp.text
+            assert FakeSession.instances == []  # never executed
+            assert len(pa.list_pending()) == before  # not stored
+            for i in range(_MAX_PENDING):
+                assert pa.peek(f"pre-conn-{i}") is not None  # never evicted
+        finally:
+            # The store is a shared cwd data/pending_actions.db — drop the
+            # prefill so later hold tests don't inherit a full queue.
+            with pa._conn() as conn:
+                conn.execute("DELETE FROM pending_actions WHERE nonce LIKE 'pre-conn-%'")
+
     def test_hold_confirm_executes_and_delivers_followup_note(self, mesh_env_hold):
         client, _store, _gateway, _bb, lane_manager = mesh_env_hold
         propose = self._call(client, "alpha")

@@ -355,6 +355,50 @@ async def test_notify_hold_agent_origin_confirm_403(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_notify_hold_queue_full_rejected_fail_closed(tmp_path, monkeypatch):
+    """With the pending store at _MAX_PENDING, a hold-decision notify is
+    REFUSED (429) — never delivered, never stored, and no existing row
+    is evicted (fail-closed; eviction is a delete-producer behavior
+    only)."""
+    from src.host.server import _MAX_PENDING
+
+    app, bb, captured, _ = _build_hold_ctx(
+        tmp_path, monkeypatch, "version: 1\ntiers:\n  external_visible: hold\n",
+    )
+    pa = app.pending_actions
+    try:
+        for i in range(_MAX_PENDING):
+            pa.store(
+                nonce=f"pre-notify-{i}", actor="operator", target_kind="agent",
+                target_id="alpha", action_kind="delete", payload={},
+                origin_kind="human",
+            )
+        before = len(pa.list_pending())
+        assert before >= _MAX_PENDING
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t",
+        ) as c:
+            resp = await c.post(
+                "/mesh/notify",
+                json={"agent_id": "scout", "message": "queue is full"},
+                headers={"X-Agent-ID": "scout"},
+            )
+        assert resp.status_code == 429
+        assert "Approval queue full" in resp.text
+        assert captured == []  # not delivered
+        assert len(pa.list_pending()) == before  # not stored
+        # No eviction: every prefilled row survives.
+        for i in range(_MAX_PENDING):
+            assert pa.peek(f"pre-notify-{i}") is not None
+    finally:
+        # The store is a shared cwd data/pending_actions.db — drop the
+        # prefill so later hold tests don't inherit a full queue.
+        with pa._conn() as conn:
+            conn.execute("DELETE FROM pending_actions WHERE nonce LIKE 'pre-notify-%'")
+        bb.close()
+
+
+@pytest.mark.asyncio
 async def test_notify_deny_policy_returns_403_and_records_denial(tmp_path, monkeypatch):
     app, bb, captured, _ = _build_hold_ctx(
         tmp_path, monkeypatch, "version: 1\ntiers:\n  external_visible: deny\n",
