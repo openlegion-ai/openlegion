@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from src.channels import AT_MENTION_RE
 from src.host.credentials import is_system_credential
-from src.shared.utils import sanitize_for_prompt, setup_logging
+from src.shared.utils import sanitize_for_prompt, setup_logging, usable_agent_reply
 
 if TYPE_CHECKING:
     from src.shared.types import MessageOrigin
@@ -270,8 +270,14 @@ class Channel(abc.ABC):
                 user=str(user_id),
             )
         response = await self.dispatch(target, message, origin=origin)
-        if not response or not response.strip():
-            return ""  # Suppress silent/empty responses
+        # Plan §8 #24 recon minor item: a bare ``response.strip()`` truthy
+        # check let the ``__SILENT__`` sentinel (a stopped/unresponsive
+        # agent) and the "(no response)"/``dispatch_error:`` lane-dispatch
+        # shapes through as if they were real agent text — a channel user
+        # would see the literal token. ``usable_agent_reply`` is the shared
+        # gate every other consumer of these non-success shapes uses.
+        if not usable_agent_reply(response):
+            return ""  # Suppress silent/unusable responses
         return f"[{target}] {response}"
 
     #: Commands gated to the channel owner only. Non-owner allowed users

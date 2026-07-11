@@ -118,6 +118,7 @@ class CronScheduler:
         utility_model_fn: Callable | None = None,
         goals_fn: Callable | None = None,
         lead_reviews_fn: Callable | None = None,
+        pending_tasks_fn: Callable | None = None,
         thread_store: Any = None,
     ):
         self.config_path = Path(config_path)
@@ -144,6 +145,19 @@ class CronScheduler:
         # with no open reviews — the probe below stays free for everyone
         # who isn't a lead sitting on a nonempty review queue.
         self.lead_reviews_fn = lead_reviews_fn
+        # Durable-tasks probe input (plan §8 #24 prereq iii): ``pending_
+        # tasks_fn(agent) -> int`` counts non-terminal (``pending``) tasks
+        # assigned to ``agent`` in the mesh-side durable tasks table (a
+        # cheap SQLite COUNT). ``hand_off``/``create_task`` write ONLY to
+        # this table, never to the legacy blackboard ``tasks/{agent}``
+        # prefix the probe below still scans — without this, a pending
+        # handoff to a stopped/unreachable agent could never trip the
+        # heartbeat safety net. Kept ALONGSIDE the blackboard scan rather
+        # than replacing it: template flows (``claim_task`` / the shared
+        # ``tasks/*`` work-queue pattern) still populate that namespace and
+        # a regression test pins it — the durable count is the primary,
+        # authoritative source; the blackboard scan is additional coverage.
+        self.pending_tasks_fn = pending_tasks_fn
         # Host-published channel post (§8 #14): wired so ``_execute_job``
         # can post a standup (or any ``post_to_channel``-tagged) job's
         # dispatch response into the team's channel thread. None in
@@ -1015,6 +1029,25 @@ class CronScheduler:
                 ))
             except Exception as e:
                 logger.debug("Pending tasks probe failed for '%s': %s", agent, e)
+
+        # Probe 3b: pending tasks in the DURABLE tasks store (plan §8 #24
+        # prereq iii). This is the authoritative source — ``hand_off``/
+        # ``create_task`` write only here, never to the blackboard prefix
+        # probe 3 scans — so a queued handoff to a stopped/unreachable
+        # agent trips the safety net even though probe 3 never sees it.
+        # Mesh-side only (cheap COUNT query); a read failure degrades to
+        # "no probe" rather than raising into the tick.
+        if self.pending_tasks_fn is not None:
+            try:
+                pending_count = self.pending_tasks_fn(agent)
+            except Exception as e:
+                logger.debug("Pending durable tasks probe failed for '%s': %s", agent, e)
+                pending_count = 0
+            results.append(HeartbeatProbeResult(
+                name="pending_durable_tasks",
+                triggered=bool(pending_count),
+                detail=f"{pending_count} pending task(s) in the durable tasks store",
+            ))
 
         # Probe 4: lead-duty pending drive-review verdicts (plan §8 #13/
         # #14). Mesh-side Team-store data only — no container hop. Non-

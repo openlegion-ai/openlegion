@@ -929,8 +929,10 @@ class DashboardEvent(BaseModel):
         # store) on create / status_change / reroute / cancel.
         # ``pending_action_*`` are emitted from ``host/pending_actions.py``
         # on store / consume(success) / reap_expired so the dashboard's
-        # System > Operator panel and inline chat bubbles render the
-        # operator's review queue without polling.
+        # Work tab "Needs you" panel and inline operator-chat
+        # ``pending_action_card`` bubbles render the operator's review
+        # queue without polling (the System > Operator panel that used to
+        # render this queue was removed in PR #1044).
         "task_created",
         "task_status_changed",
         # ``task_completed_without_handoff`` is emitted by

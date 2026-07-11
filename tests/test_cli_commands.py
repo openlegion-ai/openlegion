@@ -1556,9 +1556,11 @@ class TestWorkplaceCLICommands:
         assert result.exit_code == 0
         assert "Confirmed" in result.output
         assert "abc-nonce" in result.output
-        # URL should be the mesh confirm endpoint
+        # URL must be the dashboard proxy, not the raw mesh endpoint — the
+        # mesh endpoint requires bearer/internal + human-origin headers a
+        # bare CLI POST can't provide and 401s/403s (plan §8 #24).
         called_url = m.call_args.args[0]
-        assert "/mesh/pending/abc-nonce/confirm" in called_url
+        assert "/dashboard/api/workplace/pending/abc-nonce/confirm" in called_url
 
     def test_confirm_command_propagates_error(self):
         runner = CliRunner()
@@ -1573,7 +1575,7 @@ class TestWorkplaceCLICommands:
         assert result.exit_code == 0
         assert "Cancelled" in result.output
         called_url = m.call_args.args[0]
-        assert "/mesh/pending/abc/cancel" in called_url
+        assert "/dashboard/api/workplace/pending/abc/cancel" in called_url
 
     def test_cancel_command_includes_csrf_header(self):
         """The CLI commands must inject X-Requested-With so the dashboard

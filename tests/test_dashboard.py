@@ -5223,6 +5223,21 @@ class TestDashboardOriginStamp:
 # === Task 9 — Workplace tab + pending action review ===
 
 
+class TestPendingActionsDeadKwargRemoved:
+    """Plan §8 #24 recon minor item: ``create_dashboard_router`` accepted a
+    ``pending_actions`` kwarg that was never read in the router body — the
+    dashboard proxies to the mesh's ``/mesh/pending*`` endpoints instead
+    (enforcing the operator-or-internal gate mesh-side). Regression guard
+    against the dead parameter reappearing."""
+
+    def test_signature_has_no_pending_actions_param(self):
+        import inspect
+
+        from src.dashboard.server import create_dashboard_router
+
+        assert "pending_actions" not in inspect.signature(create_dashboard_router).parameters
+
+
 class TestWorkplaceTabRoutes:
     """Verify the new /api/workplace/* endpoints respond with the right
     shape for both the empty-state path and the store-attached path
@@ -5236,11 +5251,14 @@ class TestWorkplaceTabRoutes:
         from src.host.orchestration import Tasks
         from src.host.pending_actions import PendingActions
         self.tasks_store = Tasks(db_path=os.path.join(self._tmpdir, "tasks.db"))
+        # NOT passed into ``create_dashboard_router`` — the router never
+        # accepted a ``pending_actions`` kwarg for reading (removed as a
+        # dead parameter, plan §8 #24); it's used directly by
+        # ``_patch_pending_proxy`` below to stub the loopback proxy calls.
         self.pending_actions = PendingActions(
             db_path=os.path.join(self._tmpdir, "pa.db"),
         )
         self.components["tasks_store"] = self.tasks_store
-        self.components["pending_actions"] = self.pending_actions
 
     def teardown_method(self):
         try:
@@ -6708,6 +6726,44 @@ class TestDashboardChatPrioritySteerLane:
             "/dashboard/api/agents/alpha/chat", json={"message": "hi"},
         )
         assert resp.status_code == 502
+
+    def test_chat_silent_sentinel_becomes_human_readable(self):
+        """Plan §8 #24 recon minor item: a stopped/unresponsive agent's
+        ``__SILENT__`` sentinel must never leak raw into the dashboard
+        chat response — the operator would see a literal internal token."""
+        from src.shared.types import SILENT_REPLY_TOKEN
+
+        self.components["lane_manager"].deliver_chat = AsyncMock(
+            return_value=SILENT_REPLY_TOKEN,
+        )
+        resp = self.client.post(
+            "/dashboard/api/agents/alpha/chat", json={"message": "hi"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()["response"]
+        assert body != SILENT_REPLY_TOKEN
+        assert SILENT_REPLY_TOKEN not in body
+
+    def test_chat_no_response_marker_becomes_human_readable(self):
+        self.components["lane_manager"].deliver_chat = AsyncMock(
+            return_value="(no response)",
+        )
+        resp = self.client.post(
+            "/dashboard/api/agents/alpha/chat", json={"message": "hi"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["response"] != "(no response)"
+
+    def test_chat_dispatch_error_prefix_becomes_human_readable(self):
+        self.components["lane_manager"].deliver_chat = AsyncMock(
+            return_value="dispatch_error: connection reset",
+        )
+        resp = self.client.post(
+            "/dashboard/api/agents/alpha/chat", json={"message": "hi"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()["response"]
+        assert not body.startswith("dispatch_error:")
 
 
 class TestDashboardChatStreamBusyAwareFork:

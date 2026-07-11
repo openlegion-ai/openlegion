@@ -11507,8 +11507,10 @@ def create_mesh_app(
 
     # === Task 9 — Pending action review surface ===
     #
-    # The dashboard's System > Operator panel and the inline chat
-    # bubble both call these endpoints. Confirm wraps the existing
+    # The dashboard's Work tab "Needs you" panel and the inline operator-
+    # chat ``pending_action_card`` both call these endpoints (the System >
+    # Operator panel that used to render this queue was removed in PR
+    # #1044). Confirm wraps the existing
     # ``/mesh/config/confirm`` path; cancel is the additive escape
     # hatch (delete-without-apply) backed by ``PendingActions.cancel``.
     # Both inherit CSRF protection (X-Requested-With) from the

@@ -931,7 +931,12 @@ def pending_cmd(port: int, as_json: bool):
 def confirm_cmd(nonce: str, port: int, as_json: bool):
     """Confirm a pending action by nonce (Task 9)."""
     as_json = as_json or _json_mode
-    result = _mesh_post(port, f"/mesh/pending/{nonce}/confirm")
+    # Route through the dashboard proxy (plan §8 #24 recon minor item),
+    # like the sibling ``pending`` command — the raw mesh endpoint requires
+    # a bearer/internal header AND a human-origin stamp that a bare CLI
+    # POST can't provide, so it 401s/403s. The dashboard proxy injects both
+    # server-side.
+    result = _mesh_post(port, f"/dashboard/api/workplace/pending/{nonce}/confirm")
     if as_json:
         click.echo(dumps_safe(result))
     else:
@@ -945,7 +950,8 @@ def confirm_cmd(nonce: str, port: int, as_json: bool):
 def cancel_cmd(nonce: str, port: int, as_json: bool):
     """Cancel a pending action by nonce (Task 9)."""
     as_json = as_json or _json_mode
-    result = _mesh_post(port, f"/mesh/pending/{nonce}/cancel")
+    # See confirm_cmd above — same dashboard-proxy auth fix.
+    result = _mesh_post(port, f"/dashboard/api/workplace/pending/{nonce}/cancel")
     if as_json:
         click.echo(dumps_safe(result))
     else:
