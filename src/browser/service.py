@@ -940,6 +940,14 @@ _fingerprint_hard_burn_reason: dict[str, tuple[str, str]] = {}
 # a new module-level global, but lock-protected identity state consistent
 # with the surrounding fingerprint globals). Guarded by ``_fingerprint_lock``.
 _binding_signatures: dict[str, str] = {}
+# Retry-on-failure flag for the hard-burn dedupe path. ``snapshot`` persists
+# the WHOLE fingerprint state, so one global bool suffices. Set True when a
+# ``_force_fingerprint_burn`` transition FAILED to persist (the snapshot
+# returned False), so the next signal re-attempts even if it would otherwise
+# dedupe as an unchanged repeat — matching the original unconditional-snapshot
+# resilience. Guarded by ``_fingerprint_lock`` like the surrounding state
+# (Constraint #8: lock-protected module global).
+_fingerprint_snapshot_dirty: bool = False
 
 
 def _get_fingerprint_lock() -> asyncio.Lock:
@@ -1127,6 +1135,7 @@ async def _force_fingerprint_burn(
     agent_id: str, vendor: str, reason: str,
 ) -> bool:
     """Mark agent as hard-burned. Returns True iff state transitioned."""
+    global _fingerprint_snapshot_dirty
     async with _get_fingerprint_lock():
         already = agent_id in _fingerprint_hard_burned
         prev_reason = _fingerprint_hard_burn_reason.get(agent_id)
@@ -1135,16 +1144,21 @@ async def _force_fingerprint_burn(
         _fingerprint_hard_burned.add(agent_id)
         _fingerprint_hard_burn_reason[agent_id] = (vendor, reason)
         _fingerprint_last_signal[agent_id] = time.time()
-        # Persist ONLY on a real transition: a new burn, or a changed
-        # (vendor, reason). A burned agent repeatedly hitting the same
-        # walled site fires this listener per block-response; fsyncing an
-        # identical state each time micro-stalls the shared event loop for
-        # the whole fleet. The durable facts (burn set + reason) haven't
-        # changed on a repeat — last_signal is a best-effort timestamp we
-        # deliberately don't fsync on an identical hit.
+        # Persist on a real transition (a new burn, or a changed
+        # (vendor, reason)) — OR when a prior transition's snapshot FAILED
+        # and left the dirty flag set. A burned agent repeatedly hitting
+        # the same walled site fires this listener per block-response;
+        # fsyncing an identical state each time micro-stalls the shared
+        # event loop for the whole fleet. The durable facts (burn set +
+        # reason) haven't changed on a repeat — last_signal is a best-effort
+        # timestamp we deliberately don't fsync on an identical hit. But if
+        # the genuine transition never made it to disk, dedupe would lose
+        # it on restart; the dirty flag forces a retry on the next signal,
+        # matching the original unconditional-snapshot resilience.
         changed = (not already) or (prev_reason != (vendor, reason))
-        if changed:
-            _snapshot_fingerprint_state_locked()
+        if changed or _fingerprint_snapshot_dirty:
+            ok = _snapshot_fingerprint_state_locked()
+            _fingerprint_snapshot_dirty = not ok
     return not already
 
 
