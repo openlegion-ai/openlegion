@@ -5284,16 +5284,24 @@ class BrowserManager:
         # precisely so we can drain them here; bounded best-effort, never
         # raises. ``getattr`` default keeps this safe for older/partial
         # instances that predate the attribute.
-        dialog_tasks = list(
-            getattr(inst, "_dialog_tasks", set()) or [],
-        )
-        for task in dialog_tasks:
-            task.cancel()
-        for task in dialog_tasks:
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
+        #
+        # Drained TWICE — once now and again AFTER ``context.close()`` below —
+        # because a native dialog (notably a ``beforeunload``) can fire DURING
+        # teardown and schedule a FRESH resolver task that this first snapshot
+        # never saw. The instance is already out of ``_instances``, so no
+        # later stop could recover such a task; the post-close pass is what
+        # guarantees no resolver survives ``_stop_instance``.
+        async def _drain_dialog_tasks() -> None:
+            pending = list(getattr(inst, "_dialog_tasks", set()) or [])
+            for t in pending:
+                t.cancel()
+            for t in pending:
+                try:
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
+
+        await _drain_dialog_tasks()
         # Drain any in-flight hard-burn flip tasks fired by the response
         # listener before tearing down the context. They are short-lived
         # (one ``_force_fingerprint_burn`` call + audit event) but we
@@ -5389,6 +5397,12 @@ class BrowserManager:
             )
         except Exception as e:
             logger.debug("Error closing browser for '%s': %s", agent_id, e)
+        # CT-11 second drain: ``context.close()`` can surface a
+        # ``beforeunload`` (or other native dialog) whose resolver task was
+        # scheduled AFTER the first drain's snapshot. Now that the context is
+        # closed no new dialog events can fire, so this final pass reaps any
+        # such straggler and guarantees no resolver outlives ``_stop_instance``.
+        await _drain_dialog_tasks()
         # Tear down the per-agent X stack and release the slot. Order
         # matters: ``context.close()`` above asks Firefox to disconnect
         # from its X server BEFORE we kill that X server, so Firefox

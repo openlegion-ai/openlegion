@@ -597,6 +597,60 @@ class TestDialogListenerAttach:
         # that it is no longer running.
         assert task.cancelled() or task.exception() is None
 
+    @pytest.mark.asyncio
+    async def test_stop_instance_drains_dialog_task_created_during_teardown(self):
+        """CT-11 residual race: a native dialog (e.g. ``beforeunload``) can fire
+        DURING ``context.close()`` and schedule a NEW resolver task AFTER the
+        first drain's snapshot. Because the instance is already out of
+        ``_instances``, only the post-close SECOND drain can reap it — assert it
+        does, so no resolver survives ``_stop_instance``."""
+        mgr = _make_manager()
+
+        inst = CamoufoxInstance.__new__(CamoufoxInstance)
+        inst.agent_id = "agent-dialog-race"
+        inst.page = MagicMock()
+        inst.page.url = "https://example.com/"
+        inst._fingerprint_monitor_tasks = set()
+        inst._dialog_tasks = set()
+        inst.recorder = None
+        inst._jitter_task = None
+        inst._lock = asyncio.Lock()
+        inst._lock_loop = asyncio.get_event_loop()
+        inst.last_activity = 0.0
+        inst.drain_metrics = lambda: {
+            "agent_id": "agent-dialog-race",
+            "click_success_total": 0, "click_fail_total": 0,
+            "nav_timeout_total": 0,
+            "snapshot_p50_bytes": 0, "snapshot_p95_bytes": 0,
+            "click_window_size": 0, "click_success_rate_100": 0.0,
+        }
+
+        late: dict = {}
+
+        async def _late_resolver() -> None:
+            await asyncio.sleep(60)
+
+        async def _closing_fires_beforeunload() -> None:
+            # A ``beforeunload`` dialog fires as the context tears down: a fresh
+            # resolver is scheduled and retained AFTER the first drain already
+            # ran. Exactly the straggler the second drain must catch.
+            t = asyncio.create_task(_late_resolver())
+            inst._dialog_tasks.add(t)
+            t.add_done_callback(inst._dialog_tasks.discard)
+            late["task"] = t
+
+        inst.context = MagicMock()
+        inst.context.close = _closing_fires_beforeunload
+
+        mgr._instances["agent-dialog-race"] = inst
+
+        await mgr._stop_instance("agent-dialog-race")
+
+        # The task created during context.close() must be cancelled by return.
+        late_task = late["task"]
+        assert late_task.done()
+        assert late_task.cancelled() or late_task.exception() is None
+
 
 # ── Agent-side @tool forwarding ────────────────────────────────────────────
 
