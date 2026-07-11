@@ -272,8 +272,75 @@ def test_pair_trust_no_events_returns_zeroed_result(store):
         "submitter_agent_id": "nobody",
         "merged": 0,
         "rejected_after_approve": 0,
+        "flagged": 0,
+        "auto_merged": 0,
         "last_event_at": None,
     }
+
+
+def test_pair_trust_excludes_system_rated_auto_merges_from_floor_count(store):
+    """The self-reinforcement pin (§8 #20): a kernel-executed auto-merge
+    is rater_kind='system' + outcome='auto_merged' — it must be counted
+    ONLY as `auto_merged` (the sampling-decay input), NEVER folded into
+    `merged` (the trust-floor input). Otherwise auto-merges would feed
+    the very floor that gates further auto-merges."""
+    _drive_event(store, submitter="writer", lead="lead1", verdict="approve", resolution="merged")
+    store.record(
+        source="drive_review", ref_id="rev_auto_1", outcome="auto_merged", rater_kind="system",
+        agent_id="writer", team_id="team-x", rated_by="policy_engine",
+        details={"lead_agent_id": "lead1", "lead_verdict": "approve", "resolution": "auto_merged"},
+    )
+    store.record(
+        source="drive_review", ref_id="rev_auto_2", outcome="auto_merged", rater_kind="system",
+        agent_id="writer", team_id="team-x", rated_by="policy_engine",
+        details={"lead_agent_id": "lead1", "lead_verdict": "approve", "resolution": "auto_merged"},
+    )
+
+    result = store.pair_trust("lead1", "writer")
+    assert result["merged"] == 1, "only the human-rated merge counts toward the trust floor"
+    assert result["auto_merged"] == 2
+    assert result["rejected_after_approve"] == 0
+
+
+def test_pair_trust_flagged_counts_decay_events_and_zeroes_eligibility(store):
+    _drive_event(store, submitter="writer", lead="lead1", verdict="approve", resolution="merged")
+    store.record(
+        source="drive_review", ref_id="rev_flag", outcome="auto_merge_flagged", rater_kind="human",
+        agent_id="writer", team_id="team-x", rated_by="operator",
+        details={"lead_agent_id": "lead1", "resolution": "auto_merge_flagged"},
+    )
+
+    result = store.pair_trust("lead1", "writer")
+    assert result["merged"] == 1
+    assert result["flagged"] == 1
+
+
+def test_pair_trust_reverted_also_counts_as_flagged(store):
+    store.record(
+        source="drive_review", ref_id="rev_revert", outcome="auto_merge_reverted", rater_kind="human",
+        agent_id="writer", team_id="team-x", rated_by="operator",
+        details={"lead_agent_id": "lead1", "resolution": "auto_merge_reverted"},
+    )
+    result = store.pair_trust("lead1", "writer")
+    assert result["flagged"] == 1
+
+
+# =============================================================================
+# count_events (§8 #20 auto-merge daily rate cap)
+# =============================================================================
+
+
+def test_count_events_filters_source_outcome_rater_kind_and_since(store):
+    store.record(source="drive_review", ref_id="r1", outcome="auto_merged", rater_kind="system", agent_id="a")
+    store.record(source="drive_review", ref_id="r2", outcome="auto_merged", rater_kind="system", agent_id="b")
+    store.record(source="drive_review", ref_id="r3", outcome="merged", rater_kind="human", agent_id="a")
+
+    assert store.count_events(source="drive_review", outcome="auto_merged") == 2
+    assert store.count_events(source="drive_review", outcome="auto_merged", rater_kind="system") == 2
+    assert store.count_events(source="drive_review", outcome="auto_merged", rater_kind="human") == 0
+    assert store.count_events(source="drive_review", outcome="merged") == 1
+    # since=far future excludes everything already written.
+    assert store.count_events(source="drive_review", outcome="auto_merged", since=time.time() + 3600) == 0
 
 
 # =============================================================================

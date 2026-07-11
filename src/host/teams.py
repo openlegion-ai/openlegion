@@ -210,7 +210,8 @@ class TeamStore:
                     resolved_at       TEXT,
                     lead_verdict      TEXT,
                     lead_verdict_note TEXT,
-                    lead_verdict_at   TEXT
+                    lead_verdict_at   TEXT,
+                    lead_verdict_by   TEXT
                 );
                 CREATE INDEX IF NOT EXISTS idx_drive_reviews_team
                     ON drive_reviews(team_id, status);
@@ -681,7 +682,7 @@ class TeamStore:
     _REVIEW_COLS = (
         "id, team_id, branch, author, title, summary, status, "
         "reviewer, merge_commit, head_sha, created_at, resolved_at, "
-        "lead_verdict, lead_verdict_note, lead_verdict_at"
+        "lead_verdict, lead_verdict_note, lead_verdict_at, lead_verdict_by"
     )
 
     @staticmethod
@@ -707,6 +708,13 @@ class TeamStore:
             "lead_verdict": row[12],
             "lead_verdict_note": row[13],
             "lead_verdict_at": row[14],
+            # Verified reviewer identity that recorded the verdict (plan §8
+            # #20, U4) — durable, exact (lead) attribution for kernel-
+            # executed auto-merge's pair_trust, fixing U1's approximation
+            # (which read the team's CURRENT lead at resolution time and
+            # mis-attributed a pair across a lead swap). NULL for reviews
+            # verdicted before this column existed.
+            "lead_verdict_by": row[15],
         }
 
     def create_review(
@@ -778,9 +786,10 @@ class TeamStore:
         change anything and would just be confusing state); raises
         ``ValueError`` otherwise. ``reviewer`` is the verified lead
         identity the endpoint already checked against
-        ``teams.lead_agent_id`` — recorded here only for the debug
-        trail, not a separate column (the timestamp + verdict + note
-        are the durable record).
+        ``teams.lead_agent_id`` — stamped durably into ``lead_verdict_by``
+        (plan §8 #20, U4) so kernel-executed auto-merge's ``pair_trust``
+        can attribute the EXACT (lead, submitter) pair rather than
+        approximating via the team's lead at resolution time.
         """
         if verdict not in ("approve", "reject"):
             raise ValueError(f"Invalid verdict '{verdict}'")
@@ -791,9 +800,9 @@ class TeamStore:
             if row[0] != "open":
                 raise ValueError(f"Review '{review_id}' is already {row[0]}")
             conn.execute(
-                "UPDATE drive_reviews SET lead_verdict = ?, lead_verdict_note = ?, lead_verdict_at = ? "
-                "WHERE id = ?",
-                (verdict, note, _now(), review_id),
+                "UPDATE drive_reviews SET lead_verdict = ?, lead_verdict_note = ?, lead_verdict_at = ?, "
+                "lead_verdict_by = ? WHERE id = ?",
+                (verdict, note, _now(), reviewer, review_id),
             )
         logger.debug("lead verdict recorded on review %s by %s: %s", review_id, reviewer, verdict)
         return self.get_review(review_id)  # type: ignore[return-value]

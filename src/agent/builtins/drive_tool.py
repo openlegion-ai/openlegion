@@ -392,6 +392,9 @@ async def team_drive(
                 "lead_verdict": r.get("lead_verdict"),
                 "lead_verdict_note": sanitize_for_prompt(str(r.get("lead_verdict_note") or ""))[:1000] or None,
                 "lead_verdict_at": r.get("lead_verdict_at"),
+                # Verified reviewer identity that recorded the verdict (plan
+                # §8 #20) — an agent id, not free text, so no sanitize.
+                "lead_verdict_by": r.get("lead_verdict_by"),
             })
         return {"ok": True, "reviews": reviews, "count": len(reviews)}
 

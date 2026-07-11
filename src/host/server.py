@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.responses import StreamingResponse
 
+from src.host import auto_merge
 from src.host import drive as team_drive
 from src.host.asks import AskBroker, AskDeliveryFailed, AskLimitExceeded
 from src.host.change_history import ChangeHistory
@@ -6758,6 +6759,13 @@ def create_mesh_app(
     app.state.drive_concurrency = asyncio.Semaphore(_DRIVE_MAX_CONCURRENCY)
     app.state.drive_repo_locks: dict[str, asyncio.Lock] = {}
 
+    # Fire-and-forget auto-merge consumer tasks (plan §8 #20) — a strong-ref
+    # holder so asyncio doesn't GC an in-flight task (mirrors
+    # `_onboarding_tasks`/`_ask_delivery_tasks` below). Exposed on `app` so
+    # tests can await drain deterministically instead of polling.
+    _auto_merge_tasks: set[asyncio.Task] = set()
+    app._auto_merge_tasks = _auto_merge_tasks  # exposed for tests
+
     def _drive_repo_lock(team_id: str) -> asyncio.Lock:
         lock = app.state.drive_repo_locks.get(team_id)
         if lock is None:
@@ -6995,6 +7003,15 @@ def create_mesh_app(
         action. details_json carries the lead's advisory verdict
         alongside the resolution so ``pair_trust`` can later measure
         (lead, submitter) trust for kernel-executed auto-merge (§8 #20).
+
+        ``details["lead_agent_id"]`` is the review's own
+        ``lead_verdict_by`` — the verified identity that RECORDED the
+        verdict — falling back to the team's current lead only when
+        ``lead_verdict_by`` is NULL (pre-U4 rows, verdicted before that
+        column existed). U1 originally always read the team's current
+        lead here, which mis-attributes the pair across a lead swap
+        between verdict and merge; §8 #20 (U4) fixes that approximation
+        for every review resolved from here on.
         """
         try:
             team = teams_store.get_team(team_id) or {}
@@ -7011,7 +7028,7 @@ def create_mesh_app(
             rated_by=resolver,
             details={
                 "branch": resolved.get("branch"),
-                "lead_agent_id": team.get("lead_agent_id"),
+                "lead_agent_id": resolved.get("lead_verdict_by") or team.get("lead_agent_id"),
                 "lead_verdict": resolved.get("lead_verdict"),
                 "lead_verdict_at": resolved.get("lead_verdict_at"),
                 "resolution": resolution,
@@ -7129,6 +7146,74 @@ def create_mesh_app(
         _record_drive_review_outcome(team_id, review_id, resolved, "rejected", caller)
         return {"rejected": True, "review": resolved}
 
+    async def _post_auto_merge_note(
+        *, team_id: str, review: dict, branch: str, commit: str,
+        lead_verdict_by: str, author: str, sampled: bool,
+    ) -> None:
+        """Operator-chat note for a kernel-executed auto-merge (plan §8 #20
+        step 5) — the SAME ``/chat/note`` delivery primitive the ChainWatcher
+        uses for chain-outcome delivery (``src/cli/runtime.py``'s
+        ``_deliver_chain_outcome``), reused here directly against the
+        operator container via the mesh's own ``transport``. Best-effort:
+        callers already wrap this in a try/except (a note failure must
+        never affect the merge that already landed).
+        """
+        if transport is None:
+            return
+        from src.cli.config import _OPERATOR_AGENT_ID
+
+        if _OPERATOR_AGENT_ID not in router.agent_registry:
+            return
+        review_id = review.get("id", "")
+        lines = [
+            f"🔀 Auto-merged review {review_id} on team '{team_id}'",
+            f"branch {branch} -> main @ {commit[:10]}",
+            f"submitted by {author}, lead-approved by {lead_verdict_by}",
+        ]
+        if sampled:
+            lines.append(
+                "SAMPLED for post-review — please check this merge. Undo: "
+                f"POST /mesh/teams/{team_id}/drive/reviews/{review_id}/revert-merge — "
+                f"or reset the pair's trust: POST /mesh/teams/{team_id}/drive/reviews/"
+                f"{review_id}/flag-auto-merge"
+            )
+        note_text = "\n".join(lines)
+        try:
+            result = await transport.request(
+                _OPERATOR_AGENT_ID, "POST", "/chat/note", json={"message": note_text}, timeout=15,
+            )
+            if not isinstance(result, dict) or result.get("error") or not result.get("ok"):
+                logger.warning("auto-merge operator note rejected for review %s: %s", review_id, result)
+        except Exception:
+            logger.exception("auto-merge operator note raised for review %s", review_id)
+
+    async def _run_auto_merge_consumer(team_id: str, review: dict, lead_verdict_by: str) -> None:
+        """Fire-and-forget entry point (plan §8 #20) scheduled via
+        ``asyncio.create_task`` from the verdict endpoint below. This is the
+        outermost net on top of ``auto_merge.consider_auto_merge``'s own
+        internal guards — resolving the team's drive repo can itself raise
+        (unprovisioned drive, store error), so it gets its own try/except
+        here rather than inside the transport-agnostic ``auto_merge`` module.
+        """
+        try:
+            repo = await _drive_repo(team_id)
+        except HTTPException as e:
+            logger.info("auto-merge: drive resolve failed for team %s: %s", team_id, e.detail)
+            return
+        except Exception:
+            logger.exception("auto-merge: unexpected drive resolve failure for team %s", team_id)
+            return
+        await auto_merge.consider_auto_merge(
+            team_id=team_id,
+            review=review,
+            lead_verdict_by=lead_verdict_by,
+            teams_store=teams_store,
+            track_record_store=track_record_store,
+            repo=repo,
+            notify_fn=_post_auto_merge_note,
+            audit_fn=blackboard.log_audit,
+        )
+
     @app.post("/mesh/teams/{team_id}/drive/reviews/{review_id}/verdict")
     async def drive_record_lead_verdict(team_id: str, review_id: str, request: Request) -> dict:
         """Record the team lead's advisory approve/reject verdict (plan §8 #13).
@@ -7140,9 +7225,16 @@ def create_mesh_app(
         internal-loopback path does (``_extract_verified_agent_id``) —
         that is the existing trust boundary, not a new carve-out.
 
-        This has ZERO enforcement effect: the merge/reject endpoints
-        and their operator-or-internal gates are UNTOUCHED. Only open
-        reviews accept a verdict (409 otherwise).
+        This has ZERO enforcement effect ON THE PERMISSION LAYER: the
+        merge/reject endpoints and their operator-or-internal gates are
+        UNTOUCHED. Only open reviews accept a verdict (409 otherwise).
+
+        Plan §8 #20 (kernel-executed auto-merge): an ``approve`` verdict
+        fires the host-side auto-merge consumer via ``asyncio.create_task``
+        AFTER the store write + audit below — fire-and-forget, so this
+        endpoint's response never blocks on, or fails because of, whatever
+        the consumer decides (trust floor unmet, daily cap, a lost claim, an
+        unexpected exception — all silently-but-audibly absorbed there).
         """
         caller = _extract_verified_agent_id(request)
         if not teams_store.team_exists(team_id):
@@ -7179,7 +7271,129 @@ def create_mesh_app(
             after_value=f"{verdict}:{review_id}",
             provenance="agent",
         )
+        if verdict == "approve":
+            task = asyncio.create_task(_run_auto_merge_consumer(team_id, resolved, caller))
+            _auto_merge_tasks.add(task)
+            task.add_done_callback(_auto_merge_tasks.discard)
         return {"recorded": True, "review": resolved}
+
+    def _drive_auto_merged_review_or_error(team_id: str, review_id: str) -> dict:
+        """404 unknown review/team; 409 when the review isn't a kernel-
+        executed auto-merge (``reviewer`` is stamped ``policy_engine`` by
+        ``auto_merge.consider_auto_merge`` — see ``AUTO_MERGE_RATER`` — and
+        never by any human/internal merge caller)."""
+        if not teams_store.team_exists(team_id):
+            raise HTTPException(404, f"Team '{team_id}' not found")
+        review = teams_store.get_review(review_id)
+        if review is None or review["team_id"] != team_id:
+            raise HTTPException(404, f"Review '{review_id}' not found for team '{team_id}'")
+        if review["status"] != "merged" or review.get("reviewer") != auto_merge.AUTO_MERGE_RATER:
+            raise HTTPException(409, f"Review '{review_id}' was not kernel-executed auto-merged")
+        return review
+
+    @app.post("/mesh/teams/{team_id}/drive/reviews/{review_id}/flag-auto-merge")
+    async def drive_flag_auto_merge(team_id: str, review_id: str, request: Request) -> dict:
+        """Zero a pair's auto-merge trust after a bad kernel-executed merge
+        (plan §8 #20 step 6). Operator-or-internal, mirrors the sibling
+        merge/reject gates. Records an ``auto_merge_flagged`` decay event
+        (``rater_kind="human"``) keyed to the (lead, submitter) pair
+        recorded on the review at verdict time (``lead_verdict_by``,
+        falling back to the team's current lead the same way
+        ``_record_drive_review_outcome`` does for pre-U4 rows) —
+        ``pair_trust``'s ``flagged`` count zeroes the pair's eligibility for
+        further auto-merges until it rebuilds a fresh human-executed chain
+        of trust-floor merges.
+        """
+        _require_operator_or_internal(request)
+        caller = _extract_verified_agent_id(request)
+        await _check_rate_limit("drive", caller)
+        review = _drive_auto_merged_review_or_error(team_id, review_id)
+        team = teams_store.get_team(team_id) or {}
+        lead = review.get("lead_verdict_by") or team.get("lead_agent_id")
+        record_best_effort(
+            track_record_store,
+            source="drive_review",
+            ref_id=review_id,
+            outcome="auto_merge_flagged",
+            rater_kind="human",
+            agent_id=review.get("author"),
+            team_id=team_id,
+            rated_by=caller,
+            details={
+                "branch": review.get("branch"),
+                "lead_agent_id": lead,
+                "resolution": "auto_merge_flagged",
+            },
+        )
+        blackboard.log_audit(
+            action="drive_review_auto_merge_flagged",
+            actor=caller,
+            target=team_id,
+            field=review.get("branch"),
+            after_value=review_id,
+            provenance="user",
+        )
+        return {"flagged": True, "review_id": review_id}
+
+    @app.post("/mesh/teams/{team_id}/drive/reviews/{review_id}/revert-merge")
+    async def drive_revert_auto_merge(team_id: str, review_id: str, request: Request) -> dict:
+        """Undo a kernel-executed auto-merge with a real git revert commit
+        on main (plan §8 #20 step 7 — the undo receipt's action).
+        Operator-or-internal. Reverts ``merge_commit`` mesh-side via a
+        temporary linked worktree (``team_drive.revert_commit`` —
+        ``git merge-tree`` has no revert equivalent, so this is the one
+        drive operation needing a real working tree; see that function's
+        docstring for the hermetic-env / CAS / cleanup details it mirrors
+        from ``merge_branch``), then records an ``auto_merge_reverted``
+        decay event (same pair-scoping as flag-auto-merge; ``pair_trust``
+        groups both under ``flagged``) and audits.
+        """
+        _require_operator_or_internal(request)
+        caller = _extract_verified_agent_id(request)
+        await _check_rate_limit("drive", caller)
+        review = _drive_auto_merged_review_or_error(team_id, review_id)
+        merge_commit = review.get("merge_commit")
+        if not merge_commit:
+            raise HTTPException(409, f"Review '{review_id}' has no merge commit to revert")
+        repo = await _drive_repo(team_id)
+        async with app.state.drive_concurrency:
+            async with _drive_repo_lock(team_id):
+                try:
+                    revert_sha = await team_drive.revert_commit(repo, merge_commit)
+                except team_drive.MergeConflict as e:
+                    raise HTTPException(409, {"error": "revert_conflict", "message": str(e)})
+                except team_drive.RefMoved as e:
+                    raise HTTPException(409, str(e))
+                except team_drive.DriveError as e:
+                    raise HTTPException(500, f"revert failed: {e}")
+                _drive_size_cache.pop(str(repo), None)
+        team = teams_store.get_team(team_id) or {}
+        lead = review.get("lead_verdict_by") or team.get("lead_agent_id")
+        record_best_effort(
+            track_record_store,
+            source="drive_review",
+            ref_id=review_id,
+            outcome="auto_merge_reverted",
+            rater_kind="human",
+            agent_id=review.get("author"),
+            team_id=team_id,
+            rated_by=caller,
+            details={
+                "branch": review.get("branch"),
+                "lead_agent_id": lead,
+                "resolution": "auto_merge_reverted",
+                "revert_commit": revert_sha,
+            },
+        )
+        blackboard.log_audit(
+            action="drive_review_auto_merge_reverted",
+            actor=caller,
+            target=team_id,
+            field=review.get("branch"),
+            after_value=revert_sha,
+            provenance="user",
+        )
+        return {"reverted": True, "review_id": review_id, "revert_commit": revert_sha}
 
     # Direct-commit artifact store (Phase-2 unit 4). Handoff-data payloads
     # and save_artifact registration commit STRAIGHT to main here — this is
