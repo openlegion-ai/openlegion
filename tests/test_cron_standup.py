@@ -239,6 +239,51 @@ class TestPostToChannelExecutor:
         await scheduler._execute_job(job)
         thread_store.ensure_channel.assert_not_called()
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "returned",
+        ["__SILENT__", "(no response)", "dispatch_error: connection reset"],
+    )
+    async def test_lane_dispatch_non_success_shapes_never_posted(self, scheduler, returned):
+        """The lane dispatcher returns three non-success shapes AS SUCCESS
+        strings (SILENT sentinel, "(no response)", "dispatch_error:"). A
+        briefly-unreachable lead must never post any of them into the team
+        channel — the shared usable-reply gate rejects all three."""
+        dispatch = AsyncMock(return_value=returned)
+        thread_store = MagicMock()
+        thread_store.ensure_channel.return_value = {"id": "channel:alpha"}
+        scheduler.dispatch_fn = dispatch
+        scheduler.thread_store = thread_store
+        job = scheduler.add_job(
+            agent="lead-1", schedule="every 1h", message="standup",
+            post_to_channel="alpha", suppress_empty=False,
+        )
+        await scheduler._execute_job(job)
+        thread_store.ensure_channel.assert_not_called()
+        thread_store.post_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_job_removed_mid_dispatch_does_not_resurrect_channel(self, scheduler):
+        """A standup job removed WHILE its (slow) dispatch runs — the team was
+        deleted/archived mid-turn — must not post its late reply, which would
+        resurrect the deleted team's channel via ``ensure_channel``."""
+        thread_store = MagicMock()
+        thread_store.ensure_channel.return_value = {"id": "channel:alpha"}
+        job = scheduler.add_job(
+            agent="lead-1", schedule="every 1h", message="standup", post_to_channel="alpha",
+        )
+
+        async def _slow_dispatch(agent, message):
+            # Team deleted mid-turn — the job is removed from the table.
+            scheduler.remove_job(job.id)
+            return "Standup update that arrived after the team was deleted."
+
+        scheduler.dispatch_fn = _slow_dispatch
+        scheduler.thread_store = thread_store
+        await scheduler._execute_job(job)
+        thread_store.ensure_channel.assert_not_called()
+        thread_store.post_message.assert_not_called()
+
 
 # ── Security: post_to_channel is HOST-SIDE ONLY ──────────────────────
 
@@ -537,3 +582,63 @@ class TestReconcileStandupJobs:
 
         from src.cli.runtime import RuntimeContext
         RuntimeContext._reconcile_standup_jobs(_Stub())  # must not raise
+
+    def test_reconcile_skips_archived_lead_agent_but_keeps_active(self, tmp_path, monkeypatch):
+        """A team whose LEAD agent's config status is 'archived' (offboarded/
+        paused) must NOT get a standup job recreated at boot — a ghost lead
+        firing a daily LLM turn. A team led by an ACTIVE agent still does."""
+        store = _team_store(tmp_path)
+        _seed_led_team(store, "alpha", "lead-archived")
+        _seed_led_team(store, "beta", "lead-active")
+
+        from src.host.cron import CronScheduler
+        scheduler = CronScheduler(config_path=str(tmp_path / "cron.json"))
+
+        class _Stub:
+            cron_scheduler = scheduler
+            teams_store = store
+
+        import src.cli.runtime as runtime_mod
+        fake_cfg = {"agents": {
+            "lead-archived": {"role": "lead", "status": "archived"},
+            "lead-active": {"role": "lead", "status": "active"},
+        }}
+        monkeypatch.setattr(runtime_mod, "_load_config", lambda *a, **k: fake_cfg)
+
+        from src.cli.runtime import RuntimeContext
+        RuntimeContext._reconcile_standup_jobs(_Stub())
+
+        assert scheduler.find_standup_job("alpha") is None      # archived lead → skipped
+        assert scheduler.find_standup_job("beta") is not None   # active lead → created
+
+    def test_reconcile_prunes_existing_job_when_lead_agent_archived(self, tmp_path, monkeypatch):
+        """An existing standup job whose lead becomes archived (offboarded)
+        is pruned on the next boot reconcile."""
+        store = _team_store(tmp_path)
+        _seed_led_team(store, "alpha", "lead-1")
+
+        from src.host.cron import CronScheduler
+        scheduler = CronScheduler(config_path=str(tmp_path / "cron.json"))
+
+        class _Stub:
+            cron_scheduler = scheduler
+            teams_store = store
+
+        import src.cli.runtime as runtime_mod
+        from src.cli.runtime import RuntimeContext
+
+        # First boot: lead active → job created.
+        monkeypatch.setattr(
+            runtime_mod, "_load_config",
+            lambda *a, **k: {"agents": {"lead-1": {"status": "active"}}},
+        )
+        RuntimeContext._reconcile_standup_jobs(_Stub())
+        assert scheduler.find_standup_job("alpha") is not None
+
+        # Lead offboarded (config status archived) → next boot prunes it.
+        monkeypatch.setattr(
+            runtime_mod, "_load_config",
+            lambda *a, **k: {"agents": {"lead-1": {"status": "archived"}}},
+        )
+        RuntimeContext._reconcile_standup_jobs(_Stub())
+        assert scheduler.find_standup_job("alpha") is None

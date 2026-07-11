@@ -39,6 +39,7 @@ from src.cli.config import (
     _load_permissions,
     _remove_agent,
     _save_agents_yaml,
+    _save_permissions,
     _update_agent_field,
 )
 
@@ -216,6 +217,103 @@ class TestAtomicWrite(_TempConfigMixin):
 
         leftovers = list(self._agents_path.parent.glob("*.tmp"))
         assert leftovers == []
+
+
+class TestConcurrentPermissionsWriterLostUpdate(_TempConfigMixin):
+    """FIX 3: the seven permissions.json endpoints (assign_agent_skills,
+    set_fleet_skills, operator internet/browser toggles, api_set_fleet_skills,
+    api_update_agent_permissions, api_wallet_enable_agent) now wrap their full
+    ``_load_permissions -> mutate -> _save_permissions`` in ``_config_lock()``.
+    These pin that permissions.json writes survive concurrency the same way
+    the agents.yaml writers above do — and prove the race the lock closes.
+    """
+
+    def _locked_write(self, agent: str, skill: str) -> None:
+        # The exact load->mutate->save the FIX 3 permissions endpoints perform,
+        # now under the shared lock.
+        with _config_lock():
+            perms = _load_permissions()
+            perms.setdefault("permissions", {}).setdefault(agent, {})["allowed_skills"] = [skill]
+            _save_permissions(perms)
+
+    def test_concurrent_permissions_writes_all_survive(self):
+        """30 threads each write a DIFFERENT agent's permissions record under
+        the shared lock — every write must land in the final permissions.json
+        (2-3 of 30 survived before the lock)."""
+        agents = [f"pw-{i}" for i in range(30)]
+        threads = [
+            threading.Thread(target=self._locked_write, args=(a, f"s-{a}"))
+            for a in agents
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+            assert not t.is_alive(), "thread did not complete — possible deadlock"
+
+        perms = _load_permissions()
+        for a in agents:
+            assert perms["permissions"][a]["allowed_skills"] == [f"s-{a}"], (
+                f"lost update for {a}"
+            )
+
+    def test_unlocked_writer_loses_updates_negative_control(self):
+        """Deterministic proof the race exists WITHOUT the lock: a barrier
+        forces every thread to read the same baseline before any writes, so
+        the shared-file last-writer-wins drops all-but-one record. This is why
+        FIX 3 wraps the writers in ``_config_lock()``."""
+        n = 8
+        barrier = threading.Barrier(n)
+
+        def _unlocked(agent: str) -> None:
+            perms = _load_permissions()          # all read the same empty baseline
+            barrier.wait()
+            perms.setdefault("permissions", {})[agent] = {"allowed_skills": [agent]}
+            _save_permissions(perms)             # writes serialize; last one wins
+
+        threads = [threading.Thread(target=_unlocked, args=(f"u-{i}",)) for i in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+            assert not t.is_alive()
+
+        perms = _load_permissions()
+        survivors = [f"u-{i}" for i in range(n) if f"u-{i}" in perms.get("permissions", {})]
+        assert 0 < len(survivors) < n, (
+            f"expected a lost-update race without the lock, got {len(survivors)}/{n} survivors"
+        )
+
+
+class TestConfigLockFdLeak:
+    """FIX 7a: ``_ConfigLock.__enter__`` must close the fd it opened if
+    ``fcntl.flock`` raises after ``os.open`` succeeds — a leak would exhaust
+    the process fd table under repeated failed acquisitions."""
+
+    def test_no_fd_leak_when_flock_raises(self):
+        import os as _os
+
+        import src.cli.config as cfg_mod
+
+        fd_dir = "/dev/fd" if _os.path.isdir("/dev/fd") else f"/proc/{_os.getpid()}/fd"
+
+        def _count() -> int:
+            return len(_os.listdir(fd_dir))
+
+        def _raising_flock(fd, op):
+            raise OSError("flock failed (simulated)")
+
+        with patch.object(cfg_mod.fcntl, "flock", side_effect=_raising_flock):
+            baseline = _count()
+            for _ in range(50):
+                with pytest.raises(OSError):
+                    with _config_lock():
+                        pass
+            after = _count()
+
+        # Pre-fix each failed acquisition leaked its fd (~+50 here); the fix
+        # closes the fd before re-raising so the count stays flat.
+        assert after <= baseline + 2, f"fd leak across failed acquisitions: {baseline} -> {after}"
 
 
 class TestCrossHelperUnderOneLock(_TempConfigMixin):

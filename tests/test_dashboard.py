@@ -6795,6 +6795,10 @@ class TestDashboardChatStreamBusyAwareFork:
         assert [e["type"] for e in events] == ["text_delta", "text_delta", "done"]
         status_note, reply_chunk, done = events
         assert "mid-task" in status_note["content"]
+        # The status preamble must end with a paragraph separator so the
+        # frontend accumulator renders it and the concatenated reply as two
+        # paragraphs, not one run-on bubble.
+        assert status_note["content"].endswith("\n\n")
         assert reply_chunk["content"] == "steered answer from the running turn"
         assert done["response"] == "steered answer from the running turn"
 

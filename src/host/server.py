@@ -81,6 +81,7 @@ from src.shared.utils import (
     sanitize_for_prompt,
     set_llm_max_tokens_env,
     setup_logging,
+    usable_agent_reply,
 )
 
 logger = setup_logging("host.server")
@@ -4805,18 +4806,22 @@ def create_mesh_app(
         agent_id = _validate_agent_id(agent_id)
         skills = _clean_skill_names(data.get("skills", []))
 
-        from src.cli.config import _load_permissions, _save_permissions
+        from src.cli.config import _config_lock, _load_permissions, _save_permissions
 
-        perms = _load_permissions()
-        agents = perms.setdefault("permissions", {})
-        # Materialize the agent's full effective permissions before this partial
-        # write. Writing a bare {"allowed_skills": ...} for an agent that had no
-        # explicit entry would drop it out of the "default" template fallback in
-        # get_permissions and silently strip every other grant (Codex review).
-        if agent_id not in agents:
-            agents[agent_id] = permissions.get_permissions(agent_id).model_dump(exclude={"agent_id"})
-        agents[agent_id]["allowed_skills"] = skills
-        _save_permissions(perms)
+        # Hold the shared config lock across the full load->mutate->save so a
+        # concurrent permissions writer (another skill assign, an internet/
+        # browser toggle, an edit_agent apply) can't clobber this update.
+        with _config_lock():
+            perms = _load_permissions()
+            agents = perms.setdefault("permissions", {})
+            # Materialize the agent's full effective permissions before this partial
+            # write. Writing a bare {"allowed_skills": ...} for an agent that had no
+            # explicit entry would drop it out of the "default" template fallback in
+            # get_permissions and silently strip every other grant (Codex review).
+            if agent_id not in agents:
+                agents[agent_id] = permissions.get_permissions(agent_id).model_dump(exclude={"agent_id"})
+            agents[agent_id]["allowed_skills"] = skills
+            _save_permissions(perms)
         permissions.reload()
         return {"assigned": True, "agent_id": agent_id, "skills": skills}
 
@@ -4827,11 +4832,14 @@ def create_mesh_app(
         await _check_rate_limit("skill_install", caller)
         skills = _clean_skill_names(data.get("skills", []))
 
-        from src.cli.config import _load_permissions, _save_permissions
+        from src.cli.config import _config_lock, _load_permissions, _save_permissions
 
-        perms = _load_permissions()
-        perms["fleet_skills"] = skills
-        _save_permissions(perms)
+        # Load->mutate->save under the shared config lock (see assign_agent_skills)
+        # so a concurrent permissions writer can't clobber the fleet allowlist.
+        with _config_lock():
+            perms = _load_permissions()
+            perms["fleet_skills"] = skills
+            _save_permissions(perms)
         permissions.reload()
         return {"fleet_skills": skills}
 
@@ -6124,6 +6132,13 @@ def create_mesh_app(
                     name,
                     e,
                 )
+        # Onboarding wake for each INITIAL member — mirrors the add-member
+        # endpoint (``_schedule_onboarding_wake``'s own guards skip the
+        # operator and any non-running agent). Without this, agents seeded at
+        # create time never got the intro turn / lead nudge that later-added
+        # members do.
+        for agent in members:
+            _schedule_onboarding_wake(agent, name)
         _emit_team_event(
             event_bus,
             "team_created",
@@ -6186,18 +6201,10 @@ def create_mesh_app(
         except Exception:
             logger.exception("onboarding intro turn for %s failed", agent_id)
             reply = None
-        from src.shared.types import SILENT_REPLY_TOKEN as _SILENT
-
-        # "(no response)" is the lane dispatcher's unreachable-agent
-        # SUCCESS sentinel (runtime._direct_dispatch) — never post it to
-        # the team channel as if the new member said it.
-        if (
-            isinstance(reply, str)
-            and reply.strip()
-            and reply != _SILENT
-            and reply.strip() != "(no response)"
-            and thread_store is not None
-        ):
+        # Only post a genuine agent-authored intro — the shared gate rejects
+        # the silent sentinel, "(no response)", AND the "dispatch_error:" note
+        # so none is posted to the team channel as if the new member said it.
+        if usable_agent_reply(reply) and thread_store is not None:
             try:
                 channel = thread_store.ensure_channel(team_id)
                 thread_store.post_message(channel["id"], sender=agent_id, body=reply.strip())
@@ -9003,6 +9010,18 @@ def create_mesh_app(
                     team_name,
                     e,
                 )
+            # Same lifecycle for the daily STANDUP cron: without this the
+            # standup keeps firing a full LLM turn on the former lead and
+            # ``ensure_channel`` resurrects the archived team's channel until
+            # the next mesh boot.
+            try:
+                cron_scheduler.remove_standup_job(team_name)
+            except Exception as e:
+                logger.warning(
+                    "remove standup cron on archive %s failed: %s",
+                    team_name,
+                    e,
+                )
         _emit_team_event(event_bus, "team_archived", agent="operator", name=team_name)
         return {
             "archived": True,
@@ -9251,18 +9270,12 @@ def create_mesh_app(
             except Exception as e:
                 manifest["errors"].append(f"handover turn failed: {e}")
             else:
-                from src.shared.types import SILENT_REPLY_TOKEN as _SILENT
-
-                # "(no response)" is the lane dispatcher's unreachable-agent
-                # SUCCESS sentinel (runtime._direct_dispatch) — an offboard
-                # of a stopped/dying container must degrade to no handover
-                # doc, not commit the sentinel as if the agent wrote it.
-                if (
-                    isinstance(response, str)
-                    and response.strip()
-                    and response != _SILENT
-                    and response.strip() != "(no response)"
-                ):
+                # A dispatch return is only agent-authored when it clears the
+                # shared usable-reply gate — this rejects the silent sentinel,
+                # "(no response)", AND the "dispatch_error:" note so an offboard
+                # of a stopped/dying container degrades to no handover doc
+                # instead of committing a sentinel as if the agent wrote it.
+                if usable_agent_reply(response):
                     handover_text = response.strip()
                 else:
                     manifest["errors"].append("handover turn returned nothing usable")
@@ -9301,12 +9314,28 @@ def create_mesh_app(
                 )
             else:
                 author_email = f"{agent_id}@agents.local"
+
+                async def _commit_file_retry(*args, **kwargs) -> str:
+                    # A concurrent artifact/handoff commit landing on the team
+                    # drive's main loses the CAS (RefMoved); commit_file's own
+                    # contract says "retry" (it re-reads main's tip each call).
+                    # Retry up to 3 attempts before letting the loss surface as
+                    # a manifest error, so a racing commit during the offboard
+                    # window can't silently drop the departing agent's record.
+                    last: BaseException | None = None
+                    for _ in range(3):
+                        try:
+                            return await team_drive.commit_file(*args, **kwargs)
+                        except team_drive.RefMoved as e:
+                            last = e
+                    raise last  # type: ignore[misc]
+
                 if handover_text:
                     try:
                         h_path = team_drive.validate_drive_path(
                             f"handovers/{agent_id}/{date_str}-handover.md"
                         )
-                        commit = await team_drive.commit_file(
+                        commit = await _commit_file_retry(
                             repo, h_path, handover_text.encode("utf-8"),
                             message=f"offboard handover for {agent_id} ({reason})",
                             author_name=agent_id, author_email=author_email,
@@ -9322,7 +9351,7 @@ def create_mesh_app(
                             f"handovers/{agent_id}/{date_str}-snapshot.json"
                         )
                         snap_bytes = json.dumps(bundle, indent=2, default=str).encode("utf-8")
-                        commit = await team_drive.commit_file(
+                        commit = await _commit_file_retry(
                             repo, s_path, snap_bytes,
                             message=f"offboard snapshot for {agent_id} ({reason})",
                             author_name=agent_id, author_email=author_email,
@@ -9417,6 +9446,31 @@ def create_mesh_app(
         if agent_id not in cfg.get("agents", {}):
             raise HTTPException(404, f"Agent '{agent_id}' not found")
         manifest = await _offboard_agent(agent_id, reason="offboard")
+        # Offboard = departure: a departing lead stops being lead. Clear the
+        # pointer BEFORE archiving so no ghost lead lingers in the Team Room
+        # and the standup cron for this team is removed (otherwise the boot
+        # reconcile would recreate it for the now-archived agent). Plain
+        # archive (a reversible pause) deliberately leaves leadership intact.
+        led_team_id = None
+        try:
+            led_team_id = teams_store.led_team(agent_id)
+        except Exception as e:
+            logger.warning("offboard lead lookup for %s failed: %s", agent_id, e)
+        if led_team_id:
+            try:
+                teams_store.set_lead(led_team_id, None)
+                _sync_standup_job_on_lead_change(led_team_id, None)
+                blackboard.log_audit(
+                    action="team_lead_cleared",
+                    actor=caller,
+                    target=led_team_id,
+                    field="offboard",
+                    provenance="user",
+                )
+            except Exception as e:
+                logger.warning(
+                    "offboard clear-lead for team %s failed: %s", led_team_id, e,
+                )
         archive_result = await _archive_agent_core(agent_id)
         return {"offboarded": True, "manifest": manifest, **archive_result}
 
@@ -9813,6 +9867,17 @@ def create_mesh_app(
                 except Exception as e:
                     logger.warning(
                         "remove summary cron on delete %s failed: %s",
+                        target_id,
+                        e,
+                    )
+                # Same for the daily STANDUP cron — otherwise it keeps firing
+                # a full LLM turn on the former lead and ``ensure_channel``
+                # resurrects the deleted team's channel until the next boot.
+                try:
+                    cron_scheduler.remove_standup_job(target_id)
+                except Exception as e:
+                    logger.warning(
+                        "remove standup cron on delete %s failed: %s",
                         target_id,
                         e,
                     )
@@ -11059,18 +11124,23 @@ def create_mesh_app(
 
         from src.cli.config import (
             _OPERATOR_AGENT_ID,
+            _config_lock,
             _load_permissions,
             _save_permissions,
         )
 
-        perms = _load_permissions()
-        op_perms = perms.setdefault("permissions", {}).setdefault(
-            _OPERATOR_AGENT_ID,
-            {},
-        )
-        previous = bool(op_perms.get("can_use_internet", False))
-        op_perms["can_use_internet"] = enabled
-        _save_permissions(perms)
+        # Load->mutate->save under the shared config lock so a concurrent
+        # permissions writer (browser toggle, skill assign, edit_agent apply)
+        # can't clobber this internet-access flip.
+        with _config_lock():
+            perms = _load_permissions()
+            op_perms = perms.setdefault("permissions", {}).setdefault(
+                _OPERATOR_AGENT_ID,
+                {},
+            )
+            previous = bool(op_perms.get("can_use_internet", False))
+            op_perms["can_use_internet"] = enabled
+            _save_permissions(perms)
         if permissions is not None:
             permissions.reload()
 
@@ -11183,18 +11253,23 @@ def create_mesh_app(
 
         from src.cli.config import (
             _OPERATOR_AGENT_ID,
+            _config_lock,
             _load_permissions,
             _save_permissions,
         )
 
-        perms = _load_permissions()
-        op_perms = perms.setdefault("permissions", {}).setdefault(
-            _OPERATOR_AGENT_ID,
-            {},
-        )
-        previous = bool(op_perms.get("can_use_browser", False))
-        op_perms["can_use_browser"] = enabled
-        _save_permissions(perms)
+        # Load->mutate->save under the shared config lock so a concurrent
+        # permissions writer (internet toggle, skill assign, edit_agent apply)
+        # can't clobber this browser-access flip.
+        with _config_lock():
+            perms = _load_permissions()
+            op_perms = perms.setdefault("permissions", {}).setdefault(
+                _OPERATOR_AGENT_ID,
+                {},
+            )
+            previous = bool(op_perms.get("can_use_browser", False))
+            op_perms["can_use_browser"] = enabled
+            _save_permissions(perms)
         if permissions is not None:
             permissions.reload()
 

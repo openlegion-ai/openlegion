@@ -85,6 +85,7 @@ def _build_app(
     container_manager=None,
     with_team_drive=True,
     extra_agents=None,
+    cron_scheduler=None,
 ):
     """Mesh app with a real disk-backed TeamStore (drive provisioner
     wired so ``_offboard_agent`` commits to a REAL bare git repo), a
@@ -137,6 +138,7 @@ def _build_app(
         teams_store=teams_store,
         container_manager=container_manager,
         lane_manager=lane_manager,
+        cron_scheduler=cron_scheduler,
         auth_tokens={"operator": "op-token", "scout": "scout-token"},
     )
     return app, blackboard, teams_store, drives_dir
@@ -264,6 +266,39 @@ class TestOffboardAgentCore:
         SUCCESS string for an unreachable agent (runtime._direct_dispatch)
         — it must never be committed as if the agent authored it."""
         lane = _RecordingLaneManager(reply="(no response)")
+        app, bb, store, _ = _build_app(tmp_path, monkeypatch, lane_manager=lane)
+        try:
+            manifest = await app._offboard_agent("scout", reason="delete")
+        finally:
+            bb.close()
+        assert manifest["handover_committed"] is False
+        assert manifest["snapshot_committed"] is True
+        assert any("nothing usable" in e for e in manifest["errors"])
+
+    @pytest.mark.asyncio
+    async def test_silent_token_records_no_handover_doc(self, tmp_path, monkeypatch):
+        """The lane dispatcher returns SILENT_REPLY_TOKEN ("__SILENT__") for a
+        transport failure — the shared usable-reply gate rejects it so it is
+        never committed as if the agent authored it."""
+        from src.shared.types import SILENT_REPLY_TOKEN
+
+        lane = _RecordingLaneManager(reply=SILENT_REPLY_TOKEN)
+        app, bb, store, _ = _build_app(tmp_path, monkeypatch, lane_manager=lane)
+        try:
+            manifest = await app._offboard_agent("scout", reason="delete")
+        finally:
+            bb.close()
+        assert manifest["handover_committed"] is False
+        assert manifest["snapshot_committed"] is True
+        assert any("nothing usable" in e for e in manifest["errors"])
+
+    @pytest.mark.asyncio
+    async def test_dispatch_error_note_records_no_handover_doc(self, tmp_path, monkeypatch):
+        """The lane dispatcher's except-branch returns a
+        "dispatch_error: <redacted>" note — the shared gate rejects any string
+        starting with that prefix so the note is never committed as a handover
+        doc (the pre-fix gap that COMMITTED it verbatim)."""
+        lane = _RecordingLaneManager(reply="dispatch_error: Server disconnected")
         app, bb, store, _ = _build_app(tmp_path, monkeypatch, lane_manager=lane)
         try:
             manifest = await app._offboard_agent("scout", reason="delete")
@@ -476,3 +511,118 @@ class TestManageAgentOffboardAction:
         messages = [{"role": "user", "content": "yes", "_origin": "user"}]
         result = await manage_agent("scout", "offboard", mesh_client=mc, _messages=messages)
         assert "error" in result
+
+
+# ── FIX 8: RefMoved retry on offboard drive commits ─────────────────
+
+
+class TestOffboardCommitRefMovedRetry:
+    @pytest.mark.asyncio
+    async def test_refmoved_twice_then_success_still_commits_no_error(self, tmp_path, monkeypatch):
+        """A concurrent commit that loses the CAS (RefMoved) on the first two
+        attempts is retried; the third succeeds, so the handover/snapshot land
+        with NO manifest error (pre-fix: a single RefMoved dropped the doc)."""
+        import src.host.server as server_module
+
+        real_commit = server_module.team_drive.commit_file
+        state = {"remaining_failures": 2}
+
+        async def _flaky_commit(*a, **kw):
+            if state["remaining_failures"] > 0:
+                state["remaining_failures"] -= 1
+                raise server_module.team_drive.RefMoved("main moved — retry")
+            return await real_commit(*a, **kw)
+
+        monkeypatch.setattr(server_module.team_drive, "commit_file", _flaky_commit)
+
+        lane = _RecordingLaneManager(reply="Handover text.")
+        app, bb, store, _ = _build_app(tmp_path, monkeypatch, lane_manager=lane)
+        try:
+            manifest = await app._offboard_agent("scout", reason="delete")
+        finally:
+            bb.close()
+        assert manifest["handover_committed"] is True
+        assert manifest["snapshot_committed"] is True
+        assert manifest["errors"] == []
+
+    @pytest.mark.asyncio
+    async def test_refmoved_always_records_error_after_exactly_three_attempts(self, tmp_path, monkeypatch):
+        """A commit that always loses the CAS is retried EXACTLY 3 times per
+        call before the loss surfaces as a manifest error (never an
+        exception); both the handover and snapshot paths make 3 attempts."""
+        import src.host.server as server_module
+
+        attempts: list[str] = []
+
+        async def _always_moved(*a, **kw):
+            msg = kw.get("message", "")
+            attempts.append("handover" if "handover" in msg else "snapshot")
+            raise server_module.team_drive.RefMoved("main moved — retry")
+
+        monkeypatch.setattr(server_module.team_drive, "commit_file", _always_moved)
+
+        lane = _RecordingLaneManager(reply="Handover text.")
+        app, bb, store, _ = _build_app(tmp_path, monkeypatch, lane_manager=lane)
+        try:
+            manifest = await app._offboard_agent("scout", reason="delete")
+        finally:
+            bb.close()
+        assert manifest["handover_committed"] is False
+        assert manifest["snapshot_committed"] is False
+        assert attempts.count("handover") == 3
+        assert attempts.count("snapshot") == 3
+        assert sum("commit failed" in e for e in manifest["errors"]) == 2
+
+
+# ── FIX 5a: offboarding a LEAD clears the leadership pointer ─────────
+
+
+class TestOffboardClearsLeadership:
+    @pytest.mark.asyncio
+    async def test_offboard_of_lead_clears_pointer_and_removes_standup_job(self, tmp_path, monkeypatch):
+        """Offboard = departure: a departing LEAD stops being lead. The
+        endpoint must clear ``teams.lead_agent_id`` and remove the team's
+        standup cron (otherwise a ghost lead lingers in the Team Room and the
+        boot reconcile recreates the standup for the archived agent)."""
+        cron = MagicMock()
+        lane = _RecordingLaneManager(reply="Handover text.")
+        app, bb, store, _ = _build_app(
+            tmp_path, monkeypatch, lane_manager=lane, cron_scheduler=cron,
+        )
+        store.set_lead("research", "scout")
+        assert store.get_team("research")["lead_agent_id"] == "scout"
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+                r = await c.post("/mesh/agents/scout/offboard", headers=_op_headers())
+            assert r.status_code == 200, r.text
+            # Pointer cleared — no ghost lead.
+            assert store.get_team("research")["lead_agent_id"] is None
+            # Standup cron removed for the team (via _sync_standup_job_on_lead_change).
+            cron.remove_standup_job.assert_any_call("research")
+            # Audit row records the offboard-driven lead clear
+            # (get_audit_log's ``agent_id`` filter matches on ``target``).
+            log = bb.get_audit_log(agent_id="research", action="team_lead_cleared")
+            assert log["entries"], "expected a team_lead_cleared audit row"
+        finally:
+            bb.close()
+
+    @pytest.mark.asyncio
+    async def test_offboard_of_non_lead_leaves_other_lead_untouched(self, tmp_path, monkeypatch):
+        """Offboarding a plain member must NOT clear a different agent's
+        leadership pointer."""
+        cron = MagicMock()
+        lane = _RecordingLaneManager(reply="Handover text.")
+        app, bb, store, _ = _build_app(
+            tmp_path, monkeypatch, lane_manager=lane, cron_scheduler=cron,
+            extra_agents={"lead2": {"role": "lead"}},
+        )
+        store.add_member("research", "lead2")
+        store.set_lead("research", "lead2")
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+                r = await c.post("/mesh/agents/scout/offboard", headers=_op_headers())
+            assert r.status_code == 200, r.text
+            # lead2 is still the lead — offboarding scout (a non-lead) is a no-op here.
+            assert store.get_team("research")["lead_agent_id"] == "lead2"
+        finally:
+            bb.close()

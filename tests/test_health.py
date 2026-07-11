@@ -222,19 +222,22 @@ class TestHealthRestartMissingConfig:
 
     @pytest.mark.asyncio
     async def test_restart_refreshes_stale_role_in_router_roster(self):
-        """Regression: the rebuilt container starts with the FRESH role
-        (``info.get("role", "")``), but re-registering with the router
-        used to omit ``role=`` entirely — ``MessageRouter.register_agent``
-        only overwrites ``agent_roles`` when ``role`` is truthy, so the
-        mesh roster cache kept whatever (stale) role was cached before the
-        restart even though the container itself got the new one."""
+        """Regression: a crash-triggered auto-restart must re-stamp the CURRENT
+        role from fresh config (agents.yaml), not the stale role frozen in the
+        runtime registry ``info`` dict at the last start_agent call. An
+        ``edit_agent`` role change updates agents.yaml but not the registry
+        snapshot; the old code read ``info.get("role")`` for both the container
+        start and the ``router.register_agent`` re-stamp, so the edited role was
+        silently reverted on every crash-recovery restart."""
         from src.host.mesh import MessageRouter
 
         real_router = MessageRouter(permissions=MagicMock(), agent_registry={})
         real_router.agent_roles["good-agent"] = "stale-role"
 
+        # Registry ``info`` carries the STALE role (last start_agent); the
+        # FRESH role lives only in agents.yaml, surfaced via _load_config.
         monitor = _make_monitor({
-            "good-agent": {"role": "fresh-role", "tools_dir": "/tools"},
+            "good-agent": {"role": "stale-role", "tools_dir": "/tools"},
         })
         monitor.router = real_router
         monitor.register("good-agent")
@@ -244,8 +247,13 @@ class TestHealthRestartMissingConfig:
         monitor.runtime.start_agent.return_value = "http://localhost:8401"
         monitor.runtime.wait_for_agent = AsyncMock(return_value=True)
 
-        await monitor._try_restart("good-agent")
+        fake_cfg = {"agents": {"good-agent": {"role": "fresh-role", "tools_dir": "/tools"}}}
+        with patch("src.host.health._load_config", return_value=fake_cfg):
+            await monitor._try_restart("good-agent")
 
+        # Both the container start and the router re-stamp use the fresh role.
+        _, kwargs = monitor.runtime.start_agent.call_args
+        assert kwargs["role"] == "fresh-role"
         assert real_router.agent_roles["good-agent"] == "fresh-role"
 
 

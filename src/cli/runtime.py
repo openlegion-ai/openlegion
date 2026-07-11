@@ -2322,12 +2322,28 @@ class RuntimeContext:
         except Exception as e:
             logger.warning("standup cron bootstrap failed to load teams: %s", e)
             return
+        # Read agent statuses once so a lead that is ARCHIVED (offboarded or
+        # paused) doesn't get a standup job recreated for it at boot — a ghost
+        # lead firing a daily LLM turn. Cheap single config read for the loop.
+        try:
+            agent_statuses = {
+                aid: (acfg or {}).get("status", "active")
+                for aid, acfg in (_load_config().get("agents", {}) or {}).items()
+            }
+        except Exception as e:
+            logger.warning("standup cron bootstrap failed to load agent config: %s", e)
+            agent_statuses = {}
         led_team_names: set[str] = set()
         for name, meta in teams.items():
             if (meta.get("status") or "active") == "archived":
                 continue
             lead_agent_id = meta.get("lead_agent_id")
             if not lead_agent_id:
+                continue
+            if agent_statuses.get(lead_agent_id, "active") == "archived":
+                # Lead was archived/offboarded but the team pointer still
+                # references it — don't recreate a standup for a dead lead;
+                # the prune loop below removes any job already on the table.
                 continue
             led_team_names.add(name)
             settings = meta.get("settings") or {}
