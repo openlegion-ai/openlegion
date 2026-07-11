@@ -768,6 +768,42 @@ class TestBrowserCommandEndpoint:
         assert resp.status_code == 400, resp.text
         assert "action must be a string" in resp.text
 
+    @pytest.mark.asyncio
+    async def test_shape_validation_precedes_delegation(self, tmp_path):
+        """A structurally-invalid request must fail shape validation (400)
+        BEFORE delegation/permission resolution runs — even when the target is
+        one the caller can't message. Otherwise malformed input would drive
+        delegation work and surface as a 403 (auth) instead of a 400 (shape).
+        """
+        from httpx import ASGITransport, AsyncClient
+
+        app, _event_bus, _cm = _build_app(
+            tmp_path,
+            perms_map={
+                "worker1": {
+                    "can_use_browser": False,
+                    "can_message": ["worker1"],  # self only — can't reach worker2
+                },
+                "worker2": {"can_use_browser": True},
+            },
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/mesh/browser/command",
+                json={
+                    "action": ["snapshot"],  # non-string: shape error
+                    "params": {},
+                    "target_agent_id": "worker2",  # caller can't message this
+                },
+                headers={"X-Agent-ID": "worker1"},
+            )
+        # Shape wins: 400, not the 403 delegation would raise.
+        assert resp.status_code == 400, resp.text
+        assert "action must be a string" in resp.text
+
 
 class TestBrowserLoginRequestEndpoint:
     """POST /mesh/browser-login-request delegation matrix."""
