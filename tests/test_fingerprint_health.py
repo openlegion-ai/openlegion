@@ -51,6 +51,7 @@ atexit.register(shutil.rmtree, _PROFILES_ROOT, ignore_errors=True)
 @pytest.fixture(autouse=True)
 def _reset_fingerprint_state():
     """Each test starts with empty module-level fingerprint state."""
+    import src.browser.service as service
     from src.browser.service import (
         _binding_signatures,
         _fingerprint_audit_buckets,
@@ -65,6 +66,7 @@ def _reset_fingerprint_state():
     _fingerprint_hard_burned.clear()
     _fingerprint_hard_burn_reason.clear()
     _binding_signatures.clear()
+    service._fingerprint_snapshot_dirty = False
     yield
     _fingerprint_window.clear()
     _fingerprint_last_signal.clear()
@@ -72,6 +74,7 @@ def _reset_fingerprint_state():
     _fingerprint_hard_burned.clear()
     _fingerprint_hard_burn_reason.clear()
     _binding_signatures.clear()
+    service._fingerprint_snapshot_dirty = False
 
 
 class TestRollingWindow:
@@ -285,6 +288,112 @@ class TestForceFingerprintBurn:
         second = await _force_fingerprint_burn(agent, "perimeterx", "x-px-block-type=1")
         assert first is True
         assert second is False  # state already transitioned
+
+    @pytest.mark.asyncio
+    async def test_first_burn_persists_exactly_once(self, monkeypatch):
+        """A first burn for an agent fsyncs the snapshot exactly once."""
+        import src.browser.service as service
+
+        calls = []
+        monkeypatch.setattr(
+            service, "_snapshot_fingerprint_state_locked",
+            lambda: calls.append(1) or True,
+        )
+        await service._force_fingerprint_burn(
+            "agent-persist-once", "cloudflare", "cf-mitigated=block",
+        )
+        assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_repeat_same_reason_does_not_persist_again(self, monkeypatch):
+        """A repeat burn with the SAME (vendor, reason) must NOT re-fsync —
+        the loop-blocking snapshot is deduped on an unchanged durable state."""
+        import src.browser.service as service
+
+        calls = []
+        monkeypatch.setattr(
+            service, "_snapshot_fingerprint_state_locked",
+            lambda: calls.append(1) or True,
+        )
+        agent = "agent-persist-dedup"
+        await service._force_fingerprint_burn(agent, "datadome", "x-datadome=protected")
+        assert len(calls) == 1
+        # Same walled site, same block signal — repeated block-responses.
+        await service._force_fingerprint_burn(agent, "datadome", "x-datadome=protected")
+        await service._force_fingerprint_burn(agent, "datadome", "x-datadome=protected")
+        # Still exactly one persist — no per-block fsync stall.
+        assert len(calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_changed_reason_persists_again(self, monkeypatch):
+        """A burn whose (vendor, reason) changed IS a real transition and
+        must re-snapshot so the new durable reason survives a restart."""
+        import src.browser.service as service
+
+        calls = []
+        monkeypatch.setattr(
+            service, "_snapshot_fingerprint_state_locked",
+            lambda: calls.append(1) or True,
+        )
+        agent = "agent-persist-changed"
+        await service._force_fingerprint_burn(agent, "cloudflare", "cf-mitigated=block")
+        assert len(calls) == 1
+        # Different vendor/signal — a genuinely new durable fact.
+        await service._force_fingerprint_burn(agent, "perimeterx", "x-px-block-type=1")
+        assert len(calls) == 2
+
+    @pytest.mark.asyncio
+    async def test_failed_snapshot_retries_on_next_signal(self, monkeypatch):
+        """If a GENUINE transition's snapshot FAILS (returns False), the
+        dedupe must NOT swallow the retry — the next identical signal has to
+        re-attempt the snapshot so the transition survives a restart. The
+        original code snapshotted every call; the dirty flag preserves that
+        resilience through the dedupe."""
+        import src.browser.service as service
+
+        results = iter([False, True])  # first snapshot fails, second succeeds
+        calls = []
+
+        def _snap():
+            calls.append(1)
+            return next(results)
+
+        monkeypatch.setattr(
+            service, "_snapshot_fingerprint_state_locked", _snap,
+        )
+        agent = "agent-retry"
+        # First burn — a real transition whose snapshot FAILS.
+        await service._force_fingerprint_burn(agent, "cloudflare", "cf-mitigated=block")
+        assert len(calls) == 1
+        assert service._fingerprint_snapshot_dirty is True
+        # Identical signal — normally deduped, but the dirty flag forces a
+        # retry. This time the snapshot succeeds and clears the flag.
+        await service._force_fingerprint_burn(agent, "cloudflare", "cf-mitigated=block")
+        assert len(calls) == 2
+        assert service._fingerprint_snapshot_dirty is False
+        # Now that it's durably persisted, a further identical signal dedupes.
+        await service._force_fingerprint_burn(agent, "cloudflare", "cf-mitigated=block")
+        assert len(calls) == 2
+
+    @pytest.mark.asyncio
+    async def test_repeat_still_refreshes_in_memory_state(self, monkeypatch):
+        """Even when the snapshot is deduped, the in-memory last_signal +
+        reason must still be refreshed on every repeat block hit."""
+        import src.browser.service as service
+
+        monkeypatch.setattr(
+            service, "_snapshot_fingerprint_state_locked", lambda: True,
+        )
+        agent = "agent-inmem-refresh"
+        await service._force_fingerprint_burn(agent, "datadome", "x-datadome=protected")
+        first_signal = service._fingerprint_last_signal[agent]
+        # A later repeat hit with the SAME reason.
+        monkeypatch.setattr(service.time, "time", lambda: first_signal + 100.0)
+        await service._force_fingerprint_burn(agent, "datadome", "x-datadome=protected")
+        assert service._fingerprint_last_signal[agent] == first_signal + 100.0
+        assert service._fingerprint_hard_burn_reason[agent] == (
+            "datadome", "x-datadome=protected",
+        )
 
     @pytest.mark.asyncio
     async def test_health_payload_surfaces_hard_burn(self):
