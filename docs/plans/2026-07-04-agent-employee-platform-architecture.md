@@ -1728,6 +1728,27 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   prerequisites land in U0. Branch prefix `feat/p5gov-*` (`feat/phase5-*` is taken by an
   unrelated browser work stream).
 
+- **✅ Landed — U0 hardening prereqs (#1239).** All eight U0 items per the build order above
+  (§8 #24 prereqs i–iii + the recon minor items): archived agents survive a mesh restart
+  (boot skip + heartbeat-reconcile filter, each pinned); the heartbeat pending-tasks probe
+  gains a durable-tasks-store source (`pending_tasks_fn` seam →
+  `Tasks.count_pending_for_assignee`, the H5 backlog-cap counter reused); `__SILENT__` /
+  `"(no response)"` / `dispatch_error:` shapes are gated by `usable_agent_reply` at the two
+  human-facing leaks (channels suppress, dashboard chat substitutes a readable fallback);
+  `heartbeat_dispatch` failures now carry the `dispatch_error:` prefix the reply gate rejects;
+  CLI `confirm`/`cancel` route through the dashboard pending proxy (the bare mesh POST could
+  never pass operator-or-internal + human-origin); stale approvals-UI comments corrected; dead
+  `create_dashboard_router(pending_actions=)` kwarg deleted. **Implementation corrections
+  discovered:** (1) the blackboard `tasks/*` namespace is NOT legacy — 20+ template ACLs,
+  `claim_task`/`watch_blackboard` docs, operator-ceiling defaults, and the SPA all use it, so
+  the probe keeps BOTH sources (durable store authoritative, blackboard scan additional);
+  full removal waits until the template work-queue pattern migrates to the durable store.
+  (2) A second pre-existing test-ordering flake found: `test_channels.py
+  TestTelegramStop::test_stop_calls_shutdown_and_logs` fails whenever `test_cli_commands.py`
+  precedes it in one invocation (caplog captures nothing) — reproduced on clean main; treat
+  as known flake until the logging-state leak is fixed. Full suite 8615 passed / 26 skipped /
+  sole failure = that flake, green on isolated rerun.
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|
@@ -1783,8 +1804,9 @@ findings, if any, land as a follow-up fix PR recorded in this ledger.
 ### PR ledger — Phase 5 (as of 2026-07-11)
 | PR | Unit | CI |
 |---|---|---|
-| — | Phase-5 pre-decisions ratified (§8 #17–#24) + build order + companion review doc | this PR |
-| #1231 | earlier draft of the companion review — closed unmerged, superseded by this PR | closed |
+| #1232 | Phase-5 pre-decisions ratified (§8 #17–#24) + build order + companion review doc | merged |
+| #1231 | earlier draft of the companion review — closed unmerged, superseded by #1232 | closed |
+| #1239 | U0 — hardening prereqs (§8 #24 i–iii + recon minor items) | merged |
 
 ### YOU ARE HERE → Phase 5
 
