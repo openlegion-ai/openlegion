@@ -3498,6 +3498,163 @@ class TestDashboardProjectCRUD:
         assert row["lead_agent_id"] == "alpha"
 
 
+class TestTeamRoomEndpoint:
+    """Phase-4 unit 4 (plan §6 "Team Room dashboard"): GET
+    /api/teams/{team_name}/room composes teams_store + lane_manager +
+    tasks_store + cron_scheduler + thread_store into one read-only
+    payload — no HTTP round-trips, every sub-source None-guarded."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        from src.host.orchestration import Tasks
+        self.tasks_store = Tasks(db_path=os.path.join(self._tmpdir, "tasks.db"))
+        self.components["tasks_store"] = self.tasks_store
+        # MagicMocks by default (include_v2=True) — pin the calls this
+        # endpoint makes so results are real values, not MagicMocks
+        # (which would blow up JSON serialization).
+        self.components["lane_manager"].get_status.return_value = {}
+        self.components["cron_scheduler"].get_last_plate.return_value = None
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        try:
+            self.tasks_store.close()
+        except Exception:
+            pass
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_unknown_team_404(self):
+        resp = self.client.get("/dashboard/api/teams/ghost/room")
+        assert resp.status_code == 404
+
+    def test_composed_payload_busy_task_plate_lead_threads(self):
+        teams_store = self.components["teams_store"]
+        teams_store.create_team("team", description="desc")
+        teams_store.add_member("team", "alpha")
+        teams_store.add_member("team", "beta")
+        teams_store.set_lead("team", "alpha")
+        teams_store.set_goal("team", "Ship it")
+
+        # alpha: busy + queued, working a task
+        self.components["lane_manager"].get_status.return_value = {
+            "alpha": {"queued": 2, "pending": 2, "busy": True},
+        }
+        rec = self.tasks_store.create(
+            creator="operator", assignee="alpha", title="Dig the well", team_id="team",
+        )
+        self.tasks_store.update_status(rec["id"], "working", actor="alpha")
+
+        # alpha: a plate snapshot from the cron scheduler
+        plate = {
+            "checked_at": 1720000000.0,
+            "triggered_probes": ["pending_tasks"],
+            "has_recent_activity": True,
+            "is_default_heartbeat": True,
+            "actionable": True,
+            "has_goals": False,
+            "utility_model_configured": False,
+            "dispatched": True,
+        }
+        self.components["cron_scheduler"].get_last_plate.side_effect = (
+            lambda agent: plate if agent == "alpha" else None
+        )
+
+        # Thread activity scoped to the team.
+        ts = self.components["thread_store"]
+        ch = ts.ensure_channel("team")
+        ts.post_message(ch["id"], "alpha", body="standup done")
+
+        resp = self.client.get("/dashboard/api/teams/team/room")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        assert data["team"]["name"] == "team"
+        assert data["team"]["description"] == "desc"
+        assert data["team"]["north_star"] == "Ship it"
+        assert data["team"]["lead_agent_id"] == "alpha"
+
+        members = {m["agent_id"]: m for m in data["members"]}
+        assert set(members) == {"alpha", "beta"}
+
+        alpha = members["alpha"]
+        assert alpha["is_lead"] is True
+        assert alpha["busy"] is True
+        assert alpha["queued"] == 2
+        assert alpha["current_task"]["title"] == "Dig the well"
+        assert alpha["current_task"]["status"] == "working"
+        assert alpha["plate"] == plate
+
+        beta = members["beta"]
+        assert beta["is_lead"] is False
+        assert beta["busy"] is False
+        assert beta["current_task"] is None
+        assert beta["plate"] is None
+
+        assert len(data["threads"]) == 1
+        assert data["threads"][0]["id"] == ch["id"]
+
+    def test_member_with_no_lane_status_defaults_idle(self):
+        """A member absent from lane_manager.get_status() still appears,
+        defaulting to idle/zero-queued rather than a KeyError."""
+        self.components["teams_store"].create_team("team")
+        self.components["teams_store"].add_member("team", "solo")
+        resp = self.client.get("/dashboard/api/teams/team/room")
+        assert resp.status_code == 200
+        member = resp.json()["members"][0]
+        assert member["busy"] is False
+        assert member["queued"] == 0
+        assert member["current_task"] is None
+        assert member["plate"] is None
+
+    def test_none_guards_every_optional_source(self):
+        """Each injected source absent → clean payload, never a 500."""
+        teams_store = self.components["teams_store"]
+        teams_store.create_team("team")
+        teams_store.add_member("team", "alpha")
+        del self.components["lane_manager"]
+        del self.components["cron_scheduler"]
+        del self.components["tasks_store"]
+        del self.components["thread_store"]
+        client = _make_client(self.components)
+        resp = client.get("/dashboard/api/teams/team/room")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["threads"] == []
+        member = data["members"][0]
+        assert member["agent_id"] == "alpha"
+        assert member["busy"] is False
+        assert member["queued"] == 0
+        assert member["current_task"] is None
+        assert member["plate"] is None
+
+    def test_no_anonymous_access(self, monkeypatch, tmp_path):
+        """The room endpoint rides the same api_router auth dependency
+        as every sibling endpoint — missing ol_session → 401 once
+        hosted-mode auth is active (mirrors
+        TestCSRFAndAuth.test_auth_rejection_in_hosted_mode)."""
+        from fastapi.testclient import TestClient
+
+        from src.dashboard import auth
+
+        self.components["teams_store"].create_team("team")
+        token_path = tmp_path / "access_token"
+        token_path.write_text("test-access-token")
+        hosted_indicator = tmp_path / ".subdomain"
+        hosted_indicator.write_text("test")
+        monkeypatch.setattr(auth, "_ACCESS_TOKEN_PATH", str(token_path))
+        monkeypatch.setattr(auth, "_HOSTED_INDICATOR", str(hosted_indicator))
+        auth.reset_cache()
+        monkeypatch.setattr(auth, "_is_hosted", None)
+        try:
+            bare_client = TestClient(self.client.app)
+            resp = bare_client.get("/dashboard/api/teams/team/room")
+            assert resp.status_code == 401
+        finally:
+            auth.reset_cache()
+
+
 class TestDashboardAgentProjectField:
     """Tests for project field in /api/agents response."""
 

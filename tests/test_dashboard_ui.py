@@ -2749,3 +2749,108 @@ class TestHireTeammateEntryPoint:
         idx = _INDEX_HTML.index("teamHubTab === 'members'\" x-cloak")
         block = _INDEX_HTML[idx:idx + 600]
         assert "hireForTeam(activeTeam)" in block
+
+
+class TestTeamRoomSubTab:
+    """Phase-4 unit 4 (plan §6 "Team Room dashboard") — the Team Room is
+    a new ``teamHubTab`` sub-tab (``room``) inside the frozen ``fleet``
+    top-nav tab, NOT a new top-nav tab (Constraint #5)."""
+
+    def test_top_nav_tab_ids_are_unchanged(self):
+        """The four frozen top-nav tab ids must be exactly chat/fleet/
+        workplace/system — 'room' must NOT appear among them."""
+        m = re.search(r"tabs:\s*\[(.*?)\],", _APP_JS_TEXT, re.DOTALL)
+        assert m, "Could not locate the tabs array in app.js"
+        block = m.group(1)
+        ids = re.findall(r"id:\s*'([a-z]+)'", block)
+        assert ids == ["chat", "workplace", "fleet", "system"]
+
+    def test_room_button_present_desktop_and_mobile(self):
+        """Both the desktop pill and the mobile tab-strip button select
+        the 'room' sub-tab and load the composed payload."""
+        assert 'data-testid="team-hub-tab-room"' in _INDEX_HTML
+        assert 'data-testid="team-hub-tab-room-mobile"' in _INDEX_HTML
+        assert "teamHubTab = 'room'; loadTeamRoom(activeTeam)" in _INDEX_HTML
+
+    def test_room_is_the_default_team_hub_sub_tab(self):
+        """No pinning test constrained the prior 'work' default, so Team
+        Room — the "who's doing what" landing view — becomes the
+        default sub-tab when a team is selected."""
+        assert "teamHubTab: 'room'" in _APP_JS_TEXT
+        assert "this.teamHubTab = 'room';" in _APP_JS_TEXT
+
+    def test_room_panel_markup_present(self):
+        assert 'x-show="teamHubTab === \'room\'"' in _INDEX_HTML
+        assert 'data-testid="team-room-panel"' in _INDEX_HTML
+        assert 'data-testid="team-room-goal"' in _INDEX_HTML
+        assert 'data-testid="team-room-members"' in _INDEX_HTML
+        assert 'data-testid="team-room-member-card"' in _INDEX_HTML
+        assert 'data-testid="team-room-plate-line"' in _INDEX_HTML
+
+    def test_member_card_shows_lead_badge_and_busy_dot(self):
+        """Reuses the unit-1 Lead badge idiom and a busy/idle dot fed
+        from the room payload — not the global fleet activity dot."""
+        idx = _INDEX_HTML.index('data-testid="team-room-member-card"')
+        block = _INDEX_HTML[idx:idx + 2400]
+        assert "m.is_lead" in block
+        assert ">Lead<" in block
+        assert "m.busy ? 'bg-amber-400' : 'bg-emerald-400'" in block
+        assert "m.current_task" in block
+        assert "m.plate" in block
+
+    def test_plate_line_shows_count_and_last_checked_or_unknown(self):
+        idx = _INDEX_HTML.index('data-testid="team-room-plate-line"')
+        block = _INDEX_HTML[idx:idx + 700]
+        assert "items on plate" in block
+        assert "last checked" in block
+        assert "relativeTime(m.plate.checked_at)" in block
+        assert "plate unknown" in block
+
+    def test_thread_activity_panel_present_and_scoped(self):
+        """Mirrors the Workplace tab's read-only Threads panel pattern
+        but reads from the room payload (already team-scoped) instead
+        of the global unscoped threadsList."""
+        assert 'data-testid="team-room-threads-list"' in _INDEX_HTML
+        assert 'data-testid="team-room-thread-message-pane"' in _INDEX_HTML
+        idx = _INDEX_HTML.index('data-testid="team-room-threads-list"')
+        block = _INDEX_HTML[idx:idx + 1200]
+        assert "teamRoom?.threads" in block
+        assert "openRoomThread(t.id)" in block
+
+    def test_load_team_room_fetches_composed_endpoint(self):
+        assert "async loadTeamRoom(team)" in _APP_JS_TEXT
+        idx = _APP_JS_TEXT.index("async loadTeamRoom(team)")
+        block = _APP_JS_TEXT[idx:idx + 600]
+        assert "/dashboard/api/teams/${encodeURIComponent(team)}/room" in block
+        assert "this.teamRoom = " in block
+
+    def test_open_room_thread_is_separate_from_global_thread_state(self):
+        """openRoomThread must write roomThreadOpen/roomThreadMessages,
+        never the Workplace tab's global threadOpen/threadMessages."""
+        assert "async openRoomThread(threadId)" in _APP_JS_TEXT
+        idx = _APP_JS_TEXT.index("async openRoomThread(threadId)")
+        block = _APP_JS_TEXT[idx:idx + 600]
+        assert "this.roomThreadOpen = " in block
+        assert "this.roomThreadMessages = " in block
+        assert "this.threadOpen = " not in block
+        assert "this.threadMessages = " not in block
+
+    def test_ws_refresh_reuses_queue_changed_and_thread_message_no_new_polling(self):
+        """The Team Room panel refreshes on the SAME WS events the Team
+        Hub's other sub-tabs already debounce-refresh on — no setInterval
+        or other new polling loop introduced for the Room panel."""
+        assert "loadTeamRoom(this.activeTeam)" in _APP_JS_TEXT
+        idx = _APP_JS_TEXT.index("_teamRoomDebounce = setTimeout")
+        block = _APP_JS_TEXT[max(0, idx - 500):idx]
+        assert "evt.type === 'queue_changed'" in block
+        assert "evt.type === 'thread_message'" in block
+        assert "setInterval" not in _APP_JS_TEXT[idx - 500:idx + 500]
+
+    def test_no_write_endpoints_referenced_by_room_panel(self):
+        """Read-only observability surface: the room panel/JS must never
+        POST/PUT/DELETE against the room endpoint or its sub-sources."""
+        idx = _APP_JS_TEXT.index("async loadTeamRoom(team)")
+        end = _APP_JS_TEXT.index("async openRoomThread(threadId)")
+        block = _APP_JS_TEXT[idx:end]
+        assert "method:" not in block
+        assert "'POST'" not in block and '"POST"' not in block
