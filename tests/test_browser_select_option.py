@@ -6,7 +6,8 @@ Covers:
     ``select_option`` mesh action with the right params.
   * Manager primary path — ``locator.select_option`` is called with
     exactly the supplied kwarg (value/label/index) and the response
-    echoes the returned selection + the landed ``input_value()``.
+    echoes the returned selection + the FULL landed value set read back
+    off the element (``el.selectedOptions``).
   * Manager error classification — an "is not a <select>" Playwright
     error is classified as ``not_a_select``; an explicit no-matching-
     option error is ``option_not_found``; a detached/not-attached
@@ -15,9 +16,14 @@ Covers:
     hidden/disabled/loading); missing value/label/index is rejected as
     ``invalid_input`` before any locator resolution; supplying more than
     one of value/label/index is also ``invalid_input``.
-  * Post-select verification — when the returned selection and the
-    landed ``input_value()`` disagree (a change handler reverted the
-    value), the result is ``selection_reverted``, not a false success.
+  * Post-select verification — the landed set is read via
+    ``locator.evaluate`` (every currently-selected option value, not the
+    scalar ``input_value()`` that only reports the FIRST). When it does
+    not match the requested selection multiplicity-preservingly (a change
+    handler reverted one or more options, single OR multi-select) the
+    result is ``selection_reverted``, not a false success. A read-back
+    that RAISES is never a success either — a detached element →
+    ``ref_stale``, anything else → ``service_unavailable``.
 
 Mirrors ``tests/test_browser_parity_actions.py`` / ``tests/test_browser_captcha_redetect.py``:
 every test drives ``BrowserManager`` handler methods directly against a
@@ -62,13 +68,33 @@ def _patch_get_or_start(mgr: BrowserManager, inst: CamoufoxInstance) -> None:
     mgr.get_or_start = AsyncMock(return_value=inst)  # type: ignore[assignment]
 
 
-def _mk_locator(*, select_option_result=None, select_option_error=None, input_value=""):
+def _mk_locator(
+    *,
+    select_option_result=None,
+    select_option_error=None,
+    landed_values=None,
+    evaluate_error=None,
+):
+    """Playwright ``Locator`` mock.
+
+    ``select_option`` returns the requested option *values* (or raises
+    ``select_option_error``). The post-select verification then reads the
+    landed set via ``locator.evaluate`` — mocked here to return
+    ``landed_values`` (or raise ``evaluate_error``). When ``landed_values``
+    is left unset it MIRRORS ``select_option_result`` — i.e. the value stuck,
+    the common success case — so callers only pass it to model a revert.
+    """
     loc = MagicMock()
     if select_option_error is not None:
         loc.select_option = AsyncMock(side_effect=select_option_error)
     else:
         loc.select_option = AsyncMock(return_value=select_option_result or [])
-    loc.input_value = AsyncMock(return_value=input_value)
+    if evaluate_error is not None:
+        loc.evaluate = AsyncMock(side_effect=evaluate_error)
+    else:
+        if landed_values is None:
+            landed_values = list(select_option_result or [])
+        loc.evaluate = AsyncMock(return_value=landed_values)
     return loc
 
 
@@ -83,14 +109,15 @@ class TestSelectOptionPrimaryPath:
         _patch_get_or_start(mgr, inst)
         inst.refs["e1"] = object()
 
-        loc = _mk_locator(select_option_result=["red"], input_value="red")
+        loc = _mk_locator(select_option_result=["red"])
         mgr._locator_from_ref = AsyncMock(return_value=loc)  # type: ignore[assignment]
 
         result = await mgr.select_option("agent-select", ref="e1", value="red")
 
         assert result["success"] is True
         assert result["data"]["selected"] == ["red"]
-        assert result["data"]["value"] == "red"
+        # ``value`` now carries the FULL landed set read off the element.
+        assert result["data"]["value"] == ["red"]
         assert result["data"]["ref"] == "e1"
         loc.select_option.assert_awaited_once_with(value="red")
 
@@ -101,10 +128,11 @@ class TestSelectOptionPrimaryPath:
         _patch_get_or_start(mgr, inst)
         inst.refs["e1"] = object()
 
-        # Playwright's select_option returns option *values*; input_value()
-        # reports the same value — keep the mock self-consistent so the
-        # post-select verification (Fix 3) sees the value stuck.
-        loc = _mk_locator(select_option_result=["blue"], input_value="blue")
+        # Playwright's select_option returns option *values*; the element's
+        # selectedOptions report the same value — keep the mock self-consistent
+        # (landed_values mirrors select_option_result) so the post-select
+        # verification sees the value stuck.
+        loc = _mk_locator(select_option_result=["blue"])
         mgr._locator_from_ref = AsyncMock(return_value=loc)  # type: ignore[assignment]
 
         result = await mgr.select_option("agent-select", ref="e1", label="Blue")
@@ -119,7 +147,7 @@ class TestSelectOptionPrimaryPath:
         _patch_get_or_start(mgr, inst)
         inst.refs["e1"] = object()
 
-        loc = _mk_locator(select_option_result=["opt3"], input_value="opt3")
+        loc = _mk_locator(select_option_result=["opt3"])
         mgr._locator_from_ref = AsyncMock(return_value=loc)  # type: ignore[assignment]
 
         result = await mgr.select_option("agent-select", ref="e1", index=2)
@@ -131,7 +159,7 @@ class TestSelectOptionPrimaryPath:
     async def test_selector_path_used_when_no_ref(self):
         mgr = _make_manager()
         page = _mk_page()
-        loc = _mk_locator(select_option_result=["blue"], input_value="blue")
+        loc = _mk_locator(select_option_result=["blue"])
         locator_chain = MagicMock()
         locator_chain.first = loc
         page.locator = MagicMock(return_value=locator_chain)
@@ -279,21 +307,134 @@ class TestSelectOptionRevertedValue:
     @pytest.mark.asyncio
     async def test_reverted_value_classified_as_selection_reverted(self):
         """Playwright returns the requested option in ``selected`` but a page
-        change-handler reset the DOM value, so ``input_value()`` shows the OLD
-        value. A contradictory selected/value must NOT report success."""
+        change-handler reset the DOM value, so the read-back set shows the OLD
+        value. A contradictory selected/landed pair must NOT report success
+        (single-select regression)."""
         mgr = _make_manager()
         inst = _mk_inst()
         _patch_get_or_start(mgr, inst)
         inst.refs["e1"] = object()
 
         # select_option returns ["US"] but the select snapped back to "CA".
-        loc = _mk_locator(select_option_result=["US"], input_value="CA")
+        loc = _mk_locator(select_option_result=["US"], landed_values=["CA"])
         mgr._locator_from_ref = AsyncMock(return_value=loc)  # type: ignore[assignment]
 
         result = await mgr.select_option("agent-select", ref="e1", value="US")
 
         assert result["success"] is False
         assert result["error"]["code"] == "selection_reverted"
+
+    @pytest.mark.asyncio
+    async def test_empty_landed_set_classified_as_selection_reverted(self):
+        """A change handler that clears the selection entirely leaves nothing
+        selected — an empty read-back set is a full revert, never a success."""
+        mgr = _make_manager()
+        inst = _mk_inst()
+        _patch_get_or_start(mgr, inst)
+        inst.refs["e1"] = object()
+
+        loc = _mk_locator(select_option_result=["US"], landed_values=[])
+        mgr._locator_from_ref = AsyncMock(return_value=loc)  # type: ignore[assignment]
+
+        result = await mgr.select_option("agent-select", ref="e1", value="US")
+
+        assert result["success"] is False
+        assert result["error"]["code"] == "selection_reverted"
+
+
+class TestSelectOptionMultiSelect:
+    """The bug the OLD scalar ``input_value()`` check missed: a multi-select
+    whose change handler reverts option 2..N. ``input_value()`` reports only
+    the FIRST selected value, so it saw the (still-present) first option and
+    reported a false success; the full-set read-back catches the drop."""
+
+    @pytest.mark.asyncio
+    async def test_multiselect_partial_revert_is_selection_reverted(self):
+        mgr = _make_manager()
+        inst = _mk_inst()
+        _patch_get_or_start(mgr, inst)
+        inst.refs["e1"] = object()
+
+        # Requested US+CA+MX; the page's change handler dropped CA and MX,
+        # leaving only US selected. The old scalar guard (first value == "US",
+        # which IS in ``selected``) would have reported success.
+        loc = _mk_locator(
+            select_option_result=["US", "CA", "MX"], landed_values=["US"],
+        )
+        mgr._locator_from_ref = AsyncMock(return_value=loc)  # type: ignore[assignment]
+
+        result = await mgr.select_option(
+            "agent-select", ref="e1", value=["US", "CA", "MX"],
+        )
+
+        assert result["success"] is False
+        assert result["error"]["code"] == "selection_reverted"
+        # The honest current state is surfaced (only US survived).
+        assert "'US'" in result["error"]["message"]
+
+    @pytest.mark.asyncio
+    async def test_multiselect_fully_applied_is_success(self):
+        mgr = _make_manager()
+        inst = _mk_inst()
+        _patch_get_or_start(mgr, inst)
+        inst.refs["e1"] = object()
+
+        # Landed set matches the requested set regardless of order — the
+        # comparison is order-insensitive and multiplicity-preserving.
+        loc = _mk_locator(
+            select_option_result=["US", "CA", "MX"],
+            landed_values=["MX", "US", "CA"],
+        )
+        mgr._locator_from_ref = AsyncMock(return_value=loc)  # type: ignore[assignment]
+
+        result = await mgr.select_option(
+            "agent-select", ref="e1", value=["US", "CA", "MX"],
+        )
+
+        assert result["success"] is True
+        assert result["data"]["selected"] == ["US", "CA", "MX"]
+        assert sorted(result["data"]["value"]) == ["CA", "MX", "US"]
+
+
+class TestSelectOptionReadBackRaises:
+    """A read-back that RAISES is never a success — the old ``except: pass``
+    silently skipped verification and returned success. Now it is classified."""
+
+    @pytest.mark.asyncio
+    async def test_read_back_not_attached_is_ref_stale(self):
+        mgr = _make_manager()
+        inst = _mk_inst()
+        _patch_get_or_start(mgr, inst)
+        inst.refs["e1"] = object()
+
+        loc = _mk_locator(
+            select_option_result=["US"],
+            evaluate_error=Exception("Element is not attached to the DOM"),
+        )
+        mgr._locator_from_ref = AsyncMock(return_value=loc)  # type: ignore[assignment]
+
+        result = await mgr.select_option("agent-select", ref="e1", value="US")
+
+        assert result["success"] is False
+        assert result["error"]["code"] == "ref_stale"
+
+    @pytest.mark.asyncio
+    async def test_read_back_generic_error_is_service_unavailable(self):
+        mgr = _make_manager()
+        inst = _mk_inst()
+        _patch_get_or_start(mgr, inst)
+        inst.refs["e1"] = object()
+
+        loc = _mk_locator(
+            select_option_result=["US"],
+            evaluate_error=RuntimeError("evaluate blew up"),
+        )
+        mgr._locator_from_ref = AsyncMock(return_value=loc)  # type: ignore[assignment]
+
+        result = await mgr.select_option("agent-select", ref="e1", value="US")
+
+        assert result["success"] is False
+        assert result["error"]["code"] == "service_unavailable"
 
 
 class TestSelectOptionUnclassifiedErrorPropagates:
