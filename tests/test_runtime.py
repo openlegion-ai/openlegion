@@ -3004,7 +3004,7 @@ class TestSystemNoteCallSites:
 
     def test_mesh_server_wake_sites_flagged(self):
         src = self._src("src/host/server.py")
-        # Seven literal sites: blackboard watch steer + ``_try_wake_agent``
+        # Eight literal sites: blackboard watch steer + ``_try_wake_agent``
         # (the single enqueue funnel for the hand_off wake, operator
         # recovery wake, back-edge wake and admin-action wakes — all of
         # which inherit the flag from the helper) + the two ask-delivery
@@ -3013,8 +3013,11 @@ class TestSystemNoteCallSites:
         # offboarding-with-handover turn in ``_offboard_agent`` + the two
         # onboarding-wake sites in ``_dispatch_onboarding_wake`` (intro
         # turn + lead/operator nudge — plan §8 #15, none of these are
-        # human-typed either).
-        assert src.count("system_note=True") == 7
+        # human-typed either) + the held connector_call result note in
+        # ``_execute_held_connector_call`` (plan §8 #17 — a confirmed
+        # hold's result is delivered back to the proposing agent as a
+        # mesh-composed followup; no human typed it).
+        assert src.count("system_note=True") == 8
         # Pin that the consolidated wake paths actually route through
         # the flagged helper rather than hand-rolling an enqueue.
         assert src.count("_try_wake_agent(") >= 7  # def + 6 call sites

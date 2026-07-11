@@ -8,6 +8,17 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.host.server import create_mesh_app
+from src.shared.types import MessageOrigin
+
+
+def _human_headers(agent_id: str = "operator") -> dict:
+    origin = MessageOrigin(kind="human", channel="cli", user="u1")
+    return {"X-Agent-ID": agent_id, "X-Origin": origin.to_header_value()}
+
+
+def _agent_origin_headers(agent_id: str = "operator") -> dict:
+    origin = MessageOrigin(kind="agent", channel="", user="")
+    return {"X-Agent-ID": agent_id, "X-Origin": origin.to_header_value()}
 
 
 @pytest.fixture()
@@ -233,6 +244,248 @@ class TestWalletExecute:
             "contract": "0x1", "function": "foo()",
         })
         assert resp.status_code == 503
+
+
+# ── Action-tier policy gate: financial tier hold (plan §8 #17) ─────
+#
+# Default (no yaml) behavior is exercised by every test above, unmodified
+# -- the financial tier's compiled-in default is plain ``allow``, so
+# those tests are the "byte-identical by default" regression proof.
+
+
+@pytest.fixture()
+def hold_client(mock_wallet_service, mock_permissions, mock_blackboard, tmp_path, monkeypatch):
+    """TestClient with the financial tier held for human confirmation."""
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text("version: 1\ntiers:\n  financial: hold\n")
+    monkeypatch.setenv("OPENLEGION_POLICY_CONFIG", str(policy_path))
+    app = create_mesh_app(
+        blackboard=mock_blackboard,
+        pubsub=MagicMock(),
+        router=MagicMock(),
+        permissions=mock_permissions,
+        wallet_service_ref=[mock_wallet_service],
+    )
+    client = TestClient(app)
+    yield client
+    client.close()
+    monkeypatch.delenv("OPENLEGION_POLICY_CONFIG", raising=False)
+
+
+class TestWalletTransferPolicyHold:
+    def test_hold_queues_without_executing(self, hold_client, mock_wallet_service):
+        resp = hold_client.post("/mesh/wallet/transfer", json={
+            "agent_id": "test", "chain": "evm:base", "to": "0x1", "amount": "0.1",
+        })
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["queued_for_approval"] is True
+        assert "change_id" in body
+        mock_wallet_service.transfer.assert_not_awaited()
+
+    def test_hold_confirm_executes(self, hold_client, mock_wallet_service):
+        propose = hold_client.post("/mesh/wallet/transfer", json={
+            "agent_id": "test", "chain": "evm:base", "to": "0x1", "amount": "0.1",
+        })
+        nonce = propose.json()["change_id"]
+        digest = propose.json()["payload_digest"]
+        confirm = hold_client.post(
+            "/mesh/config/confirm",
+            json={"change_id": nonce, "payload_digest": digest},
+            headers=_human_headers("operator"),
+        )
+        assert confirm.status_code == 200, confirm.text
+        assert confirm.json()["tx_hash"] == "0xDEAD"
+        mock_wallet_service.transfer.assert_awaited_once()
+
+    def test_hold_confirm_single_use(self, hold_client):
+        propose = hold_client.post("/mesh/wallet/transfer", json={
+            "agent_id": "test", "chain": "evm:base", "to": "0x1", "amount": "0.1",
+        })
+        nonce = propose.json()["change_id"]
+        digest = propose.json()["payload_digest"]
+        first = hold_client.post(
+            "/mesh/config/confirm",
+            json={"change_id": nonce, "payload_digest": digest},
+            headers=_human_headers("operator"),
+        )
+        assert first.status_code == 200
+        second = hold_client.post(
+            "/mesh/config/confirm",
+            json={"change_id": nonce, "payload_digest": digest},
+            headers=_human_headers("operator"),
+        )
+        assert second.status_code == 400
+
+    def test_hold_confirm_cap_breach_rejected_not_executed(self, hold_client, mock_wallet_service):
+        """A confirm that would breach the daily cap is rejected by the
+        cap re-check at execution time (``WalletService._check_policy``,
+        exercised inside ``transfer``), not blindly executed."""
+        mock_wallet_service.transfer.side_effect = PermissionError("daily cap exceeded")
+        propose = hold_client.post("/mesh/wallet/transfer", json={
+            "agent_id": "test", "chain": "evm:base", "to": "0x1", "amount": "999",
+        })
+        nonce = propose.json()["change_id"]
+        digest = propose.json()["payload_digest"]
+        confirm = hold_client.post(
+            "/mesh/config/confirm",
+            json={"change_id": nonce, "payload_digest": digest},
+            headers=_human_headers("operator"),
+        )
+        assert confirm.status_code == 403
+        assert "daily cap" in confirm.text
+
+    def test_hold_confirm_reruns_permission_checks(self, hold_client, mock_permissions):
+        """Permissions may have changed between propose and confirm — the
+        executor re-checks fully rather than trusting the propose-time
+        check."""
+        propose = hold_client.post("/mesh/wallet/transfer", json={
+            "agent_id": "test", "chain": "evm:base", "to": "0x1", "amount": "0.1",
+        })
+        nonce = propose.json()["change_id"]
+        digest = propose.json()["payload_digest"]
+        mock_permissions.can_use_wallet.return_value = False
+        confirm = hold_client.post(
+            "/mesh/config/confirm",
+            json={"change_id": nonce, "payload_digest": digest},
+            headers=_human_headers("operator"),
+        )
+        assert confirm.status_code == 403
+
+    def test_agent_origin_confirm_403(self, hold_client, mock_wallet_service):
+        propose = hold_client.post("/mesh/wallet/transfer", json={
+            "agent_id": "test", "chain": "evm:base", "to": "0x1", "amount": "0.1",
+        })
+        nonce = propose.json()["change_id"]
+        digest = propose.json()["payload_digest"]
+        confirm = hold_client.post(
+            "/mesh/config/confirm",
+            json={"change_id": nonce, "payload_digest": digest},
+            headers=_agent_origin_headers("operator"),
+        )
+        assert confirm.status_code == 403
+        mock_wallet_service.transfer.assert_not_awaited()
+
+    def test_hold_queue_full_rejected_fail_closed(self, hold_client, mock_wallet_service):
+        """With the pending store at _MAX_PENDING, a hold-decision
+        transfer is REFUSED (429) — never broadcast, never stored, no
+        existing row evicted."""
+        from src.host.server import _MAX_PENDING
+
+        pa = hold_client.app.pending_actions
+        try:
+            for i in range(_MAX_PENDING):
+                pa.store(
+                    nonce=f"pre-xfer-{i}", actor="operator", target_kind="agent",
+                    target_id="alpha", action_kind="delete", payload={},
+                    origin_kind="human",
+                )
+            before = len(pa.list_pending())
+            assert before >= _MAX_PENDING
+            resp = hold_client.post("/mesh/wallet/transfer", json={
+                "agent_id": "test", "chain": "evm:base", "to": "0x1", "amount": "0.1",
+            })
+            assert resp.status_code == 429
+            assert "Approval queue full" in resp.text
+            mock_wallet_service.transfer.assert_not_awaited()
+            assert len(pa.list_pending()) == before  # not stored
+            for i in range(_MAX_PENDING):
+                assert pa.peek(f"pre-xfer-{i}") is not None  # never evicted
+        finally:
+            # The store is a shared cwd data/pending_actions.db — drop the
+            # prefill so later hold tests don't inherit a full queue.
+            with pa._conn() as conn:
+                conn.execute("DELETE FROM pending_actions WHERE nonce LIKE 'pre-xfer-%'")
+
+
+class TestWalletExecutePolicyHold:
+    def test_hold_queues_without_executing(self, hold_client, mock_wallet_service):
+        resp = hold_client.post("/mesh/wallet/execute", json={
+            "agent_id": "test", "chain": "evm:base",
+            "contract": "0xRouter", "function": "swap(address,uint256)",
+            "args": ["0x1", 100], "value": "0.1",
+        })
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["queued_for_approval"] is True
+        mock_wallet_service.execute_contract.assert_not_awaited()
+
+    def test_hold_confirm_executes(self, hold_client, mock_wallet_service):
+        propose = hold_client.post("/mesh/wallet/execute", json={
+            "agent_id": "test", "chain": "evm:base",
+            "contract": "0xRouter", "function": "swap(address,uint256)",
+            "args": ["0x1", 100], "value": "0.1",
+        })
+        nonce = propose.json()["change_id"]
+        digest = propose.json()["payload_digest"]
+        confirm = hold_client.post(
+            "/mesh/config/confirm",
+            json={"change_id": nonce, "payload_digest": digest},
+            headers=_human_headers("operator"),
+        )
+        assert confirm.status_code == 200, confirm.text
+        assert confirm.json()["tx_hash"] == "0xBEEF"
+        mock_wallet_service.execute_contract.assert_awaited_once()
+
+    def test_hold_confirm_cap_breach_rejected(self, hold_client, mock_wallet_service):
+        mock_wallet_service.execute_contract.side_effect = PermissionError("daily cap exceeded")
+        propose = hold_client.post("/mesh/wallet/execute", json={
+            "agent_id": "test", "chain": "evm:base",
+            "contract": "0xRouter", "function": "swap(address,uint256)",
+            "value": "999",
+        })
+        nonce = propose.json()["change_id"]
+        digest = propose.json()["payload_digest"]
+        confirm = hold_client.post(
+            "/mesh/config/confirm",
+            json={"change_id": nonce, "payload_digest": digest},
+            headers=_human_headers("operator"),
+        )
+        assert confirm.status_code == 403
+
+    def test_agent_origin_confirm_403(self, hold_client, mock_wallet_service):
+        propose = hold_client.post("/mesh/wallet/execute", json={
+            "agent_id": "test", "chain": "evm:base",
+            "contract": "0xRouter", "function": "swap(address,uint256)",
+        })
+        nonce = propose.json()["change_id"]
+        digest = propose.json()["payload_digest"]
+        confirm = hold_client.post(
+            "/mesh/config/confirm",
+            json={"change_id": nonce, "payload_digest": digest},
+            headers=_agent_origin_headers("operator"),
+        )
+        assert confirm.status_code == 403
+        mock_wallet_service.execute_contract.assert_not_awaited()
+
+    def test_hold_queue_full_rejected_fail_closed(self, hold_client, mock_wallet_service):
+        """With the pending store at _MAX_PENDING, a hold-decision
+        execute is REFUSED (429) — never broadcast, never stored, no
+        existing row evicted."""
+        from src.host.server import _MAX_PENDING
+
+        pa = hold_client.app.pending_actions
+        try:
+            for i in range(_MAX_PENDING):
+                pa.store(
+                    nonce=f"pre-exec-{i}", actor="operator", target_kind="agent",
+                    target_id="alpha", action_kind="delete", payload={},
+                    origin_kind="human",
+                )
+            before = len(pa.list_pending())
+            assert before >= _MAX_PENDING
+            resp = hold_client.post("/mesh/wallet/execute", json={
+                "agent_id": "test", "chain": "evm:base",
+                "contract": "0xRouter", "function": "swap(address,uint256)",
+            })
+            assert resp.status_code == 429
+            assert "Approval queue full" in resp.text
+            mock_wallet_service.execute_contract.assert_not_awaited()
+            assert len(pa.list_pending()) == before  # not stored
+            for i in range(_MAX_PENDING):
+                assert pa.peek(f"pre-exec-{i}") is not None  # never evicted
+        finally:
+            with pa._conn() as conn:
+                conn.execute("DELETE FROM pending_actions WHERE nonce LIKE 'pre-exec-%'")
 
 
 # === WalletService.cleanup_agent Tests ===

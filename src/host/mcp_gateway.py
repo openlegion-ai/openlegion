@@ -234,6 +234,24 @@ class MCPGateway:
             raise UnknownConnectorError(name)
         return c
 
+    def assigned_connector(self, name: str, agent_id: str) -> HttpConnector:
+        """Resolve a connector and enforce the assignment gate.
+
+        Assignment IS the authz gate (plan D11) — shared between
+        :meth:`call_tool` (execution time) and the action-tier policy
+        engine's held-action propose path (plan §8 #17), which must
+        refuse to even QUEUE a call for an agent that isn't assigned,
+        without making a network call. Raises ``UnknownConnectorError``
+        for an unknown connector, ``PermissionError`` for an unassigned
+        one — the same errors ``call_tool`` has always raised.
+        """
+        c = self._get_http(name)
+        if not c.applies_to(agent_id):
+            raise PermissionError(
+                f"connector {name!r} is not assigned to agent {agent_id!r}",
+            )
+        return c
+
     def invalidate(self, name: str) -> None:
         """Drop the cached discovery for one connector (auth edits)."""
         self._tools_cache.pop(name.lower(), None)
@@ -440,11 +458,7 @@ class MCPGateway:
     ) -> dict:
         """Execute one tool call. Assignment IS the authz gate — the
         operator participates like any agent (plan D11)."""
-        c = self._get_http(name)
-        if not c.applies_to(agent_id):
-            raise PermissionError(
-                f"connector {name!r} is not assigned to agent {agent_id!r}",
-            )
+        c = self.assigned_connector(name, agent_id)
         try:
             result = await self._with_session(
                 c,

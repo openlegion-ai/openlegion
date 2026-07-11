@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 
 from src.host.connectors import ConnectorStore
 from src.host.mcp_gateway import MCPGateway
-from src.shared.types import ConnectorAuth, HttpConnector
+from src.shared.types import ConnectorAuth, HttpConnector, MessageOrigin
 from tests.test_mcp_gateway import FakeOpenClient, FakeSession, _factory
 
 
@@ -181,6 +181,207 @@ class TestMeshConnectorEndpoints:
         resp = self._call(client, "alpha")
         assert resp.status_code == 503
         assert "install" in resp.json()["detail"]
+
+
+# ── Action-tier policy gate on /mesh/connectors/call (plan §8 #17) ──
+
+
+def _human_headers(agent_id: str = "operator") -> dict:
+    origin = MessageOrigin(kind="human", channel="cli", user="u1")
+    return {"X-Agent-ID": agent_id, "X-Origin": origin.to_header_value()}
+
+
+def _agent_origin_headers(agent_id: str = "operator") -> dict:
+    origin = MessageOrigin(kind="agent", channel="", user="")
+    return {"X-Agent-ID": agent_id, "X-Origin": origin.to_header_value()}
+
+
+@pytest.fixture
+def mesh_env_hold(tmp_path, monkeypatch):
+    """Same shape as ``mesh_env``, with ``config/policy.yaml`` holding the
+    external_visible tier (connector_call's classification) and a
+    ``lane_manager`` wired so the held-executor's followup-note delivery
+    to the proposing agent is observable."""
+    from src.host.mesh import Blackboard, MessageRouter, PubSub
+    from src.host.permissions import PermissionMatrix
+    from src.host.server import create_mesh_app
+
+    policy_path = tmp_path / "policy.yaml"
+    policy_path.write_text("version: 1\ntiers:\n  external_visible: hold\n")
+    monkeypatch.setenv("OPENLEGION_POLICY_CONFIG", str(policy_path))
+
+    store = _store_with_linear(tmp_path)
+    gateway = MCPGateway(store, None, client_factory=_factory)
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    lane_manager = MagicMock()
+    lane_manager.enqueue = AsyncMock(return_value="lane-task-1")
+    app = create_mesh_app(
+        bb, PubSub(), MessageRouter(permissions=perms, agent_registry={}),
+        perms, connector_store=store, mcp_gateway=gateway,
+        lane_manager=lane_manager,
+    )
+    client = TestClient(app)
+    yield client, store, gateway, bb, lane_manager
+    client.close()
+    bb.close()
+    monkeypatch.delenv("OPENLEGION_POLICY_CONFIG", raising=False)
+
+
+class TestConnectorCallPolicyGate:
+    def _call(self, client, agent, connector="linear", tool="t"):
+        return client.post(
+            "/mesh/connectors/call",
+            json={
+                "agent_id": agent, "connector": connector,
+                "tool": tool, "arguments": {},
+            },
+            headers={"X-Agent-ID": agent},
+        )
+
+    def test_default_allow_audit_executes_and_writes_policy_row(self, mesh_env):
+        client, _, _, bb = mesh_env
+        resp = self._call(client, "alpha")
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"result": "done"}
+        entries = bb.get_audit_log(action="policy_decision")["entries"]
+        assert len(entries) == 1
+        assert entries[0]["target"] == "alpha"
+        assert entries[0]["field"] == "connector_call"
+
+    def test_assignment_gate_403_before_policy_no_hold_queued(self, mesh_env_hold):
+        """An unassigned agent 403s even under a hold-configured policy —
+        the assignment check runs BEFORE ``policy.evaluate``, so a call
+        the agent isn't assigned to is never even proposed as a hold."""
+        client, _store, _gateway, bb, lane_manager = mesh_env_hold
+        resp = self._call(client, "beta")
+        assert resp.status_code == 403
+        assert bb.get_audit_log(action="policy_decision")["entries"] == []
+        lane_manager.enqueue.assert_not_awaited()
+
+    def test_unknown_connector_404_before_policy(self, mesh_env_hold):
+        client, *_ = mesh_env_hold
+        assert self._call(client, "alpha", connector="ghost").status_code == 404
+
+    def test_hold_queues_without_executing(self, mesh_env_hold):
+        client, *_ = mesh_env_hold
+        resp = self._call(client, "alpha")
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["queued_for_approval"] is True
+        assert "change_id" in body
+        # The fake MCP session was never opened -- the call was queued,
+        # not executed.
+        assert FakeSession.instances == []
+
+    def test_hold_queue_full_rejected_fail_closed(self, mesh_env_hold):
+        """With the pending store at _MAX_PENDING, a hold-decision
+        connector call is REFUSED (429) — never executed, never stored,
+        no existing row evicted."""
+        from src.host.server import _MAX_PENDING
+
+        client, *_ = mesh_env_hold
+        pa = client.app.pending_actions
+        try:
+            for i in range(_MAX_PENDING):
+                pa.store(
+                    nonce=f"pre-conn-{i}", actor="operator", target_kind="agent",
+                    target_id="alpha", action_kind="delete", payload={},
+                    origin_kind="human",
+                )
+            before = len(pa.list_pending())
+            assert before >= _MAX_PENDING
+            resp = self._call(client, "alpha")
+            assert resp.status_code == 429
+            assert "Approval queue full" in resp.text
+            assert FakeSession.instances == []  # never executed
+            assert len(pa.list_pending()) == before  # not stored
+            for i in range(_MAX_PENDING):
+                assert pa.peek(f"pre-conn-{i}") is not None  # never evicted
+        finally:
+            # The store is a shared cwd data/pending_actions.db — drop the
+            # prefill so later hold tests don't inherit a full queue.
+            with pa._conn() as conn:
+                conn.execute("DELETE FROM pending_actions WHERE nonce LIKE 'pre-conn-%'")
+
+    def test_hold_confirm_executes_and_delivers_followup_note(self, mesh_env_hold):
+        client, _store, _gateway, _bb, lane_manager = mesh_env_hold
+        propose = self._call(client, "alpha")
+        nonce = propose.json()["change_id"]
+        digest = propose.json()["payload_digest"]
+        confirm = client.post(
+            "/mesh/config/confirm",
+            json={"change_id": nonce, "payload_digest": digest},
+            headers=_human_headers("operator"),
+        )
+        assert confirm.status_code == 200, confirm.text
+        body = confirm.json()
+        assert body["delivered"] is True
+        assert body["result"] == {"result": "done"}
+        lane_manager.enqueue.assert_awaited_once()
+        args, kwargs = lane_manager.enqueue.call_args
+        assert args[0] == "alpha"
+        assert "linear:t" in args[1]
+        assert kwargs.get("mode") == "followup"
+        assert kwargs.get("system_note") is True
+
+    def test_hold_confirm_single_use(self, mesh_env_hold):
+        client, *_ = mesh_env_hold
+        propose = self._call(client, "alpha")
+        nonce = propose.json()["change_id"]
+        digest = propose.json()["payload_digest"]
+        first = client.post(
+            "/mesh/config/confirm",
+            json={"change_id": nonce, "payload_digest": digest},
+            headers=_human_headers("operator"),
+        )
+        assert first.status_code == 200
+        second = client.post(
+            "/mesh/config/confirm",
+            json={"change_id": nonce, "payload_digest": digest},
+            headers=_human_headers("operator"),
+        )
+        assert second.status_code == 400
+
+    def test_agent_origin_confirm_403(self, mesh_env_hold):
+        client, *_ = mesh_env_hold
+        propose = self._call(client, "alpha")
+        nonce = propose.json()["change_id"]
+        digest = propose.json()["payload_digest"]
+        confirm = client.post(
+            "/mesh/config/confirm",
+            json={"change_id": nonce, "payload_digest": digest},
+            headers=_agent_origin_headers("operator"),
+        )
+        assert confirm.status_code == 403
+
+    def test_deny_policy_returns_403(self, tmp_path, monkeypatch):
+        from src.host.mesh import Blackboard, MessageRouter, PubSub
+        from src.host.permissions import PermissionMatrix
+        from src.host.server import create_mesh_app
+
+        policy_path = tmp_path / "policy.yaml"
+        policy_path.write_text("version: 1\ntiers:\n  external_visible: deny\n")
+        monkeypatch.setenv("OPENLEGION_POLICY_CONFIG", str(policy_path))
+        store = _store_with_linear(tmp_path)
+        gateway = MCPGateway(store, None, client_factory=_factory)
+        bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+        perms = PermissionMatrix.__new__(PermissionMatrix)
+        perms.permissions = {}
+        app = create_mesh_app(
+            bb, PubSub(), MessageRouter(permissions=perms, agent_registry={}),
+            perms, connector_store=store, mcp_gateway=gateway,
+        )
+        client = TestClient(app)
+        try:
+            resp = self._call(client, "alpha")
+            assert resp.status_code == 403
+            assert FakeSession.instances == []
+        finally:
+            client.close()
+            bb.close()
+            monkeypatch.delenv("OPENLEGION_POLICY_CONFIG", raising=False)
 
 
 # ── agent-side registry ──────────────────────────────────────

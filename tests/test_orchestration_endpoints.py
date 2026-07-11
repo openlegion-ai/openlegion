@@ -14,7 +14,7 @@ from httpx import ASGITransport, AsyncClient
 
 from src.host.mesh import Blackboard, MessageRouter, PubSub
 from src.host.permissions import PermissionMatrix
-from src.shared.types import AgentPermissions
+from src.shared.types import AgentPermissions, MessageOrigin
 
 
 def _reload_server(monkeypatch, *, tasks_db: str):
@@ -696,6 +696,166 @@ async def test_pending_cancel_unknown_returns_404(v2_app):
             headers={"X-Agent-ID": "operator", "X-Mesh-Internal": "1"},
         )
         assert r.status_code == 404
+
+
+# ── Held-actions generalization: executor registry (plan §8 #17, C.1 row 6) ──
+
+
+def _human_internal_headers(agent_id: str = "operator") -> dict:
+    """Internal-caller headers with a human-kind X-Origin — the shape a
+    dashboard confirm click actually sends."""
+    origin = MessageOrigin(kind="human", channel="cli", user="u1")
+    return {
+        "X-Agent-ID": agent_id,
+        "X-Mesh-Internal": "1",
+        "X-Origin": origin.to_header_value(),
+    }
+
+
+@pytest.mark.asyncio
+async def test_pending_list_endpoint_surfaces_tier(v2_app):
+    """GET /mesh/pending includes the tier column on each row."""
+    app, _, _ = v2_app
+    app.pending_actions.store(
+        nonce="n-tier", actor="operator", target_kind="wallet",
+        target_id="scout", action_kind="wallet_transfer", payload={"x": 1},
+        tier="financial",
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.get("/mesh/pending", headers={"X-Mesh-Internal": "1"})
+    assert r.status_code == 200
+    row = next(p for p in r.json()["pending"] if p["nonce"] == "n-tier")
+    assert row["tier"] == "financial"
+
+
+@pytest.mark.asyncio
+async def test_confirm_unregistered_action_kind_returns_400(v2_app):
+    """A pending row whose ``action_kind`` has no registered executor
+    (a stray/corrupt row, or a future producer that forgot to register
+    one) is refused loudly rather than silently mis-dispatched."""
+    app, _, _ = v2_app
+    app.pending_actions.store(
+        nonce="n-stray", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="not_a_registered_kind",
+        payload={"x": 1}, origin_kind="human",
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/config/confirm",
+            json={"change_id": "n-stray"},
+            headers=_human_internal_headers(),
+        )
+    assert r.status_code == 400
+    assert "not_a_registered_kind" in r.text
+
+
+@pytest.mark.asyncio
+async def test_confirm_dispatches_via_executor_registry(v2_app):
+    """A custom executor registered on ``app.pending_executors`` is
+    reached through the SAME ``/mesh/config/confirm`` endpoint the
+    delete flow uses — proves the dispatch is a real registry lookup,
+    not a hard-coded delete/{team,agent} branch."""
+    app, _, _ = v2_app
+    calls = []
+
+    async def _custom_executor(record):
+        calls.append(record["nonce"])
+        return {"custom": True, "payload": record["payload"]}
+
+    app.pending_executors["custom_kind"] = _custom_executor
+    app.pending_actions.store(
+        nonce="n-custom", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="custom_kind",
+        payload={"hello": "world"}, origin_kind="human",
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/config/confirm",
+            json={"change_id": "n-custom"},
+            headers=_human_internal_headers(),
+        )
+    assert r.status_code == 200, r.text
+    assert r.json() == {"custom": True, "payload": {"hello": "world"}}
+    assert calls == ["n-custom"]
+    # Single-use: a second confirm attempt finds the row already consumed.
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r2 = await c.post(
+            "/mesh/config/confirm",
+            json={"change_id": "n-custom"},
+            headers=_human_internal_headers(),
+        )
+    assert r2.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_delete_proposal_still_evicts_oldest_at_cap(v2_app):
+    """Regression: the DELETE producers keep their evict-oldest-at-cap
+    behavior (operator-initiated surface; newest proposal winning is
+    correct there) — only the new policy hold producers fail closed."""
+    from src.host.server import _MAX_PENDING
+
+    app, _, _ = v2_app
+    pa = app.pending_actions
+    app.teams_store.create_team("doomed")
+    app.teams_store.set_status("doomed", "archived")
+    # Start from a clean table so the eviction target is deterministic.
+    with pa._conn() as conn:
+        conn.execute("DELETE FROM pending_actions")
+    # pre-0 gets the shortest TTL -> smallest expires_at -> eviction target.
+    pa.store(
+        nonce="pre-0", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="delete", payload={},
+        origin_kind="human", ttl=60,
+    )
+    for i in range(1, _MAX_PENDING):
+        pa.store(
+            nonce=f"pre-{i}", actor="operator", target_kind="agent",
+            target_id="alpha", action_kind="delete", payload={},
+            origin_kind="human", ttl=300,
+        )
+    assert len(pa.list_pending()) == _MAX_PENDING
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post(
+                "/mesh/teams/doomed/propose-delete",
+                headers=_human_internal_headers(),
+            )
+        assert r.status_code == 200, r.text
+        new_nonce = r.json()["change_id"]
+        # Evicted exactly the oldest; stored the new proposal; cap held.
+        assert len(pa.list_pending()) == _MAX_PENDING
+        assert pa.peek("pre-0") is None
+        for i in range(1, _MAX_PENDING):
+            assert pa.peek(f"pre-{i}") is not None
+        assert pa.peek(new_nonce) is not None
+    finally:
+        with pa._conn() as conn:
+            conn.execute("DELETE FROM pending_actions")
+
+
+@pytest.mark.asyncio
+async def test_confirm_agent_origin_403_for_non_delete_kind(v2_app):
+    """The human-origin confirm gate is unconditional — it fires for ANY
+    action kind, not just delete, before the executor is even looked up."""
+    app, _, _ = v2_app
+    app.pending_executors["custom_kind"] = lambda record: {"ok": True}
+    app.pending_actions.store(
+        nonce="n-agent-origin", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="custom_kind", payload={},
+    )
+    agent_origin = MessageOrigin(kind="agent", channel="", user="").to_header_value()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/config/confirm",
+            json={"change_id": "n-agent-origin"},
+            headers={
+                "X-Agent-ID": "operator", "X-Mesh-Internal": "1",
+                "X-Origin": agent_origin,
+            },
+        )
+    assert r.status_code == 403
+    # Row untouched — a legitimate human confirm can still land.
+    assert app.pending_actions.peek("n-agent-origin") is not None
 
 
 # ── Hotfix: _extract_verified_agent_id honors internal callers ──────
