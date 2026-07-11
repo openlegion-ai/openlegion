@@ -8045,21 +8045,65 @@ class BrowserManager:
         wid_s = str(wid)
         loop = asyncio.get_running_loop()
         await asyncio.sleep(pre_click_settle())
-        await loop.run_in_executor(
-            None,
-            lambda: subprocess.run(
-                ["xdotool", "mousedown", "--clearmodifiers", "--window", wid_s, "1"],
-                capture_output=True, timeout=3, env=inst.subprocess_env(),
-            ),
-        )
-        await asyncio.sleep(click_dwell())
-        await loop.run_in_executor(
-            None,
-            lambda: subprocess.run(
-                ["xdotool", "mouseup", "--clearmodifiers", "--window", wid_s, "1"],
-                capture_output=True, timeout=3, env=inst.subprocess_env(),
-            ),
-        )
+        # Once button 1 goes DOWN the release MUST always fire. The mousedown
+        # is issued INSIDE the guarded block: an ``asyncio.CancelledError``
+        # (uvicorn cancels the request task on client disconnect) can fire
+        # during the mousedown await itself — the executor thread still runs
+        # ``xdotool mousedown`` to completion (button pressed) even as the
+        # awaiting coroutine unwinds, so the finally's emergency release must
+        # cover the mousedown-await window too, not just the dwell. Any other
+        # raise would likewise strand the button held for the rest of the
+        # session, and the CDP fallback (a different input channel) cannot
+        # release it. Mirror ``_x11_drag`` / ``_x11_right_click_xy``: run the
+        # release via ``run_in_executor`` so the worker thread completes the
+        # subprocess even if the awaiting future is cancelled.
+        released = False
+        try:
+            down = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    ["xdotool", "mousedown", "--clearmodifiers", "--window", wid_s, "1"],
+                    capture_output=True, timeout=3, env=inst.subprocess_env(),
+                ),
+            )
+            # A dropped mousedown (wedged X server / lost WID) must surface as
+            # a failure so the caller's CDP fallback engages — never a silent
+            # success. The finally's release is then a harmless no-op (the
+            # button was never pressed).
+            if down.returncode != 0:
+                raise RuntimeError(f"xdotool mousedown (button 1) failed: rc={down.returncode}")
+            await asyncio.sleep(click_dwell())
+            up = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    ["xdotool", "mouseup", "--clearmodifiers", "--window", wid_s, "1"],
+                    capture_output=True, timeout=3, env=inst.subprocess_env(),
+                ),
+            )
+            # A non-zero mouseup may mean the release never injected — the
+            # button could still be held, so fall through to the finally's
+            # best-effort release AND raise so the caller falls back to CDP.
+            if up.returncode != 0:
+                raise RuntimeError(f"xdotool mouseup (button 1) failed: rc={up.returncode}")
+            released = True
+        finally:
+            # Emergency release — fire ONLY when the normal release did not
+            # cleanly complete (cancel/raise anywhere in the pressed window, or
+            # a non-zero normal mouseup); the success path already released
+            # exactly once. Best effort: never mask the propagating
+            # ``CancelledError`` or the body's original exception if this
+            # cleanup also fails.
+            if not released:
+                try:
+                    await loop.run_in_executor(
+                        None,
+                        lambda: subprocess.run(
+                            ["xdotool", "mouseup", "--clearmodifiers", "--window", wid_s, "1"],
+                            capture_output=True, timeout=3, env=inst.subprocess_env(),
+                        ),
+                    )
+                except BaseException:
+                    pass
 
     async def _x11_click_xy(
         self, inst: CamoufoxInstance, x: float, y: float,
@@ -8083,21 +8127,65 @@ class BrowserManager:
         wid_s = str(wid)
         loop = asyncio.get_running_loop()
         await asyncio.sleep(pre_click_settle())
-        await loop.run_in_executor(
-            None,
-            lambda: subprocess.run(
-                ["xdotool", "mousedown", "--clearmodifiers", "--window", wid_s, "1"],
-                capture_output=True, timeout=3, env=inst.subprocess_env(),
-            ),
-        )
-        await asyncio.sleep(click_dwell())
-        await loop.run_in_executor(
-            None,
-            lambda: subprocess.run(
-                ["xdotool", "mouseup", "--clearmodifiers", "--window", wid_s, "1"],
-                capture_output=True, timeout=3, env=inst.subprocess_env(),
-            ),
-        )
+        # Once button 1 goes DOWN the release MUST always fire. The mousedown
+        # is issued INSIDE the guarded block: an ``asyncio.CancelledError``
+        # (uvicorn cancels the request task on client disconnect) can fire
+        # during the mousedown await itself — the executor thread still runs
+        # ``xdotool mousedown`` to completion (button pressed) even as the
+        # awaiting coroutine unwinds, so the finally's emergency release must
+        # cover the mousedown-await window too, not just the dwell. Any other
+        # raise would likewise strand the button held for the rest of the
+        # session, and the CDP fallback (a different input channel) cannot
+        # release it. Mirror ``_x11_drag`` / ``_x11_right_click_xy``: run the
+        # release via ``run_in_executor`` so the worker thread completes the
+        # subprocess even if the awaiting future is cancelled.
+        released = False
+        try:
+            down = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    ["xdotool", "mousedown", "--clearmodifiers", "--window", wid_s, "1"],
+                    capture_output=True, timeout=3, env=inst.subprocess_env(),
+                ),
+            )
+            # A dropped mousedown (wedged X server / lost WID) must surface as
+            # a failure so the caller's CDP fallback engages — never a silent
+            # success. The finally's release is then a harmless no-op (the
+            # button was never pressed).
+            if down.returncode != 0:
+                raise RuntimeError(f"xdotool mousedown (button 1) failed: rc={down.returncode}")
+            await asyncio.sleep(click_dwell())
+            up = await loop.run_in_executor(
+                None,
+                lambda: subprocess.run(
+                    ["xdotool", "mouseup", "--clearmodifiers", "--window", wid_s, "1"],
+                    capture_output=True, timeout=3, env=inst.subprocess_env(),
+                ),
+            )
+            # A non-zero mouseup may mean the release never injected — the
+            # button could still be held, so fall through to the finally's
+            # best-effort release AND raise so the caller falls back to CDP.
+            if up.returncode != 0:
+                raise RuntimeError(f"xdotool mouseup (button 1) failed: rc={up.returncode}")
+            released = True
+        finally:
+            # Emergency release — fire ONLY when the normal release did not
+            # cleanly complete (cancel/raise anywhere in the pressed window, or
+            # a non-zero normal mouseup); the success path already released
+            # exactly once. Best effort: never mask the propagating
+            # ``CancelledError`` or the body's original exception if this
+            # cleanup also fails.
+            if not released:
+                try:
+                    await loop.run_in_executor(
+                        None,
+                        lambda: subprocess.run(
+                            ["xdotool", "mouseup", "--clearmodifiers", "--window", wid_s, "1"],
+                            capture_output=True, timeout=3, env=inst.subprocess_env(),
+                        ),
+                    )
+                except BaseException:
+                    pass
 
     async def _x11_right_click_xy(
         self, inst: CamoufoxInstance, x: float, y: float,

@@ -273,6 +273,302 @@ class TestX11RightClickXy:
         assert calls[0][-1] == "3" and calls[1][-1] == "3"
 
 
+# ── Left-click (button 1) release + xdotool-failure guards ──────────────────
+
+
+_DWELL_SENTINEL = 0.123456  # distinctive value so a patched sleep can pick the dwell
+
+
+def _make_locator():
+    loc = MagicMock()
+    loc.bounding_box = AsyncMock(
+        return_value={"x": 100, "y": 100, "width": 40, "height": 40},
+    )
+    return loc
+
+
+async def _noop(*a, **k):
+    return None
+
+
+class TestX11ClickButtonRelease:
+    """Guard tests for ``_x11_click`` (ref path), the primary-button analogue
+    of ``TestX11RightClickXy``:
+
+      * a CancelledError mid-dwell (uvicorn cancels the request task on client
+        disconnect) must still release button 1 — otherwise it stays physically
+        held for the rest of the session (X11 corruption);
+      * a dropped xdotool mousedown/mouseup (wedged X server / lost WID) must
+        surface as a RuntimeError so the caller's CDP fallback engages, never a
+        silent success.
+    """
+
+    def _prep(self, mgr, monkeypatch):
+        monkeypatch.setattr(mgr, "_x11_ensure_in_viewport", _noop)
+        monkeypatch.setattr(mgr, "_x11_move_to", _noop)
+
+    @pytest.mark.asyncio
+    async def test_mouseup_fires_in_finally_on_cancel(self, monkeypatch):
+        import src.browser.service as svc
+
+        mgr = _make_manager()
+        inst = _FakeInstance(x11_wid=321)
+        self._prep(mgr, monkeypatch)
+
+        calls: list[list[str]] = []
+
+        class _Ok:
+            returncode = 0
+
+        def _fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            return _Ok()
+
+        monkeypatch.setattr(
+            "src.browser.service.subprocess",
+            types.SimpleNamespace(run=_fake_run),
+        )
+
+        # Raise CancelledError from INSIDE the dwell sleep (button 1 is DOWN):
+        # tag the dwell via a sentinel click_dwell() so it is picked out
+        # regardless of how many settle-sleeps precede it.
+        real_sleep = asyncio.sleep
+        monkeypatch.setattr(svc, "click_dwell", lambda: _DWELL_SENTINEL)
+
+        async def _sleep(*a, **k):
+            if a and a[0] == _DWELL_SENTINEL:
+                raise asyncio.CancelledError()
+            return await real_sleep(0)
+
+        monkeypatch.setattr(svc.asyncio, "sleep", _sleep)
+
+        with pytest.raises(asyncio.CancelledError):
+            await mgr._x11_click(inst, _make_locator())
+
+        # Despite the cancel mid-dwell, button 1 was released exactly once.
+        verbs = [c[1] for c in calls]
+        assert verbs == ["mousedown", "mouseup"]
+        assert calls[0][-1] == "1" and calls[1][-1] == "1"
+
+    @pytest.mark.asyncio
+    async def test_mouseup_fires_in_finally_on_cancel_during_mousedown(self, monkeypatch):
+        """A CancelledError during the MOUSEDOWN executor await (the pressed
+        window BEFORE the dwell) must still release button 1: the executor
+        thread runs xdotool mousedown to completion (button pressed) even as
+        the awaiting coroutine unwinds, so the mousedown must sit INSIDE the
+        guarded block for the finally to cover it."""
+        mgr = _make_manager()
+        inst = _FakeInstance(x11_wid=321)
+        self._prep(mgr, monkeypatch)
+
+        calls: list[list[str]] = []
+
+        class _Ok:
+            returncode = 0
+
+        def _fake_run(cmd, *args, **kwargs):
+            # Record the call (the thread ran the subprocess), then simulate the
+            # awaiting future being cancelled on the mousedown await only.
+            calls.append(cmd)
+            if cmd[1] == "mousedown":
+                raise asyncio.CancelledError()
+            return _Ok()
+
+        monkeypatch.setattr(
+            "src.browser.service.subprocess",
+            types.SimpleNamespace(run=_fake_run),
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await mgr._x11_click(inst, _make_locator())
+
+        # Button pressed (thread ran) + await cancelled → the finally released
+        # it anyway. Without the mousedown inside the try this would be
+        # ["mousedown"] only (button stranded).
+        verbs = [c[1] for c in calls]
+        assert verbs == ["mousedown", "mouseup"]
+        assert calls[0][-1] == "1" and calls[1][-1] == "1"
+
+    @pytest.mark.asyncio
+    async def test_nonzero_mousedown_raises(self, monkeypatch):
+        mgr = _make_manager()
+        inst = _FakeInstance(x11_wid=321)
+        self._prep(mgr, monkeypatch)
+
+        calls: list[list[str]] = []
+
+        def _fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            return types.SimpleNamespace(returncode=1)
+
+        monkeypatch.setattr(
+            "src.browser.service.subprocess",
+            types.SimpleNamespace(run=_fake_run),
+        )
+
+        with pytest.raises(RuntimeError):
+            await mgr._x11_click(inst, _make_locator())
+
+        # A dropped mousedown raises so the caller falls back to CDP. The
+        # finally still issues a best-effort mouseup — a harmless no-op (the
+        # button was never pressed), strictly safer than skipping it.
+        verbs = [c[1] for c in calls]
+        assert verbs == ["mousedown", "mouseup"]
+
+    @pytest.mark.asyncio
+    async def test_nonzero_mouseup_raises_after_best_effort_release(self, monkeypatch):
+        mgr = _make_manager()
+        inst = _FakeInstance(x11_wid=321)
+        self._prep(mgr, monkeypatch)
+
+        calls: list[list[str]] = []
+
+        def _fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            # mousedown succeeds; every mouseup reports failure.
+            rc = 0 if cmd[1] == "mousedown" else 1
+            return types.SimpleNamespace(returncode=rc)
+
+        monkeypatch.setattr(
+            "src.browser.service.subprocess",
+            types.SimpleNamespace(run=_fake_run),
+        )
+
+        with pytest.raises(RuntimeError):
+            await mgr._x11_click(inst, _make_locator())
+
+        # A non-zero normal mouseup may not have released — the finally issues a
+        # best-effort SECOND release, then the RuntimeError propagates so the
+        # caller falls back to CDP.
+        verbs = [c[1] for c in calls]
+        assert verbs == ["mousedown", "mouseup", "mouseup"]
+        assert all(c[-1] == "1" for c in calls)
+
+
+class TestX11ClickXyButtonRelease:
+    """Same guards for ``_x11_click_xy`` (coord path)."""
+
+    @pytest.mark.asyncio
+    async def test_mouseup_fires_in_finally_on_cancel(self, monkeypatch):
+        import src.browser.service as svc
+
+        mgr = _make_manager()
+        inst = _FakeInstance(x11_wid=654)
+        monkeypatch.setattr(mgr, "_x11_move_to", _noop)
+
+        calls: list[list[str]] = []
+
+        class _Ok:
+            returncode = 0
+
+        def _fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            return _Ok()
+
+        monkeypatch.setattr(
+            "src.browser.service.subprocess",
+            types.SimpleNamespace(run=_fake_run),
+        )
+
+        real_sleep = asyncio.sleep
+        monkeypatch.setattr(svc, "click_dwell", lambda: _DWELL_SENTINEL)
+
+        async def _sleep(*a, **k):
+            if a and a[0] == _DWELL_SENTINEL:
+                raise asyncio.CancelledError()
+            return await real_sleep(0)
+
+        monkeypatch.setattr(svc.asyncio, "sleep", _sleep)
+
+        with pytest.raises(asyncio.CancelledError):
+            await mgr._x11_click_xy(inst, 10, 20)
+
+        verbs = [c[1] for c in calls]
+        assert verbs == ["mousedown", "mouseup"]
+        assert calls[0][-1] == "1" and calls[1][-1] == "1"
+
+    @pytest.mark.asyncio
+    async def test_mouseup_fires_in_finally_on_cancel_during_mousedown(self, monkeypatch):
+        """CancelledError during the mousedown await must still release button
+        1 (coord path). See the ``_x11_click`` analogue for the full rationale."""
+        mgr = _make_manager()
+        inst = _FakeInstance(x11_wid=654)
+        monkeypatch.setattr(mgr, "_x11_move_to", _noop)
+
+        calls: list[list[str]] = []
+
+        class _Ok:
+            returncode = 0
+
+        def _fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            if cmd[1] == "mousedown":
+                raise asyncio.CancelledError()
+            return _Ok()
+
+        monkeypatch.setattr(
+            "src.browser.service.subprocess",
+            types.SimpleNamespace(run=_fake_run),
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await mgr._x11_click_xy(inst, 10, 20)
+
+        verbs = [c[1] for c in calls]
+        assert verbs == ["mousedown", "mouseup"]
+        assert calls[0][-1] == "1" and calls[1][-1] == "1"
+
+    @pytest.mark.asyncio
+    async def test_nonzero_mousedown_raises(self, monkeypatch):
+        mgr = _make_manager()
+        inst = _FakeInstance(x11_wid=654)
+        monkeypatch.setattr(mgr, "_x11_move_to", _noop)
+
+        calls: list[list[str]] = []
+
+        def _fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            return types.SimpleNamespace(returncode=1)
+
+        monkeypatch.setattr(
+            "src.browser.service.subprocess",
+            types.SimpleNamespace(run=_fake_run),
+        )
+
+        with pytest.raises(RuntimeError):
+            await mgr._x11_click_xy(inst, 10, 20)
+
+        # Best-effort emergency mouseup fires (harmless no-op) then the raise
+        # propagates so the caller falls back to CDP.
+        verbs = [c[1] for c in calls]
+        assert verbs == ["mousedown", "mouseup"]
+
+    @pytest.mark.asyncio
+    async def test_nonzero_mouseup_raises_after_best_effort_release(self, monkeypatch):
+        mgr = _make_manager()
+        inst = _FakeInstance(x11_wid=654)
+        monkeypatch.setattr(mgr, "_x11_move_to", _noop)
+
+        calls: list[list[str]] = []
+
+        def _fake_run(cmd, *args, **kwargs):
+            calls.append(cmd)
+            rc = 0 if cmd[1] == "mousedown" else 1
+            return types.SimpleNamespace(returncode=rc)
+
+        monkeypatch.setattr(
+            "src.browser.service.subprocess",
+            types.SimpleNamespace(run=_fake_run),
+        )
+
+        with pytest.raises(RuntimeError):
+            await mgr._x11_click_xy(inst, 10, 20)
+
+        verbs = [c[1] for c in calls]
+        assert verbs == ["mousedown", "mouseup", "mouseup"]
+        assert all(c[-1] == "1" for c in calls)
+
+
 # ── Clipboard ──────────────────────────────────────────────────────────────
 
 
