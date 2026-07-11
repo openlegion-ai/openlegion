@@ -10,6 +10,10 @@ These tests cover:
 * schema migration is idempotent
 * persistence across reopen
 * concurrent consumes serialize via ``BEGIN IMMEDIATE``
+* lead advisory recommendation columns + ``record_recommendation`` (plan
+  §8 #19): live-row-only writes, re-recommend overwrites, ZERO effect on
+  consume, every read path surfaces the fields
+* ``resolve_proposer`` team-routing helper (plan §8 #19)
 """
 
 from __future__ import annotations
@@ -17,7 +21,9 @@ from __future__ import annotations
 import threading
 import time
 
-from src.host.pending_actions import PendingActions, _payload_digest
+import pytest
+
+from src.host.pending_actions import PendingActions, _payload_digest, resolve_proposer
 
 
 def _make_store(tmp_path) -> PendingActions:
@@ -635,3 +641,164 @@ def test_cancel_surfaces_tier(tmp_path):
     )
     rec = pa.cancel("n1")
     assert rec["tier"] == "irreversible"
+
+
+# ── Lead advisory recommendation (plan §8 #19) ─────────────────────────
+
+
+def test_record_recommendation_round_trips_through_peek(tmp_path):
+    pa = _make_store(tmp_path)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="wallet",
+        target_id="scout", action_kind="wallet_transfer", payload={"agent_id": "scout"},
+    )
+    rec = pa.record_recommendation("n1", recommendation="approve", by="lead-1", note="looks fine")
+    assert rec is not None
+    assert rec["lead_recommendation"] == "approve"
+    assert rec["lead_recommendation_note"] == "looks fine"
+    assert rec["lead_recommendation_by"] == "lead-1"
+    assert rec["lead_recommendation_at"] is not None
+    assert pa.peek("n1")["lead_recommendation"] == "approve"
+
+
+def test_record_recommendation_defaults_to_none_on_fresh_row(tmp_path):
+    pa = _make_store(tmp_path)
+    rec = pa.store(
+        nonce="n1", actor="operator", target_kind="wallet",
+        target_id="scout", action_kind="wallet_transfer", payload={"agent_id": "scout"},
+    )
+    assert rec["lead_recommendation"] is None
+    assert rec["lead_recommendation_note"] is None
+    assert rec["lead_recommendation_by"] is None
+    assert rec["lead_recommendation_at"] is None
+    assert pa.peek("n1")["lead_recommendation"] is None
+
+
+def test_record_recommendation_unknown_nonce_returns_none(tmp_path):
+    pa = _make_store(tmp_path)
+    assert pa.record_recommendation("nope", recommendation="approve", by="lead-1") is None
+
+
+def test_record_recommendation_expired_nonce_returns_none(tmp_path):
+    pa = _make_store(tmp_path)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="wallet",
+        target_id="scout", action_kind="wallet_transfer", payload={"agent_id": "scout"},
+        ttl=-1,
+    )
+    assert pa.record_recommendation("n1", recommendation="approve", by="lead-1") is None
+
+
+def test_record_recommendation_rejects_invalid_recommendation(tmp_path):
+    pa = _make_store(tmp_path)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="wallet",
+        target_id="scout", action_kind="wallet_transfer", payload={"agent_id": "scout"},
+    )
+    with pytest.raises(ValueError):
+        pa.record_recommendation("n1", recommendation="maybe", by="lead-1")
+
+
+def test_re_recommend_overwrites_latest_wins(tmp_path):
+    pa = _make_store(tmp_path)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="wallet",
+        target_id="scout", action_kind="wallet_transfer", payload={"agent_id": "scout"},
+    )
+    pa.record_recommendation("n1", recommendation="approve", by="lead-1", note="first")
+    rec = pa.record_recommendation("n1", recommendation="reject", by="lead-1", note="changed my mind")
+    assert rec["lead_recommendation"] == "reject"
+    assert rec["lead_recommendation_note"] == "changed my mind"
+
+
+def test_recommendation_never_consumes_the_row(tmp_path):
+    """Recording a recommendation must never itself resolve the hold —
+    the row stays fully pending afterward."""
+    pa = _make_store(tmp_path)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="wallet",
+        target_id="scout", action_kind="wallet_transfer", payload={"agent_id": "scout"},
+    )
+    pa.record_recommendation("n1", recommendation="approve", by="lead-1")
+    assert pa.peek("n1") is not None
+    # The row can still be consumed normally afterward.
+    assert pa.consume("n1") is not None
+
+
+def test_all_read_paths_surface_recommendation_fields(tmp_path):
+    """peek/consume/cancel/list_pending must all carry the four fields."""
+    pa = _make_store(tmp_path)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="wallet",
+        target_id="scout", action_kind="wallet_transfer", payload={"agent_id": "scout"},
+    )
+    pa.record_recommendation("n1", recommendation="reject", by="lead-1", note="no")
+    assert pa.peek("n1")["lead_recommendation"] == "reject"
+    rows = pa.list_pending()
+    assert rows[0]["lead_recommendation"] == "reject"
+    assert rows[0]["lead_recommendation_by"] == "lead-1"
+
+    pa.store(
+        nonce="n2", actor="operator", target_kind="wallet",
+        target_id="scout", action_kind="wallet_transfer", payload={"agent_id": "scout"},
+    )
+    pa.record_recommendation("n2", recommendation="approve", by="lead-1")
+    consumed = pa.consume("n2")
+    assert consumed["lead_recommendation"] == "approve"
+
+    pa.store(
+        nonce="n3", actor="operator", target_kind="wallet",
+        target_id="scout", action_kind="wallet_transfer", payload={"agent_id": "scout"},
+    )
+    pa.record_recommendation("n3", recommendation="approve", by="lead-1")
+    cancelled = pa.cancel("n3")
+    assert cancelled["lead_recommendation"] == "approve"
+
+
+def test_migration_is_idempotent_with_recommendation_columns(tmp_path):
+    """Re-opening the store (schema migration re-runs) must not raise."""
+    db_path = str(tmp_path / "pending.db")
+    pa1 = PendingActions(db_path=db_path)
+    pa1.store(
+        nonce="n1", actor="operator", target_kind="wallet",
+        target_id="scout", action_kind="wallet_transfer", payload={"agent_id": "scout"},
+    )
+    pa2 = PendingActions(db_path=db_path)  # re-open -- ALTER chain reruns
+    assert pa2.peek("n1")["lead_recommendation"] is None
+
+
+# ── resolve_proposer (plan §8 #19 lead-recommend team routing) ─────────
+
+
+class TestResolveProposer:
+    def test_resolves_agent_id_for_connector_call(self):
+        record = {"action_kind": "connector_call", "payload": {"agent_id": "scout"}}
+        assert resolve_proposer(record) == "scout"
+
+    def test_resolves_agent_id_for_wallet_transfer(self):
+        record = {"action_kind": "wallet_transfer", "payload": {"agent_id": "scout"}}
+        assert resolve_proposer(record) == "scout"
+
+    def test_resolves_agent_id_for_wallet_execute(self):
+        record = {"action_kind": "wallet_execute", "payload": {"agent_id": "scout"}}
+        assert resolve_proposer(record) == "scout"
+
+    def test_resolves_agent_id_for_notify_user(self):
+        record = {"action_kind": "notify_user", "payload": {"agent_id": "scout"}}
+        assert resolve_proposer(record) == "scout"
+
+    def test_team_delete_has_no_proposer(self):
+        """team_delete's payload never carries an agent_id at all."""
+        record = {"action_kind": "delete", "target_kind": "team", "payload": {"name": "acme"}}
+        assert resolve_proposer(record) is None
+
+    def test_agent_delete_payload_agent_id_is_the_target_not_a_proposer(self):
+        """agent_delete's payload["agent_id"] names the deletion target —
+        deliberately NOT treated as a proposer (the delete action_kind is
+        entirely excluded from the agent-proposed set)."""
+        record = {"action_kind": "delete", "target_kind": "agent", "payload": {"agent_id": "scout"}}
+        assert resolve_proposer(record) is None
+
+    def test_missing_agent_id_in_payload_returns_none(self):
+        record = {"action_kind": "notify_user", "payload": {}}
+        assert resolve_proposer(record) is None

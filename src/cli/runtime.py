@@ -1883,6 +1883,10 @@ class RuntimeContext:
         # _start_background) so terminal-chain delivery reads/writes the
         # very tasks DB the mesh transitions tasks in.
         self._tasks_store_ref = _tasks_store_ref
+        # Plan §8 #19's ``lead_pending_holds`` probe (constructed above,
+        # before ``create_mesh_app`` runs) resolves this lazily at call
+        # time — same deferred-``getattr`` pattern as ``_tasks_store_ref``.
+        self._pending_actions_ref = getattr(app, "pending_actions", None)
         # Wire the mesh's back-edge writer into the lane watchdog so a
         # lane-timeout failure produces a ``task_failed`` inbox event for
         # the originator AND triggers the wake-on-event chain. Without
@@ -2066,6 +2070,43 @@ class RuntimeContext:
             reviews = store.list_reviews(team_id, status="open")
             return {"team_id": team_id, "count": len(reviews)} if reviews else None
 
+        def lead_pending_holds(agent: str) -> dict | None:
+            """Lead-duty probe input (plan §8 #19): mirrors
+            ``lead_pending_reviews`` exactly, but over the pending-actions
+            (policy-held) store instead of drive reviews. Mesh-side Team
+            store + pending-actions store data only, never the container.
+            Returns None fast for non-leads (one cheap ``led_team``
+            lookup) or leads whose team members have no unrecommended
+            held actions; otherwise ``{"team_id", "count", "nonces"}`` —
+            ``nonces`` is a small capped sample (recommend_pending_action
+            needs a nonce and there is no dedicated listing tool this unit
+            builds)."""
+            store = getattr(self, "teams_store", None)
+            if store is None:
+                return None
+            team_id = store.led_team(agent)
+            if not team_id:
+                return None
+            pending_store = getattr(self, "_pending_actions_ref", None)
+            if pending_store is None:
+                return None
+            members = set(store.members(team_id))
+            if not members:
+                return None
+            from src.host.pending_actions import resolve_proposer
+
+            nonces: list[str] = []
+            count = 0
+            for record in pending_store.list_pending():
+                if record.get("lead_recommendation"):
+                    continue
+                if resolve_proposer(record) not in members:
+                    continue
+                count += 1
+                if len(nonces) < 5:
+                    nonces.append(record["nonce"])
+            return {"team_id": team_id, "count": count, "nonces": nonces} if count else None
+
         def agent_pending_tasks(agent: str) -> int:
             """Durable-tasks probe input (plan §8 #24 prereq iii): the
             durable tasks table is what ``hand_off``/``create_task``
@@ -2188,6 +2229,14 @@ class RuntimeContext:
             lead_reviews_fn=lead_pending_reviews,
             pending_tasks_fn=agent_pending_tasks,
             thread_store=getattr(self, "thread_store", None),
+            # Plan §8 #19: mirrors ``lead_reviews_fn`` above, over the
+            # pending-actions (policy-held) store instead of drive
+            # reviews. ``self._pending_actions_ref`` is resolved lazily
+            # inside the closure (same ``getattr``-after-the-fact pattern
+            # as ``agent_pending_tasks``/``_tasks_store_ref`` below) since
+            # ``create_mesh_app`` — which owns ``pending_actions`` — runs
+            # AFTER this scheduler is constructed.
+            lead_holds_fn=lead_pending_holds,
         )
         self._cron_job_count = len(self.cron_scheduler.jobs)
 

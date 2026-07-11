@@ -67,6 +67,57 @@ async def notify_user(message: str, *, mesh_client=None, workspace_manager=None)
 
 
 @tool(
+    name="recommend_pending_action",
+    description=(
+        "Record your advisory approve/reject recommendation on a teammate's "
+        "held pending action -- a notify/connector/wallet call the policy "
+        "engine paused for human confirmation (plan §8 #19). LEAD-ONLY, "
+        "enforced server-side: you must be the team lead of the agent whose "
+        "action is held, or this fails with a 403. Purely advisory -- it has "
+        "ZERO effect on whether the action is confirmed, cancelled, or "
+        "executed; only a human can release or drop a hold. Find the nonce "
+        "from your heartbeat's held-action probe."
+    ),
+    parameters={
+        "nonce": {
+            "type": "string",
+            "description": "The held action's nonce (from your held-action probe).",
+        },
+        "recommendation": {
+            "type": "string",
+            "enum": ["approve", "reject"],
+            "description": "Your advisory recommendation.",
+        },
+        "note": {
+            "type": "string",
+            "description": "Optional note explaining your recommendation, max 500 chars.",
+            "default": "",
+        },
+    },
+)
+async def recommend_pending_action(
+    nonce: str, recommendation: str, note: str = "", *, mesh_client=None,
+) -> dict:
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if recommendation not in ("approve", "reject"):
+        return {"error": f"Invalid recommendation '{recommendation}'. Use 'approve' or 'reject'."}
+    clean_note = sanitize_for_prompt(note)[:500] if note else ""
+    try:
+        result = await mesh_client.recommend_pending_action(nonce, recommendation, clean_note)
+    except Exception as e:
+        return {
+            "error": f"Recording recommendation failed: {e}",
+            "recovery_hint": (
+                "Only the proposing agent's team lead can recommend on a held "
+                "action -- if you aren't that lead, or the nonce is unknown or "
+                "expired, this will always fail."
+            ),
+        }
+    return {"ok": True, "nonce": nonce, "recommendation": recommendation, "result": result}
+
+
+@tool(
     name="list_agents",
     description=(
         "List agents in your team (solo agents see themselves and the "

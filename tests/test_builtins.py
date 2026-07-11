@@ -2133,6 +2133,83 @@ class TestNotifyUser:
             _heartbeat_mode.reset(token)
 
 
+# ── recommend_pending_action (plan §8 #19) ───────────────────
+
+
+class TestRecommendPendingAction:
+    @pytest.mark.asyncio
+    async def test_success(self):
+        from src.agent.builtins.mesh_tool import recommend_pending_action
+
+        mock_mesh = AsyncMock()
+        mock_mesh.recommend_pending_action = AsyncMock(return_value={"recorded": True})
+
+        result = await recommend_pending_action(
+            nonce="n1", recommendation="approve", note="looks good", mesh_client=mock_mesh,
+        )
+        assert result["ok"] is True
+        assert result["nonce"] == "n1"
+        assert result["recommendation"] == "approve"
+        mock_mesh.recommend_pending_action.assert_awaited_once_with("n1", "approve", "looks good")
+
+    @pytest.mark.asyncio
+    async def test_no_mesh_client(self):
+        from src.agent.builtins.mesh_tool import recommend_pending_action
+
+        result = await recommend_pending_action(nonce="n1", recommendation="approve", mesh_client=None)
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_invalid_recommendation_value(self):
+        from src.agent.builtins.mesh_tool import recommend_pending_action
+
+        mock_mesh = AsyncMock()
+        result = await recommend_pending_action(nonce="n1", recommendation="maybe", mesh_client=mock_mesh)
+        assert "error" in result
+        mock_mesh.recommend_pending_action.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_failure_returns_directive_envelope(self):
+        """A 403 (not the lead) or 409 (teamless proposer / no team lead)
+        from the mesh must surface as an actionable error, not a crash."""
+        from src.agent.builtins.mesh_tool import recommend_pending_action
+
+        mock_mesh = AsyncMock()
+        mock_mesh.recommend_pending_action = AsyncMock(
+            side_effect=RuntimeError("403: Only the proposing agent's team lead can recommend"),
+        )
+        result = await recommend_pending_action(nonce="n1", recommendation="reject", mesh_client=mock_mesh)
+        assert "error" in result
+        assert "recovery_hint" in result
+
+    @pytest.mark.asyncio
+    async def test_note_is_sanitized_and_truncated(self):
+        from src.agent.builtins.mesh_tool import recommend_pending_action
+
+        mock_mesh = AsyncMock()
+        mock_mesh.recommend_pending_action = AsyncMock(return_value={"recorded": True})
+        long_note = "x" * 600
+        await recommend_pending_action(
+            nonce="n1", recommendation="approve", note=long_note, mesh_client=mock_mesh,
+        )
+        sent_note = mock_mesh.recommend_pending_action.call_args[0][2]
+        assert len(sent_note) == 500
+
+    def test_docstring_says_lead_only_and_advisory(self):
+        """Pin: the tool description must tell the agent this is
+        lead-only and advisory (plan §8 #19 requirement)."""
+        import importlib
+
+        import src.agent.builtins.mesh_tool as mesh_tool
+        importlib.reload(mesh_tool)
+        from src.agent.tools import _tool_staging
+
+        description = _tool_staging["recommend_pending_action"]["description"]
+        assert "LEAD-ONLY" in description
+        assert "advisory" in description.lower()
+        assert "ZERO effect" in description
+
+
 # ── LLMClient embedding model ───────────────────────────────
 
 

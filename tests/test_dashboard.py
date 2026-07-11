@@ -5474,6 +5474,82 @@ class TestWorkplaceTabRoutes:
             resp = client.post("/dashboard/api/workplace/pending/missing/cancel")
         assert resp.status_code == 404
 
+    def test_workplace_pending_rides_through_lead_recommendation_fields(self):
+        """Plan §8 #19: the new lead-recommendation columns ride through
+        the existing pending proxy untouched — no dashboard-side
+        allowlisting drops them."""
+        client = self._client_with_v2(False)
+        self.pending_actions.store(
+            nonce="n1", actor="operator", target_kind="wallet",
+            target_id="alpha", action_kind="wallet_transfer",
+            payload={"agent_id": "alpha"},
+        )
+        self.pending_actions.record_recommendation(
+            "n1", recommendation="approve", by="lead-1", note="fine",
+        )
+        with self._patch_pending_proxy():
+            resp = client.get("/dashboard/api/workplace/pending")
+        row = next(r for r in resp.json()["pending"] if r["nonce"] == "n1")
+        assert row["lead_recommendation"] == "approve"
+        assert row["lead_recommendation_note"] == "fine"
+        assert row["lead_recommendation_by"] == "lead-1"
+
+    # ── Autonomous-actions "by exception" sample view (plan §8 #19) ────
+    #
+    # Direct blackboard read — mirrors ``/api/operator-audit`` (no mesh
+    # loopback proxy needed; the dashboard already holds ``blackboard``
+    # in-process).
+
+    def test_autonomy_log_filters_to_the_two_action_kinds(self):
+        client = self._client_with_v2(False)
+        bb = self.components["blackboard"]
+        bb.log_audit(action="policy_decision", target="scout", field="notify_user", after_value="{}")
+        bb.log_audit(action="drive_review_auto_merged", target="research", field="feat-a", after_value="{}")
+        # Noise — must NOT appear.
+        bb.log_audit(action="edit", target="scout", field="model")
+        bb.log_audit(action="drive_review_merge", target="research", field="feat-b")
+        resp = client.get("/dashboard/api/workplace/autonomy-log")
+        assert resp.status_code == 200
+        actions = {e["action"] for e in resp.json()["entries"]}
+        assert actions == {"policy_decision", "drive_review_auto_merged"}
+
+    def test_autonomy_log_newest_first(self):
+        client = self._client_with_v2(False)
+        bb = self.components["blackboard"]
+        bb.log_audit(action="policy_decision", target="first", field="notify_user")
+        bb.log_audit(action="policy_decision", target="second", field="notify_user")
+        bb.log_audit(action="policy_decision", target="third", field="notify_user")
+        resp = client.get("/dashboard/api/workplace/autonomy-log")
+        targets = [e["target"] for e in resp.json()["entries"]]
+        assert targets == ["third", "second", "first"]
+
+    def test_autonomy_log_respects_limit(self):
+        client = self._client_with_v2(False)
+        bb = self.components["blackboard"]
+        for i in range(5):
+            bb.log_audit(action="policy_decision", target=f"a{i}", field="notify_user")
+        resp = client.get("/dashboard/api/workplace/autonomy-log?limit=2")
+        assert len(resp.json()["entries"]) == 2
+
+    def test_autonomy_log_empty_when_no_blackboard_rows(self):
+        client = self._client_with_v2(False)
+        resp = client.get("/dashboard/api/workplace/autonomy-log")
+        assert resp.status_code == 200
+        assert resp.json()["entries"] == []
+
+    def test_autonomy_log_carries_probation_flag(self):
+        """The probation-escalated audit payload's ``probation: true``
+        rides through untouched for the UI's badge."""
+        client = self._client_with_v2(False)
+        bb = self.components["blackboard"]
+        bb.log_audit(
+            action="policy_decision", target="rookie", field="notify_user",
+            after_value='{"tier": "external_visible", "decision": "hold", "probation": true}',
+        )
+        resp = client.get("/dashboard/api/workplace/autonomy-log")
+        entry = resp.json()["entries"][0]
+        assert '"probation": true' in entry["after_value"]
+
     # ── Pending confirm proxy: dashboard → mesh with X-Origin: human ──
     #
     # The confirm button in the workplace panel + the inline

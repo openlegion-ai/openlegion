@@ -8963,6 +8963,35 @@ def create_dashboard_router(
         except Exception:
             return {"ok": True, "nonce": nonce}
 
+    # Autonomous-actions "by exception" sample view (plan §8 #19). Direct
+    # blackboard read — mirrors ``/api/operator-audit`` above (the
+    # dashboard already holds a live ``blackboard`` reference in-process;
+    # no mesh loopback is needed, unlike the pending-actions proxies above
+    # which exist specifically to cross the operator-or-internal gate).
+    _AUTONOMY_LOG_ACTIONS = ("policy_decision", "drive_review_auto_merged")
+
+    @api_router.get("/api/workplace/autonomy-log")
+    async def api_workplace_autonomy_log(limit: int = 50) -> dict:
+        """Recent autonomous-decision samples for the Work tab's
+        by-exception review surface (plan §8 #19's "cheap read view of
+        recent allow_audit decisions" — not new hold machinery).
+
+        Filtered to the two action kinds the earned-autonomy machinery
+        writes: ``policy_decision`` (every hold/deny/allow_audit gate
+        decision, including probation escalations, plan §8 #17/#19) and
+        ``drive_review_auto_merged`` (kernel-executed auto-merges, plan
+        §8 #20). Newest-first, capped at 200. Read-only.
+        """
+        if blackboard is None:
+            return {"entries": []}
+        limit = max(1, min(limit, 200))
+        merged: list[dict] = []
+        for action in _AUTONOMY_LOG_ACTIONS:
+            page = blackboard.get_audit_log(page=1, per_page=limit, action=action)
+            merged.extend(page.get("entries", []))
+        merged.sort(key=lambda e: e.get("id", 0), reverse=True)
+        return {"entries": merged[:limit]}
+
     @api_router.post("/api/changes/undo/{undo_token}")
     async def api_changes_undo(undo_token: str, request: Request) -> dict:
         """Reverse a recent soft edit (PR 1).

@@ -55,7 +55,7 @@ from typing import Any, Awaitable, Callable
 from src.host import drive as team_drive
 from src.host.track_record import record_best_effort
 from src.shared import limits as limits_mod
-from src.shared.utils import setup_logging
+from src.shared.utils import dumps_safe, setup_logging
 
 logger = setup_logging("host.auto_merge")
 
@@ -265,12 +265,22 @@ async def consider_auto_merge(
         )
         if audit_fn is not None:
             try:
+                # ``after_value`` carries a small JSON blob (not just the
+                # bare commit sha) so the plan §8 #19 autonomy-log dashboard
+                # view can show the submitting agent + sampled flag without
+                # a second lookup — the same "structured after_value"
+                # convention ``policy.py``'s ``policy_decision`` rows
+                # already use.
                 audit_fn(
                     action="drive_review_auto_merged",
                     actor=AUTO_MERGE_RATER,
                     target=team_id,
                     field=branch,
-                    after_value=commit,
+                    after_value=dumps_safe({
+                        "commit": commit,
+                        "author": author,
+                        "sampled": sampled,
+                    }),
                     provenance="system",
                 )
             except Exception:

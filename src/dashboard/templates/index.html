@@ -1182,6 +1182,11 @@
                                     x-text="'Expires in ' + workplaceFormatExpiry(msg.expires_at)"></span>
                                 </div>
                                 <p class="text-xs text-gray-200 mb-2" x-text="msg.summary || (msg.action_kind + ' on ' + (msg.target_kind || '?') + ' ' + (msg.target_id || '?'))"></p>
+                                <!-- Lead advisory recommendation (plan §8
+                                     #19) — additive, read-only. Zero
+                                     effect on Confirm/Cancel below. -->
+                                <p x-show="msg.lead_recommendation" class="text-[11px] text-indigo-300 mb-2"
+                                  x-text="'Lead recommends: ' + msg.lead_recommendation + (msg.lead_recommendation_note ? ' — ' + msg.lead_recommendation_note : '')"></p>
                                 <template x-if="msg.preview_diff">
                                   <div class="mb-3">
                                     <button @click="diffOpen = !diffOpen"
@@ -4100,6 +4105,10 @@
                     <div class="min-w-0 flex-1">
                       <div class="text-sm text-gray-200 break-words" x-text="item.title"></div>
                       <div x-show="item.subtitle" class="text-[11px] text-gray-400 mt-0.5 break-words" x-text="item.subtitle"></div>
+                      <!-- Lead advisory recommendation (plan §8 #19) —
+                           additive, read-only. Zero effect on the
+                           Confirm/Cancel buttons to the right. -->
+                      <div x-show="item.leadRecommendation" class="text-[11px] text-indigo-300 mt-0.5 break-words" x-text="item.leadRecommendation"></div>
                     </div>
                   </div>
                   <div class="flex flex-wrap gap-1.5 shrink-0 sm:justify-end">
@@ -4172,6 +4181,50 @@
             @click="needsYouExpanded = true"
             class="mt-2 text-[11px] text-amber-200 hover:text-amber-100 transition-colors"
             x-text="'Show ' + (needsYouItems.length - needsYouCollapsedCap) + ' more'"></button>
+        </section>
+
+        <!-- Autonomous actions — the by-exception "samples" surface
+             (plan §8 #19): recent policy_decision / kernel-executed
+             auto-merge audit rows, so the human can spot-check what the
+             fleet has been doing without hunting through the full audit
+             trail. Read-only, additive, collapsed by default; NOT a new
+             top-nav tab (Constraint #5). Hidden entirely when there's
+             nothing to show and no error, so an idle deployment gets no
+             extra chrome. -->
+        <section x-show="autonomyLog.length > 0 || workplaceErrors.autonomyLog" x-cloak
+          data-testid="autonomy-log-section"
+          role="region" aria-label="Recent autonomous actions"
+          class="mb-4 bg-gray-800/20 border border-gray-700/40 rounded-xl p-3 sm:p-4">
+          <button type="button"
+            class="flex items-center gap-2 w-full text-left"
+            @click="autonomyLogExpanded = !autonomyLogExpanded"
+            :aria-expanded="autonomyLogExpanded"
+            aria-controls="autonomy-log-list">
+            <svg class="w-3.5 h-3.5 text-gray-400 shrink-0 transition-transform" :class="autonomyLogExpanded && 'rotate-90'" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 5l7 7-7 7"/></svg>
+            <h2 class="text-sm font-semibold text-gray-200">Autonomous actions</h2>
+            <span class="text-[11px] font-medium px-2 py-0.5 rounded-full bg-gray-700/50 text-gray-300" x-text="autonomyLog.length"></span>
+            <button type="button" @click.stop="loadWorkplaceAutonomyLog()" class="ml-auto text-[11px] px-2 py-0.5 rounded bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-white transition-colors">Refresh</button>
+          </button>
+          <template x-if="workplaceErrors.autonomyLog">
+            <div class="bg-red-900/20 border border-red-800/40 rounded-lg p-2.5 mt-2 flex flex-wrap items-center gap-2" role="alert">
+              <span class="text-[11px] text-red-200 flex-1" x-text="workplaceErrors.autonomyLog"></span>
+              <button type="button" @click="retryWorkplaceSection('autonomyLog')"
+                class="text-[11px] font-medium px-2.5 py-1 rounded bg-red-800/40 hover:bg-red-700/50 text-red-100 transition-colors">Retry</button>
+            </div>
+          </template>
+          <div x-show="autonomyLogExpanded" x-cloak id="autonomy-log-list" class="mt-2.5 space-y-1 max-h-[30dvh] overflow-y-auto custom-scrollbar">
+            <template x-for="entry in autonomyLog" :key="entry.id">
+              <div class="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-gray-900/40 text-[11px]">
+                <span class="text-gray-500 w-14 shrink-0" x-text="entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : ''"></span>
+                <span class="text-gray-300 truncate" x-text="autonomyLogEntryDetail(entry).agent"></span>
+                <span class="text-gray-500 truncate" x-text="autonomyLogEntryDetail(entry).kind"></span>
+                <span x-show="autonomyLogEntryDetail(entry).tier" class="px-1.5 py-0.5 rounded-full bg-gray-700/40 text-gray-400" x-text="autonomyLogEntryDetail(entry).tier"></span>
+                <span class="ml-auto px-1.5 py-0.5 rounded-full bg-indigo-900/30 text-indigo-300 border border-indigo-800/30 shrink-0" x-text="autonomyLogEntryDetail(entry).decision"></span>
+                <span x-show="autonomyLogEntryDetail(entry).sampled" class="px-1.5 py-0.5 rounded-full bg-amber-900/30 text-amber-300 border border-amber-800/30 shrink-0">sampled</span>
+                <span x-show="autonomyLogEntryDetail(entry).probation" class="px-1.5 py-0.5 rounded-full bg-purple-900/30 text-purple-300 border border-purple-800/30 shrink-0">probation</span>
+              </div>
+            </template>
+          </div>
         </section>
 
         <!-- Goals strip (PR 2 of Work tab rewrite). Operator-managed

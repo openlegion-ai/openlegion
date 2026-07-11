@@ -29,6 +29,12 @@ def _reload_server(monkeypatch, tmp_path):
     monkeypatch.setenv(
         "OPENLEGION_USER_NOTIFICATIONS_DB", str(tmp_path / "user_notifs.db"),
     )
+    # Isolate the held-actions store — the notify-hold tests below store
+    # rows, and without this pin every mesh app in one pytest process
+    # shares a single cwd data/pending_actions.db across test files.
+    monkeypatch.setenv(
+        "OPENLEGION_PENDING_ACTIONS_DB", str(tmp_path / "pending_actions.db"),
+    )
     import src.host.server as server_module
     importlib.reload(server_module)
     return server_module
@@ -64,6 +70,7 @@ def app_ctx(tmp_path, monkeypatch):
     bb.close()
     monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
     monkeypatch.delenv("OPENLEGION_USER_NOTIFICATIONS_DB", raising=False)
+    monkeypatch.delenv("OPENLEGION_PENDING_ACTIONS_DB", raising=False)
     importlib.reload(server_module)
 
 
@@ -367,14 +374,15 @@ async def test_notify_hold_queue_full_rejected_fail_closed(tmp_path, monkeypatch
     )
     pa = app.pending_actions
     try:
+        # The store is tmp_path-isolated (OPENLEGION_PENDING_ACTIONS_DB
+        # pin in ``_reload_server``) — counts are exact, no post-purge.
         for i in range(_MAX_PENDING):
             pa.store(
                 nonce=f"pre-notify-{i}", actor="operator", target_kind="agent",
                 target_id="alpha", action_kind="delete", payload={},
                 origin_kind="human",
             )
-        before = len(pa.list_pending())
-        assert before >= _MAX_PENDING
+        assert len(pa.list_pending()) == _MAX_PENDING
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://t",
         ) as c:
@@ -386,15 +394,11 @@ async def test_notify_hold_queue_full_rejected_fail_closed(tmp_path, monkeypatch
         assert resp.status_code == 429
         assert "Approval queue full" in resp.text
         assert captured == []  # not delivered
-        assert len(pa.list_pending()) == before  # not stored
+        assert len(pa.list_pending()) == _MAX_PENDING  # not stored
         # No eviction: every prefilled row survives.
         for i in range(_MAX_PENDING):
             assert pa.peek(f"pre-notify-{i}") is not None
     finally:
-        # The store is a shared cwd data/pending_actions.db — drop the
-        # prefill so later hold tests don't inherit a full queue.
-        with pa._conn() as conn:
-            conn.execute("DELETE FROM pending_actions WHERE nonce LIKE 'pre-notify-%'")
         bb.close()
 
 

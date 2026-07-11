@@ -63,6 +63,41 @@ falls back to the compiled-in defaults above -- never fails open into
 allow-everything, never fails closed into deny-everything beyond those
 defaults.
 
+U5 addition -- probation preset (plan §8 #19), schema v1 extended with an
+optional top-level ``probation:`` block::
+
+    probation:
+      enabled: true            # default false
+      min_accepted: 5          # default 5, clamped 1-10000
+      tiers: [external_visible, financial]   # optional narrowing, default both
+
+Precedence (load-bearing, documented here because it is easy to get
+backwards): **per-agent override > probation > tier override > compiled
+default**. Probation only ever fires on a decision that was resolved from
+the tier override or the compiled-in tier default -- an explicit
+per-agent row for that tier wins outright and probation never runs for
+that call. When probation is enabled, the action's tier is one of its
+configured ``tiers`` (default both ``external_visible``/``financial`` --
+``irreversible`` can never be named here; see below), and the resolved
+decision is weaker than ``hold``, the agent's ACCEPTED count (see below)
+is compared against ``min_accepted``; below it, the decision is escalated
+to ``hold``. Probation only ESCALATES -- it can never resolve a decision
+to something LESS strict than what the tier/agent config already
+produced, and it can never push a decision past ``hold`` (a yaml ``deny``
+stays ``deny``). ``irreversible`` is untouched either way: it is clamped
+to ``hold`` unconditionally by :func:`_clamp_for_tier` before probation
+ever runs, and probation's tier allowlist can't name it in the first
+place.
+
+Accepted count = the plan §6 "after N accepted deliverables" count:
+:meth:`TrackRecordStore.counts_for_agent` for the agent, restricted to
+``rater_kinds=AUTONOMY_RATER_KINDS`` (the rating-trust rule -- an
+operator-agent's own rating never counts), summed over ``outcome ==
+"accepted"`` across the ``task_outcome`` and ``summary_rating`` sources.
+No ``track_record_store`` wired, or a read failure, is treated as zero
+accepted outcomes -- probation fails TOWARD safety (a hold), never toward
+a guessed allow, and the failure is logged.
+
 Constraint #12 (absolute, no exceptions): thresholds set here are
 OPERATOR policy. There is no lead or agent carve-out anywhere in this
 module -- the ``agents:`` block is a set of per-agent-ID rows a human
@@ -77,13 +112,17 @@ Audit: ``hold`` / ``deny`` / ``allow_audit`` decisions each write one
 ``WalletService._audit``, so a policy-level row would be a pure
 duplicate for the one tier whose compiled-in default is "allow". This is
 a deliberate deviation from "every decision is audited" -- see the unit's
-build report for the reasoning.
+build report for the reasoning. A probation-escalated hold's audit row
+additionally carries ``"probation": true`` in its payload -- present ONLY
+when probation is what caused the escalation, so every pre-U5 audit
+payload (and every non-probation decision today) is byte-identical to
+before.
 
-U5 seam (not implemented here): ``track_record_store`` and
-``cost_tracker`` are accepted at construction and stored, unused, so plan
-§8 #19's f(tier, track_record, budget) probation logic has somewhere to
-read from without another constructor-signature change. No probation
-logic exists in this unit.
+``track_record_store`` (the U3 constructor seam, wired in
+``create_mesh_app``) is now READ by :meth:`evaluate` for the probation
+preset above. ``cost_tracker`` remains accepted-and-unused -- no part of
+plan §8 #19's f(tier, track_record, budget) built in this unit reads
+budget; that stays a future seam.
 """
 
 from __future__ import annotations
@@ -95,6 +134,7 @@ from typing import Any
 
 import yaml
 
+from src.host.track_record import AUTONOMY_RATER_KINDS
 from src.shared.utils import dumps_safe, setup_logging
 
 logger = setup_logging("host.policy")
@@ -139,6 +179,25 @@ DEFAULT_TIER_DECISIONS: dict[str, str] = {
     "irreversible": "hold",
     "financial": "allow",
     "external_visible": "allow_audit",
+}
+
+# Tiers the probation preset (plan §8 #19) is allowed to name. Deliberately
+# excludes "irreversible" -- it is already clamped to "hold" unconditionally
+# (see ``_clamp_for_tier``), so naming it in ``probation.tiers`` would
+# configure dead policy.
+_PROBATION_TIERS: frozenset[str] = frozenset({"external_visible", "financial"})
+
+_PROBATION_MIN_ACCEPTED_DEFAULT = 5
+_PROBATION_MIN_ACCEPTED_RANGE = (1, 10000)
+
+# Compiled-in probation defaults -- byte-identical to "no probation block
+# at all" (disabled, both tiers, min_accepted=5). Sharing one dict
+# instance per resolved config is safe: every value is immutable
+# (bool/int/frozenset).
+_DEFAULT_PROBATION: dict[str, Any] = {
+    "enabled": False,
+    "min_accepted": _PROBATION_MIN_ACCEPTED_DEFAULT,
+    "tiers": _PROBATION_TIERS,
 }
 
 
@@ -191,6 +250,7 @@ class ActionPolicyEngine:
         self._loaded_stat: tuple[int, int] | None = None
         self._tier_overrides: dict[str, str] = {}
         self._agent_overrides: dict[str, dict[str, str]] = {}
+        self._probation: dict[str, Any] = dict(_DEFAULT_PROBATION)
         # U5 seam (plan §8 #19's f(tier, track_record, budget)) -- accepted
         # and stored, unused, so the earned-autonomy unit can read from
         # these without another constructor-signature change.
@@ -219,6 +279,7 @@ class ActionPolicyEngine:
         self._loaded_stat = self._stat()
         self._tier_overrides = {}
         self._agent_overrides = {}
+        self._probation = dict(_DEFAULT_PROBATION)
         if not self._path.exists():
             return
         try:
@@ -246,6 +307,7 @@ class ActionPolicyEngine:
             return
         self._tier_overrides = self._parse_tier_overrides(raw.get("tiers"))
         self._agent_overrides = self._parse_agent_overrides(raw.get("agents"))
+        self._probation = self._parse_probation(raw.get("probation"))
 
     def _parse_tier_overrides(self, tiers: Any) -> dict[str, str]:
         if tiers is None:
@@ -307,6 +369,84 @@ class ActionPolicyEngine:
                 result[str(agent_id)] = clean
         return result
 
+    def _parse_probation(self, raw: Any) -> dict[str, Any]:
+        """Parse the optional ``probation:`` block (plan §8 #19).
+
+        Each field is validated independently and falls back to ITS OWN
+        compiled-in default on a malformed value -- mirroring the
+        per-field-tolerant style of :meth:`_parse_tier_overrides` /
+        :meth:`_parse_agent_overrides` above, rather than discarding the
+        whole block for one bad field. No ``probation:`` key at all (or
+        an empty mapping) resolves to all-defaults -- disabled, both
+        tiers, ``min_accepted=5`` -- which is exactly "no yaml at all"
+        (the U5 regression requirement: absent/disabled must be
+        byte-identical to U3-landed main).
+        """
+        result: dict[str, Any] = dict(_DEFAULT_PROBATION)
+        if raw is None:
+            return result
+        if not isinstance(raw, dict):
+            logger.error(
+                "Policy config %s: 'probation' must be a mapping; ignored (disabled)",
+                self._path,
+            )
+            return result
+        if "enabled" in raw:
+            enabled = raw["enabled"]
+            if isinstance(enabled, bool):
+                result["enabled"] = enabled
+            else:
+                logger.error(
+                    "Policy config %s: probation.enabled must be a boolean; "
+                    "ignored (default false)",
+                    self._path,
+                )
+        if "min_accepted" in raw:
+            min_accepted = raw["min_accepted"]
+            if isinstance(min_accepted, bool) or not isinstance(min_accepted, int):
+                logger.error(
+                    "Policy config %s: probation.min_accepted must be an integer; "
+                    "ignored (default %d)",
+                    self._path, _PROBATION_MIN_ACCEPTED_DEFAULT,
+                )
+            else:
+                lo, hi = _PROBATION_MIN_ACCEPTED_RANGE
+                clamped = max(lo, min(min_accepted, hi))
+                if clamped != min_accepted:
+                    logger.warning(
+                        "Policy config %s: probation.min_accepted %r clamped to %d",
+                        self._path, min_accepted, clamped,
+                    )
+                result["min_accepted"] = clamped
+        if "tiers" in raw:
+            tiers_raw = raw["tiers"]
+            if not isinstance(tiers_raw, list):
+                logger.error(
+                    "Policy config %s: probation.tiers must be a list; "
+                    "ignored (default: both tiers)",
+                    self._path,
+                )
+            else:
+                clean_tiers: set[str] = set()
+                for tier in tiers_raw:
+                    if tier in _PROBATION_TIERS:
+                        clean_tiers.add(tier)
+                    else:
+                        logger.error(
+                            "Policy config %s: probation.tiers entry %r ignored "
+                            "(must be 'external_visible' or 'financial')",
+                            self._path, tier,
+                        )
+                if clean_tiers:
+                    result["tiers"] = frozenset(clean_tiers)
+                else:
+                    logger.error(
+                        "Policy config %s: probation.tiers had no valid entries; "
+                        "falling back to both tiers",
+                        self._path,
+                    )
+        return result
+
     def _maybe_reload(self) -> None:
         """Pick up an external edit to the file (hand-edited policy on a
         headless deploy). Caller holds the lock."""
@@ -323,8 +463,12 @@ class ActionPolicyEngine:
 
         Resolution order: per-agent override for the action's tier, then
         the tier-level override, then the compiled-in default -- with the
-        irreversible-tier floor (:func:`_clamp_for_tier`) applied last no
-        matter which source produced the decision.
+        irreversible-tier floor (:func:`_clamp_for_tier`) applied next no
+        matter which source produced the decision, and the probation
+        preset (plan §8 #19) applied last. Full precedence: **per-agent
+        override > probation > tier override > compiled default**
+        (irreversible's clamp sits outside this ladder entirely -- it
+        always wins regardless of source).
 
         Raises ``ValueError`` if ``action_kind`` isn't in the static
         :data:`ACTION_TIERS` registry -- every call site in this unit
@@ -332,7 +476,8 @@ class ActionPolicyEngine:
         programming error, never on live traffic.
 
         Writes one audit row for every decision except plain ``allow``
-        (see the module docstring's audit-deviation note).
+        (see the module docstring's audit-deviation note); a probation-
+        escalated hold's row additionally carries ``"probation": true``.
         """
         tier = ACTION_TIERS.get(action_kind)
         if tier is None:
@@ -342,30 +487,87 @@ class ActionPolicyEngine:
             agent_overrides = self._agent_overrides.get(agent_id, {})
             if tier in agent_overrides:
                 decision = agent_overrides[tier]
+                from_per_agent = True
             elif tier in self._tier_overrides:
                 decision = self._tier_overrides[tier]
+                from_per_agent = False
             else:
                 decision = DEFAULT_TIER_DECISIONS[tier]
+                from_per_agent = False
+            probation = self._probation
         decision = _clamp_for_tier(tier, decision)
+        probation_applied = False
+        if (
+            not from_per_agent
+            and probation["enabled"]
+            and tier in probation["tiers"]
+            and _SEVERITY[decision] < _SEVERITY["hold"]
+            and self._accepted_count(agent_id) < probation["min_accepted"]
+        ):
+            decision = "hold"
+            probation_applied = True
         if decision != "allow":
-            self._write_audit(agent_id, action_kind, tier, decision, summary)
+            self._write_audit(
+                agent_id, action_kind, tier, decision, summary, probation=probation_applied,
+            )
         return PolicyDecision(decision=decision, tier=tier, action_kind=action_kind)
 
+    def _accepted_count(self, agent_id: str) -> int:
+        """The probation preset's "after N accepted deliverables" count
+        (plan §6/§8 #19): ``task_outcome`` + ``summary_rating`` events
+        with ``outcome == "accepted"``, restricted to
+        :data:`AUTONOMY_RATER_KINDS` (the rating-trust rule -- an
+        operator-agent's own rating never counts toward probation
+        release, same as every other autonomy score).
+
+        No store wired, or a read failure, is treated as zero accepted
+        outcomes -- fail TOWARD safety (keeps the action on hold) rather
+        than guessing an agent has already earned release. A failure is
+        logged so a broken ledger doesn't silently hold everyone forever
+        without a trace.
+        """
+        store = self.track_record_store
+        if store is None:
+            return 0
+        try:
+            counts = store.counts_for_agent(agent_id, rater_kinds=AUTONOMY_RATER_KINDS)
+        except Exception as e:
+            logger.warning(
+                "probation: track record read failed for agent %r; treating "
+                "accepted count as 0 (fail toward hold): %s",
+                agent_id, e,
+            )
+            return 0
+        return (
+            counts.get("task_outcome", {}).get("accepted", 0)
+            + counts.get("summary_rating", {}).get("accepted", 0)
+        )
+
     def _write_audit(
-        self, agent_id: str, action_kind: str, tier: str, decision: str, summary: str,
+        self,
+        agent_id: str,
+        action_kind: str,
+        tier: str,
+        decision: str,
+        summary: str,
+        *,
+        probation: bool = False,
     ) -> None:
         if self._blackboard is None:
             return
+        payload = {
+            "tier": tier,
+            "decision": decision,
+            "summary": (summary or "")[:200],
+        }
+        if probation:
+            payload["probation"] = True
         try:
             self._blackboard.log_audit(
                 action="policy_decision",
                 target=agent_id,
                 field=action_kind,
-                after_value=dumps_safe({
-                    "tier": tier,
-                    "decision": decision,
-                    "summary": (summary or "")[:200],
-                }),
+                after_value=dumps_safe(payload),
                 actor=agent_id,
                 provenance="agent",
             )

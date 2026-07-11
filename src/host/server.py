@@ -44,7 +44,7 @@ from src.host.orchestration import (
     TaskNotFound,
     Tasks,
 )
-from src.host.pending_actions import PendingActions
+from src.host.pending_actions import PendingActions, resolve_proposer
 from src.host.teams import TeamNotFound, TeamStore
 from src.host.threads import ThreadStore
 from src.shared import limits as limits_mod
@@ -780,7 +780,17 @@ def create_mesh_app(
     # ``/mesh/config/confirm`` held-actions dispatcher (plan §8 #17,
     # C.1 row 6 — generalized from delete-confirmations-only to every
     # held action kind) and the dashboard's pending-action review surface.
-    pending_actions = PendingActions(db_path="data/pending_actions.db")
+    # ``OPENLEGION_PENDING_ACTIONS_DB`` overrides the on-disk path (the
+    # same convention as ``OPENLEGION_TRACK_RECORD_DB`` below) — used by
+    # tests to pin the store inside ``tmp_path``; without it every test
+    # file that builds a mesh app in one pytest process shares a single
+    # cwd ``data/pending_actions.db`` and cross-contaminates queue-capacity
+    # assertions.
+    _pending_actions_db_path = os.environ.get(
+        "OPENLEGION_PENDING_ACTIONS_DB",
+        "data/pending_actions.db",
+    )
+    pending_actions = PendingActions(db_path=_pending_actions_db_path)
     app.pending_actions = pending_actions  # exposed for tests/dashboard
     # Task 9 — wire EventBus so store/consume/cancel/reap_expired emit
     # ``pending_action_*`` events to the dashboard.
@@ -1220,6 +1230,11 @@ def create_mesh_app(
         # clone/pull/push is 2 requests; 240/min only catches a git loop
         # gone feral without throttling a busy team.
         "drive": (240, 60),
+        # Lead advisory recommendation on a held pending action (plan §8
+        # #19) — agent-reachable like the drive-verdict endpoint, so it
+        # gets its own bucket at the same generosity (240/min is far above
+        # any legitimate lead's recommend rate).
+        "pending_recommend": (240, 60),
     }
 
     async def _check_rate_limit(endpoint: str, agent_id: str) -> None:
@@ -12343,6 +12358,85 @@ def create_mesh_app(
             "target_id": record["target_id"],
             "action_kind": record["action_kind"],
         }
+
+    @app.post("/mesh/pending/{nonce}/recommend")
+    async def pending_recommend(nonce: str, request: Request) -> dict:
+        """Record a team lead's advisory approve/reject recommendation on
+        a teammate's held pending action (plan §8 #19).
+
+        Gated EXACTLY like the drive-review verdict endpoint's lead-only
+        pattern (``drive_record_lead_verdict`` above): the verified
+        caller must equal the ``teams.lead_agent_id`` of the team
+        containing the held action's PROPOSING agent -- everyone else (a
+        non-lead teammate, another team's lead, or even a non-lead
+        operator) gets 403.
+
+        Resolving "the proposing agent's team" requires reading the held
+        row first (:func:`resolve_proposer` inspects what the tier-gated
+        propose endpoints above actually stored — ``payload["agent_id"]``
+        for connector/wallet/notify holds), so an unknown/expired nonce
+        404s before any lead check runs. A resolvable proposer with no
+        team, or a team with no lead assigned, 409s with a directive
+        message — those are state problems, not a permission denial.
+
+        ZERO enforcement (Constraint #12): ``PendingActions.record_
+        recommendation`` only writes advisory display columns; the
+        confirm/cancel/consume paths never read them, so this can never
+        release a hold, block a confirm, or auto-execute anything.
+        """
+        caller = _extract_verified_agent_id(request)
+        preview = pending_actions.peek(nonce)
+        if preview is None:
+            raise HTTPException(404, "Pending action not found or already expired")
+        proposer = resolve_proposer(preview)
+        if not proposer:
+            raise HTTPException(
+                409,
+                "This held action has no team-scoped proposer to route a "
+                "recommendation to (it was proposed by the operator, not an agent)",
+            )
+        team_id = teams_store.team_of(proposer)
+        if not team_id:
+            raise HTTPException(
+                409, f"Agent '{proposer}' is not on a team -- there is no lead to route to",
+            )
+        team = teams_store.get_team(team_id) or {}
+        lead_agent_id = team.get("lead_agent_id")
+        if not lead_agent_id:
+            raise HTTPException(409, f"Team '{team_id}' has no lead assigned")
+        if caller != lead_agent_id:
+            _record_denial(
+                "permission", caller=caller, target=nonce, gate="pending:recommend:not_lead",
+            )
+            raise HTTPException(
+                403, "Only the proposing agent's team lead can recommend on this held action",
+            )
+        await _check_rate_limit("pending_recommend", caller)
+        body = await request.json()
+        recommendation = str(body.get("recommendation", "")).strip().lower()
+        if recommendation not in ("approve", "reject"):
+            raise HTTPException(400, "recommendation must be 'approve' or 'reject'")
+        note_raw = body.get("note")
+        note: str | None = None
+        if note_raw is not None:
+            note = sanitize_for_prompt(str(note_raw)).strip()
+            if len(note) > 500:
+                raise HTTPException(400, "note must be 500 characters or fewer")
+            note = note or None
+        record = pending_actions.record_recommendation(
+            nonce, recommendation=recommendation, note=note, by=caller,
+        )
+        if record is None:
+            raise HTTPException(404, "Pending action not found or already expired")
+        blackboard.log_audit(
+            action="pending_action_recommended",
+            actor=caller,
+            target=nonce,
+            field=record.get("action_kind", ""),
+            after_value=recommendation,
+            provenance="agent",
+        )
+        return {"recorded": True, "pending": record}
 
     @app.post("/mesh/audit/archive")
     async def audit_archive(request: Request) -> dict:

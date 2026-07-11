@@ -1837,6 +1837,31 @@ class MeshClient:
         _raise_with_body(response)
         return response.json()
 
+    # ---- Held-action lead recommendations (plan §8 #19) -----------------
+    async def recommend_pending_action(
+        self, nonce: str, recommendation: str, note: str = "",
+    ) -> dict:
+        """Record this agent's advisory approve/reject recommendation on
+        a teammate's held pending action.
+
+        Server-enforced lead-only: the mesh 403s any caller that isn't
+        the team lead of the agent who proposed the held action, and
+        409s a nonce whose proposer has no team or whose team has no
+        lead. Purely advisory -- has ZERO effect on whether the action is
+        confirmed, cancelled, or executed.
+        """
+        client = await self._get_client()
+        body: dict = {"recommendation": recommendation}
+        if note:
+            body["note"] = note
+        response = await client.post(
+            f"{self.mesh_url}/mesh/pending/{nonce}/recommend",
+            json=body,
+            headers=self._trace_headers(),
+        )
+        _raise_with_body(response)
+        return response.json()
+
     async def commit_drive_artifact(
         self, team: str, *, name: str, content: str, kind: str = "artifact",
         encoding: str = "utf8",
