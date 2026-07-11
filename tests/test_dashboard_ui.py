@@ -2870,3 +2870,91 @@ class TestTeamRoomSubTab:
         block = _APP_JS_TEXT[idx:end]
         assert "method:" not in block
         assert "'POST'" not in block and '"POST"' not in block
+
+
+# ── Phase-5 U5: lead advisory recommendations + autonomy log (§8 #19) ──
+
+
+class TestLeadRecommendationUI:
+    """Needs-you row + inline pending_action_card render the lead
+    advisory recommendation additively — no new tabs, no frozen-ID
+    changes, zero enforcement (display only)."""
+
+    def test_needs_you_item_computes_lead_recommendation_line(self):
+        assert "leadRecommendation: p.lead_recommendation" in _APP_JS_TEXT
+        assert "Lead recommends: ${p.lead_recommendation}" in _APP_JS_TEXT
+
+    def test_needs_you_row_renders_the_line(self):
+        assert 'x-show="item.leadRecommendation"' in _INDEX_HTML
+        assert 'x-text="item.leadRecommendation"' in _INDEX_HTML
+
+    def test_inline_pending_action_card_renders_the_line(self):
+        assert 'x-show="msg.lead_recommendation"' in _INDEX_HTML
+        assert "'Lead recommends: ' + msg.lead_recommendation" in _INDEX_HTML
+
+    def test_inject_pending_action_card_carries_recommendation_fields(self):
+        m = re.search(
+            r"_injectPendingActionCard\(data\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "_injectPendingActionCard body missing"
+        body = m.group(1)
+        assert "lead_recommendation: data.lead_recommendation" in body
+        assert "lead_recommendation_note: data.lead_recommendation_note" in body
+
+    def test_pending_backfill_passes_recommendation_fields_through(self):
+        idx = _APP_JS_TEXT.index("async loadWorkplacePending()")
+        end = _APP_JS_TEXT.index("async loadWorkplaceHelpRequests()")
+        block = _APP_JS_TEXT[idx:end]
+        assert "lead_recommendation: p.lead_recommendation" in block
+        assert "lead_recommendation_note: p.lead_recommendation_note" in block
+
+    def test_no_new_top_nav_tab(self):
+        """Constraint #5: the frozen top-nav tab IDs are untouched — the
+        new surfaces live inside the existing Work tab."""
+        for frozen_id in ("chat", "fleet", "workplace", "system"):
+            assert f"'{frozen_id}'" in _APP_JS_TEXT or f'"{frozen_id}"' in _APP_JS_TEXT
+
+
+class TestAutonomyLogUI:
+    """The "Autonomous actions" by-exception sample view (plan §8 #19):
+    a small collapsible section near Needs-you, read-only, additive."""
+
+    def test_loader_and_endpoint_exist(self):
+        assert "async loadWorkplaceAutonomyLog()" in _APP_JS_TEXT
+        assert "/workplace/autonomy-log" in _APP_JS_TEXT
+
+    def test_loaded_on_workplace_tab_batch_load(self):
+        idx = _APP_JS_TEXT.index("async loadWorkplace()")
+        end = _APP_JS_TEXT.index("async loadThreads()")
+        block = _APP_JS_TEXT[idx:end]
+        assert "this.loadWorkplaceAutonomyLog()" in block
+
+    def test_retry_section_wired(self):
+        assert "autonomyLog: this.loadWorkplaceAutonomyLog" in _APP_JS_TEXT
+
+    def test_section_is_collapsible_and_additive(self):
+        assert 'data-testid="autonomy-log-section"' in _INDEX_HTML
+        assert "Autonomous actions" in _INDEX_HTML
+        assert "autonomyLogExpanded" in _INDEX_HTML
+
+    def test_entry_detail_parser_handles_both_action_kinds(self):
+        m = re.search(
+            r"autonomyLogEntryDetail\(entry\)\s*\{(.*?)\n    \},",
+            _APP_JS_TEXT,
+            re.DOTALL,
+        )
+        assert m, "autonomyLogEntryDetail body missing"
+        body = m.group(1)
+        assert "'drive_review_auto_merged'" in body
+        assert "sampled" in body
+        assert "probation" in body
+
+    def test_no_new_top_nav_tab(self):
+        idx = _INDEX_HTML.index('data-testid="autonomy-log-section"')
+        # The section sits inside the Work tab's content, not a sibling
+        # top-nav element — sanity check it's nested under the workplace
+        # tab body rather than declared at the top-nav bar.
+        preceding = _INDEX_HTML[:idx]
+        assert preceding.count("Sticky \"Needs you\" panel") >= 1

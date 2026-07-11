@@ -28,6 +28,20 @@ Reaping is opportunistic: ``store`` and ``consume`` call ``reap_expired``
 themselves so callers do not need to wire a periodic task. A background
 reaper could be added later if pressure rises, but the opportunistic path
 is enough for correctness given pending records are short-lived and bounded.
+
+Lead advisory recommendation (plan §8 #19): four additive columns
+(``lead_recommendation``, ``lead_recommendation_note``,
+``lead_recommendation_by``, ``lead_recommendation_at``) migrated via the
+same lazy-``ALTER`` pattern as ``summary``/``preview_diff``/``tier``, and
+:meth:`record_recommendation`, which writes them on a still-live row
+(unknown/expired nonces get ``None``, matching :meth:`consume`'s reap-
+then-check posture). This is a PURE DISPLAY write -- no method in this
+module reads these columns to change behavior; :meth:`consume` and
+:meth:`cancel` are untouched, so a recorded recommendation has ZERO
+effect on whether a held action is released or dropped. Every read path
+(:meth:`peek`, :meth:`consume`, :meth:`cancel`, :meth:`list_pending`)
+surfaces the four fields so the dashboard/mesh-endpoint layer never needs
+a second lookup.
 """
 
 from __future__ import annotations
@@ -187,6 +201,21 @@ class PendingActions:
                     )
                 except sqlite3.OperationalError:
                     pass
+            # Lead advisory recommendation columns (plan §8 #19) — same
+            # lazy-ALTER pattern as above. ``lead_recommendation_at`` is
+            # REAL (a ``time.time()`` timestamp), the rest are TEXT.
+            for col, col_type in (
+                ("lead_recommendation", "TEXT"),
+                ("lead_recommendation_note", "TEXT"),
+                ("lead_recommendation_by", "TEXT"),
+                ("lead_recommendation_at", "REAL"),
+            ):
+                try:
+                    conn.execute(
+                        f"ALTER TABLE pending_actions ADD COLUMN {col} {col_type}",
+                    )
+                except sqlite3.OperationalError:
+                    pass
 
     # ── Core API ────────────────────────────────────────────────────
 
@@ -277,6 +306,10 @@ class PendingActions:
             "summary": summary,
             "preview_diff": preview_diff,
             "tier": tier,
+            "lead_recommendation": None,
+            "lead_recommendation_note": None,
+            "lead_recommendation_by": None,
+            "lead_recommendation_at": None,
         }
 
     def peek(self, nonce: str) -> dict | None:
@@ -291,7 +324,9 @@ class PendingActions:
             row = conn.execute(
                 "SELECT actor, target_kind, target_id, action_kind, "
                 "payload_json, payload_digest, origin_kind, created_at, "
-                "expires_at, status, summary, preview_diff, tier "
+                "expires_at, status, summary, preview_diff, tier, "
+                "lead_recommendation, lead_recommendation_note, "
+                "lead_recommendation_by, lead_recommendation_at "
                 "FROM pending_actions WHERE nonce=?",
                 (nonce,),
             ).fetchone()
@@ -314,6 +349,10 @@ class PendingActions:
             "summary": row[10],
             "preview_diff": row[11],
             "tier": row[12],
+            "lead_recommendation": row[13],
+            "lead_recommendation_note": row[14],
+            "lead_recommendation_by": row[15],
+            "lead_recommendation_at": row[16],
         }
 
     def consume(
@@ -347,7 +386,9 @@ class PendingActions:
                 row = conn.execute(
                     "SELECT actor, target_kind, target_id, action_kind, "
                     "payload_json, payload_digest, origin_kind, created_at, "
-                    "expires_at, status, summary, preview_diff, tier "
+                    "expires_at, status, summary, preview_diff, tier, "
+                    "lead_recommendation, lead_recommendation_note, "
+                    "lead_recommendation_by, lead_recommendation_at "
                     "FROM pending_actions WHERE nonce=?",
                     (nonce,),
                 ).fetchone()
@@ -416,6 +457,10 @@ class PendingActions:
             "summary": row[10],
             "preview_diff": row[11],
             "tier": row[12],
+            "lead_recommendation": row[13],
+            "lead_recommendation_note": row[14],
+            "lead_recommendation_by": row[15],
+            "lead_recommendation_at": row[16],
         }
 
     def cancel(
@@ -443,7 +488,9 @@ class PendingActions:
                 row = conn.execute(
                     "SELECT actor, target_kind, target_id, action_kind, "
                     "payload_json, payload_digest, origin_kind, created_at, "
-                    "expires_at, status, summary, preview_diff, tier "
+                    "expires_at, status, summary, preview_diff, tier, "
+                    "lead_recommendation, lead_recommendation_note, "
+                    "lead_recommendation_by, lead_recommendation_at "
                     "FROM pending_actions WHERE nonce=?",
                     (nonce,),
                 ).fetchone()
@@ -494,6 +541,10 @@ class PendingActions:
             "summary": row[10],
             "preview_diff": row[11],
             "tier": row[12],
+            "lead_recommendation": row[13],
+            "lead_recommendation_note": row[14],
+            "lead_recommendation_by": row[15],
+            "lead_recommendation_at": row[16],
         }
 
     # ── Maintenance / surfacing ────────────────────────────────────
@@ -551,7 +602,9 @@ class PendingActions:
             rows = conn.execute(
                 "SELECT nonce, actor, target_kind, target_id, action_kind, "
                 "payload_json, payload_digest, origin_kind, created_at, "
-                "expires_at, status, summary, preview_diff, tier "
+                "expires_at, status, summary, preview_diff, tier, "
+                "lead_recommendation, lead_recommendation_note, "
+                "lead_recommendation_by, lead_recommendation_at "
                 "FROM pending_actions "
                 "WHERE expires_at >= ? ORDER BY created_at ASC",
                 (time.time(),),
@@ -572,6 +625,92 @@ class PendingActions:
                 "summary": r[11],
                 "preview_diff": r[12],
                 "tier": r[13],
+                "lead_recommendation": r[14],
+                "lead_recommendation_note": r[15],
+                "lead_recommendation_by": r[16],
+                "lead_recommendation_at": r[17],
             }
             for r in rows
         ]
+
+    def record_recommendation(
+        self,
+        nonce: str,
+        *,
+        recommendation: str,
+        by: str,
+        note: str | None = None,
+    ) -> dict | None:
+        """Record (or overwrite) a team lead's advisory recommendation on
+        a held action (plan §8 #19).
+
+        Only a live (still-present, non-expired) row accepts a
+        recommendation -- an unknown or expired nonce returns ``None`` so
+        the caller (the mesh endpoint) can 404. Re-recommending
+        OVERWRITES the prior recommendation columns -- latest wins,
+        mirroring :meth:`consume`'s single-resolution-wins posture, but
+        this never deletes the row: the held action stays exactly as
+        pending as it was before.
+
+        ZERO enforcement (Constraint #12): this is a pure display-column
+        write. :meth:`consume` and :meth:`cancel` never read these
+        columns -- a recorded recommendation cannot release a hold, block
+        a confirm, or change anything about the action it's attached to.
+        """
+        if recommendation not in ("approve", "reject"):
+            raise ValueError(
+                f"recommendation must be 'approve' or 'reject', got {recommendation!r}",
+            )
+        self._safe_reap()
+        now = time.time()
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = conn.execute(
+                    "SELECT expires_at FROM pending_actions WHERE nonce=?", (nonce,),
+                ).fetchone()
+                if not row or now > row[0]:
+                    conn.execute("COMMIT")
+                    return None
+                conn.execute(
+                    "UPDATE pending_actions SET lead_recommendation=?, "
+                    "lead_recommendation_note=?, lead_recommendation_by=?, "
+                    "lead_recommendation_at=? WHERE nonce=?",
+                    (recommendation, note, by, now, nonce),
+                )
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+        return self.peek(nonce)
+
+
+# ── Lead-recommend team routing (plan §8 #19) ──────────────────────────
+
+# Action kinds whose payload carries the PROPOSING agent's id under
+# "agent_id" (verified in ``src/host/server.py``'s policy-hold call
+# sites). The "delete" action_kind (team_delete / agent_delete tiers) is
+# deliberately excluded: its propose endpoints are themselves operator-
+# or-internal gated, so there is no agent proposer to route a
+# recommendation to -- ``team_delete``'s payload never carries an
+# ``agent_id`` at all, and ``agent_delete``'s payload["agent_id"] names
+# the DELETION TARGET, not a proposer.
+_AGENT_PROPOSED_ACTION_KINDS: frozenset[str] = frozenset(
+    {"connector_call", "wallet_transfer", "wallet_execute", "notify_user"},
+)
+
+
+def resolve_proposer(record: dict) -> str | None:
+    """Best-effort resolve the agent whose action a held row represents.
+
+    Used by the lead-recommend surface (plan §8 #19, ``POST
+    /mesh/pending/{nonce}/recommend`` in ``server.py``) to find the team
+    whose lead should be allowed to recommend on this hold. Returns
+    ``None`` for rows with no resolvable agent proposer -- the caller
+    treats that as teamless/operator-proposed (403/409), never a guess.
+    """
+    if record.get("action_kind") not in _AGENT_PROPOSED_ACTION_KINDS:
+        return None
+    payload = record.get("payload") or {}
+    agent_id = payload.get("agent_id")
+    return str(agent_id) if agent_id else None

@@ -499,6 +499,10 @@ function dashboard() {
     // feed (GET /api/help-requests) that drives those "Needs you" rows,
     // replacing the old volatile operator-chat scrape.
     needsYouRequests: [],
+    // Recent-autonomous-actions "by exception" sample view (plan §8
+    // #19) — read-only, additive to the Work tab. Collapsed by default.
+    autonomyLog: [],
+    autonomyLogExpanded: false,
     workplaceLoading: false,
     // Per-section loading + error state. Failures used to be swallowed
     // silently (console.error) which left the user staring at an empty
@@ -516,6 +520,7 @@ function dashboard() {
       summaries: false,
       goals: false,
       pipelines: false,
+      autonomyLog: false,
     },
     workplaceErrors: {
       teams: '',
@@ -526,6 +531,7 @@ function dashboard() {
       summaries: '',
       goals: '',
       pipelines: '',
+      autonomyLog: '',
     },
     // Team Threads observability panel (Work tab). Read-only: thread
     // list + message pane; events render as status chips.
@@ -2674,6 +2680,7 @@ function dashboard() {
           this.loadWorkplaceGoals(),
           this.loadWorkplacePipelines(),
           this.loadThreads(),
+          this.loadWorkplaceAutonomyLog(),
         ]);
       } finally {
         this.workplaceLoading = false;
@@ -2750,6 +2757,7 @@ function dashboard() {
         summaries: this.loadWorkplaceSummaries,
         goals: this.loadWorkplaceGoals,
         pipelines: this.loadWorkplacePipelines,
+        autonomyLog: this.loadWorkplaceAutonomyLog,
       }[section];
       if (fn) fn.call(this);
     },
@@ -3065,6 +3073,8 @@ function dashboard() {
             summary: p.summary,
             preview_diff: p.preview_diff,
             expires_at: p.expires_at,
+            lead_recommendation: p.lead_recommendation,
+            lead_recommendation_note: p.lead_recommendation_note,
           });
         }
       } catch (e) {
@@ -3072,6 +3082,59 @@ function dashboard() {
       } finally {
         this.workplaceSectionLoading.pending = false;
       }
+    },
+
+    // Recent-autonomous-actions "by exception" sample view (plan §8
+    // #19). Read-only — a direct GET, no proxy stub needed in tests
+    // since the dashboard endpoint reads the blackboard in-process.
+    async loadWorkplaceAutonomyLog() {
+      this.workplaceSectionLoading.autonomyLog = true;
+      this.workplaceErrors.autonomyLog = '';
+      try {
+        const resp = await fetch(`${window.__config.apiBase}/workplace/autonomy-log?limit=50`);
+        if (!resp.ok) {
+          this.workplaceErrors.autonomyLog = `Couldn't load autonomous actions (HTTP ${resp.status})`;
+          return;
+        }
+        const data = await resp.json();
+        this.autonomyLog = data.entries || [];
+      } catch (e) {
+        this.workplaceErrors.autonomyLog = (e && e.message)
+          ? `Couldn't load autonomous actions: ${e.message}`
+          : "Couldn't load autonomous actions";
+      } finally {
+        this.workplaceSectionLoading.autonomyLog = false;
+      }
+    },
+
+    // Parse one autonomy-log entry's ``after_value`` JSON blob into a
+    // display-friendly shape. Both action kinds store structured JSON
+    // (see ``policy.py``'s ``_write_audit`` / ``auto_merge.py``'s
+    // ``drive_review_auto_merged`` audit row) — a parse failure (legacy
+    // row, corrupt blob) degrades to blank fields rather than throwing.
+    autonomyLogEntryDetail(entry) {
+      let data = {};
+      try {
+        data = JSON.parse(entry.after_value || '{}') || {};
+      } catch (e) { /* legacy/corrupt row — blank fields below */ }
+      if (entry.action === 'drive_review_auto_merged') {
+        return {
+          agent: data.author || '',
+          kind: 'drive_merge',
+          tier: null,
+          decision: 'auto_merged',
+          sampled: !!data.sampled,
+          probation: false,
+        };
+      }
+      return {
+        agent: entry.target || '',
+        kind: entry.field || '',
+        tier: data.tier || null,
+        decision: data.decision || null,
+        sampled: false,
+        probation: !!data.probation,
+      };
     },
 
     async loadWorkplaceHelpRequests() {
@@ -3351,6 +3414,13 @@ function dashboard() {
           previewDiff: hasDiff ? p.preview_diff : null,
           previewExpanded: expanded,
           previewToggleAriaId: previewAriaId,
+          // Lead advisory recommendation (plan §8 #19) — additive,
+          // read-only display line; ZERO effect on the Confirm/Cancel
+          // actions above (the server never lets a recommendation
+          // change what those buttons do).
+          leadRecommendation: p.lead_recommendation
+            ? `Lead recommends: ${p.lead_recommendation}${p.lead_recommendation_note ? ' — ' + p.lead_recommendation_note : ''}`
+            : null,
           actions: [
             primary,
             { label: 'Cancel', style: 'gray', handler: () => this._confirmCancelPendingAction(p.nonce, this._humanizeAction(p.action_kind, p.target_kind, p.target_id, p.summary)) },
@@ -4013,6 +4083,13 @@ function dashboard() {
         summary: data.summary || '',
         preview_diff: data.preview_diff || '',
         expires_at: data.expires_at || 0,
+        // Lead advisory recommendation (plan §8 #19) — additive display
+        // fields only; absent at propose time (a recommendation can
+        // only exist after the row is created), populated when this
+        // card is (re)built from the authoritative ``workplacePending``
+        // list (``loadWorkplacePending``'s backfill call below).
+        lead_recommendation: data.lead_recommendation || null,
+        lead_recommendation_note: data.lead_recommendation_note || null,
         _isDestructive: isDestructive,
         resolved_status: null,
         ts: Date.now() / 1000,
@@ -11370,6 +11447,7 @@ function dashboard() {
         list_skill_assignments: 'reviewing skill assignments',
         assign_skill: 'assigning a skill',
         team_drive: 'working in the team drive',
+        recommend_pending_action: 'recommending on a held action',
       };
       if (map[toolName]) return map[toolName];
       // Fallback: humanise the snake_case tool name.

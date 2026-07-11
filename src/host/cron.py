@@ -120,6 +120,7 @@ class CronScheduler:
         lead_reviews_fn: Callable | None = None,
         pending_tasks_fn: Callable | None = None,
         thread_store: Any = None,
+        lead_holds_fn: Callable | None = None,
     ):
         self.config_path = Path(config_path)
         self.jobs: dict[str, CronJob] = {}
@@ -145,6 +146,15 @@ class CronScheduler:
         # with no open reviews — the probe below stays free for everyone
         # who isn't a lead sitting on a nonempty review queue.
         self.lead_reviews_fn = lead_reviews_fn
+        # Lead-duty probe input (plan §8 #19): ``lead_holds_fn(agent) ->
+        # {"team_id", "count", "nonces"} | None`` mirrors ``lead_reviews_fn``
+        # exactly — one cheap ``led_team`` lookup short-circuits non-leads,
+        # and only UNRECOMMENDED held actions proposed by the lead's own
+        # team members count. ``nonces`` is a small capped sample so the
+        # probe detail is directly actionable (recommend_pending_action
+        # needs a nonce; there is no agent-facing "list my team's holds"
+        # tool this unit builds).
+        self.lead_holds_fn = lead_holds_fn
         # Durable-tasks probe input (plan §8 #24 prereq iii): ``pending_
         # tasks_fn(agent) -> int`` counts non-terminal (``pending``) tasks
         # assigned to ``agent`` in the mesh-side durable tasks table (a
@@ -1068,6 +1078,33 @@ class CronScheduler:
                     triggered=bool(count),
                     detail=(
                         f"{count} drive review(s) pending your verdict for team {team_id}"
+                    ),
+                ))
+
+        # Probe 5: lead-duty pending advisory recommendations on held
+        # (earned-autonomy policy) actions (plan §8 #19). Mirrors probe 4
+        # exactly: mesh-side Team-store + pending-actions data only, one
+        # cheap lookup for non-leads (``lead_holds_fn`` short-circuits
+        # before touching the pending-actions store at all); a read
+        # failure degrades to "no probe" rather than raising into the tick.
+        if self.lead_holds_fn is not None:
+            try:
+                held = self.lead_holds_fn(agent)
+            except Exception as e:
+                logger.debug("lead_holds_fn failed for '%s': %s", agent, e)
+                held = None
+            if held:
+                count = held.get("count", 0)
+                team_id = held.get("team_id", "")
+                nonces = held.get("nonces") or []
+                sample = f" (e.g. {', '.join(nonces[:3])})" if nonces else ""
+                results.append(HeartbeatProbeResult(
+                    name="lead_pending_holds",
+                    triggered=bool(count),
+                    detail=(
+                        f"{count} teammate action(s) held for policy review on team "
+                        f"{team_id}{sample} -- use recommend_pending_action(nonce=...) "
+                        "to record your advisory opinion."
                     ),
                 ))
 

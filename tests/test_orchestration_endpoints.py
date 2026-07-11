@@ -858,6 +858,277 @@ async def test_confirm_agent_origin_403_for_non_delete_kind(v2_app):
     assert app.pending_actions.peek("n-agent-origin") is not None
 
 
+# ── Lead advisory recommendation (plan §8 #19) ──────────────────────
+#
+# POST /mesh/pending/{nonce}/recommend — gated exactly like the drive-
+# verdict endpoint's lead-only pattern: the verified caller must equal
+# the TEAM LEAD of the agent who PROPOSED the held action. ZERO
+# enforcement: recommending never touches confirm/cancel/consume.
+
+
+def _store_wallet_hold(app, nonce: str, proposer: str) -> None:
+    app.pending_actions.store(
+        nonce=nonce, actor="operator", target_kind="wallet",
+        target_id=proposer, action_kind="wallet_transfer",
+        payload={"agent_id": proposer, "chain": "eth", "to": "0xabc", "amount": "1"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_recommend_lead_records_and_surfaces(v2_app):
+    app, _, _ = v2_app
+    _seed_teams(app)
+    app.teams_store.set_lead("research", "scout")
+    _store_wallet_hold(app, "n1", "analyst")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/pending/n1/recommend",
+            json={"recommendation": "approve", "note": "looks fine"},
+            headers={"X-Agent-ID": "scout", "X-Mesh-Internal": "1"},
+        )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["recorded"] is True
+    assert body["pending"]["lead_recommendation"] == "approve"
+    assert body["pending"]["lead_recommendation_note"] == "looks fine"
+    assert body["pending"]["lead_recommendation_by"] == "scout"
+    # Surfaces through the list endpoint too.
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r2 = await c.get("/mesh/pending", headers={"X-Mesh-Internal": "1"})
+    row = next(p for p in r2.json()["pending"] if p["nonce"] == "n1")
+    assert row["lead_recommendation"] == "approve"
+
+
+@pytest.mark.asyncio
+async def test_recommend_non_lead_teammate_403(v2_app):
+    """The proposer itself is NOT the lead — recommending is still
+    denied (analyst proposed this hold and is not research's lead)."""
+    app, _, _ = v2_app
+    _seed_teams(app)
+    app.teams_store.set_lead("research", "scout")
+    _store_wallet_hold(app, "n1", "analyst")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/pending/n1/recommend",
+            json={"recommendation": "approve"},
+            headers={"X-Agent-ID": "analyst", "X-Mesh-Internal": "1"},
+        )
+    assert r.status_code == 403
+    assert app.pending_actions.peek("n1")["lead_recommendation"] is None
+
+
+@pytest.mark.asyncio
+async def test_recommend_non_lead_operator_403(v2_app):
+    """A non-lead operator 403s too — mirrors the drive-verdict
+    endpoint's own operator-gets-no-carve-out posture."""
+    app, _, _ = v2_app
+    _seed_teams(app)
+    app.teams_store.set_lead("research", "scout")
+    _store_wallet_hold(app, "n1", "analyst")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/pending/n1/recommend",
+            json={"recommendation": "approve"},
+            headers={"X-Agent-ID": "operator", "X-Mesh-Internal": "1"},
+        )
+    assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_recommend_other_team_lead_403(v2_app):
+    """A different team's lead has no standing on this hold."""
+    app, _, _ = v2_app
+    _seed_teams(app)
+    app.teams_store.set_lead("research", "scout")
+    app.teams_store.set_lead("ops", "tracker")
+    _store_wallet_hold(app, "n1", "analyst")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/pending/n1/recommend",
+            json={"recommendation": "approve"},
+            headers={"X-Agent-ID": "tracker", "X-Mesh-Internal": "1"},
+        )
+    assert r.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_recommend_teamless_proposer_409(v2_app):
+    """The proposing agent isn't on any team — no lead to route to."""
+    app, _, _ = v2_app
+    _seed_teams(app)
+    _store_wallet_hold(app, "n1", "solo-agent")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/pending/n1/recommend",
+            json={"recommendation": "approve"},
+            headers={"X-Agent-ID": "scout", "X-Mesh-Internal": "1"},
+        )
+    assert r.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_recommend_team_with_no_lead_409(v2_app):
+    app, _, _ = v2_app
+    _seed_teams(app)  # research has no lead assigned
+    _store_wallet_hold(app, "n1", "analyst")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/pending/n1/recommend",
+            json={"recommendation": "approve"},
+            headers={"X-Agent-ID": "scout", "X-Mesh-Internal": "1"},
+        )
+    assert r.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_recommend_operator_proposed_hold_409(v2_app):
+    """team_delete/agent_delete rows have no agent proposer at all —
+    routes to nobody, 409s directively rather than guessing."""
+    app, _, _ = v2_app
+    _seed_teams(app)
+    app.teams_store.create_team("doomed")
+    app.teams_store.set_status("doomed", "archived")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        propose = await c.post(
+            "/mesh/teams/doomed/propose-delete",
+            headers=_human_internal_headers(),
+        )
+    nonce = propose.json()["change_id"]
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            f"/mesh/pending/{nonce}/recommend",
+            json={"recommendation": "approve"},
+            headers={"X-Agent-ID": "scout", "X-Mesh-Internal": "1"},
+        )
+    assert r.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_recommend_unknown_nonce_404(v2_app):
+    app, _, _ = v2_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/pending/does-not-exist/recommend",
+            json={"recommendation": "approve"},
+            headers={"X-Agent-ID": "scout", "X-Mesh-Internal": "1"},
+        )
+    assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_recommend_expired_nonce_404(v2_app):
+    app, _, _ = v2_app
+    _seed_teams(app)
+    app.teams_store.set_lead("research", "scout")
+    app.pending_actions.store(
+        nonce="n-exp", actor="operator", target_kind="wallet",
+        target_id="analyst", action_kind="wallet_transfer",
+        payload={"agent_id": "analyst"}, ttl=-1,
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/pending/n-exp/recommend",
+            json={"recommendation": "approve"},
+            headers={"X-Agent-ID": "scout", "X-Mesh-Internal": "1"},
+        )
+    assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_recommend_invalid_value_400(v2_app):
+    app, _, _ = v2_app
+    _seed_teams(app)
+    app.teams_store.set_lead("research", "scout")
+    _store_wallet_hold(app, "n1", "analyst")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/pending/n1/recommend",
+            json={"recommendation": "maybe"},
+            headers={"X-Agent-ID": "scout", "X-Mesh-Internal": "1"},
+        )
+    assert r.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_recommend_note_length_capped(v2_app):
+    app, _, _ = v2_app
+    _seed_teams(app)
+    app.teams_store.set_lead("research", "scout")
+    _store_wallet_hold(app, "n1", "analyst")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/pending/n1/recommend",
+            json={"recommendation": "approve", "note": "x" * 501},
+            headers={"X-Agent-ID": "scout", "X-Mesh-Internal": "1"},
+        )
+    assert r.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_recommend_reject_does_not_block_confirm(v2_app):
+    """ZERO enforcement pin: a reject recommendation must not stop the
+    human confirm path from executing the held action."""
+    app, _, _ = v2_app
+    _seed_teams(app)
+    app.teams_store.set_lead("research", "scout")
+    calls = []
+
+    async def _custom_executor(record):
+        calls.append(record["nonce"])
+        return {"executed": True}
+
+    app.pending_executors["wallet_transfer"] = _custom_executor
+    app.pending_actions.store(
+        nonce="n1", actor="operator", target_kind="wallet",
+        target_id="analyst", action_kind="wallet_transfer",
+        payload={"agent_id": "analyst"}, origin_kind="human",
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        rec = await c.post(
+            "/mesh/pending/n1/recommend",
+            json={"recommendation": "reject"},
+            headers={"X-Agent-ID": "scout", "X-Mesh-Internal": "1"},
+        )
+    assert rec.status_code == 200
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        confirm = await c.post(
+            "/mesh/pending/n1/confirm",
+            headers=_human_internal_headers(),
+        )
+    assert confirm.status_code == 200, confirm.text
+    assert calls == ["n1"]
+
+
+@pytest.mark.asyncio
+async def test_recommend_approve_does_not_auto_execute(v2_app):
+    """ZERO enforcement pin: an approve recommendation must not itself
+    release the hold — the executor only runs on an explicit confirm."""
+    app, _, _ = v2_app
+    _seed_teams(app)
+    app.teams_store.set_lead("research", "scout")
+    calls = []
+
+    async def _custom_executor(record):
+        calls.append(record["nonce"])
+        return {"executed": True}
+
+    app.pending_executors["wallet_transfer"] = _custom_executor
+    app.pending_actions.store(
+        nonce="n1", actor="operator", target_kind="wallet",
+        target_id="analyst", action_kind="wallet_transfer",
+        payload={"agent_id": "analyst"}, origin_kind="human",
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        rec = await c.post(
+            "/mesh/pending/n1/recommend",
+            json={"recommendation": "approve"},
+            headers={"X-Agent-ID": "scout", "X-Mesh-Internal": "1"},
+        )
+    assert rec.status_code == 200
+    assert calls == []  # not executed
+    assert app.pending_actions.peek("n1") is not None  # still pending
+
+
 # ── Hotfix: _extract_verified_agent_id honors internal callers ──────
 #
 # In production (auth tokens configured), the dashboard cancel proxy
