@@ -1468,6 +1468,61 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   adversarial review of ALL Phase-4 PRs (Phase-3 pattern) — findings, if any, land as a
   follow-up fix PR recorded in this ledger.
 
+- **✅ Landed — Phase-4 end-of-phase review + fixes (#1229).** Consolidated adversarial review of
+  all Phase-4 PRs on the merged tree — three independent passes (lifecycle/permission/concurrency
+  deep-dive with repro scripts; units-2/4/5 correctness + cross-unit integration; phase-wide
+  invariant sweep + doc accuracy). The invariant sweep PASSED every family with evidence: both
+  goal kinds operator-write-only across every enumerated write path, lead ceiling zero (merge/
+  reject handler bodies byte-identical, pinned test body diff-verified unchanged), thread writers
+  host-side-only with `post_to_channel` unreachable at every layer, Constraints #1/#5/#6/#13
+  conformant, all commits single-authored, ruff clean. Eight confirmed findings, all fixed in
+  #1229 with negative-control-verified regression tests:
+  1. **CRITICAL — permissions.json lock coverage:** seven PRE-EXISTING endpoints (mesh skills/
+     internet/browser + dashboard skills/permissions/wallet-enable) still did bare
+     load→mutate→save outside the unit-2 `_config_lock` (repro: 2–3 of 30 concurrent writes
+     survive — a lost update can silently undo a permission grant OR revocation). The unit-2
+     landed entry's "EVERY load→mutate→save runs under it" claim was FALSE for these seven —
+     corrected here; all seven now hold the lock across the full sequence.
+  2. **MAJOR — usable-reply gate:** the lane dispatcher has THREE non-success return shapes
+     (`__SILENT__`, "(no response)", "dispatch_error: …"); the unit-3 pre-merge fix denylisted
+     two at two sites, and the standup post gate rejected none (an unreachable lead would post
+     the literal silent token into the team channel daily). One shared `usable_agent_reply`
+     predicate now guards all three host-side writers.
+  3. **MAJOR — standup cron leaks:** team archive and mesh confirm-delete removed the summary
+     job but not the standup job (daily full LLM turn on the former lead + deleted-team channel
+     resurrection until next boot). Both surfaces now remove it.
+  4. **MAJOR — health auto-restart stale role:** `_try_restart` re-stamped the registry's cached
+     role instead of the freshly-loaded config's — the unit-2 regression test proved
+     propagation, not source freshness; `edit_agent` role changes were silently reverted by
+     crash rebuilds. Fresh config role now wins.
+  5. **MAJOR — lead lifecycle:** offboarding a team's lead left `lead_agent_id` dangling (ghost
+     lead in the Team Room; boot reconcile recreated the standup job for the archived lead).
+     Offboard now clears leadership (+ standup sync + audit); the reconcile skips archived
+     leads. Plain archive stays reversible/untouched.
+  6. **MAJOR — create-team onboarding gap:** initial members of a new team never got the
+     onboarding wake (only later joins did); both create loops now fire it.
+  7. **MINOR batch:** `_ConfigLock` fd leak on flock failure; in-flight standup re-checks job
+     liveness before posting; busy-path SSE status note ends with a paragraph break; CLAUDE.md
+     Constraint #13 clarified (CLI seam precondition) + content-pinned.
+  8. **MINOR — RefMoved retry:** offboard drive commits retried (3 attempts) so a concurrent
+     main commit can't silently drop a departing agent's handover/snapshot.
+  One reviewer finding (plan doc missing the unit-5 landed entry) was already fixed by #1228
+  before the review completed — dismissed with verification.
+  **Recorded residuals (deliberate, no code change):** offboarding a BUSY agent reliably times
+  out the handover turn (FIFO followup queues behind the in-flight task, wait ≤600s) — the raw
+  snapshot still commits, so data loss is partial (no distilled narrative); a steer-shaped
+  handover is future design work. The config flock blocks the event loop under CROSS-PROCESS
+  contention — accepted (critical sections are ms-scale; contention requires a concurrent CLI/
+  setup-wizard process). No per-agent offboard/delete serialization beyond the commit retry
+  (dual-delete TOCTOU window remains; the garbage-commit half is closed by the reply gate).
+  Volume-before-config teardown ordering can leave a config-listed agent with no volume on a
+  mid-teardown failure (pre-existing deliberate H12 ordering). `/api/broadcast/stream` remains
+  direct-call (the shipped UI fans out client-side to the CONVERTED per-agent stream endpoint;
+  only direct API callers are affected — recorded gate, same shape as the original unit-5
+  residual). A plain-ARCHIVED (not offboarded) lead keeps its Lead badge in the Team Room —
+  truthful display; the operator can unassign. Full local suite 8556 passed / 26 skipped /
+  0 failed.
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|
@@ -1517,6 +1572,7 @@ findings, if any, land as a follow-up fix PR recorded in this ledger.
 | #1222 | onboarding + offboarding-with-handover — three delete surfaces converge (unit 3) | merged |
 | #1224 | Team Room — plate snapshots, composed room read, default Team Hub sub-tab (unit 4) | merged |
 | #1226 | test-isolation hardening — set_cron schema security pin vs registry pollution | merged |
+| #1229 | end-of-phase review fixes — permissions lock coverage, reply gate, standup leaks, lead | merged |
 | #1227 | streaming/broadcast steer-routing — busy-aware SSE fork + broadcast via deliver_chat (unit 5) | merged |
 
 ### YOU ARE HERE → Phase 5
