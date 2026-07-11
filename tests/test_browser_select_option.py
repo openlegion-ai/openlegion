@@ -21,9 +21,13 @@ Covers:
     scalar ``input_value()`` that only reports the FIRST). When it does
     not match the requested selection multiplicity-preservingly (a change
     handler reverted one or more options, single OR multi-select) the
-    result is ``selection_reverted``, not a false success. A read-back
-    that RAISES is never a success either — a detached element →
-    ``ref_stale``, anything else → ``service_unavailable``.
+    result is ``selection_reverted``, not a false success. A guarded read
+    off a non-select element (``select_option`` redirected through a
+    ``<label>``) yields ``null`` — INCONCLUSIVE, so it trusts Playwright's
+    ``selected`` and succeeds rather than fabricating a failure. A
+    legitimate clear (empty ``selected`` AND empty landed set) is a
+    success too. A read-back that RAISES is never a success — a detached
+    element → ``ref_stale``, anything else → ``service_unavailable``.
 
 Mirrors ``tests/test_browser_parity_actions.py`` / ``tests/test_browser_captcha_redetect.py``:
 every test drives ``BrowserManager`` handler methods directly against a
@@ -68,11 +72,14 @@ def _patch_get_or_start(mgr: BrowserManager, inst: CamoufoxInstance) -> None:
     mgr.get_or_start = AsyncMock(return_value=inst)  # type: ignore[assignment]
 
 
+_UNSET = object()
+
+
 def _mk_locator(
     *,
     select_option_result=None,
     select_option_error=None,
-    landed_values=None,
+    landed_values=_UNSET,
     evaluate_error=None,
 ):
     """Playwright ``Locator`` mock.
@@ -83,6 +90,9 @@ def _mk_locator(
     ``landed_values`` (or raise ``evaluate_error``). When ``landed_values``
     is left unset it MIRRORS ``select_option_result`` — i.e. the value stuck,
     the common success case — so callers only pass it to model a revert.
+    Pass ``landed_values=None`` EXPLICITLY to model the located element having
+    no ``selectedOptions`` (a label-redirect target — the read is inconclusive
+    and the guard returns ``null``).
     """
     loc = MagicMock()
     if select_option_error is not None:
@@ -92,7 +102,7 @@ def _mk_locator(
     if evaluate_error is not None:
         loc.evaluate = AsyncMock(side_effect=evaluate_error)
     else:
-        if landed_values is None:
+        if landed_values is _UNSET:
             landed_values = list(select_option_result or [])
         loc.evaluate = AsyncMock(return_value=landed_values)
     return loc
@@ -435,6 +445,57 @@ class TestSelectOptionReadBackRaises:
 
         assert result["success"] is False
         assert result["error"]["code"] == "service_unavailable"
+
+
+class TestSelectOptionInconclusiveReadBack:
+    """``select_option`` can redirect through a ``<label>`` to its associated
+    control, so the located element isn't guaranteed to BE the ``<select>``. A
+    read-back off a non-select element has no ``selectedOptions`` — the guarded
+    evaluate returns ``None``. That is INCONCLUSIVE, not a failure: trust
+    Playwright's ``selected`` rather than fabricate a revert."""
+
+    @pytest.mark.asyncio
+    async def test_null_read_back_is_success_not_service_unavailable(self):
+        mgr = _make_manager()
+        inst = _mk_inst()
+        _patch_get_or_start(mgr, inst)
+        inst.refs["e1"] = object()
+
+        # Playwright reports the option selected; the located element has no
+        # selectedOptions (label wrapper) so the read-back is None.
+        loc = _mk_locator(select_option_result=["red"], landed_values=None)
+        mgr._locator_from_ref = AsyncMock(return_value=loc)  # type: ignore[assignment]
+
+        result = await mgr.select_option("agent-select", ref="e1", value="red")
+
+        assert result["success"] is True
+        assert result["data"]["selected"] == ["red"]
+        # An inconclusive read falls back to Playwright's returned selection.
+        assert result["data"]["value"] == ["red"]
+
+
+class TestSelectOptionLegitimateClear:
+    """A legitimate clear — deselect everything — returns an EMPTY ``selected``
+    AND an empty landed set. The two are equal, so it is a success; the guard
+    must NOT misflag ``landed_values == []`` as a revert on its own."""
+
+    @pytest.mark.asyncio
+    async def test_empty_selection_matching_empty_landed_is_success(self):
+        mgr = _make_manager()
+        inst = _mk_inst()
+        _patch_get_or_start(mgr, inst)
+        inst.refs["e1"] = object()
+
+        # select_option([]) deselects all in a multi-select — nothing requested
+        # to stick, nothing landed.
+        loc = _mk_locator(select_option_result=[], landed_values=[])
+        mgr._locator_from_ref = AsyncMock(return_value=loc)  # type: ignore[assignment]
+
+        result = await mgr.select_option("agent-select", ref="e1", value=[])
+
+        assert result["success"] is True
+        assert result["data"]["selected"] == []
+        assert result["data"]["value"] == []
 
 
 class TestSelectOptionUnclassifiedErrorPropagates:

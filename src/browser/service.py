@@ -9618,23 +9618,36 @@ class BrowserManager:
                 # option, so a multi-select revert of options 2..N is invisible
                 # to it; read EVERY currently-selected value straight off the
                 # element instead.
+                #
+                # ``select_option`` may redirect through a ``<label>`` to its
+                # associated control, so the located element here isn't
+                # guaranteed to BE the ``<select>``. Guard the read: an element
+                # with no ``selectedOptions`` yields ``null`` (INCONCLUSIVE —
+                # trust Playwright's ``selected``), never a thrown
+                # ``Array.from(undefined)`` that would masquerade as a failure.
                 try:
                     landed_values = await locator.evaluate(
-                        "el => Array.from(el.selectedOptions, o => o.value)",
+                        "el => el && el.selectedOptions "
+                        "? Array.from(el.selectedOptions, o => o.value) : null",
                     )
                 except Exception as e:
-                    # A failed read-back is NOT a success. Classify: a
-                    # detached/stale element → ref_stale (re-snapshot); anything
-                    # else is an infrastructure failure, not a landed selection.
+                    # Only an ACTUAL raise from the read-back is a non-success.
+                    # Classify: a detached/stale element → ref_stale
+                    # (re-snapshot); anything else is an infrastructure failure,
+                    # not a landed selection.
                     msg_l = str(e).lower()
                     if "not attached" in msg_l or "detached" in msg_l:
                         return _err("ref_stale", str(e))
                     return _err("service_unavailable", str(e))
 
-                # Compare multiplicity-preserving (duplicate option values are
-                # legal — do NOT collapse to a set) and order-insensitively.
-                # An empty landed set means nothing is selected — a full revert.
-                if not landed_values or sorted(landed_values) != sorted(selected):
+                # ``None`` = the located element has no ``selectedOptions`` (a
+                # label wrapper / redirect target, not the <select> itself). The
+                # read is inconclusive, so trust Playwright's ``selected`` rather
+                # than fabricate a revert. When we DID read the <select>, compare
+                # multiplicity-preserving (duplicate option values are legal — do
+                # NOT collapse to a set) and order-insensitively; a legitimate
+                # clear (both empty) is equal and stays a success.
+                if landed_values is not None and sorted(landed_values) != sorted(selected):
                     return _err(
                         "selection_reverted",
                         f"The <select> did not settle on the requested option(s) "
@@ -9646,7 +9659,7 @@ class BrowserManager:
                     "success": True,
                     "data": {
                         "selected": selected,
-                        "value": landed_values,
+                        "value": landed_values if landed_values is not None else selected,
                         "ref": ref or selector,
                     },
                 }
