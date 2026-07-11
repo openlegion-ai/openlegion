@@ -11988,6 +11988,11 @@ def create_mesh_app(
         """
         caller_id = _extract_verified_agent_id(request)
         body = await request.json()
+        # Reject malformed bodies (null, list, string, number) with a clean 400
+        # before any target resolution or permission work — otherwise
+        # ``body.get(...)`` raises AttributeError → opaque 500.
+        if not isinstance(body, dict):
+            raise HTTPException(400, "request body must be a JSON object")
         req_agent_id = _resolve_browser_target(
             caller_id,
             body.get("target_agent_id") or "",
@@ -11996,6 +12001,15 @@ def create_mesh_app(
 
         action = body.get("action", "")
         params = body.get("params", {})
+
+        # A non-string ``action`` (e.g. a list) is unhashable and would raise at
+        # the ``action not in _ALLOWED_BROWSER_ACTIONS`` membership check → 500.
+        if not isinstance(action, str):
+            raise HTTPException(400, "action must be a string")
+        # A non-dict ``params`` fails later at ``params.get("url")`` or ships
+        # invalid JSON downstream — reject it up front.
+        if not isinstance(params, dict):
+            raise HTTPException(400, "params must be a JSON object")
 
         if not action:
             raise HTTPException(400, "action is required")

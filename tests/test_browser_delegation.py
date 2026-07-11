@@ -687,6 +687,87 @@ class TestBrowserCommandEndpoint:
                 assert resp.status_code == 400, (bad, resp.text)
                 assert "must be a string" in resp.text
 
+    @pytest.mark.asyncio
+    async def test_non_dict_body_rejected(self, tmp_path):
+        """A well-formed JSON body that decodes to null / a list / a string
+        must yield a clean 400, not an opaque 500 from ``body.get(...)``
+        raising AttributeError."""
+        from httpx import ASGITransport, AsyncClient
+
+        app, _event_bus, _cm = _build_app(
+            tmp_path,
+            perms_map={
+                "worker": {"can_use_browser": True},
+            },
+        )
+
+        # Send raw JSON documents (not httpx ``json=`` — ``json=None`` would
+        # send an empty body, a different decode-error path). Each decodes to
+        # a non-dict: null → None, a list, a string.
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            for raw in ("null", "[1, 2, 3]", '"just a string"'):
+                resp = await client.post(
+                    "/mesh/browser/command",
+                    content=raw,
+                    headers={
+                        "X-Agent-ID": "worker",
+                        "Content-Type": "application/json",
+                    },
+                )
+                assert resp.status_code == 400, (raw, resp.text)
+                assert "must be a JSON object" in resp.text
+
+    @pytest.mark.asyncio
+    async def test_non_dict_params_rejected(self, tmp_path):
+        """A non-dict ``params`` must yield 400 up front rather than failing
+        later at ``params.get("url")`` or shipping invalid JSON downstream."""
+        from httpx import ASGITransport, AsyncClient
+
+        app, _event_bus, _cm = _build_app(
+            tmp_path,
+            perms_map={
+                "worker": {"can_use_browser": True},
+            },
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/mesh/browser/command",
+                json={"action": "snapshot", "params": "not-a-dict"},
+                headers={"X-Agent-ID": "worker"},
+            )
+        assert resp.status_code == 400, resp.text
+        assert "params must be a JSON object" in resp.text
+
+    @pytest.mark.asyncio
+    async def test_non_string_action_rejected(self, tmp_path):
+        """A list ``action`` is unhashable and would blow up at the
+        ``action not in _ALLOWED_BROWSER_ACTIONS`` membership check → 500.
+        It must be rejected with a clean 400 instead."""
+        from httpx import ASGITransport, AsyncClient
+
+        app, _event_bus, _cm = _build_app(
+            tmp_path,
+            perms_map={
+                "worker": {"can_use_browser": True},
+            },
+        )
+
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/mesh/browser/command",
+                json={"action": ["snapshot"], "params": {}},
+                headers={"X-Agent-ID": "worker"},
+            )
+        assert resp.status_code == 400, resp.text
+        assert "action must be a string" in resp.text
+
 
 class TestBrowserLoginRequestEndpoint:
     """POST /mesh/browser-login-request delegation matrix."""
