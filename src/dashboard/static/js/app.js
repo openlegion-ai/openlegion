@@ -626,12 +626,22 @@ function dashboard() {
     auditArchiving: false,
 
     // Unified Team Hub (replaces separate TEAM.md + Comms + Broadcast panels).
-    // Leads with the live Work view; raw State + Activity are demoted under
+    // Leads with the Team Room (who's doing what, thread activity, plate
+    // per agent — Phase-4 unit 4); raw State + Activity are demoted under
     // the Advanced sub-tab (teamHubAdvTab).
     teamHubExpanded: true,
-    teamHubTab: 'work',  // 'work' | 'artifacts' | 'docs' | 'members' | 'broadcast' | 'advanced'
+    teamHubTab: 'room',  // 'room' | 'work' | 'artifacts' | 'docs' | 'members' | 'broadcast' | 'advanced'
     teamHubAdvTab: 'state',  // within Advanced: 'state' | 'activity'
     _teamWorkLoaded: false,  // load the workplace ledger once, then WS keeps it live
+
+    // Team Room panel (Phase-4 unit 4) — one composed read from
+    // GET /api/teams/{team}/room: {team, members, threads}. Its own
+    // thread-open state so opening a thread here never clobbers the
+    // Workplace tab's global Threads panel state.
+    teamRoom: null,
+    teamRoomLoading: false,
+    roomThreadOpen: null,
+    roomThreadMessages: [],
 
     // TEAM.md banner on Agents tab (kept for backward compat, not used by template)
     teamBannerExpanded: false,
@@ -832,6 +842,7 @@ function dashboard() {
     _fleetDebounce: null,
     _queueRefreshDebounce: null,
     _cronDebounce: null,
+    _teamRoomDebounce: null,
     _seenEventIds: new Set(),
 
 
@@ -2504,7 +2515,13 @@ function dashboard() {
         // Lead-with-Work: ensure the task ledger is loaded when entering the
         // Teams tab with a team active (init restores activeTeam directly, not
         // via switchTeam, so the Work view would otherwise render empty).
-        if (this.activeTeam) this._ensureWorkplaceTasks();
+        if (this.activeTeam) {
+          this._ensureWorkplaceTasks();
+          // Same reasoning for the Team Room (Phase-4 unit 4), now the
+          // default sub-tab — a restored activeTeam bypasses switchTeam's
+          // eager loadTeamRoom() call, so mirror it here.
+          if (this.teamHubTab === 'room') this.loadTeamRoom(this.activeTeam);
+        }
       }
       if (tab === 'system') {
         this.fetchSettings();
@@ -2684,6 +2701,38 @@ function dashboard() {
         this.threadMessages = data.messages || [];
       } catch (e) {
         console.error('openThread failed', e);
+      }
+    },
+
+    // ── Team Room panel (Phase-4 unit 4) — who's doing what, thread
+    // activity, plate per agent. One composed fetch; no per-member or
+    // per-source polling of its own. ──
+    async loadTeamRoom(team) {
+      if (!team) return;
+      this.teamRoomLoading = true;
+      try {
+        const resp = await fetch(`/dashboard/api/teams/${encodeURIComponent(team)}/room`);
+        if (!resp.ok) return;
+        this.teamRoom = await resp.json();
+      } catch (e) {
+        console.error('loadTeamRoom failed', e);
+      } finally {
+        this.teamRoomLoading = false;
+      }
+    },
+
+    // Opens a thread inline in the Team Room panel — separate state
+    // from ``openThread``/``threadOpen`` so this read-only drill-in
+    // never clobbers the Workplace tab's global Threads panel.
+    async openRoomThread(threadId) {
+      try {
+        const resp = await fetch(`/dashboard/api/threads/${encodeURIComponent(threadId)}/messages`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        this.roomThreadOpen = data.thread || null;
+        this.roomThreadMessages = data.messages || [];
+      } catch (e) {
+        console.error('openRoomThread failed', e);
       }
     },
 
@@ -4868,6 +4917,17 @@ function dashboard() {
         this._queueRefreshDebounce = setTimeout(() => this.fetchQueues(), 300);
       }
 
+      // Team Room panel live refresh (Phase-4 unit 4) — reuses the same
+      // queue_changed (busy/queued) and thread_message (thread activity)
+      // signals the Team Hub's other sub-tabs already debounce-refresh
+      // on; no new polling, only re-pulls while the Room sub-tab is on
+      // screen for the affected team.
+      if ((evt.type === 'queue_changed' || evt.type === 'thread_message') &&
+          this.activeTab === 'fleet' && this.teamHubTab === 'room' && this.activeTeam) {
+        if (this._teamRoomDebounce) clearTimeout(this._teamRoomDebounce);
+        this._teamRoomDebounce = setTimeout(() => this.loadTeamRoom(this.activeTeam), 500);
+      }
+
       // System-tab config changed elsewhere — re-fetch just the affected
       // panel, and only while the System tab is on screen (off-screen panels
       // re-sync on their next open). ``data.scope`` maps to the panel's
@@ -6386,7 +6446,7 @@ function dashboard() {
       this.teamEditBuffer = '';
       this.teamBannerExpanded = false;
       this.teamHubExpanded = true;
-      this.teamHubTab = 'work';
+      this.teamHubTab = 'room';
       this.showTeamForm = false;
       this.commsView = 'activity';
       this.commsExpanded = false;
@@ -6398,11 +6458,16 @@ function dashboard() {
       this.bbEntries = [];
       this.commsSubs = {};
       this.artifactsList = [];
+      this.teamRoom = null;
+      this.roomThreadOpen = null;
+      this.roomThreadMessages = [];
       this.fetchTeamContent();
       if (name) {
-        // Work leads — ensure the task ledger is loaded (WS keeps it live).
-        // State/Activity (Advanced) and Files lazy-load on their own tabs, so
-        // switching teams no longer eagerly fans out blackboard + artifact reads.
+        // Room leads — ensure it's loaded (WS-debounce keeps it live).
+        // Work ledger loads alongside it since other sub-tabs still read
+        // from the same shared workplace state. State/Activity (Advanced)
+        // and Files lazy-load on their own tabs.
+        this.loadTeamRoom(name);
         this._ensureWorkplaceTasks();
       }
     },

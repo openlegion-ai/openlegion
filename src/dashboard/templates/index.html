@@ -1654,6 +1654,12 @@
                 x-text="'🎯 ' + (activeTeamData?.north_star || '')"></span>
               <!-- Tab pills — desktop only, click stops propagation to header toggle -->
               <div class="team-hub-desktop-tabs seg-group hidden lg:flex ml-auto flex-shrink-0" @click.stop role="tablist" aria-label="Team sections">
+                <button @click="teamHubExpanded = true; teamHubTab = 'room'; loadTeamRoom(activeTeam)"
+                  class="seg-tab seg-tab-sm" data-testid="team-hub-tab-room"
+                  :class="teamHubExpanded && teamHubTab === 'room' ? 'seg-tab-active' : ''"
+                  role="tab" :aria-selected="teamHubExpanded && teamHubTab === 'room'">
+                  <span>Room</span>
+                </button>
                 <button @click="teamHubExpanded = true; teamHubTab = 'work'; _ensureWorkplaceTasks()"
                   class="seg-tab seg-tab-sm"
                   :class="teamHubExpanded && teamHubTab === 'work' ? 'seg-tab-active' : ''"
@@ -1715,6 +1721,12 @@
             <div x-show="teamHubExpanded" x-transition class="border-t border-gray-800/60">
               <!-- Mobile tab strip (shown below lg; desktop pills take over at lg) -->
               <div class="team-hub-tabs team-hub-mobile-tabs lg:hidden" role="tablist" aria-label="Team sections">
+                <button @click="teamHubTab = 'room'; loadTeamRoom(activeTeam)"
+                  class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2" data-testid="team-hub-tab-room-mobile"
+                  :class="teamHubTab === 'room' ? 'text-white border-indigo-500' : 'text-gray-400 border-transparent hover:text-gray-300'"
+                  role="tab" :aria-selected="teamHubTab === 'room'">
+                  Room
+                </button>
                 <button @click="teamHubTab = 'work'; _ensureWorkplaceTasks()"
                   class="px-4 py-2.5 text-xs font-medium transition-colors border-b-2"
                   :class="teamHubTab === 'work' ? 'text-white border-indigo-500' : 'text-gray-400 border-transparent hover:text-gray-300'"
@@ -1751,6 +1763,123 @@
                   role="tab" :aria-selected="teamHubTab === 'advanced'">
                   Advanced
                 </button>
+              </div>
+
+              <!-- ── ROOM (Phase-4 unit 4 — who's doing what, thread activity,
+                   plate per agent. Composed read-only view; the operator's
+                   default landing when opening a team.) ── -->
+              <div x-show="teamHubTab === 'room'" x-cloak class="px-4 py-3" data-testid="team-room-panel">
+                <!-- Team goal header -->
+                <div x-show="teamRoom?.team?.north_star" class="mb-3 px-3 py-2 rounded-lg bg-indigo-900/10 border border-indigo-800/30" data-testid="team-room-goal">
+                  <div class="text-[11px] uppercase tracking-wide text-indigo-400/80 mb-0.5">Team goal</div>
+                  <div class="text-xs text-gray-300" x-text="teamRoom?.team?.north_star"></div>
+                </div>
+
+                <!-- first-load spinner -->
+                <div x-show="teamRoomLoading && !teamRoom" class="flex items-center gap-2 text-gray-500 py-6 justify-center">
+                  <svg class="animate-spin h-4 w-4" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+                  <span class="text-xs">Loading room…</span>
+                </div>
+
+                <template x-if="!teamRoomLoading || teamRoom">
+                  <div>
+                    <!-- Member cards: name, Lead badge, busy/idle dot, current
+                         task, plate line. -->
+                    <div class="space-y-1.5 mb-4" data-testid="team-room-members">
+                      <template x-for="m in (teamRoom?.members || [])" :key="m.agent_id">
+                        <div class="bg-gray-800/40 border border-gray-800/60 rounded-lg px-3 py-2" data-testid="team-room-member-card">
+                          <div class="flex items-center gap-2.5 min-w-0">
+                            <div class="agent-avatar agent-avatar-sm" :class="'agent-color-' + agentColorIndex(m.agent_id)">
+                              <img :src="agentAvatarUrl(m.agent_id)" :alt="m.agent_id">
+                            </div>
+                            <span class="w-2 h-2 rounded-full flex-shrink-0"
+                              :class="m.busy ? 'bg-amber-400' : 'bg-emerald-400'"
+                              :title="m.busy ? 'Busy' : 'Idle'"></span>
+                            <span class="text-xs text-gray-300 truncate" x-text="m.agent_id"></span>
+                            <span x-show="m.is_lead"
+                              class="text-[11px] px-1.5 py-0.5 rounded bg-amber-900/30 text-amber-400 border border-amber-800/40 flex-shrink-0"
+                              title="Team lead — accountability owner (standup, advisory review verdicts, goal stewardship). No extra permissions.">Lead</span>
+                            <span x-show="m.queued > 0"
+                              class="text-[11px] px-1.5 py-0.5 rounded-full bg-amber-900/30 text-amber-400 border border-amber-800/40 font-mono ml-auto flex-shrink-0"
+                              x-text="m.queued + ' queued'"></span>
+                          </div>
+                          <div class="text-[11px] text-gray-400 mt-1.5 truncate" x-show="m.current_task"
+                            :title="m.current_task?.title" x-text="'Working: ' + (m.current_task?.title || '')"></div>
+                          <div class="text-[11px] text-gray-500 mt-1" x-show="!m.current_task">No active task.</div>
+                          <div class="text-[11px] text-gray-500 mt-1" data-testid="team-room-plate-line">
+                            <template x-if="m.plate">
+                              <span x-text="(m.plate.triggered_probes?.length || 0) + ' items on plate · last checked ' + relativeTime(m.plate.checked_at)"></span>
+                            </template>
+                            <template x-if="!m.plate">
+                              <span>plate unknown</span>
+                            </template>
+                          </div>
+                        </div>
+                      </template>
+                      <div x-show="teamRoom && (teamRoom.members || []).length === 0" class="text-center py-6">
+                        <div class="text-gray-500 text-xs">No members yet.</div>
+                      </div>
+                    </div>
+
+                    <!-- Thread activity — mirrors the Workplace tab's
+                         read-only Threads panel, scoped to this team. -->
+                    <div>
+                      <h4 class="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-1.5">Thread activity</h4>
+                      <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        <div class="bg-gray-800/40 border border-gray-700/50 rounded-lg p-2 max-h-64 overflow-y-auto"
+                          data-testid="team-room-threads-list">
+                          <template x-if="!(teamRoom?.threads || []).length">
+                            <div class="text-xs text-gray-500 p-2">No thread activity yet.</div>
+                          </template>
+                          <template x-for="t in (teamRoom?.threads || [])" :key="t.id">
+                            <button type="button" @click="openRoomThread(t.id)"
+                              class="w-full text-left px-2 py-1.5 rounded hover:bg-gray-700/50 transition-colors"
+                              :class="roomThreadOpen && roomThreadOpen.id === t.id ? 'bg-gray-700/60' : ''">
+                              <div class="flex items-center gap-2 min-w-0">
+                                <span class="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded shrink-0"
+                                      :class="{
+                                        'bg-indigo-500/20 text-indigo-300': t.kind === 'channel',
+                                        'bg-amber-500/20 text-amber-300': t.kind === 'task',
+                                        'bg-cyan-500/20 text-cyan-300': t.kind === 'dm',
+                                      }"
+                                      x-text="t.kind"></span>
+                                <span class="text-xs text-gray-200 truncate" x-text="t.title || t.id"></span>
+                              </div>
+                              <div class="text-[10px] text-gray-500 mt-0.5" x-text="relativeTime(t.updated_at)"></div>
+                            </button>
+                          </template>
+                        </div>
+                        <div class="md:col-span-2 bg-gray-800/40 border border-gray-700/50 rounded-lg p-3 max-h-64 overflow-y-auto"
+                          data-testid="team-room-thread-message-pane">
+                          <template x-if="!roomThreadOpen">
+                            <div class="text-xs text-gray-500">Select a thread to see its messages.</div>
+                          </template>
+                          <template x-if="roomThreadOpen && !roomThreadMessages.length">
+                            <div class="text-xs text-gray-500">No messages in this thread yet.</div>
+                          </template>
+                          <template x-for="m in roomThreadMessages" :key="m.id">
+                            <div class="mb-2">
+                              <div class="flex items-baseline gap-2">
+                                <span class="text-xs font-medium text-gray-200" x-text="m.sender"></span>
+                                <span class="text-[10px] text-gray-500" x-text="relativeTime(m.created_at)"></span>
+                              </div>
+                              <template x-if="m.kind === 'event'">
+                                <span class="inline-flex items-center gap-1 mt-0.5 text-[10px] px-1.5 py-0.5 rounded"
+                                      :class="['task_failed','task_blocked'].includes((m.payload || {}).kind) ? 'bg-red-500/20 text-red-300' : 'bg-emerald-500/20 text-emerald-300'">
+                                  <span x-text="(m.payload || {}).kind || 'event'"></span>
+                                  <span x-text="(m.payload || {}).status ? '· ' + (m.payload || {}).status : ''"></span>
+                                </span>
+                              </template>
+                              <template x-if="m.kind !== 'event'">
+                                <div class="text-xs text-gray-300 break-words" x-text="m.body || ''"></div>
+                              </template>
+                            </div>
+                          </template>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </template>
               </div>
 
               <!-- ── WORK (live task flow — derived from the shared workplace ledger) ── -->

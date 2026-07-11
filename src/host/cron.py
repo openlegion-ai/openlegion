@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -155,6 +156,13 @@ class CronScheduler:
         self.health_monitor = health_monitor
         self._running = False
         self._job_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        # Plate snapshot (Phase-4 unit 4, plan §6 "Team Room dashboard"):
+        # the most recent heartbeat tick's plate for each agent, keyed by
+        # agent id. A byproduct of the existing per-tick computation — no
+        # extra probe/context/container cost. Computed fresh per tick and
+        # never persisted across restarts; ``get_last_plate`` is the only
+        # reader (the dashboard's Team Room panel).
+        self._last_plate: dict[str, dict] = {}
         self._load()
 
     def set_health_monitor(self, health_monitor: Any) -> None:
@@ -486,6 +494,10 @@ class CronScheduler:
         to_remove = [jid for jid, job in self.jobs.items() if job.agent == agent_id]
         for jid in to_remove:
             del self.jobs[jid]
+        # Agent deletion must not leak a stale plate snapshot (Phase-4
+        # unit 4) — drop it unconditionally, not just when a job was
+        # removed, so a re-created agent of the same id starts clean.
+        self._last_plate.pop(agent_id, None)
         if to_remove:
             self._save()
             if self._event_bus:
@@ -658,7 +670,20 @@ class CronScheduler:
                         if not manual and not actionable:
                             has_goals = self._agent_has_goals(job.agent)
                             utility_ready = self._utility_model_configured()
-                            if not (has_goals and utility_ready):
+                            dispatched = has_goals and utility_ready
+                            # Plate snapshot (Phase-4 unit 4): a manual
+                            # trigger never reaches this branch (the
+                            # ``not manual`` guard above), so every write
+                            # here is a real periodic tick — covers both
+                            # the goals-only-dispatch and the gated/empty
+                            # sub-cases below.
+                            self._record_plate_snapshot(
+                                job.agent, triggered=triggered, has_activity=has_activity,
+                                is_default=is_default, actionable=actionable,
+                                has_goals=has_goals, utility_ready=utility_ready,
+                                dispatched=dispatched,
+                            )
+                            if not dispatched:
                                 logger.debug(
                                     "Heartbeat %s: probe-only tick for '%s' "
                                     "(no actionable plate; goals=%s, "
@@ -666,6 +691,28 @@ class CronScheduler:
                                     job.id, job.agent, has_goals, utility_ready,
                                 )
                                 return None
+                        elif not manual:
+                            # Actionable plate, non-manual tick — the gate
+                            # above was skipped so has_goals/utility_ready
+                            # were never computed on this path. Fill them
+                            # in via the same cheap mesh-side lookups
+                            # purely for the snapshot; this does NOT touch
+                            # the escalation decision (already made:
+                            # ``actionable`` is True, so the tick always
+                            # dispatches here) and does not restructure
+                            # the gate above.
+                            has_goals = self._agent_has_goals(job.agent)
+                            utility_ready = self._utility_model_configured()
+                            self._record_plate_snapshot(
+                                job.agent, triggered=triggered, has_activity=has_activity,
+                                is_default=is_default, actionable=actionable,
+                                has_goals=has_goals, utility_ready=utility_ready,
+                                dispatched=True,
+                            )
+                        # else: manual trigger — never writes a plate
+                        # snapshot (Phase-4 unit 4 §Part A.4); a manual
+                        # "run now" isn't the organic periodic signal the
+                        # Team Room's "last checked" line should reflect.
 
                         # Build rich heartbeat message. The leading line
                         # carries the current ISO timestamp so the LLM
@@ -866,6 +913,50 @@ class CronScheduler:
         except Exception as e:
             logger.debug("utility_model_fn failed: %s", e)
             return False
+
+    def get_last_plate(self, agent: str) -> dict | None:
+        """Return the most recent heartbeat plate snapshot for ``agent``.
+
+        ``None`` when no heartbeat tick has run yet for this agent (no
+        heartbeat job, a fresh process, or the agent was just removed).
+        Read-only — backs the Team Room dashboard's per-member plate
+        line (plan §6 "Team Room dashboard"). Never triggers a probe,
+        context, or container call; it only returns whatever the last
+        tick already computed.
+        """
+        return self._last_plate.get(agent)
+
+    def _record_plate_snapshot(
+        self,
+        agent: str,
+        *,
+        triggered: list[HeartbeatProbeResult],
+        has_activity: bool,
+        is_default: bool,
+        actionable: bool,
+        has_goals: bool,
+        utility_ready: bool,
+        dispatched: bool,
+    ) -> None:
+        """Record a byproduct snapshot of this tick's heartbeat plate.
+
+        Every field here is a value the heartbeat branch of
+        ``_execute_job`` already computed (or a cheap mesh-side lookup
+        already used elsewhere on the gate path) — this never adds a
+        probe, ``context_fn``, or container call of its own. Overwrites
+        any prior snapshot for the agent; only the latest tick matters
+        to the Team Room panel.
+        """
+        self._last_plate[agent] = {
+            "checked_at": time.time(),
+            "triggered_probes": [p.name for p in triggered],
+            "has_recent_activity": has_activity,
+            "is_default_heartbeat": is_default,
+            "actionable": actionable,
+            "has_goals": has_goals,
+            "utility_model_configured": utility_ready,
+            "dispatched": dispatched,
+        }
 
     def _run_heartbeat_probes(self, agent: str) -> list[HeartbeatProbeResult]:
         """Run cheap, deterministic probes before invoking the LLM."""

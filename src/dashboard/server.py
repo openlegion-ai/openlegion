@@ -6005,6 +6005,83 @@ def create_dashboard_router(
         )
         return {"success": True, "team_name": team_name, "lead_agent_id": None}
 
+    # ── Team Room (Phase-4 unit 4, plan §6 "Team Room dashboard") ──
+
+    @api_router.get("/api/teams/{team_name}/room")
+    async def api_team_room(team_name: str) -> dict:
+        """One composed read for the Team Room panel: who's doing what,
+        thread activity, and per-agent plate for a team.
+
+        Composed IN-PROCESS from the injected live objects (no HTTP
+        round-trips to other dashboard endpoints, no container calls —
+        this is the same "reads live Python objects in the mesh
+        process" contract every other dashboard endpoint rides).
+        Every sub-source is optional and None-guarded exactly like
+        sibling endpoints (``/api/queues``'s ``lane_manager`` check,
+        ``/api/workplace/teams``'s ``tasks_store`` try/except,
+        ``/api/threads``'s ``thread_store`` check) — a missing source
+        degrades to empty/null fields, never a 500.
+        """
+        team = teams_store.get_team(team_name)
+        if team is None:
+            raise HTTPException(status_code=404, detail=f"Team '{team_name}' not found")
+
+        lane_status = lane_manager.get_status() if lane_manager else {}
+
+        health_map: dict[str, str] = {}
+        if health_monitor is not None:
+            health_map = {h["agent"]: h.get("status") for h in health_monitor.get_status()}
+
+        # Current task per member: the (at most one, by design — B1
+        # single-lane) "working" task. One team-scoped query, not one
+        # per member.
+        current_task_by_agent: dict[str, dict] = {}
+        if tasks_store is not None:
+            try:
+                for row in tasks_store.list_team(team_name, statuses=["working"]):
+                    assignee = row.get("assignee")
+                    if assignee and assignee not in current_task_by_agent:
+                        current_task_by_agent[assignee] = {
+                            "id": row.get("id"),
+                            "title": row.get("title"),
+                            "status": row.get("status"),
+                        }
+            except Exception as e:
+                logger.warning("Team Room %s: tasks lookup failed: %s", team_name, e)
+
+        members = []
+        for agent_id in team.get("members", []):
+            status = lane_status.get(agent_id, {})
+            plate = cron_scheduler.get_last_plate(agent_id) if cron_scheduler else None
+            members.append({
+                "agent_id": agent_id,
+                "is_lead": agent_id == team.get("lead_agent_id"),
+                "busy": bool(status.get("busy", False)),
+                "queued": status.get("queued", 0),
+                "current_task": current_task_by_agent.get(agent_id),
+                "plate": plate,
+                "health": health_map.get(agent_id),
+            })
+
+        threads: list[dict] = []
+        if thread_store is not None:
+            try:
+                threads = thread_store.list_threads(scope_id=team_name, limit=10)
+            except Exception as e:
+                logger.warning("Team Room %s: threads lookup failed: %s", team_name, e)
+
+        return {
+            "team": {
+                "name": team.get("name"),
+                "description": team.get("description"),
+                "north_star": team.get("north_star"),
+                "success_criteria": team.get("success_criteria"),
+                "lead_agent_id": team.get("lead_agent_id"),
+            },
+            "members": members,
+            "threads": threads,
+        }
+
     # ── Team TEAM brief (team.md) ──────────────────────────
 
     def _resolve_team_path(team: str) -> Path:

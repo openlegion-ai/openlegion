@@ -996,6 +996,262 @@ class TestPlateGate:
         dispatch.assert_called_once()
 
 
+class TestPlateSnapshot:
+    """Phase-4 unit 4 (plan §6 "Team Room dashboard"): each heartbeat
+    tick records a byproduct snapshot of the plate it just computed —
+    zero extra probe/context/container cost — so the dashboard can show
+    "who's doing what" without re-deriving the gate decision.
+    """
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.config_path = f"{self._tmpdir}/cron.json"
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _clean_ctx(self):
+        return AsyncMock(return_value={
+            "heartbeat_rules": "",
+            "daily_logs": "",
+            "is_default_heartbeat": True,
+            "has_recent_activity": False,
+        })
+
+    def _empty_bb(self):
+        bb = MagicMock()
+        bb.list_by_prefix.return_value = []
+        return bb
+
+    def _pending_task_bb(self):
+        bb = MagicMock()
+        bb.list_by_prefix.side_effect = (
+            lambda prefix: [MagicMock(key="tasks/test/t1", value={"do": "x"})]
+            if "tasks" in prefix else []
+        )
+        return bb
+
+    def test_get_last_plate_none_before_any_tick(self):
+        sched = CronScheduler(config_path=self.config_path)
+        assert sched.get_last_plate("nobody") is None
+
+    @pytest.mark.asyncio
+    async def test_actionable_dispatch_records_snapshot(self):
+        """A probe-triggered actionable tick records dispatched=True."""
+        dispatch = AsyncMock(return_value="working")
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            blackboard=self._pending_task_bb(), context_fn=self._clean_ctx(),
+            goals_fn=lambda agent: None,
+            utility_model_fn=lambda: "",
+        )
+        job = sched.add_job(
+            agent="test", schedule="every 15m", message="heartbeat", heartbeat=True,
+        )
+        assert sched.get_last_plate("test") is None
+        await sched._execute_job(job)
+        plate = sched.get_last_plate("test")
+        assert plate is not None
+        assert plate["dispatched"] is True
+        assert plate["actionable"] is True
+        # disk_usage may or may not trigger depending on the host's free
+        # space — assert on the probe under test, not the full list.
+        assert "pending_tasks" in plate["triggered_probes"]
+        assert plate["has_recent_activity"] is False
+        assert plate["is_default_heartbeat"] is True
+        assert isinstance(plate["checked_at"], float)
+
+    @pytest.mark.asyncio
+    async def test_goals_only_dispatch_records_snapshot(self):
+        """No actionable items but goals + utility model → dispatched=True,
+        actionable stays False (the snapshot reflects the plate, not the
+        escalation reason)."""
+        dispatch = AsyncMock(return_value="initiative")
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            blackboard=self._empty_bb(), context_fn=self._clean_ctx(),
+            goals_fn=lambda agent: {"goals": ["Grow pipeline"], "set_by": "operator"},
+            utility_model_fn=lambda: "openai/gpt-4o-mini",
+        )
+        job = sched.add_job(
+            agent="test", schedule="every 15m", message="heartbeat", heartbeat=True,
+        )
+        with patch.object(sched, "_run_heartbeat_probes", return_value=[]):
+            await sched._execute_job(job)
+        plate = sched.get_last_plate("test")
+        assert plate is not None
+        assert plate["dispatched"] is True
+        assert plate["actionable"] is False
+        assert plate["has_goals"] is True
+        assert plate["utility_model_configured"] is True
+        assert plate["triggered_probes"] == []
+
+    @pytest.mark.asyncio
+    async def test_gated_empty_plate_records_snapshot(self):
+        """No actionable items, no goals, no utility model → gated
+        return; the snapshot still records dispatched=False (never a
+        missing snapshot for a real periodic tick)."""
+        dispatch = AsyncMock(return_value="nope")
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            blackboard=self._empty_bb(), context_fn=self._clean_ctx(),
+            goals_fn=lambda agent: None,
+            utility_model_fn=lambda: "",
+        )
+        job = sched.add_job(
+            agent="test", schedule="every 15m", message="heartbeat", heartbeat=True,
+        )
+        with patch.object(sched, "_run_heartbeat_probes", return_value=[]):
+            result = await sched._execute_job(job)
+        assert result is None
+        plate = sched.get_last_plate("test")
+        assert plate is not None
+        assert plate["dispatched"] is False
+        assert plate["actionable"] is False
+        assert plate["has_goals"] is False
+        assert plate["utility_model_configured"] is False
+        assert plate["triggered_probes"] == []
+
+    @pytest.mark.asyncio
+    async def test_busy_skip_still_records_dispatched_true(self):
+        """The gate decided to escalate (actionable=True via recent
+        activity); the agent being busy is a separate downstream
+        conflict handled by heartbeat_dispatch_fn, not a plate-gate
+        outcome — the snapshot already written stays dispatched=True."""
+        hb_dispatch = AsyncMock(return_value={"skipped": True, "reason": "agent_busy"})
+        context_fn = AsyncMock(return_value={
+            "is_default_heartbeat": False,
+            "has_recent_activity": True,
+        })
+        sched = CronScheduler(
+            config_path=self.config_path,
+            dispatch_fn=AsyncMock(),
+            heartbeat_dispatch_fn=hb_dispatch,
+            context_fn=context_fn,
+        )
+        job = sched.add_job(
+            agent="test", schedule="every 15m", message="heartbeat", heartbeat=True,
+        )
+        with patch.object(sched, "_run_heartbeat_probes", return_value=[]):
+            result = await sched._execute_job(job)
+        assert result is None
+        plate = sched.get_last_plate("test")
+        assert plate is not None
+        assert plate["dispatched"] is True
+        assert plate["actionable"] is True
+
+    @pytest.mark.asyncio
+    async def test_snapshot_is_byproduct_no_extra_context_fn_or_probe_calls(self):
+        """Recording the snapshot must not add a second context_fn or
+        probe call — same call counts as the pre-existing gate logic."""
+        dispatch = AsyncMock(return_value="working")
+        context_fn = self._clean_ctx()
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            blackboard=self._pending_task_bb(), context_fn=context_fn,
+            goals_fn=lambda agent: None,
+            utility_model_fn=lambda: "",
+        )
+        job = sched.add_job(
+            agent="test", schedule="every 15m", message="heartbeat", heartbeat=True,
+        )
+        with patch.object(
+            sched, "_run_heartbeat_probes", wraps=sched._run_heartbeat_probes,
+        ) as probes_spy:
+            await sched._execute_job(job)
+        assert context_fn.call_count == 1
+        assert probes_spy.call_count == 1
+        assert sched.get_last_plate("test") is not None
+
+    @pytest.mark.asyncio
+    async def test_remove_agent_jobs_clears_plate_snapshot(self):
+        dispatch = AsyncMock(return_value="working")
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            blackboard=self._pending_task_bb(), context_fn=self._clean_ctx(),
+        )
+        job = sched.add_job(
+            agent="test", schedule="every 15m", message="heartbeat", heartbeat=True,
+        )
+        await sched._execute_job(job)
+        assert sched.get_last_plate("test") is not None
+        sched.remove_agent_jobs("test")
+        assert sched.get_last_plate("test") is None
+
+    @pytest.mark.asyncio
+    async def test_remove_agent_jobs_clears_snapshot_even_without_a_job(self):
+        """Cleanup must not leak a snapshot even when there's no cron job
+        left to match on — defensive against future callers wiring
+        offboarding differently."""
+        dispatch = AsyncMock(return_value="working")
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            blackboard=self._pending_task_bb(), context_fn=self._clean_ctx(),
+        )
+        job = sched.add_job(
+            agent="test", schedule="every 15m", message="heartbeat", heartbeat=True,
+        )
+        await sched._execute_job(job)
+        assert sched.get_last_plate("test") is not None
+        sched.remove_job(job.id)  # job gone, but plate snapshot remains
+        assert sched.get_last_plate("test") is not None
+        sched.remove_agent_jobs("test")  # no jobs left to remove...
+        assert sched.get_last_plate("test") is None  # ...but the snapshot still clears
+
+    @pytest.mark.asyncio
+    async def test_manual_heartbeat_trigger_does_not_write_snapshot(self):
+        dispatch = AsyncMock(return_value="ran")
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            blackboard=self._empty_bb(), context_fn=self._clean_ctx(),
+            goals_fn=lambda agent: None, utility_model_fn=lambda: "",
+        )
+        job = sched.add_job(
+            agent="test", schedule="every 15m", message="heartbeat", heartbeat=True,
+        )
+        with patch.object(sched, "_run_heartbeat_probes", return_value=[]):
+            result = await sched._execute_job(job, manual=True)
+        assert result is not None  # manual trigger always dispatches
+        dispatch.assert_called_once()
+        assert sched.get_last_plate("test") is None
+
+    @pytest.mark.asyncio
+    async def test_manual_trigger_preserves_prior_automatic_snapshot(self):
+        """A manual "run now" must not clobber the last real periodic
+        snapshot — it simply doesn't write one of its own."""
+        dispatch = AsyncMock(return_value="ran")
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            blackboard=self._pending_task_bb(), context_fn=self._clean_ctx(),
+        )
+        job = sched.add_job(
+            agent="test", schedule="every 15m", message="heartbeat", heartbeat=True,
+        )
+        await sched._execute_job(job)
+        original = sched.get_last_plate("test")
+        assert original is not None
+        await sched._execute_job(job, manual=True)
+        assert sched.get_last_plate("test") == original
+
+    @pytest.mark.asyncio
+    async def test_non_heartbeat_message_job_never_writes_snapshot(self):
+        dispatch = AsyncMock(return_value="done")
+        sched = CronScheduler(config_path=self.config_path, dispatch_fn=dispatch)
+        job = sched.add_job(agent="test", schedule="every 15m", message="hello", heartbeat=False)
+        await sched._execute_job(job)
+        assert sched.get_last_plate("test") is None
+
+    @pytest.mark.asyncio
+    async def test_tool_job_never_writes_snapshot(self):
+        invoke = AsyncMock(return_value={"ok": True})
+        sched = CronScheduler(config_path=self.config_path, invoke_fn=invoke)
+        job = sched.add_job(
+            agent="test", schedule="every 15m", tool_name="some_tool", tool_params="{}",
+        )
+        await sched._execute_job(job)
+        assert sched.get_last_plate("test") is None
+
+
 class TestHeartbeatDispatchFn:
     """Tests for dedicated heartbeat_dispatch_fn path."""
 
