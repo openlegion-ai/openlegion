@@ -4802,9 +4802,17 @@ class BrowserManager:
 
         Flow: compute the current ``(UA, proxy)`` signature; compare against
         the per-agent signature persisted last launch. On a mismatch, drop
-        only the bound vendor cookies (never generic session cookies). Then
-        persist the current signature as the new baseline — including on the
-        first launch, when nothing is dropped. Best-effort throughout: any
+        only the bound vendor cookies (never generic session cookies). The
+        current signature is persisted as the new baseline ONLY when it is
+        SAFE to do so: on the first launch (nothing to drop), when the
+        signature is unchanged (idempotent), or when a mismatch's drop was
+        verified — enumeration succeeded and either found no bound cookie or
+        the drop was confirmed to have removed every bound family. If
+        enumeration FAILED (``cookies is None``) or the drop could not be
+        verified, we RETAIN the old baseline so the NEXT launch retries the
+        drop; otherwise a silently-failed drop would advance the baseline and
+        leave poisoned anti-bot cookies replaying under the new identity —
+        a guaranteed 403 + trust hit (BC-4). Best-effort throughout: any
         failure is logged and the browser starts anyway.
         """
         from src.browser import session_persistence as _sp
@@ -4825,10 +4833,18 @@ class BrowserManager:
         async with _get_fingerprint_lock():
             persisted_sig = _binding_signatures.get(agent_id)
 
-        # Only drop when we have a prior signature AND it changed. First
-        # launch (no prior signature) drops nothing but still records the
-        # baseline below.
+        # Whether it is SAFE to advance the persisted baseline to ``current_sig``.
+        # First launch (no prior signature) and an unchanged signature are both
+        # safe — nothing to drop / idempotent. A mismatch is safe ONLY once we
+        # have verified the drop actually happened (or there was nothing bound
+        # to drop). If enumeration or the drop could not be verified we leave the
+        # OLD baseline so the NEXT launch retries — never advance over a failed
+        # drop, or poisoned bound cookies replay under the new identity (BC-4).
+        baseline_safe = True
+
         if persisted_sig is not None and persisted_sig != current_sig:
+            # Mismatch: assume unsafe until we prove the drop succeeded.
+            baseline_safe = False
             try:
                 cookies = await context.cookies()
             except Exception as e:
@@ -4837,7 +4853,18 @@ class BrowserManager:
                     agent_id, e,
                 )
                 cookies = None
-            if cookies:
+            if cookies is None:
+                # Enumeration FAILED — we cannot know what to drop. Retain the
+                # old baseline (do NOT advance) so the next launch retries.
+                logger.warning(
+                    "binding-coherence: cookie enumeration failed for '%s'; "
+                    "retaining old baseline to retry drop next launch",
+                    agent_id,
+                )
+            else:
+                # Enumeration SUCCEEDED. ``cookies == []`` (empty) is a genuine
+                # "nothing to drop" and is distinct from the ``None`` failure
+                # above.
                 bound_names: list[str] = []
                 vendors: list[str] = []
                 for cookie in cookies:
@@ -4849,7 +4876,11 @@ class BrowserManager:
                         bound_names.append(name)
                         if family not in vendors:
                             vendors.append(family)
-                if bound_names:
+                if not bound_names:
+                    # Enumeration succeeded and nothing was bound — safe to
+                    # advance the baseline.
+                    baseline_safe = True
+                else:
                     dropped = await self._clear_bound_cookies(
                         context, bound_names, cookies,
                     )
@@ -4861,9 +4892,33 @@ class BrowserManager:
                             agent_id, persisted_sig, current_sig, dropped,
                             ",".join(vendors) or "(none)",
                         )
+                        # Verified drop (count > 0). Best-effort readback for
+                        # extra safety: confirm no bound family survived. A
+                        # readback failure — or a surviving bound cookie —
+                        # leaves the old baseline for a retry.
+                        baseline_safe = await self._bound_cookies_gone(
+                            context, agent_id,
+                        )
+                    else:
+                        # Drop returned 0 while bound cookies existed: it
+                        # FAILED. Retain the old baseline so the next launch
+                        # retries rather than replaying poisoned cookies.
+                        logger.warning(
+                            "binding-coherence: bound-cookie drop failed for "
+                            "'%s' (%d bound cookie(s) still present); retaining "
+                            "old baseline to retry drop next launch",
+                            agent_id, len(bound_names),
+                        )
 
-        # Record the current signature as the new baseline (first-run
-        # included) and durably persist it next to the burn state.
+        if not baseline_safe:
+            # Leave the previously persisted signature untouched — the next
+            # launch will see a mismatch again and retry the drop. Never blocks
+            # startup; the browser proceeds with the profile as-is.
+            return
+
+        # Record the current signature as the new baseline (first-run, unchanged
+        # signature, and verified drop) and durably persist it next to the burn
+        # state.
         async with _get_fingerprint_lock():
             _binding_signatures[agent_id] = current_sig
             try:
@@ -4873,6 +4928,42 @@ class BrowserManager:
                     "binding-coherence: state snapshot failed for '%s': %s",
                     agent_id, e,
                 )
+
+    async def _bound_cookies_gone(self, context, agent_id: str) -> bool:
+        """Best-effort readback: ``True`` iff no bound vendor family remains.
+
+        Called after a drop that reported success (count > 0) as a stronger
+        confirmation than the count alone. Re-reads ``context.cookies()`` and
+        checks that none of the anti-bot bound families
+        (``cf_clearance``/``datadome``/``_abck`` …) survived.
+
+        Returns ``False`` on ANY readback failure — an exception OR a surviving
+        bound cookie — so the caller retains the old binding baseline and
+        retries the drop on the next launch. Fully guarded: never raises, so it
+        can never block browser startup.
+        """
+        from src.browser import session_persistence as _sp
+
+        try:
+            remaining = await context.cookies()
+        except Exception as e:
+            logger.warning(
+                "binding-coherence: post-drop cookie readback failed for "
+                "'%s': %s; retaining old baseline to retry next launch",
+                agent_id, e,
+            )
+            return False
+        for cookie in remaining or []:
+            if not isinstance(cookie, dict):
+                continue
+            if _sp.cookie_binding_vendor(cookie.get("name")) is not None:
+                logger.warning(
+                    "binding-coherence: bound cookie survived the drop for "
+                    "'%s'; retaining old baseline to retry next launch",
+                    agent_id,
+                )
+                return False
+        return True
 
     async def _clear_bound_cookies(
         self, context, bound_names: list[str], all_cookies: list,
