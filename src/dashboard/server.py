@@ -303,6 +303,18 @@ _COOKIE_LIST_MAX_LEN = 1000  # max cookies per import
 
 _VALID_SAMESITE = {"Lax": "Lax", "Strict": "Strict", "None": "None"}
 
+# Phase-4 unit 5 (streaming/broadcast steer-routing, plan §8 #10 residual):
+# the busy path of ``/api/agents/{id}/chat/stream`` cannot token-stream a
+# running turn (the steered reply is the turn's own final text, delivered
+# only when the steer future resolves), so it emits this preamble as one
+# ``text_delta`` chunk ahead of the (also single-chunk) reply — reusing the
+# existing SSE vocabulary the frontend already parses instead of inventing a
+# new event type.
+_BUSY_CHAT_STATUS_NOTE = (
+    "_This agent is mid-task — your message was routed in as a priority "
+    "interrupt. Waiting for its reply..._"
+)
+
 
 def _is_ip_literal_domain(domain: str) -> bool:
     """True when ``domain`` is a literal IPv4 or IPv6 address."""
@@ -3807,6 +3819,11 @@ def create_dashboard_router(
                 channel="dashboard",
                 user=_operator_session_id(request),
             )
+            # Captured (not just left on the contextvar) because the busy
+            # fork below calls ``lane_manager.deliver_chat`` AFTER this
+            # block's ``finally`` resets the contextvar — same reason
+            # ``_hdrs`` is baked synchronously here for the idle generator.
+            _trace_id_val = current_trace_id.get()
             _hdrs = trace_headers()
             _hdrs.update(origin_header(_origin))
             # Session observability (Phase 2): capture the verbatim dashboard
@@ -3827,6 +3844,52 @@ def create_dashboard_router(
                     logger.debug("dashboard intent capture failed: %s", _intent_err)
         finally:
             current_trace_id.reset(_trace_tok)
+
+        from starlette.responses import StreamingResponse
+
+        # Busy-aware fork (Phase-4 unit 5; plan §8 #10 residual — the
+        # recorded Phase-3 gap). A busy agent's running turn physically
+        # cannot be token-streamed to this caller: the steered reply is the
+        # turn's OWN final text, delivered only when the steer future
+        # resolves (lanes.py ``try_steer_and_wait``). So a busy agent never
+        # gets a direct stream opened at all — this routes through the same
+        # lane the non-streaming ``/chat`` endpoint uses (``deliver_chat``:
+        # steer-inject with a reply back-edge, idle falls back to a followup
+        # turn) and relays the answer over the SAME SSE vocabulary the
+        # frontend already parses (``text_delta`` + ``done``) rather than
+        # inventing a new event type. B1 is untouched either way — this
+        # never opens a second parallel turn, it only chooses which existing
+        # single-lane primitive delivers the reply.
+        #
+        # ``get_status()`` is advisory: if the busy flag flips between this
+        # check and the direct-stream branch below (idle→busy race), that
+        # call blocks on ``_chat_lock`` for the run's duration exactly as it
+        # does today — an accepted bounded degrade, not a correctness issue.
+        _lane_status = lane_manager.get_status() if lane_manager else {}
+        _is_busy = bool(_lane_status.get(agent_id, {}).get("busy", False))
+
+        if _is_busy and lane_manager is not None:
+
+            async def busy_event_generator():
+                final_response = ""
+                try:
+                    yield f"data: {dumps_safe({'type': 'text_delta', 'content': _BUSY_CHAT_STATUS_NOTE})}\n\n"
+                    final_response = await lane_manager.deliver_chat(
+                        agent_id, message, trace_id=_trace_id_val, origin=_origin,
+                    )
+                    # Single chunk — the turn's own final text arrives all at
+                    # once (there is no token stream to relay), then `done`.
+                    yield f"data: {dumps_safe({'type': 'text_delta', 'content': final_response})}\n\n"
+                    yield f"data: {dumps_safe({'type': 'done', 'response': final_response})}\n\n"
+                except Exception as e:
+                    yield f"data: {json.dumps({'type': 'error', 'message': friendly_streaming_error(e)})}\n\n"
+                if event_bus:
+                    event_bus.emit(
+                        "chat_done", agent=agent_id,
+                        data={"response": final_response, "session": chat_session},
+                    )
+
+            return StreamingResponse(busy_event_generator(), media_type="text/event-stream")
 
         async def event_generator():
             final_response = ""
@@ -3865,14 +3928,17 @@ def create_dashboard_router(
             if event_bus:
                 event_bus.emit("chat_done", agent=agent_id, data={"response": final_response, "session": chat_session})
 
-        from starlette.responses import StreamingResponse
-
         return StreamingResponse(event_generator(), media_type="text/event-stream")
 
     @api_router.post("/api/broadcast")
     async def api_broadcast(request: Request) -> dict:
-        if transport is None:
-            raise HTTPException(status_code=503, detail="Transport not available")
+        # Phase-4 unit 5 (plan §8 #10 residual): broadcast used to call
+        # each agent's ``/chat`` directly, so ``transport`` was the gate.
+        # It now routes every recipient through the lane instead (see
+        # ``_send`` below), so ``lane_manager`` is the real dependency —
+        # same 503 contract ``/api/agents/{id}/chat`` already uses.
+        if lane_manager is None:
+            raise HTTPException(status_code=503, detail="Lane manager not available")
         body = await request.json()
         message = body.get("message", "").strip()
         if not message:
@@ -3893,8 +3959,12 @@ def create_dashboard_router(
         if not targets:
             return {"responses": {}, "message": "No matching agents"}
 
-        # Task 2b: stamp dashboard broadcast as human-origin.
-        from src.shared.trace import origin_header, trace_headers
+        # Task 2b: stamp dashboard broadcast as human-origin. Trace_id is
+        # deliberately NOT minted here (pre-existing contract, pinned by
+        # TestDashboardChatMintsTraceId.test_chat_trace_does_not_leak_into_
+        # broadcast) so a broadcast never inherits a stale trace_id left on
+        # the worker-reused contextvar by an unrelated prior /chat call.
+        from src.shared.trace import current_trace_id
         from src.shared.types import MessageOrigin
 
         bc_origin = MessageOrigin(
@@ -3902,22 +3972,26 @@ def create_dashboard_router(
             channel="dashboard",
             user=_operator_session_id(request),
         )
-        bc_hdrs = trace_headers()
-        bc_hdrs.update(origin_header(bc_origin))
+        bc_trace_id = current_trace_id.get()
 
         results = {}
 
+        # Priority steer lane (plan §8 #10): each recipient is delivered
+        # via ``deliver_chat`` instead of a direct agent call — busy
+        # recipients get the message steered into their running turn (with
+        # a reply back-edge), idle recipients get a normal followup turn.
+        # Never a second parallel turn per agent (B1). Recipients are
+        # dispatched CONCURRENTLY (one task per agent, gathered below) —
+        # broadcast already WAITS for every reply before responding (not
+        # fire-and-forget), so deliver_chat's wait-for-reply semantics
+        # match the pre-existing contract exactly; only the delivery
+        # mechanism changed, not the wait/response shape.
         async def _send(aid: str) -> tuple[str, str]:
             try:
-                data = await transport.request(
-                    aid,
-                    "POST",
-                    "/chat",
-                    json={"message": message},
-                    timeout=120,
-                    headers=bc_hdrs,
+                response = await lane_manager.deliver_chat(
+                    aid, message, trace_id=bc_trace_id, origin=bc_origin,
                 )
-                return aid, data.get("response", "(no response)")
+                return aid, response or "(no response)"
             except Exception as e:
                 return aid, f"Error: {e}"
 
