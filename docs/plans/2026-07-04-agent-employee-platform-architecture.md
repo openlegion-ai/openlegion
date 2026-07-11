@@ -1749,6 +1749,28 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   as known flake until the logging-state leak is fixed. Full suite 8615 passed / 26 skipped /
   sole failure = that flake, green on isolated rerun.
 
+- **✅ Landed — U1 durable track record (#1241, §8 #18).** `src/host/track_record.py`
+  (`TrackRecordStore`, `data/track_record.db`, WAL, canonical v1, env
+  `OPENLEGION_TRACK_RECORD_DB`): append-only `outcome_events` — NO retention column, NO reap
+  method, both pinned. Write points all ride `record_best_effort` (a ledger failure never
+  fails the source operation): task outcomes on both paths (mesh → `rater_kind=operator_agent`,
+  dashboard → `human` — the #18 rating-trust rule's raw material), summary ratings on both
+  paths (solo scope → agent event, team scope → team event), and drive-review merge/reject via
+  one `_record_drive_review_outcome` helper whose `details_json` carries branch + lead verdict
+  fields. Reads: `GET /mesh/agents/{id}/track-record` (self-or-operator-or-internal, goals-gate
+  mirror; config-based 404 so archived agents stay readable; `autonomy_counts` filtered to
+  `("human","system")` raters — the exclusion is pinned) and a None-guarded `track_record`
+  section in `_build_agent_bundle`. `pair_trust(lead, submitter)` query ships now for the U4
+  auto-merge trust floor. 29 store unit tests + 17 integration tests across 6 suites.
+  **Recorded approximation:** drive-review events attribute the lead via the team's CURRENT
+  `lead_agent_id` at resolution time — `drive_reviews` has no verdict-author column — so a
+  lead swap between verdict and merge mis-attributes the pair; U4 must add `lead_verdict_by`
+  at the verdict write for exact attribution going forward. **Recorded hygiene gap
+  (pre-existing class):** stores default-constructed inside `create_mesh_app` accumulate
+  `data/*.db` in the repo root across a full local test session unless fixtures pin the env
+  var/chdir — pinned in the suites this unit touched; a broader fixture-hygiene pass is a
+  future cleanup, not a Phase-5 unit.
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|
@@ -1807,6 +1829,7 @@ findings, if any, land as a follow-up fix PR recorded in this ledger.
 | #1232 | Phase-5 pre-decisions ratified (§8 #17–#24) + build order + companion review doc | merged |
 | #1231 | earlier draft of the companion review — closed unmerged, superseded by #1232 | closed |
 | #1239 | U0 — hardening prereqs (§8 #24 i–iii + recon minor items) | merged |
+| #1241 | U1 — durable per-agent track record ledger (§8 #18) | merged |
 
 ### YOU ARE HERE → Phase 5
 
