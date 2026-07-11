@@ -179,6 +179,53 @@ class TestMeshOnboardingWake:
             threads.close()
 
     @pytest.mark.asyncio
+    async def test_silent_token_is_never_posted_to_channel(self, tmp_path, monkeypatch):
+        """SILENT_REPLY_TOKEN from the lane dispatcher must never be posted to
+        the team channel as if the new member said it (shared usable-reply
+        gate)."""
+        from src.shared.types import SILENT_REPLY_TOKEN
+
+        lane = _RecordingLaneManager(replies={"agent1": SILENT_REPLY_TOKEN})
+        app, bb, store, threads, router = _build_app(
+            tmp_path, monkeypatch, lane_manager=lane, extra_registry={"agent1": "http://a1:8400"},
+        )
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+                r = await c.post(
+                    "/mesh/teams/research/members", json={"agent": "agent1"}, headers=_op_headers(),
+                )
+            assert r.status_code == 200, r.text
+            await _drain()
+            channel = threads.ensure_channel("research")
+            msgs = threads.list_messages(channel["id"])
+            assert not [m for m in msgs if m["sender"] == "agent1"]
+        finally:
+            bb.close()
+            threads.close()
+
+    @pytest.mark.asyncio
+    async def test_dispatch_error_note_is_never_posted_to_channel(self, tmp_path, monkeypatch):
+        """A "dispatch_error: <redacted>" note from the lane dispatcher's
+        except-branch must never be posted to the team channel."""
+        lane = _RecordingLaneManager(replies={"agent1": "dispatch_error: connection reset"})
+        app, bb, store, threads, router = _build_app(
+            tmp_path, monkeypatch, lane_manager=lane, extra_registry={"agent1": "http://a1:8400"},
+        )
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+                r = await c.post(
+                    "/mesh/teams/research/members", json={"agent": "agent1"}, headers=_op_headers(),
+                )
+            assert r.status_code == 200, r.text
+            await _drain()
+            channel = threads.ensure_channel("research")
+            msgs = threads.list_messages(channel["id"])
+            assert not [m for m in msgs if m["sender"] == "agent1"]
+        finally:
+            bb.close()
+            threads.close()
+
+    @pytest.mark.asyncio
     async def test_join_nudges_lead_not_operator_when_lead_present(self, tmp_path, monkeypatch):
         lane = _RecordingLaneManager(replies={"agent1": "hello"})
         app, bb, store, threads, router = _build_app(
@@ -339,4 +386,106 @@ class TestDashboardOnboardingWakeWiring:
             cost_tracker.close()
             trace_store.close()
         onboarding_wake.assert_called_once_with("agent1", "research")
+        os.environ.pop("OPENLEGION_MAX_TEAMS", None)
+
+
+# ── FIX 6: create-team paths fire onboarding for INITIAL members ─────
+
+
+class TestCreateTeamOnboardingWake:
+    @pytest.mark.asyncio
+    async def test_mesh_create_team_fires_wake_for_initial_members(self, tmp_path, monkeypatch):
+        """``POST /mesh/teams`` must fire the onboarding wake for each INITIAL
+        member (previously only add-member did), so a seeded member gets the
+        same intro turn + channel post that a later-added member gets."""
+        lane = _RecordingLaneManager(replies={"agent1": "Hi team, agent1 here!"})
+        app, bb, store, threads, router = _build_app(
+            tmp_path, monkeypatch, lane_manager=lane, extra_registry={"agent1": "http://a1:8400"},
+        )
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+                r = await c.post(
+                    "/mesh/teams",
+                    json={"name": "newteam", "members": ["agent1"]},
+                    headers=_op_headers(),
+                )
+            assert r.status_code == 200, r.text
+            await _drain()
+            # Intro turn dispatched to the seeded member.
+            intro_calls = [c for c in lane.calls if c["agent"] == "agent1"]
+            assert len(intro_calls) == 1
+            assert intro_calls[0]["system_note"] is True
+            assert "newteam" in intro_calls[0]["message"]
+            # Reply posted host-side into the new team's channel.
+            channel = threads.ensure_channel("newteam")
+            msgs = threads.list_messages(channel["id"])
+            assert any("agent1 here" in m["body"] for m in msgs if m["sender"] == "agent1")
+        finally:
+            bb.close()
+            threads.close()
+
+    def test_dashboard_create_team_calls_injected_wake_per_member(self, tmp_path, monkeypatch):
+        """The dashboard ``POST /api/teams`` create path must invoke the
+        injected ``onboarding_wake`` for each initial member (same seam the
+        add-member endpoint uses)."""
+        import os
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from src.dashboard.server import create_dashboard_router
+        from src.host.costs import CostTracker
+        from src.host.health import HealthMonitor
+        from src.host.traces import TraceStore
+
+        config_dir = tmp_path / "config"
+        config_dir.mkdir(exist_ok=True)
+        agents_file = config_dir / "agents.yaml"
+        agents_file.write_text(yaml.dump({"agents": {"agent1": {"role": "worker"}}}))
+        perms_file = config_dir / "permissions.json"
+        perms_file.write_text("{}")
+        import src.cli.config as cli_cfg
+
+        monkeypatch.setattr(cli_cfg, "AGENTS_FILE", agents_file)
+        monkeypatch.setattr(cli_cfg, "PERMISSIONS_FILE", perms_file)
+        monkeypatch.setattr(cli_cfg, "TEAMS_DIR", config_dir / "teams")
+
+        bb = Blackboard(str(tmp_path / "bb.db"))
+        cost_tracker = CostTracker(db_path=str(tmp_path / "costs.db"))
+        trace_store = TraceStore(db_path=str(tmp_path / "traces.db"))
+        teams_store = TeamStore(db_path=str(tmp_path / "teams.db"), teams_dir=tmp_path / "teams")
+        runtime_mock = MagicMock()
+        transport_mock = MagicMock()
+        router_mock = MagicMock()
+        health_monitor = HealthMonitor(runtime=runtime_mock, transport=transport_mock, router=router_mock)
+        agent_registry = {"agent1": "http://a1:8400"}
+        onboarding_wake = MagicMock()
+
+        router = create_dashboard_router(
+            blackboard=bb,
+            health_monitor=health_monitor,
+            cost_tracker=cost_tracker,
+            trace_store=trace_store,
+            event_bus=None,
+            agent_registry=agent_registry,
+            teams_store=teams_store,
+            permissions=MagicMock(),
+            transport=transport_mock,
+            onboarding_wake=onboarding_wake,
+        )
+        app = FastAPI()
+        app.include_router(router)
+        client = TestClient(app)
+        try:
+            resp = client.post(
+                "/dashboard/api/teams",
+                json={"name": "newteam", "members": ["agent1"]},
+                headers={"X-Requested-With": "XMLHttpRequest"},
+            )
+            assert resp.status_code == 200, resp.text
+        finally:
+            bb.close()
+            cost_tracker.close()
+            trace_store.close()
+        onboarding_wake.assert_called_once_with("agent1", "newteam")
         os.environ.pop("OPENLEGION_MAX_TEAMS", None)

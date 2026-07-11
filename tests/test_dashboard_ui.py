@@ -2439,6 +2439,22 @@ class TestPolishFixesApplied:
             "Constraint #12 addendum should frame lead as team data, not an identity tier"
         )
 
+    def test_claudemd_documents_offboard_before_delete_constraint(self):
+        """CLAUDE.md Constraint #13 pins the offboard-before-delete ordering
+        AND the clarifying sentence that the CLI ``/remove`` path attempts
+        offboarding only when the mesh runtime seam is wired (unwired = skip
+        with a printed note — deliberate, tested)."""
+        claude_md = (_REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        assert "Offboard-before-delete" in claude_md, (
+            "Constraint #13 (offboard-before-delete) missing from Known Constraints"
+        )
+        assert (
+            "attempts offboarding ONLY when the mesh runtime seam is wired" in claude_md
+        ), "Constraint #13 should clarify the CLI /remove seam-gated offboard behaviour"
+        assert (
+            "an unwired seam deliberately SKIPS the handover" in claude_md
+        ), "Constraint #13 should state the unwired seam skips with a printed note"
+
 
 # ── EventBus coverage — JS handlers wired in onWsEvent ────────────────
 

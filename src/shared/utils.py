@@ -165,6 +165,37 @@ def sanitize_for_prompt(text: str) -> str:
     return "".join(out)
 
 
+def usable_agent_reply(text: Any) -> bool:
+    """True when a lane-dispatch return value is genuine agent-authored text.
+
+    ``_direct_dispatch`` (src/cli/runtime.py) has three non-success return
+    shapes that host-side consumers must NEVER treat as an agent's words: the
+    silent sentinel (:data:`SILENT_REPLY_TOKEN`), the literal ``"(no
+    response)"`` unreachable-agent success marker, and a ``"dispatch_error:
+    <redacted reason>"`` note written by its except-branch. This is the single
+    gate every consumer shares (offboard handover, onboarding intro post,
+    standup channel post) so a newly-added non-success shape is rejected at
+    every site at once instead of leaking into a committed doc or a channel.
+
+    Rejects: non-str, empty/whitespace-only, the silent token, ``"(no
+    response)"``, and any string starting with ``"dispatch_error:"``.
+    """
+    from src.shared.types import SILENT_REPLY_TOKEN
+
+    if not isinstance(text, str):
+        return False
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped == SILENT_REPLY_TOKEN:
+        return False
+    if stripped == "(no response)":
+        return False
+    if stripped.startswith("dispatch_error:"):
+        return False
+    return True
+
+
 def friendly_streaming_error(exc: Exception) -> str:
     """Return a user-friendly message for LLM streaming errors.
 

@@ -14,9 +14,10 @@ What this module pins is the layer AROUND the store:
 
 import importlib
 import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
+import yaml
 from httpx import ASGITransport, AsyncClient
 
 from src.cli.config import (
@@ -27,6 +28,7 @@ from src.cli.config import (
 from src.host.mesh import Blackboard, MessageRouter, PubSub
 from src.host.permissions import PermissionMatrix
 from src.host.teams import TeamStore, validate_team_id
+from src.shared.types import MessageOrigin
 
 
 class TestValidateTeamId:
@@ -926,3 +928,106 @@ class TestCrossProjectPermissionIsolation:
         # Neither can access global keys
         assert not pm.can_read_blackboard("alpha_worker", "context/global")
         assert not pm.can_read_blackboard("beta_worker", "context/global")
+
+
+# ── FIX 2: standup cron removed on team archive + confirm-delete ────
+
+
+def _human_origin_headers() -> dict:
+    origin = MessageOrigin(kind="human", channel="cli", user="u1")
+    return {
+        "Authorization": "Bearer op-token",
+        "X-Agent-ID": "operator",
+        "X-Origin": origin.to_header_value(),
+    }
+
+
+def _build_team_app_with_cron(tmp_path, monkeypatch, cron):
+    """Mesh app wired with a (mock) cron_scheduler + a real TeamStore so the
+    team archive / confirm-delete lifecycle can be exercised end-to-end."""
+    monkeypatch.chdir(tmp_path)
+    perms_file = tmp_path / "permissions.json"
+    perms_file.write_text(json.dumps({"permissions": {}}))
+    agents_file = tmp_path / "agents.yaml"
+    agents_file.write_text(yaml.dump({"agents": {"operator": {"role": "operator"}}}))
+    import src.cli.config as cli_cfg
+
+    monkeypatch.setattr(cli_cfg, "PERMISSIONS_FILE", perms_file)
+    monkeypatch.setattr(cli_cfg, "AGENTS_FILE", agents_file)
+    monkeypatch.setattr(cli_cfg, "TEAMS_DIR", tmp_path / "teams")
+
+    import src.host.server as server_module
+
+    importlib.reload(server_module)
+    permissions = PermissionMatrix()
+    router = MessageRouter(permissions, {"operator": "http://op:8400"})
+    blackboard = Blackboard(str(tmp_path / "bb.db"))
+    teams_store = TeamStore(db_path=str(tmp_path / "teams.db"), teams_dir=tmp_path / "teams")
+    from src.host.threads import ThreadStore
+
+    thread_store = ThreadStore(db_path=":memory:")
+    app = server_module.create_mesh_app(
+        blackboard=blackboard,
+        pubsub=PubSub(),
+        router=router,
+        permissions=permissions,
+        teams_store=teams_store,
+        cron_scheduler=cron,
+        thread_store=thread_store,
+        auth_tokens={"operator": "op-token"},
+    )
+    return app, blackboard, teams_store, thread_store, server_module
+
+
+class TestTeamArchiveDeleteRemovesStandupCron:
+    @pytest.mark.asyncio
+    async def test_archive_endpoint_removes_standup_job(self, tmp_path, monkeypatch):
+        """Archiving a team must remove its standup cron (not just the summary
+        job) or it keeps firing a daily LLM turn on the former lead and
+        resurrects the archived team's channel until next boot."""
+        cron = MagicMock()
+        app, bb, store, threads, server_module = _build_team_app_with_cron(
+            tmp_path, monkeypatch, cron,
+        )
+        store.create_team("alpha")
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+                r = await c.post("/mesh/teams/alpha/archive", headers=_op_headers())
+            assert r.status_code == 200, r.text
+            cron.remove_standup_job.assert_any_call("alpha")
+        finally:
+            bb.close()
+            threads.close()
+            importlib.reload(server_module)
+
+    @pytest.mark.asyncio
+    async def test_confirm_delete_removes_standup_job(self, tmp_path, monkeypatch):
+        """The propose/confirm delete chain (``_apply_pending_delete`` TEAM
+        branch) must also remove the standup cron."""
+        cron = MagicMock()
+        app, bb, store, threads, server_module = _build_team_app_with_cron(
+            tmp_path, monkeypatch, cron,
+        )
+        store.create_team("alpha")
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+                r = await c.post("/mesh/teams/alpha/archive", headers=_op_headers())
+                assert r.status_code == 200, r.text
+                r = await c.post(
+                    "/mesh/teams/alpha/propose-delete", headers=_human_origin_headers(),
+                )
+                assert r.status_code == 200, r.text
+                nonce = r.json()["change_id"]
+                digest = r.json()["payload_digest"]
+                r = await c.post(
+                    "/mesh/config/confirm",
+                    json={"change_id": nonce, "payload_digest": digest},
+                    headers=_human_origin_headers(),
+                )
+                assert r.status_code == 200, r.text
+                assert r.json()["deleted"] == "team"
+            cron.remove_standup_job.assert_any_call("alpha")
+        finally:
+            bb.close()
+            threads.close()
+            importlib.reload(server_module)

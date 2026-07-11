@@ -589,6 +589,17 @@ class HealthMonitor:
             # restart. Read from fresh YAML (the registry ``info`` dict
             # doesn't carry it); no-op when unset → LLMClient default 16384.
             _hcfg = _agents_cfg.get(agent_id, {})
+            # Prefer the CURRENT role from fresh config (agents.yaml) over the
+            # registry ``info`` dict, whose role was frozen at the last
+            # start_agent call — otherwise an ``edit_agent`` role change is
+            # silently reverted by every crash-triggered auto-restart. Fall
+            # back to the registry role only when the agent is absent from the
+            # fresh config. Scope is role ONLY — model/tools_dir/thinking stay
+            # on the registry snapshot (recorded residual, out of scope here).
+            fresh_role = (
+                _hcfg.get("role", "") if agent_id in _agents_cfg
+                else info.get("role", "")
+            )
             set_llm_max_tokens_env(restart_env, _hcfg)
             from src.shared.limits import set_llm_limits_env
             set_llm_limits_env(restart_env, _hcfg)
@@ -597,7 +608,7 @@ class HealthMonitor:
                     None,
                     lambda: self.runtime.start_agent(
                         agent_id=agent_id,
-                        role=info.get("role", ""),
+                        role=fresh_role,
                         tools_dir=info.get("tools_dir", ""),
                         model=info.get("model", ""),
                         thinking=info.get("thinking", ""),
@@ -623,13 +634,13 @@ class HealthMonitor:
                 await loop.run_in_executor(None, self.runtime.stop_agent, agent_id)
                 return
             # Pass the fresh role through — the container above already
-            # started with ``role=info.get("role", "")``, but re-registering
-            # without it left the mesh roster cache (``router.agent_roles``)
-            # stale after an auto-rebuild: register_agent only overwrites
-            # agent_roles when ``role`` is truthy, so an omitted role here
-            # silently kept whatever (possibly outdated, or absent) role was
-            # cached before the restart.
-            self.router.register_agent(agent_id, url, role=info.get("role", ""))
+            # started with ``role=fresh_role``, but re-registering without it
+            # left the mesh roster cache (``router.agent_roles``) stale after
+            # an auto-rebuild: register_agent only overwrites agent_roles when
+            # ``role`` is truthy, so an omitted role here silently kept
+            # whatever (possibly outdated, or absent) role was cached before
+            # the restart.
+            self.router.register_agent(agent_id, url, role=fresh_role)
             health.consecutive_failures = 0
             health.restart_count += 1
             health.restart_timestamps.append(now)

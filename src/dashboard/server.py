@@ -312,7 +312,11 @@ _VALID_SAMESITE = {"Lax": "Lax", "Strict": "Strict", "None": "None"}
 # new event type.
 _BUSY_CHAT_STATUS_NOTE = (
     "_This agent is mid-task — your message was routed in as a priority "
-    "interrupt. Waiting for its reply..._"
+    "interrupt. Waiting for its reply..._\n\n"
+    # Trailing paragraph break: the frontend accumulator concatenates this
+    # preamble chunk and the (single-chunk) reply into one bubble, so without
+    # a "\n\n" separator the status line and the reply render as one run-on
+    # paragraph. This is content, not the SSE frame terminator.
 )
 
 
@@ -2035,11 +2039,14 @@ def create_dashboard_router(
             raise HTTPException(503, "Permissions not available")
         body = await request.json()
         skills = _clean_skill_names(body.get("skills", []))
-        from src.cli.config import _load_permissions, _save_permissions
+        from src.cli.config import _config_lock, _load_permissions, _save_permissions
 
-        perms = _load_permissions()
-        perms["fleet_skills"] = skills
-        _save_permissions(perms)
+        # Load->mutate->save under the shared config lock so a concurrent
+        # permissions writer can't clobber the fleet allowlist (lost update).
+        with _config_lock():
+            perms = _load_permissions()
+            perms["fleet_skills"] = skills
+            _save_permissions(perms)
         permissions.reload()
         _emit_config_changed("skills")
         return {"fleet_skills": skills}
@@ -3596,51 +3603,55 @@ def create_dashboard_router(
         if permissions is None:
             raise HTTPException(status_code=503, detail="Permissions not available")
         body = await request.json()
-        from src.cli.config import _load_permissions, _save_permissions
+        from src.cli.config import _config_lock, _load_permissions, _save_permissions
 
-        perms_data = _load_permissions()
-        agents = perms_data.setdefault("permissions", {})
-        # Materialize full effective permissions before a partial write, so an
-        # agent that had no explicit entry (was using the "default" template)
-        # doesn't get dropped to a sparse record that strips its other grants
-        # (Codex review). No-op for agents that already have an entry.
-        if agent_id not in agents:
-            agents[agent_id] = permissions.get_permissions(agent_id).model_dump(exclude={"agent_id"})
-        agent_perms = agents[agent_id]
+        # Hold the shared config lock across the full load->mutate->save so a
+        # concurrent permissions writer (another agent-perm edit, a skill
+        # assign, a wallet enable) can't clobber this update (lost update).
+        with _config_lock():
+            perms_data = _load_permissions()
+            agents = perms_data.setdefault("permissions", {})
+            # Materialize full effective permissions before a partial write, so an
+            # agent that had no explicit entry (was using the "default" template)
+            # doesn't get dropped to a sparse record that strips its other grants
+            # (Codex review). No-op for agents that already have an entry.
+            if agent_id not in agents:
+                agents[agent_id] = permissions.get_permissions(agent_id).model_dump(exclude={"agent_id"})
+            agent_perms = agents[agent_id]
 
-        updated = []
-        if "allowed_credentials" in body:
-            val = body["allowed_credentials"]
-            if not isinstance(val, list) or not all(isinstance(v, str) for v in val):
-                raise HTTPException(status_code=400, detail="allowed_credentials must be a list of strings")
-            agent_perms["allowed_credentials"] = val
-            updated.append("allowed_credentials")
-        if "allowed_apis" in body:
-            val = body["allowed_apis"]
-            if not isinstance(val, list) or not all(isinstance(v, str) for v in val):
-                raise HTTPException(status_code=400, detail="allowed_apis must be a list of strings")
-            agent_perms["allowed_apis"] = val
-            updated.append("allowed_apis")
-        if "allowed_skills" in body:
-            # Per-agent skill-pack allowlist (path-safe-validated, sorted/deduped).
-            agent_perms["allowed_skills"] = _clean_skill_names(body["allowed_skills"])
-            updated.append("allowed_skills")
-        for flag in ("can_use_browser", "can_use_internet", "can_spawn", "can_manage_cron", "can_use_wallet"):
-            if flag in body:
-                agent_perms[flag] = bool(body[flag])
-                updated.append(flag)
-        if "wallet_allowed_chains" in body:
-            val = body["wallet_allowed_chains"]
-            if not isinstance(val, list) or not all(isinstance(v, str) for v in val):
-                raise HTTPException(
-                    status_code=400,
-                    detail="wallet_allowed_chains must be a list of strings",
-                )
-            agent_perms["wallet_allowed_chains"] = val
-            updated.append("wallet_allowed_chains")
+            updated = []
+            if "allowed_credentials" in body:
+                val = body["allowed_credentials"]
+                if not isinstance(val, list) or not all(isinstance(v, str) for v in val):
+                    raise HTTPException(status_code=400, detail="allowed_credentials must be a list of strings")
+                agent_perms["allowed_credentials"] = val
+                updated.append("allowed_credentials")
+            if "allowed_apis" in body:
+                val = body["allowed_apis"]
+                if not isinstance(val, list) or not all(isinstance(v, str) for v in val):
+                    raise HTTPException(status_code=400, detail="allowed_apis must be a list of strings")
+                agent_perms["allowed_apis"] = val
+                updated.append("allowed_apis")
+            if "allowed_skills" in body:
+                # Per-agent skill-pack allowlist (path-safe-validated, sorted/deduped).
+                agent_perms["allowed_skills"] = _clean_skill_names(body["allowed_skills"])
+                updated.append("allowed_skills")
+            for flag in ("can_use_browser", "can_use_internet", "can_spawn", "can_manage_cron", "can_use_wallet"):
+                if flag in body:
+                    agent_perms[flag] = bool(body[flag])
+                    updated.append(flag)
+            if "wallet_allowed_chains" in body:
+                val = body["wallet_allowed_chains"]
+                if not isinstance(val, list) or not all(isinstance(v, str) for v in val):
+                    raise HTTPException(
+                        status_code=400,
+                        detail="wallet_allowed_chains must be a list of strings",
+                    )
+                agent_perms["wallet_allowed_chains"] = val
+                updated.append("wallet_allowed_chains")
 
-        perms_data.setdefault("permissions", {})[agent_id] = agent_perms
-        _save_permissions(perms_data)
+            perms_data.setdefault("permissions", {})[agent_id] = agent_perms
+            _save_permissions(perms_data)
         permissions.reload()
         return {"updated": updated, "agent_id": agent_id}
 
@@ -5475,20 +5486,23 @@ def create_dashboard_router(
         _verify_dashboard_auth(request)
         if permissions is None:
             raise HTTPException(status_code=503, detail="Permissions not available")
-        from src.cli.config import _load_permissions, _save_permissions
+        from src.cli.config import _config_lock, _load_permissions, _save_permissions
 
-        perms_data = _load_permissions()
-        agent_perms = perms_data.get("permissions", {}).get(agent_id, {})
-        agent_perms["can_use_wallet"] = True
-        if not agent_perms.get("wallet_allowed_chains"):
-            # Default to all known chains (not wildcard "*")
-            _ws_local = (wallet_service_ref or [None])[0]
-            if _ws_local:
-                agent_perms["wallet_allowed_chains"] = list(_ws_local.chains.keys())
-            else:
-                agent_perms["wallet_allowed_chains"] = ["*"]
-        perms_data.setdefault("permissions", {})[agent_id] = agent_perms
-        _save_permissions(perms_data)
+        # Load->mutate->save under the shared config lock so a concurrent
+        # permissions writer can't clobber this wallet enable (lost update).
+        with _config_lock():
+            perms_data = _load_permissions()
+            agent_perms = perms_data.get("permissions", {}).get(agent_id, {})
+            agent_perms["can_use_wallet"] = True
+            if not agent_perms.get("wallet_allowed_chains"):
+                # Default to all known chains (not wildcard "*")
+                _ws_local = (wallet_service_ref or [None])[0]
+                if _ws_local:
+                    agent_perms["wallet_allowed_chains"] = list(_ws_local.chains.keys())
+                else:
+                    agent_perms["wallet_allowed_chains"] = ["*"]
+            perms_data.setdefault("permissions", {})[agent_id] = agent_perms
+            _save_permissions(perms_data)
         permissions.reload()
         _emit_config_changed("wallet", agent=agent_id)
         return {"enabled": True, "agent_id": agent_id}
@@ -5845,6 +5859,14 @@ def create_dashboard_router(
                     name,
                     e,
                 )
+        # Onboarding wake for each INITIAL member — mirrors the add-member
+        # endpoint. The injected callback is the mesh's own
+        # ``_schedule_onboarding_wake`` closure, whose guards skip the operator
+        # and any non-running agent. Without this, dashboard-seeded members
+        # never got the intro turn / lead nudge that later-added members do.
+        if onboarding_wake is not None:
+            for agent in members:
+                onboarding_wake(agent, name)
         _emit_team_event(
             "team_created",
             agent="operator",

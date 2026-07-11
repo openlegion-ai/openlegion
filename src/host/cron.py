@@ -31,7 +31,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from src.shared.utils import dumps_safe, generate_id, setup_logging
+from src.shared.utils import dumps_safe, generate_id, setup_logging, usable_agent_reply
 
 logger = setup_logging("host.cron")
 
@@ -849,8 +849,22 @@ class CronScheduler:
                     # any message job the host tagged) publishes its
                     # dispatch response into the team's channel thread.
                     # Only on a non-empty/non-error response — an empty
-                    # or suppressed tick has nothing worth posting.
-                    if job.post_to_channel and not _is_empty_response(response):
+                    # or suppressed tick has nothing worth posting. For a
+                    # STRING response ``usable_agent_reply`` additionally
+                    # rejects the lane dispatcher's three non-success shapes
+                    # (SILENT sentinel, "(no response)", "dispatch_error:") so
+                    # a briefly-unreachable lead never posts a sentinel into
+                    # the team channel; a non-str (defensive dict) response is
+                    # left to ``_post_to_channel`` to JSON-encode as before.
+                    # ``job.id in self.jobs`` re-check: a job removed mid-
+                    # dispatch (team deleted/archived) must not resurrect the
+                    # channel via ``ensure_channel`` after its slow turn ends.
+                    if (
+                        job.post_to_channel
+                        and not _is_empty_response(response)
+                        and (not isinstance(response, str) or usable_agent_reply(response))
+                        and job.id in self.jobs
+                    ):
                         self._post_to_channel(job, response)
 
                 self._emit_cron_change("executed", job)
