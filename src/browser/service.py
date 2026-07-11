@@ -4953,7 +4953,17 @@ class BrowserManager:
                 agent_id, e,
             )
             return False
-        for cookie in remaining or []:
+        if remaining is None:
+            # A ``None`` readback means we couldn't confirm the jar — treat it
+            # exactly like the exception path (unverified), NOT as an empty jar
+            # (which would falsely "verify" the drop and advance the baseline).
+            logger.warning(
+                "binding-coherence: post-drop cookie readback returned None "
+                "for '%s'; retaining old baseline to retry next launch",
+                agent_id,
+            )
+            return False
+        for cookie in remaining:
             if not isinstance(cookie, dict):
                 continue
             if _sp.cookie_binding_vendor(cookie.get("name")) is not None:

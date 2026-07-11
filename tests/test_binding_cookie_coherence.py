@@ -392,3 +392,18 @@ class TestRetrySafetyBC4:
         assert ctx.cookies_calls == 2  # enumeration + post-drop readback
         assert _binding_signatures[agent] == stale
         assert _binding_signatures[agent] != _current_sig(mgr, agent)
+
+    @pytest.mark.asyncio
+    async def test_readback_returning_none_is_unverified(self):
+        """A ``None`` readback means the jar couldn't be confirmed — it must be
+        treated like the exception path (unverified), NOT as an empty jar that
+        falsely verifies the drop."""
+
+        class _NoneReadbackContext:
+            async def cookies(self):
+                return None
+
+        mgr = _make_manager()
+        # Directly exercise the readback helper: None → False (unverified) so
+        # the caller retains the old baseline and retries next launch.
+        assert await mgr._bound_cookies_gone(_NoneReadbackContext(), "agent-x") is False
