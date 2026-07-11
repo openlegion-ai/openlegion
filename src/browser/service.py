@@ -3253,6 +3253,16 @@ class CamoufoxInstance:
         self.dialog_policy: dict = {"action": "dismiss", "text": ""}
         # Idempotency flag for ``BrowserManager._attach_dialog_listeners``.
         self._dialog_attached: bool = False
+        # Strong references to the fire-and-forget ``_on_dialog`` resolver
+        # tasks scheduled by the ``page.on("dialog")`` / ``context.on("page")``
+        # callbacks. Playwright's event callbacks are SYNC, so the coroutine
+        # is dispatched via ``asyncio.create_task`` — without a retained
+        # reference the task can be GC'd mid-``await dialog.accept/dismiss``,
+        # leaving the page's native JS dialog unresolved (page hang). Mirrors
+        # ``_fingerprint_monitor_tasks``: each task is discarded on completion
+        # via ``add_done_callback`` and any still in-flight are cancelled by
+        # ``BrowserManager._stop_instance`` at teardown.
+        self._dialog_tasks: set[asyncio.Task] = set()
         # Most-recent native dialog message + type, e.g.
         # ``{"message": "Delete this?", "type": "confirm"}``. None until the
         # first dialog fires. Surfaced by ``set_dialog_policy`` so the agent
@@ -5264,6 +5274,22 @@ class BrowserManager:
         for task in monitor_tasks:
             task.cancel()
         for task in monitor_tasks:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+        # CT-11 — cancel any in-flight native-dialog resolver tasks so an
+        # ``_on_dialog`` coroutine cannot ``await dialog.accept/dismiss``
+        # against a Page we are about to close. Retained in ``_dialog_tasks``
+        # precisely so we can drain them here; bounded best-effort, never
+        # raises. ``getattr`` default keeps this safe for older/partial
+        # instances that predate the attribute.
+        dialog_tasks = list(
+            getattr(inst, "_dialog_tasks", set()) or [],
+        )
+        for task in dialog_tasks:
+            task.cancel()
+        for task in dialog_tasks:
             try:
                 await task
             except (asyncio.CancelledError, Exception):
@@ -9221,15 +9247,27 @@ class BrowserManager:
         Thin wrapper over Playwright's ``page.wait_for_load_state
         ("networkidle")`` — useful after an action that triggers XHR / fetch
         (search-as-you-type, infinite scroll, a form POST) to let the results
-        settle before snapshotting. ``timeout`` is milliseconds, default
-        10000, capped at 30000. Reaching the cap is NOT fatal: it returns a
-        structured ``idle=False`` result (the page may simply have long-poll /
-        websocket traffic that never goes idle) rather than raising.
+        settle before snapshotting. ``timeout`` is milliseconds and must be a
+        POSITIVE number, default 10000, capped at 30000. Reaching the cap is
+        NOT fatal: it returns a structured ``idle=False`` result (the page may
+        simply have long-poll / websocket traffic that never goes idle) rather
+        than raising.
         """
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
             return _err("invalid_input", "timeout must be a number (ms)")
-        # Clamp to a sane window: at least 0, at most 30s.
-        timeout_ms = max(0, min(int(timeout), 30000))
+        # Playwright treats ``timeout=0`` as NO timeout (wait forever), which
+        # would hang the per-agent ``inst.lock`` indefinitely and wedge every
+        # other command for this agent. Sub-1ms positive fractions also
+        # truncate to 0 under ``int()``. Reject non-positive after truncation
+        # with a truthful error rather than silently substituting a floor.
+        timeout_ms = int(timeout)
+        if timeout_ms <= 0:
+            return _err(
+                "invalid_input",
+                "timeout must be a positive number of milliseconds",
+            )
+        # Clamp to a sane upper window: at most 30s.
+        timeout_ms = min(timeout_ms, 30000)
         inst = await self.get_or_start(agent_id)
         inst.touch()
         async with inst.lock:
@@ -13323,17 +13361,22 @@ class BrowserManager:
             existing = list(inst.context.pages)
             if inst.page is not None and inst.page not in existing:
                 existing.append(inst.page)
+
+            def _spawn_dialog_task(dialog) -> None:
+                # Retain a strong reference to the scheduled resolver — a bare
+                # ``asyncio.create_task`` can be garbage-collected mid-``await
+                # dialog.accept/dismiss``, leaving the page's JS dialog pending
+                # (page hang). Mirrors ``_spawn_fingerprint_monitor``: track in
+                # ``inst._dialog_tasks`` and discard on completion.
+                t = asyncio.create_task(self._on_dialog(inst, dialog))
+                inst._dialog_tasks.add(t)
+                t.add_done_callback(inst._dialog_tasks.discard)
+
             for page in existing:
-                page.on(
-                    "dialog",
-                    lambda d: asyncio.create_task(self._on_dialog(inst, d)),
-                )
+                page.on("dialog", _spawn_dialog_task)
             inst.context.on(
                 "page",
-                lambda p: p.on(
-                    "dialog",
-                    lambda d: asyncio.create_task(self._on_dialog(inst, d)),
-                ),
+                lambda p: p.on("dialog", _spawn_dialog_task),
             )
         except Exception as e:
             logger.debug(

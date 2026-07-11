@@ -22,13 +22,18 @@ handler methods directly against a fake instance, patching
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import types
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.browser.service import _FIREFOX_GRANTABLE_PERMISSIONS, BrowserManager
+from src.browser.service import (
+    _FIREFOX_GRANTABLE_PERMISSIONS,
+    BrowserManager,
+    CamoufoxInstance,
+)
 
 
 def _make_manager() -> BrowserManager:
@@ -40,13 +45,12 @@ class _FakeInstance:
     """Minimal CamoufoxInstance duck-type for the parity handlers."""
 
     def __init__(self, *, x11_wid=None):
-        import asyncio
-
         self.agent_id = "agent-parity"
         self.x11_wid = x11_wid
         self._user_control = False
         self.dialog_policy = {"action": "dismiss", "text": ""}
         self.last_dialog_message = None
+        self._dialog_tasks: set = set()
         self.refs: dict = {}
         self._lock = asyncio.Lock()
         # Context / page are MagicMocks with AsyncMock async methods.
@@ -501,6 +505,97 @@ class TestDialogListenerAttach:
 
         inst.page.on.assert_not_called()
         inst.context.on.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_dialog_task_retained_and_discarded(self):
+        """CT-11: the scheduled ``_on_dialog`` resolver must be strongly held in
+        ``inst._dialog_tasks`` — without a reference it can be GC'd mid-``await
+        dialog.accept/dismiss``, leaving the page's JS dialog pending (hang).
+        It must also be discarded once it completes."""
+        mgr = _make_manager()
+        inst = _FakeInstance()
+
+        # Capture the SYNC ``page.on("dialog", ...)`` callback so the test can
+        # fire it exactly as Playwright would.
+        captured: dict = {}
+
+        def _capture(event, handler):
+            if event == "dialog":
+                captured["handler"] = handler
+
+        inst.page.on = MagicMock(side_effect=_capture)
+        inst.context.pages = [inst.page]
+        inst.context.on = MagicMock()
+        inst._dialog_attached = False
+
+        mgr._attach_dialog_listeners(inst)
+
+        handler = captured["handler"]
+        dialog = MagicMock()
+        dialog.message = "Delete this?"
+        dialog.type = "confirm"
+        dialog.accept = AsyncMock()
+        dialog.dismiss = AsyncMock()
+
+        # Firing the sync callback must schedule the resolver AND retain a
+        # strong reference to it in the retention set.
+        handler(dialog)
+        assert len(inst._dialog_tasks) == 1
+        task = next(iter(inst._dialog_tasks))
+
+        # Run to completion: the dialog is resolved (default policy dismisses)
+        # and the task is discarded from the set via ``add_done_callback``.
+        await task
+        # ``add_done_callback`` fires via ``loop.call_soon`` — flush it.
+        await asyncio.sleep(0)
+        dialog.dismiss.assert_awaited_once()
+        assert inst._dialog_tasks == set()
+
+    @pytest.mark.asyncio
+    async def test_stop_instance_cancels_pending_dialog_tasks(self):
+        """CT-11 shutdown drain: a still-in-flight ``_on_dialog`` resolver must
+        be cancelled by ``_stop_instance`` so it can't await against a Page we
+        are tearing down. Mirrors the fingerprint-monitor cancellation."""
+        mgr = _make_manager()
+
+        # Minimal fake CamoufoxInstance — bypass __init__ (needs real Camoufox
+        # internals) and stamp only the attributes _stop_instance touches.
+        inst = CamoufoxInstance.__new__(CamoufoxInstance)
+        inst.agent_id = "agent-dialog-cancel"
+        inst.page = MagicMock()
+        inst.page.url = "https://example.com/"
+        inst.context = AsyncMock()
+        inst.context.close = AsyncMock()
+        inst._fingerprint_monitor_tasks = set()
+        inst._dialog_tasks = set()
+        inst.recorder = None
+        inst._jitter_task = None
+        inst._lock = asyncio.Lock()
+        inst._lock_loop = asyncio.get_event_loop()
+        inst.last_activity = 0.0
+        inst.drain_metrics = lambda: {
+            "agent_id": "agent-dialog-cancel",
+            "click_success_total": 0, "click_fail_total": 0,
+            "nav_timeout_total": 0,
+            "snapshot_p50_bytes": 0, "snapshot_p95_bytes": 0,
+            "click_window_size": 0, "click_success_rate_100": 0.0,
+        }
+
+        # A resolver that would still be running long after teardown — the
+        # cancellation, not completion, must terminate it.
+        async def _never() -> None:
+            await asyncio.sleep(60)
+
+        task = asyncio.create_task(_never())
+        inst._dialog_tasks.add(task)
+        mgr._instances["agent-dialog-cancel"] = inst
+
+        await mgr._stop_instance("agent-dialog-cancel")
+
+        assert task.done()
+        # Either cancelled or a clean finish is acceptable — the property is
+        # that it is no longer running.
+        assert task.cancelled() or task.exception() is None
 
 
 # ── Agent-side @tool forwarding ────────────────────────────────────────────

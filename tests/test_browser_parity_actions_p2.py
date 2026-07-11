@@ -468,6 +468,66 @@ class TestWaitForNetworkIdle:
         assert result["success"] is False
         assert result["error"]["code"] == "service_unavailable"
 
+    @pytest.mark.asyncio
+    async def test_zero_timeout_rejected_no_hang(self):
+        """CT-9: Playwright treats ``timeout=0`` as NO timeout (wait forever),
+        which would hang the per-agent lock and wedge every other command for
+        this agent. It must be rejected with a structured ``invalid_input``
+        error BEFORE the page's ``wait_for_load_state`` is ever awaited."""
+        mgr = _make_manager()
+        inst = _FakeInstance()
+        _patch_get_or_start(mgr, inst)
+
+        result = await mgr.wait_for_network_idle("agent-parity", timeout=0)
+
+        assert result["success"] is False
+        assert result["error"]["code"] == "invalid_input"
+        # Rejected before ever touching Playwright — no chance to hang.
+        inst.page.wait_for_load_state.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_negative_timeout_rejected(self):
+        mgr = _make_manager()
+        inst = _FakeInstance()
+        _patch_get_or_start(mgr, inst)
+
+        result = await mgr.wait_for_network_idle("agent-parity", timeout=-5)
+
+        assert result["success"] is False
+        assert result["error"]["code"] == "invalid_input"
+        inst.page.wait_for_load_state.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_sub_millisecond_fraction_rejected(self):
+        """A positive fraction below 1ms truncates to 0 under ``int()`` — which
+        Playwright would treat as no timeout. Reject it rather than silently
+        waiting forever."""
+        mgr = _make_manager()
+        inst = _FakeInstance()
+        _patch_get_or_start(mgr, inst)
+
+        result = await mgr.wait_for_network_idle("agent-parity", timeout=0.5)
+
+        assert result["success"] is False
+        assert result["error"]["code"] == "invalid_input"
+        inst.page.wait_for_load_state.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_positive_timeout_still_reaches_playwright(self):
+        """The guard must NOT regress the happy path: a positive timeout still
+        reaches ``page.wait_for_load_state`` with the clamped value."""
+        mgr = _make_manager()
+        inst = _FakeInstance()
+        _patch_get_or_start(mgr, inst)
+
+        result = await mgr.wait_for_network_idle("agent-parity", timeout=1)
+
+        assert result["success"] is True
+        assert result["data"]["idle"] is True
+        inst.page.wait_for_load_state.assert_awaited_once_with(
+            "networkidle", timeout=1,
+        )
+
 
 # ── Agent-side @tool forwarding ────────────────────────────────────────────
 
