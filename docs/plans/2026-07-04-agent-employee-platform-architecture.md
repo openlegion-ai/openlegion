@@ -1771,6 +1771,22 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   var/chdir — pinned in the suites this unit touched; a broader fixture-hygiene pass is a
   future cleanup, not a Phase-5 unit.
 
+- **✅ Landed — U2 positive feedback push (#1243, §8 #23).** `accepted` outcomes with
+  non-empty (post-strip) feedback push to a NEW `learnings/wins.md`; the corrections file's
+  praise-exclusion intent survives verbatim (docstring updated to say praise goes to the
+  separate wins file). Agent `/learnings/feedback` routes by outcome — `accepted` →
+  `record_win` (mirrors `record_correction`: caps, timestamped append, rotation); unknown
+  outcomes keep the pre-U2 treat-as-correction default (pinned). `get_learnings_context`
+  appends `## What worked (keep doing)` LAST, so errors/corrections keep byte-identical
+  priority under the shared cap (pinned by exact-equality test at a small cap); wins fills
+  only the remainder and drops out entirely when there is none. `acknowledged` and
+  empty-feedback accepts still push nothing; rework/rejected unchanged. **Recorded residual:**
+  the read-only `GET /workspace-learnings` dashboard endpoint surfaces errors/corrections but
+  not wins — cosmetic parity gap, candidate for the end-of-phase fix PR. **Flake-class note
+  for gate runs:** a timing-margin assertion (`test_offboarding.py
+  ...test_handover_turn_timeout_is_bounded_never_hangs`, asserts elapsed < 3.0s) can trip
+  under xdist CPU contention — green in isolation; same contention class as the known flakes.
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|
@@ -1830,6 +1846,7 @@ findings, if any, land as a follow-up fix PR recorded in this ledger.
 | #1231 | earlier draft of the companion review — closed unmerged, superseded by #1232 | closed |
 | #1239 | U0 — hardening prereqs (§8 #24 i–iii + recon minor items) | merged |
 | #1241 | U1 — durable per-agent track record ledger (§8 #18) | merged |
+| #1243 | U2 — positive feedback push to learnings/wins.md (§8 #23) | merged |
 
 ### YOU ARE HERE → Phase 5
 
