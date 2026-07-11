@@ -1439,6 +1439,35 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   polling); the four frozen top-nav tab IDs untouched and now pinned by a dedicated test.
   28 new tests. Full local suite 8524 passed / 26 skipped / 0 failed.
 
+- **✅ Landed — Phase-4 unit 5: streaming/broadcast steer-routing (#1227; the recorded Phase-3
+  residual, closed without the escape hatch).** Both surfaces reroute onto the EXISTING
+  `LaneManager.deliver_chat` — zero changes to lanes.py, src/agent/loop.py, app.js, channels,
+  REPL, or mesh wake. Streaming chat forks busy-aware at the dashboard endpoint: idle keeps the
+  direct SSE proxy untouched (true token streaming; the advisory-check race window degrades to
+  today's bounded blocking, documented in-code); busy never opens the direct stream — the message
+  steers into the RUNNING turn and the reply relays over the existing SSE vocabulary (a
+  `text_delta` status preamble, the turn's final text as one `text_delta` chunk — a steered
+  reply cannot token-stream by construction — then `done`; no new event types, no frontend
+  changes). Broadcast: the found contract (await every reply, concurrent fan-out) is preserved
+  exactly — only the per-recipient delivery mechanism changed to `deliver_chat` (busy → steer
+  into the running turn, idle → followup lane turn), with concurrency proven by a barrier test
+  that would deadlock if dispatch serialized. B1 pinned: a dedicated test asserts the busy path
+  never calls the agent's `/chat`//`/chat/stream` directly. Two existing broadcast tests
+  re-pointed from transport mocks to `deliver_chat` mocks preserving their original intent.
+  Full local suite 8534 passed / 26 skipped / 0 failed.
+
+- **✅ Landed — Phase-4 exit (this PR).** All five units + pre-decisions merged as separate green
+  PRs off `main` (#1217/#1218/#1220/#1222/#1224/#1227 + doc-recording PRs + the #1226
+  test-isolation hardening). Exit checks on the merged tree (2026-07-11): the `resources`
+  template/config key is grep-zero in src/ (round-trips deleted, §8 #16d); the "role is fixed by
+  the template" freeze copy is grep-zero (role sits in `_ALLOWED_OVERRIDE_FIELDS`); the dashboard
+  delete path calls `teams_store.remove_agent` (dangling-membership bug closed) and the CLI
+  `/remove` wipes the data volume (leak closed); offboard-before-delete holds on all three
+  delete surfaces (order-proof tests). Wizard v1 was extended, not replaced — no C.1 pair
+  applied this phase beyond the deletions above. The phase closes with the consolidated
+  adversarial review of ALL Phase-4 PRs (Phase-3 pattern) — findings, if any, land as a
+  follow-up fix PR recorded in this ledger.
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|
@@ -1487,8 +1516,10 @@ findings, if any, land as a follow-up fix PR recorded in this ledger.
 | #1220 | hiring wizard v2 — config file-lock (B-pre #2), role unfrozen, goals-driven hiring (unit 2) | merged |
 | #1222 | onboarding + offboarding-with-handover — three delete surfaces converge (unit 3) | merged |
 | #1224 | Team Room — plate snapshots, composed room read, default Team Hub sub-tab (unit 4) | merged |
+| #1226 | test-isolation hardening — set_cron schema security pin vs registry pollution | merged |
+| #1227 | streaming/broadcast steer-routing — busy-aware SSE fork + broadcast via deliver_chat (unit 5) | merged |
 
-### YOU ARE HERE → Phase 4
+### YOU ARE HERE → Phase 5
 
 **Phase 3 (the workday) is COMPLETE.** All four units landed as separate green PRs off `main`,
 each completing its C.1 deletion in-phase. The C.4 phase-exit check ran on the merged tree
@@ -1512,22 +1543,44 @@ survives only as plate-gate/message input (by design), never as skip logic.
 unratified) — do not build it without an explicit user decision; any future scratch ratification
 MUST resolve the SandboxBackend story at the same time (recorded in §8 #9).
 
-**Phase 4 (org model) is IN PROGRESS** — pre-decisions ratified as **§8 #12–#16**: lead-goals =
-accountability, not a write path (#12); lead review = recorded advisory verdict, not merge power
-(#13); lead = `teams.lead_agent_id` team data + host-published standup (#14); offboarding hooks
-at ARCHIVE time with all three delete surfaces converging (#15); hiring wizard v2 is
-operator-tier with the agents.yaml file-lock built first (#16). Build order: **unit 1** Lead
-role core + Constraint #1/#12 amendments + the host-side channel-post primitive → **unit 2**
-hiring wizard v2 (file-lock FIRST) → **unit 3** onboarding + offboarding-with-handover →
-**unit 4** Team Room dashboard → **unit 5** (small) streaming/broadcast steer-routing (the
-recorded Phase-3 residual: dashboard streaming chat + broadcast still call agent endpoints
-directly — single-lane-safe after #1213, but not steer-routed through `deliver_chat`;
-re-deferred with a recorded gate if the design balloons). Standing gates carried forward:
-Personnel-file *import* is UNBLOCKED — B-pre #2's config file-lock landed in unit 2 (#1220), the
-import feature itself remains unbuilt/unscheduled;
-Phase-5 hibernation still needs B3's three-subsystem scoping; a goals agent-write carve-out
-(team or standing) remains UNRATIFIED — do not build one without an explicit user decision;
-per-agent budget allocation by the lead (§5) is NOT built this phase (§8 #12).
+**Phase 4 (org model) is COMPLETE.** Pre-decisions ratified as **§8 #12–#16** (#1217), all five
+units landed as separate green PRs off `main`, exit checks green (see the Phase-4 exit entry):
+- **Lead role core** (#1218) — `teams.lead_agent_id` (team data, zero permission elevation),
+  operator-only assignment with same-transaction integrity clears; lead-only ADVISORY drive-review
+  verdicts (merge/reject gates untouched); lead-duty plate probe; host-published standup via
+  `CronJob.post_to_channel` (unreachable from every agent-facing cron surface); Constraint #1/#12
+  amendments landed with their pinning test.
+- **hiring wizard v2** (#1220) — B-pre #2 CLOSED first (sidecar `config/.config.lock` flock +
+  atomic agents.yaml writes covering every config writer); `role` unfrozen in the fleet-override
+  allowlist (+ the latent `_apply_template` ignore-gap); health-monitor re-register roster
+  staleness fixed; dead `resources` key deleted; Team Hub goals-driven hire entry in the
+  wizard-v1 shape (operator-tier, UI never calls create APIs).
+- **onboarding + offboarding-with-handover** (#1222) — offboard = bounded handover turn on the
+  live agent + export-bundle snapshot, committed in-process to `handovers/{agent}/` (author =
+  departing agent) STRICTLY before volume destruction on all three delete surfaces (order-proof
+  tests); dashboard-delete dangling-membership bug and CLI volume-leak bug fixed; onboarding
+  intro host-published + lead/operator first-task nudge; Known Constraint #13.
+- **Team Room** (#1224) — read-only: plate snapshots as a heartbeat-gate byproduct, one composed
+  `GET /api/teams/{name}/room`, default `room` Team Hub sub-tab; frozen top-nav IDs untouched.
+- **streaming/broadcast steer-routing** (#1227) — the Phase-3 residual closed: busy streaming
+  chat steers the running turn (reply as one SSE chunk over the existing event vocabulary), idle
+  keeps true token streaming; broadcast fans out per-recipient through `deliver_chat` preserving
+  its await-all concurrent contract; B1 pinned; loop.py/lanes.py/frontend untouched.
+The consolidated end-of-phase adversarial review of all Phase-4 PRs runs at phase close
+(Phase-3 pattern) — findings land as a fix PR recorded in the Phase-4 ledger.
+
+**Phase 5 (governance at scale) is next** — see §6 Phase 5: **action-tier policy engine**
+(reversible-internal → external-visible → irreversible → financial; absorbs `pending_actions`),
+**per-agent track record** (accepted/rework/rejected outcomes composed into the Personnel File),
+**earned-autonomy policy** = f(action tier, track record, budget), **positive feedback push**
+(extend `feedback_push.py` beyond rework/rejected), **hibernation** (stop idle containers,
+cold-wake on task/ask/mention/cron). Standing gates carried forward: hibernation still needs
+**B3's three-subsystem scoping** (health-monitor auto-restart, cron heartbeats, lane rehydration
+all fight container stopping — B-pre #1 landed long ago, the other legs are undesigned); a goals
+agent-write carve-out (team or standing) remains UNRATIFIED — do not build one without an
+explicit user decision; per-agent budget allocation by the lead is NOT built (§8 #12 — revisit
+with earned autonomy); Personnel-file *import* is unblocked (B-pre #2 fixed) but unscheduled;
+raw shared `/team/scratch` stays unratified (§8 #1, sandbox story per §8 #9).
 
 **Handoff note:** this doc is the source of truth — a fresh session can continue from here without
 this session's chat history. Read §5 (keep/refactor/remove), Appendices A–C, §8 (ratified
