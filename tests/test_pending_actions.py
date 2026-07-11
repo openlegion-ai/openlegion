@@ -576,3 +576,62 @@ def test_pending_action_created_event_carries_summary_and_diff(tmp_path):
     evt = next(c for c in captured if c[0] == "pending_action_created")
     assert evt[2]["summary"] == "Switch alpha's model from gpt-4o to claude"
     assert evt[2]["preview_diff"] == "diff goes here"
+
+
+# ── Held-actions generalization: tier column (plan §8 #17, C.1 row 6) ────
+
+
+def test_store_persists_tier(tmp_path):
+    pa = _make_store(tmp_path)
+    rec = pa.store(
+        nonce="n1", actor="operator", target_kind="wallet",
+        target_id="scout", action_kind="wallet_transfer", payload={"x": 1},
+        tier="financial",
+    )
+    assert rec["tier"] == "financial"
+    assert pa.peek("n1")["tier"] == "financial"
+
+
+def test_tier_defaults_to_none_when_not_passed(tmp_path):
+    """Older call sites (and callers predating the policy engine) don't
+    pass ``tier`` — the column must be nullable and round-trip None."""
+    pa = _make_store(tmp_path)
+    rec = pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="delete", payload={"x": 1},
+    )
+    assert rec["tier"] is None
+    assert pa.peek("n1")["tier"] is None
+
+
+def test_list_pending_surfaces_tier(tmp_path):
+    pa = _make_store(tmp_path)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="connector",
+        target_id="linear", action_kind="connector_call", payload={},
+        tier="external_visible",
+    )
+    rows = pa.list_pending()
+    assert rows[0]["tier"] == "external_visible"
+
+
+def test_consume_surfaces_tier(tmp_path):
+    pa = _make_store(tmp_path)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="delete", payload={},
+        tier="irreversible",
+    )
+    rec = pa.consume("n1", confirmer="operator")
+    assert rec["tier"] == "irreversible"
+
+
+def test_cancel_surfaces_tier(tmp_path):
+    pa = _make_store(tmp_path)
+    pa.store(
+        nonce="n1", actor="operator", target_kind="agent",
+        target_id="alpha", action_kind="delete", payload={},
+        tier="irreversible",
+    )
+    rec = pa.cancel("n1")
+    assert rec["tier"] == "irreversible"

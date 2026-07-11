@@ -24,7 +24,7 @@ import uuid as _uuid
 from collections import defaultdict, deque
 from collections.abc import Callable, Coroutine
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.responses import StreamingResponse
@@ -328,9 +328,10 @@ if TYPE_CHECKING:
 
 # ── Pending Action Store TTLs ────────────────────────────────────
 #
-# Pending operator actions (delete confirmations, undo-receipt rows)
-# live in ``PendingActions`` (``data/pending_actions.db``) so they
-# survive mesh restarts. The store itself is constructed inside
+# Held actions awaiting human confirmation (deletes, and — as of plan
+# §8 #17 — notify/connector/wallet holds proposed under the action-tier
+# policy engine) live in ``PendingActions`` (``data/pending_actions.db``)
+# so they survive mesh restarts. The store itself is constructed inside
 # ``create_mesh_app`` and exposed on the app as ``app.pending_actions``.
 # Only the field-aware TTLs live at module scope so the receipt-card
 # layer and tests can compute them without instantiating an app.
@@ -775,14 +776,21 @@ def create_mesh_app(
 
     # Persistent pending-action store. Mirrors the path convention of
     # ``data/costs.db`` / ``data/traces.db``. Backs the
-    # ``/mesh/config/confirm`` delete dispatcher and the dashboard's
-    # pending-action review surface.
+    # ``/mesh/config/confirm`` held-actions dispatcher (plan §8 #17,
+    # C.1 row 6 — generalized from delete-confirmations-only to every
+    # held action kind) and the dashboard's pending-action review surface.
     pending_actions = PendingActions(db_path="data/pending_actions.db")
     app.pending_actions = pending_actions  # exposed for tests/dashboard
     # Task 9 — wire EventBus so store/consume/cancel/reap_expired emit
     # ``pending_action_*`` events to the dashboard.
     if event_bus is not None:
         pending_actions.set_event_bus(event_bus)
+
+    # Executor registry keyed on ``action_kind`` (plan §8 #17, C.1 row 6).
+    # ``/mesh/config/confirm`` dispatches a consumed row through this
+    # instead of the old hard-coded "delete on {team,agent}" branch —
+    # each executor is registered near where it's defined below.
+    app.pending_executors: dict[str, Callable[[dict], Any]] = {}
 
     # PR 1 — soft-edit receipts + 5-minute Undo. Mirrors the pending_actions
     # plumbing: SQLite-backed, exposed on the app for tests/dashboard,
@@ -855,6 +863,27 @@ def create_mesh_app(
     )
     track_record_store = TrackRecordStore(db_path=_track_record_db_path)
     app.track_record_store = track_record_store  # exposed for tests/dashboard
+
+    # Action-tier policy engine (plan §8 #17) — the one mesh-side gate for
+    # consequential agent actions (delete / wallet / notify / connector
+    # calls). ``OPENLEGION_POLICY_CONFIG`` overrides the on-disk path —
+    # used by tests to keep the yaml inside ``tmp_path`` instead of
+    # polluting cwd. ``track_record_store`` / ``cost_tracker`` are the U5
+    # seam (plan §8 #19's f(tier, track_record, budget)) — accepted now,
+    # unused until earned-autonomy probation logic lands.
+    from src.host.policy import ActionPolicyEngine
+
+    _policy_config_path = os.environ.get(
+        "OPENLEGION_POLICY_CONFIG",
+        "config/policy.yaml",
+    )
+    policy_engine = ActionPolicyEngine(
+        blackboard,
+        config_path=_policy_config_path,
+        track_record_store=track_record_store,
+        cost_tracker=cost_tracker,
+    )
+    app.policy_engine = policy_engine  # exposed for tests/dashboard
 
     # Durable verbatim-intent store (Phase 2, session observability).
     # Instantiated in cli/runtime and passed in; attached here so the
@@ -2972,20 +3001,15 @@ def create_mesh_app(
             raise HTTPException(503, str(exc)) from exc
         return {"connectors": connectors}
 
-    @app.post("/mesh/connectors/call")
-    async def connector_call(data: dict, request: Request) -> dict:
-        """Execute one remote connector tool call for the caller."""
-        caller = _resolve_agent_id(data.get("agent_id", ""), request)
-        connector = str(data.get("connector", ""))
-        tool = str(data.get("tool", ""))
-        arguments = data.get("arguments") or {}
-        if not connector or not tool:
-            raise HTTPException(400, "connector and tool are required")
-        if not isinstance(arguments, dict):
-            raise HTTPException(400, "arguments must be an object")
-        if mcp_gateway is None:
-            raise HTTPException(503, "Connector gateway not configured")
-        await _check_rate_limit("connectors", caller)
+    async def _execute_connector_call(
+        caller: str, connector: str, tool: str, arguments: dict,
+    ) -> dict:
+        """Actually run one connector tool call + write its audit row.
+
+        Shared by the direct ``allow``/``allow_audit`` path and the held
+        (``connector_call``) executor on confirm — identical exception
+        handling and audit shape in both places.
+        """
         from src.host.mcp_gateway import (
             ConnectorAuthError,
             ConnectorSSRFError,
@@ -3043,6 +3067,114 @@ def create_mesh_app(
         except Exception as e:
             logger.warning("Audit log failed for connector call: %s", e)
         return result
+
+    async def _execute_held_connector_call(record: dict) -> dict:
+        """Executor for a confirmed ``connector_call`` hold (plan §8 #17).
+
+        Runs the SAME call path as the direct endpoint (assignment +
+        SSRF re-checked at execution time by ``mcp_gateway.call_tool``,
+        exactly like today), then delivers the result to the PROPOSING
+        agent as a followup-lane system note — the original HTTP caller
+        (the agent's own tool-call request) is long gone by the time a
+        human confirms, so the result can only reach the agent via a
+        fresh dispatch, mirroring how other host-side notes reach agents
+        (e.g. the onboarding-wake / lead-nudge sends in this same file).
+        """
+        payload = record["payload"]
+        caller = str(payload.get("agent_id", ""))
+        connector = str(payload.get("connector", ""))
+        tool = str(payload.get("tool", ""))
+        arguments = payload.get("arguments") or {}
+        result = await _execute_connector_call(caller, connector, tool, arguments)
+        if lane_manager is not None and caller:
+            try:
+                note = (
+                    f"Your connector call {connector}:{tool} was approved and "
+                    f"executed. Result: {dumps_safe(result)[:1500]}"
+                )
+                await lane_manager.enqueue(caller, note, mode="followup", system_note=True)
+            except Exception as e:
+                logger.warning(
+                    "delivering held connector_call result to %s failed: %s", caller, e,
+                )
+        return {"delivered": True, "change_id": record["nonce"], "result": result}
+
+    app.pending_executors["connector_call"] = _execute_held_connector_call
+
+    @app.post("/mesh/connectors/call")
+    async def connector_call(data: dict, request: Request) -> dict:
+        """Execute one remote connector tool call for the caller.
+
+        Gate order (plan §8 #17): assignment (permission) check, then
+        rate limit, then ``policy_engine.evaluate``, then act on the
+        decision. Assignment is checked here at PROPOSE time (never
+        queue a hold for a connector the agent isn't assigned to) AND
+        again at execution time inside ``mcp_gateway.call_tool`` — both
+        the direct-execute path below and the held executor above go
+        through that same call.
+        """
+        caller = _resolve_agent_id(data.get("agent_id", ""), request)
+        connector = str(data.get("connector", ""))
+        tool = str(data.get("tool", ""))
+        arguments = data.get("arguments") or {}
+        if not connector or not tool:
+            raise HTTPException(400, "connector and tool are required")
+        if not isinstance(arguments, dict):
+            raise HTTPException(400, "arguments must be an object")
+        if mcp_gateway is None:
+            raise HTTPException(503, "Connector gateway not configured")
+        from src.host.mcp_gateway import UnknownConnectorError
+
+        try:
+            mcp_gateway.assigned_connector(connector, caller)
+        except UnknownConnectorError:
+            raise HTTPException(404, f"Unknown connector: {connector}")
+        except PermissionError as exc:
+            _record_denial(
+                "permission", caller=caller, target=connector, gate="connector_assignment",
+            )
+            raise HTTPException(403, str(exc)) from exc
+        await _check_rate_limit("connectors", caller)
+
+        summary = f"Call connector {connector!r} tool {tool!r}"[:200]
+        decision = policy_engine.evaluate(caller, "connector_call", summary=summary)
+        if decision.decision == "deny":
+            _record_denial(
+                "permission", caller=caller, target=connector, gate="policy:connector_call",
+            )
+            raise HTTPException(403, "Connector call denied by policy")
+        if decision.decision == "hold":
+            origin = _validated_origin(request, caller)
+            nonce = str(_uuid.uuid4())
+            payload = {
+                "agent_id": caller,
+                "connector": connector,
+                "tool": tool,
+                "arguments": arguments,
+            }
+            record = pending_actions.store(
+                nonce=nonce,
+                actor="operator",
+                target_kind="connector",
+                target_id=connector,
+                action_kind="connector_call",
+                payload=payload,
+                origin_kind=origin.kind if origin is not None else None,
+                ttl=_CHANGE_TTL_SECONDS,
+                summary=summary,
+                tier=decision.tier,
+            )
+            return {
+                "queued_for_approval": True,
+                "change_id": nonce,
+                "summary": summary,
+                "expires_at": datetime.fromtimestamp(
+                    record["expires_at"], tz=timezone.utc,
+                ).isoformat(),
+                "payload_digest": record["payload_digest"],
+                "requires_confirmation": True,
+            }
+        return await _execute_connector_call(caller, connector, tool, arguments)
 
     # === Wallet Signing Service ===
 
@@ -3109,9 +3241,64 @@ def create_mesh_app(
         except ValueError as e:
             raise HTTPException(400, str(e))
 
+    async def _wallet_transfer_core(
+        agent_id: str, chain: str, to: str, amount: str, token: str,
+    ) -> dict:
+        """Broadcast the transfer via ``WalletService``. No permission
+        checks here — callers are responsible: the direct endpoint below
+        already checked once; the held executor re-checks fully (plan
+        §8 #17) since permissions may have changed since propose time.
+        ``WalletService._check_policy`` (spend caps) and the per-agent
+        lock run inside ``transfer`` exactly as today, in both paths.
+        """
+        if _ws_ref[0] is None:
+            raise HTTPException(503, "Wallet service not configured")
+        logger.info(
+            "Wallet transfer",
+            extra={
+                "extra_data": {
+                    "agent_id": agent_id, "chain": chain, "to": to, "amount": amount,
+                },
+            },
+        )
+        try:
+            return await _ws_ref[0].transfer(agent_id, chain, to, amount, token, permissions)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        except PermissionError as e:
+            raise HTTPException(403, str(e))
+
+    async def _execute_held_wallet_transfer(record: dict) -> dict:
+        """Executor for a confirmed ``wallet_transfer`` hold (plan §8 #17).
+
+        Re-runs the FULL propose-time path — permission checks first
+        (they may have changed since the agent proposed this transfer),
+        then the same core whose ``_check_policy`` spend-cap check and
+        per-agent lock enforce caps at EXECUTION time, not propose time.
+        """
+        payload = record["payload"]
+        agent_id = str(payload.get("agent_id", ""))
+        chain = str(payload.get("chain", ""))
+        if not permissions.can_use_wallet(agent_id):
+            raise HTTPException(403, "Wallet access denied")
+        if not permissions.can_use_wallet_chain(agent_id, chain):
+            raise HTTPException(403, f"Chain not allowed: {chain}")
+        return await _wallet_transfer_core(
+            agent_id, chain, str(payload.get("to", "")),
+            str(payload.get("amount", "")), str(payload.get("token", "native")),
+        )
+
+    app.pending_executors["wallet_transfer"] = _execute_held_wallet_transfer
+
     @app.post("/mesh/wallet/transfer")
     async def wallet_transfer_endpoint(data: dict, request: Request) -> dict:
-        """Sign and broadcast a token transfer."""
+        """Sign and broadcast a token transfer.
+
+        Gate order (plan §8 #17): permission checks, then rate limit,
+        then ``policy_engine.evaluate``, then act. Default decision
+        (financial tier, no yaml) is ``allow`` — zero behavior change;
+        wallet caps remain the real governor.
+        """
         agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
         chain = data.get("chain", "")
         if not permissions.can_use_wallet(agent_id):
@@ -3121,34 +3308,105 @@ def create_mesh_app(
         if _ws_ref[0] is None:
             raise HTTPException(503, "Wallet service not configured")
         await _check_rate_limit("wallet_transfer", agent_id)
+        to = data.get("to", "")
+        amount = data.get("amount", "")
+        token = data.get("token", "native")
+        summary = f"Transfer {amount} {token} on {chain} to {to}"[:200]
+        decision = policy_engine.evaluate(agent_id, "wallet_transfer", summary=summary)
+        if decision.decision == "deny":
+            _record_denial(
+                "permission", caller=agent_id, target=chain, gate="policy:wallet_transfer",
+            )
+            raise HTTPException(403, "Wallet transfer denied by policy")
+        if decision.decision == "hold":
+            origin = _validated_origin(request, agent_id)
+            nonce = str(_uuid.uuid4())
+            payload = {
+                "agent_id": agent_id, "chain": chain, "to": to,
+                "amount": amount, "token": token,
+            }
+            record = pending_actions.store(
+                nonce=nonce,
+                actor="operator",
+                target_kind="wallet",
+                target_id=agent_id,
+                action_kind="wallet_transfer",
+                payload=payload,
+                origin_kind=origin.kind if origin is not None else None,
+                ttl=_CHANGE_TTL_SECONDS,
+                summary=summary,
+                tier=decision.tier,
+            )
+            return {
+                "queued_for_approval": True,
+                "change_id": nonce,
+                "summary": summary,
+                "expires_at": datetime.fromtimestamp(
+                    record["expires_at"], tz=timezone.utc,
+                ).isoformat(),
+                "payload_digest": record["payload_digest"],
+                "requires_confirmation": True,
+            }
+        return await _wallet_transfer_core(agent_id, chain, to, amount, token)
+
+    async def _wallet_execute_core(
+        agent_id: str, chain: str, contract: str, function: str,
+        args: list, value: str, transaction: str,
+    ) -> dict:
+        """Broadcast the contract call / Solana tx via ``WalletService``.
+        No permission checks here — see ``_wallet_transfer_core``."""
+        if _ws_ref[0] is None:
+            raise HTTPException(503, "Wallet service not configured")
         logger.info(
-            "Wallet transfer",
+            "Wallet execute",
             extra={
                 "extra_data": {
-                    "agent_id": agent_id,
-                    "chain": chain,
-                    "to": data.get("to", ""),
-                    "amount": data.get("amount", ""),
-                }
+                    "agent_id": agent_id, "chain": chain,
+                    "contract": contract, "function": function,
+                },
             },
         )
         try:
-            return await _ws_ref[0].transfer(
-                agent_id,
-                chain,
-                data.get("to", ""),
-                data.get("amount", ""),
-                data.get("token", "native"),
-                permissions,
+            return await _ws_ref[0].execute_contract(
+                agent_id, chain, contract, function, args, value, transaction, permissions,
             )
         except ValueError as e:
             raise HTTPException(400, str(e))
         except PermissionError as e:
             raise HTTPException(403, str(e))
 
+    async def _execute_held_wallet_execute(record: dict) -> dict:
+        """Executor for a confirmed ``wallet_execute`` hold (plan §8 #17).
+
+        Re-runs the FULL propose-time path, same rationale as
+        ``_execute_held_wallet_transfer``.
+        """
+        payload = record["payload"]
+        agent_id = str(payload.get("agent_id", ""))
+        chain = str(payload.get("chain", ""))
+        contract = str(payload.get("contract", ""))
+        if not permissions.can_use_wallet(agent_id):
+            raise HTTPException(403, "Wallet access denied")
+        if not permissions.can_use_wallet_chain(agent_id, chain):
+            raise HTTPException(403, f"Chain not allowed: {chain}")
+        if contract and not permissions.can_access_wallet_contract(agent_id, contract):
+            raise HTTPException(403, f"Contract not allowed: {contract}")
+        return await _wallet_execute_core(
+            agent_id, chain, contract, str(payload.get("function", "")),
+            payload.get("args", []) or [], str(payload.get("value", "0")),
+            str(payload.get("transaction", "")),
+        )
+
+    app.pending_executors["wallet_execute"] = _execute_held_wallet_execute
+
     @app.post("/mesh/wallet/execute")
     async def wallet_execute_endpoint(data: dict, request: Request) -> dict:
-        """Sign and broadcast a contract call or Solana transaction."""
+        """Sign and broadcast a contract call or Solana transaction.
+
+        Gate order (plan §8 #17): permission checks, then rate limit,
+        then ``policy_engine.evaluate``, then act. Default decision
+        (financial tier, no yaml) is ``allow`` — zero behavior change.
+        """
         agent_id = _resolve_agent_id(data.get("agent_id", ""), request)
         chain = data.get("chain", "")
         contract = data.get("contract", "")
@@ -3161,32 +3419,50 @@ def create_mesh_app(
         if _ws_ref[0] is None:
             raise HTTPException(503, "Wallet service not configured")
         await _check_rate_limit("wallet_execute", agent_id)
-        logger.info(
-            "Wallet execute",
-            extra={
-                "extra_data": {
-                    "agent_id": agent_id,
-                    "chain": chain,
-                    "contract": contract,
-                    "function": data.get("function", ""),
-                }
-            },
-        )
-        try:
-            return await _ws_ref[0].execute_contract(
-                agent_id,
-                chain,
-                contract,
-                data.get("function", ""),
-                data.get("args", []),
-                data.get("value", "0"),
-                data.get("transaction", ""),
-                permissions,
+        function = data.get("function", "")
+        args = data.get("args", []) or []
+        value = data.get("value", "0")
+        transaction = data.get("transaction", "")
+        summary = f"Execute {function or 'transaction'} on {chain} contract {contract}"[:200]
+        decision = policy_engine.evaluate(agent_id, "wallet_execute", summary=summary)
+        if decision.decision == "deny":
+            _record_denial(
+                "permission", caller=agent_id, target=chain, gate="policy:wallet_execute",
             )
-        except ValueError as e:
-            raise HTTPException(400, str(e))
-        except PermissionError as e:
-            raise HTTPException(403, str(e))
+            raise HTTPException(403, "Wallet execute denied by policy")
+        if decision.decision == "hold":
+            origin = _validated_origin(request, agent_id)
+            nonce = str(_uuid.uuid4())
+            payload = {
+                "agent_id": agent_id, "chain": chain, "contract": contract,
+                "function": function, "args": args, "value": value,
+                "transaction": transaction,
+            }
+            record = pending_actions.store(
+                nonce=nonce,
+                actor="operator",
+                target_kind="wallet",
+                target_id=agent_id,
+                action_kind="wallet_execute",
+                payload=payload,
+                origin_kind=origin.kind if origin is not None else None,
+                ttl=_CHANGE_TTL_SECONDS,
+                summary=summary,
+                tier=decision.tier,
+            )
+            return {
+                "queued_for_approval": True,
+                "change_id": nonce,
+                "summary": summary,
+                "expires_at": datetime.fromtimestamp(
+                    record["expires_at"], tz=timezone.utc,
+                ).isoformat(),
+                "payload_digest": record["payload_digest"],
+                "requires_confirmation": True,
+            }
+        return await _wallet_execute_core(
+            agent_id, chain, contract, function, args, value, transaction,
+        )
 
     # === Agent Registry ===
 
@@ -3286,35 +3562,98 @@ def create_mesh_app(
     _NOTIFY_MAX_LEN = 2000
     _WS_FILE_NAMES = ("SOUL.md", "INSTRUCTIONS.md", "USER.md", "HEARTBEAT.md", "MEMORY.md")
 
+    async def _deliver_notification(agent_id: str, message: str) -> dict:
+        """Actually push the notification across every channel + log it.
+
+        Shared by the direct ``allow``/``allow_audit`` path and the held
+        (``notify_user``) executor on confirm.
+        """
+        # Emit to dashboard first — users should see notifications even if
+        # channel delivery (Telegram/Discord/etc.) fails below.
+        if event_bus:
+            event_bus.emit("notification", agent=agent_id, data={"message": message})
+            if any(f in message for f in _WS_FILE_NAMES):
+                event_bus.emit("workspace_updated", agent=agent_id, data={"message": message})
+        try:
+            await notify_fn(agent_id, message)
+        except Exception as e:
+            logger.warning("notify_user failed: %s", e)
+            raise HTTPException(500, f"Notification failed: {e}")
+        # Best-effort observation-log write. ``agent_id`` was server-
+        # resolved by the caller so the ``from`` is unforgeable. This is
+        # a PULL surface the operator reads via ``read_user_notifications``
+        # — it never wakes anyone. A logging failure must NEVER break the
+        # notify response.
+        try:
+            user_notification_log.record(agent_id, message)
+        except Exception as e:
+            logger.debug("user_notification_log.record failed: %s", e)
+        return {"sent": True}
+
+    async def _execute_held_notify(record: dict) -> dict:
+        """Executor for a confirmed ``notify_user`` hold (plan §8 #17)."""
+        payload = record["payload"]
+        agent_id = str(payload.get("agent_id", ""))
+        message = str(payload.get("message", ""))
+        if notify_fn is None:
+            raise HTTPException(503, "Notifications not available")
+        result = await _deliver_notification(agent_id, message)
+        result["change_id"] = record["nonce"]
+        return result
+
+    app.pending_executors["notify_user"] = _execute_held_notify
+
     @app.post("/mesh/notify")
     async def notify_user(body: NotifyRequest, request: Request) -> dict:
-        """Push a notification from an agent to the user across all channels."""
+        """Push a notification from an agent to the user across all channels.
+
+        No permission check exists here today (recon, plan §8 #17) — the
+        policy gate is this endpoint's first. Default decision (no
+        ``config/policy.yaml``) is ``allow_audit``: delivered exactly as
+        before, plus one audit row. A yaml ``hold`` queues the message
+        for human approval instead of sending it — the response makes
+        clear it was NOT sent (``sent: false`` / ``queued_for_approval``).
+        """
         body.agent_id = _resolve_agent_id(body.agent_id, request)
         await _check_rate_limit("notify", body.agent_id)
         if notify_fn is None:
             raise HTTPException(503, "Notifications not available")
         message = body.message[:_NOTIFY_MAX_LEN]
-        # Emit to dashboard first — users should see notifications even if
-        # channel delivery (Telegram/Discord/etc.) fails below.
-        if event_bus:
-            event_bus.emit("notification", agent=body.agent_id, data={"message": message})
-            if any(f in message for f in _WS_FILE_NAMES):
-                event_bus.emit("workspace_updated", agent=body.agent_id, data={"message": message})
-        try:
-            await notify_fn(body.agent_id, message)
-        except Exception as e:
-            logger.warning("notify_user failed: %s", e)
-            raise HTTPException(500, f"Notification failed: {e}")
-        # Best-effort observation-log write. ``body.agent_id`` was
-        # server-resolved above via ``_resolve_agent_id`` so the ``from``
-        # is unforgeable. This is a PULL surface the operator reads via
-        # ``read_user_notifications`` — it never wakes anyone. A logging
-        # failure must NEVER break the notify response.
-        try:
-            user_notification_log.record(body.agent_id, message)
-        except Exception as e:
-            logger.debug("user_notification_log.record failed: %s", e)
-        return {"sent": True}
+        summary = f"Notify user: {message}"[:200]
+        decision = policy_engine.evaluate(body.agent_id, "notify_user", summary=summary)
+        if decision.decision == "deny":
+            _record_denial(
+                "permission", caller=body.agent_id, target="user", gate="policy:notify_user",
+            )
+            raise HTTPException(403, "Notification denied by policy")
+        if decision.decision == "hold":
+            origin = _validated_origin(request, body.agent_id)
+            nonce = str(_uuid.uuid4())
+            payload = {"agent_id": body.agent_id, "message": message}
+            record = pending_actions.store(
+                nonce=nonce,
+                actor="operator",
+                target_kind="notify",
+                target_id=body.agent_id,
+                action_kind="notify_user",
+                payload=payload,
+                origin_kind=origin.kind if origin is not None else None,
+                ttl=_CHANGE_TTL_SECONDS,
+                summary=summary,
+                tier=decision.tier,
+            )
+            return {
+                "sent": False,
+                "queued_for_approval": True,
+                "change_id": nonce,
+                "summary": summary,
+                "expires_at": datetime.fromtimestamp(
+                    record["expires_at"], tz=timezone.utc,
+                ).isoformat(),
+                "payload_digest": record["payload_digest"],
+                "requires_confirmation": True,
+            }
+        return await _deliver_notification(body.agent_id, message)
 
     @app.post("/mesh/traces")
     async def record_agent_trace(data: dict, request: Request) -> dict:
@@ -9822,6 +10161,13 @@ def create_mesh_app(
         ``target_kind``. ``target_kind`` is ``"team"`` because
         the pending_actions schema predates the rename — it's a
         backend value, not a domain term.
+
+        Consults ``policy_engine.evaluate(caller, "team_delete", ...)``
+        (plan §8 #17) after the operator-or-internal gate and the
+        archived precondition. The irreversible tier is clamped to
+        never resolve below ``hold``, so the default (and everything
+        short of an explicit yaml ``deny``) is exactly today's flow —
+        store + a ``requires_confirmation`` envelope.
         """
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
@@ -9835,6 +10181,17 @@ def create_mesh_app(
                 400,
                 "Team must be archived before delete. Call /mesh/teams/{team_name}/archive first.",
             )
+        members = team_meta.get("members", []) or []
+        # Short headline shown in the inline chat card (max ~80 chars
+        # so it doesn't wrap awkwardly). The longer policy explanation
+        # is kept in the payload for the legacy CLI surface.
+        summary = f"Delete team {team_name!r} and unlink {len(members)} agent(s)"
+        decision = policy_engine.evaluate(caller, "team_delete", summary=summary)
+        if decision.decision == "deny":
+            _record_denial(
+                "permission", caller=caller, target=team_name, gate="policy:team_delete",
+            )
+            raise HTTPException(403, "Team delete denied by policy")
         origin = _validated_origin(request, caller)
         origin_kind = origin.kind if origin is not None else None
         # Cap pending rows to bound storage growth.
@@ -9848,11 +10205,6 @@ def create_mesh_app(
                     (oldest["nonce"],),
                 )
         nonce = str(_uuid.uuid4())
-        members = team_meta.get("members", []) or []
-        # Short headline shown in the inline chat card (max ~80 chars
-        # so it doesn't wrap awkwardly). The longer policy explanation
-        # is kept in the payload for the legacy CLI surface.
-        summary = f"Delete team {team_name!r} and unlink {len(members)} agent(s)"
         payload = {
             "name": team_name,
             "summary": summary,
@@ -9869,6 +10221,7 @@ def create_mesh_app(
             ttl=_CHANGE_TTL_SECONDS,
             summary=summary,
             preview_diff=None,
+            tier=decision.tier,
         )
         return {
             "change_id": nonce,
@@ -9906,6 +10259,13 @@ def create_mesh_app(
                 400,
                 "Agent must be archived before delete. Call /mesh/agents/{agent_id}/archive first.",
             )
+        summary = f"Delete agent {agent_id!r} permanently"
+        decision = policy_engine.evaluate(caller, "agent_delete", summary=summary)
+        if decision.decision == "deny":
+            _record_denial(
+                "permission", caller=caller, target=agent_id, gate="policy:agent_delete",
+            )
+            raise HTTPException(403, "Agent delete denied by policy")
         origin = _validated_origin(request, caller)
         origin_kind = origin.kind if origin is not None else None
         pending_actions.reap_expired()
@@ -9918,7 +10278,6 @@ def create_mesh_app(
                     (oldest["nonce"],),
                 )
         nonce = str(_uuid.uuid4())
-        summary = f"Delete agent {agent_id!r} permanently"
         payload = {
             "agent_id": agent_id,
             "summary": summary,
@@ -9934,6 +10293,7 @@ def create_mesh_app(
             ttl=_CHANGE_TTL_SECONDS,
             summary=summary,
             preview_diff=None,
+            tier=decision.tier,
         )
         return {
             "change_id": nonce,
@@ -10083,6 +10443,11 @@ def create_mesh_app(
             400,
             f"Unsupported pending-delete target_kind: {kind!r}",
         )
+
+    # Register the existing delete executor on the held-actions registry
+    # (plan §8 #17, C.1 row 6) — behavior is byte-identical, only the
+    # dispatch mechanism generalized (see ``confirm_config_change``).
+    app.pending_executors["delete"] = _apply_pending_delete
 
     @app.post("/mesh/tasks/{task_id}/cancel")
     async def cancel_task(task_id: str, request: Request) -> dict:
@@ -11574,27 +11939,41 @@ def create_mesh_app(
         if confirm_origin is None or confirm_origin.kind != "human":
             raise HTTPException(403, "Confirmation requires human origin")
 
+    # Held-action kinds whose STORED row is required to carry human
+    # origin (checked by ``consume(require_origin_kind=...)`` below), in
+    # addition to the unconditional live-request check every confirm
+    # gets from ``_confirm_origin_check``. Delete is the only one: its
+    # propose endpoints are themselves operator-or-internal gated, and
+    # the "operator" identity can be the operator AGENT acting on its
+    # own initiative, not necessarily a human at the keyboard — requiring
+    # the stored proposal to ALSO carry human origin closes that gap
+    # (the plan's "double human-origin" property). notify_user /
+    # connector_call / wallet_transfer / wallet_execute are proposed by
+    # an assigned agent's own tool call, which never carries an X-Origin
+    # header (``mesh_client.py`` doesn't send one on those calls) — so
+    # the stored origin_kind is always empty for them by construction,
+    # and requiring "human" there would make every such hold permanently
+    # unconfirmable. ``_confirm_origin_check`` alone (unconditional,
+    # every action kind) is what actually satisfies "no agent, lead
+    # included, can ever release a hold" for those.
+    _ROW_ORIGIN_REQUIRED_KINDS: frozenset[str] = frozenset({"delete"})
+
     @app.post("/mesh/config/confirm")
     async def confirm_config_change(request: Request) -> dict:
-        """Apply a destructive pending action by change_id only.
+        """Apply a held action by change_id (plan §8 #17, C.1 row 6).
 
-        Post PR #927 this endpoint is the consume side of the
-        delete-confirmation flow only. Config edits no longer flow
-        through propose+confirm — they apply immediately via
-        ``/mesh/agents/{id}/edit-soft`` and emit an undo receipt
-        instead. The endpoint name is retained for SDK / dashboard
+        Generalized from the delete-only dispatcher: any ``action_kind``
+        with a registered executor on ``app.pending_executors`` can be
+        confirmed here. The endpoint name and the ``change_id`` /
+        ``payload_digest`` request shape are retained for SDK / dashboard
         back-compat with the existing ``MeshClient.confirm_config_change``
-        method, which the destructive-action review surface (delete-team,
-        delete-agent) still uses.
+        method.
 
-        Accepted shape: ``target_kind in {"team", "agent"}`` +
-        ``action_kind="delete"``. Any other ``action_kind`` returns
-        HTTP 400 — non-delete pending rows are no longer produced.
-
-        The endpoint inherits ``require_origin_kind="human"`` on
-        ``PendingActions.consume`` and the additional confirm-side
-        ``_confirm_origin_check`` so a forged X-Origin or buggy
-        non-human caller can't flip the lever.
+        ``_confirm_origin_check`` (live confirm request must carry human
+        origin) is unconditional for every action kind. The STORED row's
+        origin is additionally required to be ``"human"`` only for
+        ``action_kind="delete"`` (see ``_ROW_ORIGIN_REQUIRED_KINDS``) —
+        preserving the exact pre-existing delete behavior byte-for-byte.
         """
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
@@ -11604,43 +11983,40 @@ def create_mesh_app(
         change_id = data.get("change_id", "")
         client_digest = data.get("payload_digest")
 
+        # Non-destructive peek so we know which origin requirement to
+        # apply BEFORE consuming — consume() itself decides pass/fail
+        # against whatever we pass here. Unknown/expired nonce defaults
+        # to the strict "human" requirement (matches prior behavior);
+        # consume() returns None for it either way.
+        preview = pending_actions.peek(change_id)
+        preview_kind = preview.get("action_kind") if preview else None
+        require_origin = "human" if preview_kind in _ROW_ORIGIN_REQUIRED_KINDS | {None} else None
+
         # Consume + apply. ``consume`` is atomic: same nonce can only
         # be applied once. If the apply raises, the row is already
         # gone — the caller must propose a new change.
         record = pending_actions.consume(
             change_id,
             confirmer="operator",
-            require_origin_kind="human",
+            require_origin_kind=require_origin,
             expected_payload_digest=client_digest,
         )
         if not record:
             raise HTTPException(400, "Pending action invalid or expired")
 
-        # Post PR #927 this dispatcher is the delete-only path.
-        # ``action_kind`` is always ``"delete"`` and ``target_kind`` is
-        # always one of {"team", "agent"} — the only producers
-        # (/mesh/teams/{name}/propose-delete and
-        # /mesh/agents/{id}/propose-delete) hard-code those values.
-        if record.get("action_kind") == "delete" and record.get("target_kind") in {
-            "team",
-            "agent",
-        }:
-            return await _apply_pending_delete(record)
-
-        # Defensive: a stray non-delete row would otherwise reach the
-        # retired legacy edit-apply path. Refuse it loudly so the
-        # producer surfaces in logs.
-        logger.warning(
-            "rejecting non-delete pending row on /mesh/config/confirm: action_kind=%r target_kind=%r",
-            record.get("action_kind"),
-            record.get("target_kind"),
-        )
-        raise HTTPException(
-            400,
-            "Pending action is not a delete confirmation; "
-            "/mesh/config/confirm no longer accepts config edits "
-            "(use /mesh/agents/{id}/edit-soft instead).",
-        )
+        executor = app.pending_executors.get(record.get("action_kind", ""))
+        if executor is None:
+            logger.warning(
+                "rejecting pending row with no registered executor on "
+                "/mesh/config/confirm: action_kind=%r target_kind=%r",
+                record.get("action_kind"),
+                record.get("target_kind"),
+            )
+            raise HTTPException(
+                400,
+                f"Unsupported pending action_kind: {record.get('action_kind')!r}",
+            )
+        return await executor(record)
 
     # === Task 9 — Pending action review surface ===
     #
@@ -11648,8 +12024,10 @@ def create_mesh_app(
     # chat ``pending_action_card`` both call these endpoints (the System >
     # Operator panel that used to render this queue was removed in PR
     # #1044). Confirm wraps the existing
-    # ``/mesh/config/confirm`` path; cancel is the additive escape
-    # hatch (delete-without-apply) backed by ``PendingActions.cancel``.
+    # ``/mesh/config/confirm`` path (generalized under the action-tier
+    # policy engine, plan §8 #17 — every held action kind, not just
+    # deletes); cancel is the additive escape hatch (drop the row
+    # without applying it) backed by ``PendingActions.cancel``.
     # Both inherit CSRF protection (X-Requested-With) from the
     # dashboard's fetch wrapper and the `_csrf_check` middleware.
 

@@ -1,18 +1,28 @@
-"""Persistent storage for operator-proposed actions awaiting human confirmation.
+"""Persistent storage for actions held pending human confirmation.
 
 Each pending action has a nonce (idempotency key + propose -> confirm pairing),
 a payload digest (replay protection), an origin kind (so confirm-side gates
 can require ``origin_kind="human"``), and an expiry (default 300s -- same as
 the legacy in-memory TTL, configurable per call).
 
+Originally a delete-confirmation-only store; generalized under the
+action-tier policy engine (plan §8 #17, C.1 row 6) into the mesh's one
+held-actions ledger. A ``tier`` column (from
+``src.host.policy.ActionPolicyEngine``) rides alongside each row, and
+``server.py`` dispatches confirmed rows through a pluggable executor
+registry keyed on ``action_kind`` (``app.pending_executors``) instead of
+the old hard-coded delete-only branch -- the store mechanics below
+(nonce, digest, origin gate, TTL + reap, single-use consume) are
+unchanged and now serve every held action kind, not just deletes.
+
 Schema mirrors the Blackboard pattern in ``src/host/mesh.py``: SQLite WAL,
 ``busy_timeout=30000``, schema migration via ``executescript()``.
 
 External contract: ``store(nonce, actor, target_kind, target_id, action_kind,
-payload, origin_kind, ttl)`` returns a record dict; ``consume(nonce, *,
-require_origin_kind, expected_payload_digest, confirmer)`` returns the record
-or None (expired/missing/wrong-digest/wrong-origin/wrong-actor) and atomically
-deletes on success.
+payload, origin_kind, ttl, tier=...)`` returns a record dict; ``consume(nonce,
+*, require_origin_kind, expected_payload_digest, confirmer)`` returns the
+record or None (expired/missing/wrong-digest/wrong-origin/wrong-actor) and
+atomically deletes on success.
 
 Reaping is opportunistic: ``store`` and ``consume`` call ``reap_expired``
 themselves so callers do not need to wire a periodic task. A background
@@ -134,6 +144,14 @@ class PendingActions:
         and a diff preview without a follow-up round-trip. They are
         nullable so older rows (and callers that don't compute them)
         remain valid.
+
+        ``tier`` (plan §8 #17, C.1 row 6) carries the
+        ``ActionPolicyEngine`` tier ("irreversible" / "financial" /
+        "external_visible") the held action was classified under, so the
+        dashboard's held-actions queue can group/label rows without a
+        second lookup. Nullable for the same reason as the other two --
+        older rows and any caller that hasn't wired the policy engine
+        through yet still round-trip cleanly.
         """
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as conn:
@@ -158,11 +176,11 @@ class PendingActions:
                 CREATE INDEX IF NOT EXISTS idx_pending_target
                     ON pending_actions (target_kind, target_id);
             """)
-            # Migrate legacy databases that pre-date the summary/preview_diff
-            # columns. SQLite's ``ALTER TABLE ... ADD COLUMN`` is cheap and
-            # idempotent enough — wrap in try/except to swallow the
+            # Migrate legacy databases that pre-date the summary/preview_diff/
+            # tier columns. SQLite's ``ALTER TABLE ... ADD COLUMN`` is cheap
+            # and idempotent enough — wrap in try/except to swallow the
             # "duplicate column" error on already-migrated DBs.
-            for col in ("summary", "preview_diff"):
+            for col in ("summary", "preview_diff", "tier"):
                 try:
                     conn.execute(
                         f"ALTER TABLE pending_actions ADD COLUMN {col} TEXT",
@@ -185,6 +203,7 @@ class PendingActions:
         ttl: int = _DEFAULT_TTL_SEC,
         summary: str | None = None,
         preview_diff: str | None = None,
+        tier: str | None = None,
     ) -> dict:
         """Persist a pending action. Returns the record dict.
 
@@ -199,6 +218,12 @@ class PendingActions:
         only). Both are surfaced through ``pending_action_created`` so
         the dashboard's inline chat card can render them without a
         follow-up round-trip.
+
+        ``tier`` is the ``ActionPolicyEngine`` classification
+        ("irreversible" / "financial" / "external_visible") of
+        ``action_kind`` at propose time (plan §8 #17). Optional --
+        callers that don't have a policy engine wired (or predate it)
+        leave it ``None``.
         """
         now = time.time()
         digest = _payload_digest(payload)
@@ -212,12 +237,12 @@ class PendingActions:
                 "INSERT OR REPLACE INTO pending_actions "
                 "(nonce, actor, target_kind, target_id, action_kind, "
                 "payload_json, payload_digest, origin_kind, created_at, "
-                "expires_at, status, summary, preview_diff) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)",
+                "expires_at, status, summary, preview_diff, tier) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
                 (
                     nonce, actor, target_kind, target_id, action_kind,
                     dumps_safe(payload), digest, origin_kind,
-                    now, expires_at, summary, preview_diff,
+                    now, expires_at, summary, preview_diff, tier,
                 ),
             )
         # Task 9 — surface to the dashboard so the System > Operator
@@ -234,6 +259,7 @@ class PendingActions:
                 "expires_at": expires_at,
                 "summary": summary,
                 "preview_diff": preview_diff,
+                "tier": tier,
             },
         )
         return {
@@ -250,6 +276,7 @@ class PendingActions:
             "status": "pending",
             "summary": summary,
             "preview_diff": preview_diff,
+            "tier": tier,
         }
 
     def peek(self, nonce: str) -> dict | None:
@@ -264,7 +291,7 @@ class PendingActions:
             row = conn.execute(
                 "SELECT actor, target_kind, target_id, action_kind, "
                 "payload_json, payload_digest, origin_kind, created_at, "
-                "expires_at, status, summary, preview_diff "
+                "expires_at, status, summary, preview_diff, tier "
                 "FROM pending_actions WHERE nonce=?",
                 (nonce,),
             ).fetchone()
@@ -286,6 +313,7 @@ class PendingActions:
             "status": row[9],
             "summary": row[10],
             "preview_diff": row[11],
+            "tier": row[12],
         }
 
     def consume(
@@ -319,7 +347,7 @@ class PendingActions:
                 row = conn.execute(
                     "SELECT actor, target_kind, target_id, action_kind, "
                     "payload_json, payload_digest, origin_kind, created_at, "
-                    "expires_at, status, summary, preview_diff "
+                    "expires_at, status, summary, preview_diff, tier "
                     "FROM pending_actions WHERE nonce=?",
                     (nonce,),
                 ).fetchone()
@@ -387,6 +415,7 @@ class PendingActions:
             "status": "consumed",
             "summary": row[10],
             "preview_diff": row[11],
+            "tier": row[12],
         }
 
     def cancel(
@@ -414,7 +443,7 @@ class PendingActions:
                 row = conn.execute(
                     "SELECT actor, target_kind, target_id, action_kind, "
                     "payload_json, payload_digest, origin_kind, created_at, "
-                    "expires_at, status, summary, preview_diff "
+                    "expires_at, status, summary, preview_diff, tier "
                     "FROM pending_actions WHERE nonce=?",
                     (nonce,),
                 ).fetchone()
@@ -464,6 +493,7 @@ class PendingActions:
             "status": "cancelled",
             "summary": row[10],
             "preview_diff": row[11],
+            "tier": row[12],
         }
 
     # ── Maintenance / surfacing ────────────────────────────────────
@@ -521,7 +551,7 @@ class PendingActions:
             rows = conn.execute(
                 "SELECT nonce, actor, target_kind, target_id, action_kind, "
                 "payload_json, payload_digest, origin_kind, created_at, "
-                "expires_at, status, summary, preview_diff "
+                "expires_at, status, summary, preview_diff, tier "
                 "FROM pending_actions "
                 "WHERE expires_at >= ? ORDER BY created_at ASC",
                 (time.time(),),
@@ -541,6 +571,7 @@ class PendingActions:
                 "status": r[10],
                 "summary": r[11],
                 "preview_diff": r[12],
+                "tier": r[13],
             }
             for r in rows
         ]
