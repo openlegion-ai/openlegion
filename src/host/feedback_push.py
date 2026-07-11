@@ -10,9 +10,12 @@ which appends it to the agent's corrections file — from there it rides
 ``get_learnings_context`` into every future task / chat / heartbeat
 prompt automatically.
 
-``accepted`` / ``acknowledged`` are deliberately NOT pushed: they are
-rating signals, not corrections, and stuffing praise into the
-corrections file would dilute the signal the LLM is told to follow.
+Phase-5 U2 (§8 #23): an ``accepted`` outcome WITH non-empty feedback
+text is pushed the same way, but lands in a SEPARATE
+``learnings/wins.md`` file instead of the corrections file — praise is
+pushed to a separate wins file so it never dilutes the corrections
+signal. ``accepted`` without feedback and ``acknowledged`` are still
+deliberately NOT pushed: there is no comment to record either way.
 
 Best-effort by design: the rated agent's container may be stopped or
 archived. A failed push is logged and surfaced as
@@ -29,6 +32,7 @@ from src.shared.utils import setup_logging
 logger = setup_logging("host.feedback_push")
 
 _ACTIONABLE_OUTCOMES = ("rework", "rejected")
+_WIN_OUTCOMES = ("accepted",)
 
 
 async def push_outcome_feedback(
@@ -38,9 +42,18 @@ async def push_outcome_feedback(
 
     Returns ``"recorded"`` on success, ``"failed"`` on a push error, or
     ``None`` when the outcome carries nothing actionable (wrong outcome
-    kind, empty feedback, no assignee, no transport).
+    kind, empty feedback, no assignee, no transport). ``rework`` /
+    ``rejected`` push corrections; ``accepted`` pushes a win, but only
+    when the feedback is non-empty after stripping whitespace — an
+    empty-comment accept is a rating signal with nothing to record.
     """
-    if outcome not in _ACTIONABLE_OUTCOMES or not feedback:
+    if outcome in _ACTIONABLE_OUTCOMES:
+        if not feedback:
+            return None
+    elif outcome in _WIN_OUTCOMES:
+        if not feedback or not feedback.strip():
+            return None
+    else:
         return None
     if transport is None:
         return None
