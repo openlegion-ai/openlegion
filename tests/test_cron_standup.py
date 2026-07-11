@@ -261,7 +261,16 @@ class TestPostToChannelNotAgentSettable:
     def test_set_cron_tool_schema_has_no_post_to_channel_param(self):
         """The LLM-facing tool schema must not even expose the
         parameter — the agent can't ask for it, let alone set it."""
-        import src.agent.builtins.mesh_tool  # noqa: F401  (registers into _tool_staging)
+        import importlib
+
+        import src.agent.builtins.mesh_tool as mesh_tool
+        # Reload so registration re-runs even when another test file in
+        # this worker cleared the module-global ``_tool_staging`` (e.g.
+        # test_grouped_tools/test_mcp_e2e setup) — a bare re-import is a
+        # no-op and this security pin would KeyError on registry state
+        # instead of testing the schema. Same idiom as test_builtins'
+        # set_cron copy test.
+        importlib.reload(mesh_tool)
         from src.agent.tools import _tool_staging
 
         params = _tool_staging["set_cron"]["parameters"]
