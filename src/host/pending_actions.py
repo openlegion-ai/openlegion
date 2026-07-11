@@ -16,7 +16,12 @@ the old hard-coded delete-only branch -- the store mechanics below
 unchanged and now serve every held action kind, not just deletes.
 
 Schema mirrors the Blackboard pattern in ``src/host/mesh.py``: SQLite WAL,
-``busy_timeout=30000``, schema migration via ``executescript()``.
+``busy_timeout=30000``, schema migration via ``executescript()``. The
+mesh's instance lives at ``data/pending_actions.db``, overridable via the
+``OPENLEGION_PENDING_ACTIONS_DB`` env var (resolved in ``create_mesh_app``,
+the same convention as ``OPENLEGION_TRACK_RECORD_DB``) so test files that
+build mesh apps can pin the store inside ``tmp_path`` instead of sharing
+one cwd database across a whole pytest process.
 
 External contract: ``store(nonce, actor, target_kind, target_id, action_kind,
 payload, origin_kind, ttl, tier=...)`` returns a record dict; ``consume(nonce,

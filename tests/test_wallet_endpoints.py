@@ -259,6 +259,11 @@ def hold_client(mock_wallet_service, mock_permissions, mock_blackboard, tmp_path
     policy_path = tmp_path / "policy.yaml"
     policy_path.write_text("version: 1\ntiers:\n  financial: hold\n")
     monkeypatch.setenv("OPENLEGION_POLICY_CONFIG", str(policy_path))
+    # tmp_path-isolate the held-actions store — every mesh app in one
+    # pytest process would otherwise share a single cwd
+    # data/pending_actions.db and the queue-capacity tests below would
+    # cross-contaminate with other test files.
+    monkeypatch.setenv("OPENLEGION_PENDING_ACTIONS_DB", str(tmp_path / "pending_actions.db"))
     app = create_mesh_app(
         blackboard=mock_blackboard,
         pubsub=MagicMock(),
@@ -270,6 +275,7 @@ def hold_client(mock_wallet_service, mock_permissions, mock_blackboard, tmp_path
     yield client
     client.close()
     monkeypatch.delenv("OPENLEGION_POLICY_CONFIG", raising=False)
+    monkeypatch.delenv("OPENLEGION_PENDING_ACTIONS_DB", raising=False)
 
 
 class TestWalletTransferPolicyHold:
@@ -369,33 +375,28 @@ class TestWalletTransferPolicyHold:
     def test_hold_queue_full_rejected_fail_closed(self, hold_client, mock_wallet_service):
         """With the pending store at _MAX_PENDING, a hold-decision
         transfer is REFUSED (429) — never broadcast, never stored, no
-        existing row evicted."""
+        existing row evicted. The store is tmp_path-isolated per test
+        (OPENLEGION_PENDING_ACTIONS_DB pin in ``hold_client``), so the
+        counts are exact and no post-test purge is needed."""
         from src.host.server import _MAX_PENDING
 
         pa = hold_client.app.pending_actions
-        try:
-            for i in range(_MAX_PENDING):
-                pa.store(
-                    nonce=f"pre-xfer-{i}", actor="operator", target_kind="agent",
-                    target_id="alpha", action_kind="delete", payload={},
-                    origin_kind="human",
-                )
-            before = len(pa.list_pending())
-            assert before >= _MAX_PENDING
-            resp = hold_client.post("/mesh/wallet/transfer", json={
-                "agent_id": "test", "chain": "evm:base", "to": "0x1", "amount": "0.1",
-            })
-            assert resp.status_code == 429
-            assert "Approval queue full" in resp.text
-            mock_wallet_service.transfer.assert_not_awaited()
-            assert len(pa.list_pending()) == before  # not stored
-            for i in range(_MAX_PENDING):
-                assert pa.peek(f"pre-xfer-{i}") is not None  # never evicted
-        finally:
-            # The store is a shared cwd data/pending_actions.db — drop the
-            # prefill so later hold tests don't inherit a full queue.
-            with pa._conn() as conn:
-                conn.execute("DELETE FROM pending_actions WHERE nonce LIKE 'pre-xfer-%'")
+        for i in range(_MAX_PENDING):
+            pa.store(
+                nonce=f"pre-xfer-{i}", actor="operator", target_kind="agent",
+                target_id="alpha", action_kind="delete", payload={},
+                origin_kind="human",
+            )
+        assert len(pa.list_pending()) == _MAX_PENDING
+        resp = hold_client.post("/mesh/wallet/transfer", json={
+            "agent_id": "test", "chain": "evm:base", "to": "0x1", "amount": "0.1",
+        })
+        assert resp.status_code == 429
+        assert "Approval queue full" in resp.text
+        mock_wallet_service.transfer.assert_not_awaited()
+        assert len(pa.list_pending()) == _MAX_PENDING  # not stored
+        for i in range(_MAX_PENDING):
+            assert pa.peek(f"pre-xfer-{i}") is not None  # never evicted
 
 
 class TestWalletExecutePolicyHold:
@@ -460,32 +461,28 @@ class TestWalletExecutePolicyHold:
     def test_hold_queue_full_rejected_fail_closed(self, hold_client, mock_wallet_service):
         """With the pending store at _MAX_PENDING, a hold-decision
         execute is REFUSED (429) — never broadcast, never stored, no
-        existing row evicted."""
+        existing row evicted. tmp_path-isolated store — see the transfer
+        sibling above."""
         from src.host.server import _MAX_PENDING
 
         pa = hold_client.app.pending_actions
-        try:
-            for i in range(_MAX_PENDING):
-                pa.store(
-                    nonce=f"pre-exec-{i}", actor="operator", target_kind="agent",
-                    target_id="alpha", action_kind="delete", payload={},
-                    origin_kind="human",
-                )
-            before = len(pa.list_pending())
-            assert before >= _MAX_PENDING
-            resp = hold_client.post("/mesh/wallet/execute", json={
-                "agent_id": "test", "chain": "evm:base",
-                "contract": "0xRouter", "function": "swap(address,uint256)",
-            })
-            assert resp.status_code == 429
-            assert "Approval queue full" in resp.text
-            mock_wallet_service.execute_contract.assert_not_awaited()
-            assert len(pa.list_pending()) == before  # not stored
-            for i in range(_MAX_PENDING):
-                assert pa.peek(f"pre-exec-{i}") is not None  # never evicted
-        finally:
-            with pa._conn() as conn:
-                conn.execute("DELETE FROM pending_actions WHERE nonce LIKE 'pre-exec-%'")
+        for i in range(_MAX_PENDING):
+            pa.store(
+                nonce=f"pre-exec-{i}", actor="operator", target_kind="agent",
+                target_id="alpha", action_kind="delete", payload={},
+                origin_kind="human",
+            )
+        assert len(pa.list_pending()) == _MAX_PENDING
+        resp = hold_client.post("/mesh/wallet/execute", json={
+            "agent_id": "test", "chain": "evm:base",
+            "contract": "0xRouter", "function": "swap(address,uint256)",
+        })
+        assert resp.status_code == 429
+        assert "Approval queue full" in resp.text
+        mock_wallet_service.execute_contract.assert_not_awaited()
+        assert len(pa.list_pending()) == _MAX_PENDING  # not stored
+        for i in range(_MAX_PENDING):
+            assert pa.peek(f"pre-exec-{i}") is not None  # never evicted
 
 
 # === WalletService.cleanup_agent Tests ===

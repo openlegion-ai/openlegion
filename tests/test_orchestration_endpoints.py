@@ -66,6 +66,11 @@ def v2_app(tmp_path, monkeypatch):
     # override it) shares one on-disk data/track_record.db and accrues
     # rows across the whole test session, making count assertions flaky.
     monkeypatch.setenv("OPENLEGION_TRACK_RECORD_DB", str(tmp_path / "track_record.db"))
+    # Same isolation for the held-actions store — without this pin every
+    # mesh app built in one pytest process shares one cwd
+    # data/pending_actions.db, so the queue-capacity and recommend/hold
+    # assertions below cross-contaminate with other test files.
+    monkeypatch.setenv("OPENLEGION_PENDING_ACTIONS_DB", str(tmp_path / "pending_actions.db"))
     perms_map = {
         "operator": {"can_route_tasks": True},
         "scout":    {"can_route_tasks": True, "can_message": ["analyst", "operator"]},
@@ -86,6 +91,7 @@ def v2_app(tmp_path, monkeypatch):
     bb.close()
     monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
     monkeypatch.delenv("OPENLEGION_TRACK_RECORD_DB", raising=False)
+    monkeypatch.delenv("OPENLEGION_PENDING_ACTIONS_DB", raising=False)
     importlib.reload(server_module)
 
 
@@ -798,9 +804,8 @@ async def test_delete_proposal_still_evicts_oldest_at_cap(v2_app):
     pa = app.pending_actions
     app.teams_store.create_team("doomed")
     app.teams_store.set_status("doomed", "archived")
-    # Start from a clean table so the eviction target is deterministic.
-    with pa._conn() as conn:
-        conn.execute("DELETE FROM pending_actions")
+    # The store is tmp_path-isolated per test (OPENLEGION_PENDING_ACTIONS_DB
+    # pin in v2_app) — no pre-clean or post-purge needed anymore.
     # pre-0 gets the shortest TTL -> smallest expires_at -> eviction target.
     pa.store(
         nonce="pre-0", actor="operator", target_kind="agent",
@@ -814,23 +819,19 @@ async def test_delete_proposal_still_evicts_oldest_at_cap(v2_app):
             origin_kind="human", ttl=300,
         )
     assert len(pa.list_pending()) == _MAX_PENDING
-    try:
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-            r = await c.post(
-                "/mesh/teams/doomed/propose-delete",
-                headers=_human_internal_headers(),
-            )
-        assert r.status_code == 200, r.text
-        new_nonce = r.json()["change_id"]
-        # Evicted exactly the oldest; stored the new proposal; cap held.
-        assert len(pa.list_pending()) == _MAX_PENDING
-        assert pa.peek("pre-0") is None
-        for i in range(1, _MAX_PENDING):
-            assert pa.peek(f"pre-{i}") is not None
-        assert pa.peek(new_nonce) is not None
-    finally:
-        with pa._conn() as conn:
-            conn.execute("DELETE FROM pending_actions")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/teams/doomed/propose-delete",
+            headers=_human_internal_headers(),
+        )
+    assert r.status_code == 200, r.text
+    new_nonce = r.json()["change_id"]
+    # Evicted exactly the oldest; stored the new proposal; cap held.
+    assert len(pa.list_pending()) == _MAX_PENDING
+    assert pa.peek("pre-0") is None
+    for i in range(1, _MAX_PENDING):
+        assert pa.peek(f"pre-{i}") is not None
+    assert pa.peek(new_nonce) is not None
 
 
 @pytest.mark.asyncio

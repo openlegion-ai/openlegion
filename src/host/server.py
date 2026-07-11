@@ -780,7 +780,17 @@ def create_mesh_app(
     # ``/mesh/config/confirm`` held-actions dispatcher (plan §8 #17,
     # C.1 row 6 — generalized from delete-confirmations-only to every
     # held action kind) and the dashboard's pending-action review surface.
-    pending_actions = PendingActions(db_path="data/pending_actions.db")
+    # ``OPENLEGION_PENDING_ACTIONS_DB`` overrides the on-disk path (the
+    # same convention as ``OPENLEGION_TRACK_RECORD_DB`` below) — used by
+    # tests to pin the store inside ``tmp_path``; without it every test
+    # file that builds a mesh app in one pytest process shares a single
+    # cwd ``data/pending_actions.db`` and cross-contaminates queue-capacity
+    # assertions.
+    _pending_actions_db_path = os.environ.get(
+        "OPENLEGION_PENDING_ACTIONS_DB",
+        "data/pending_actions.db",
+    )
+    pending_actions = PendingActions(db_path=_pending_actions_db_path)
     app.pending_actions = pending_actions  # exposed for tests/dashboard
     # Task 9 — wire EventBus so store/consume/cancel/reap_expired emit
     # ``pending_action_*`` events to the dashboard.

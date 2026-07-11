@@ -367,7 +367,7 @@ class TestNoWriteSurface:
         for name in forbidden:
             assert not hasattr(engine, name), f"ActionPolicyEngine grew a write method: {name}"
 
-    def test_no_mesh_route_writes_policy_yaml(self):
+    def test_no_mesh_route_writes_policy_yaml(self, tmp_path, monkeypatch):
         """No POST/PUT/PATCH/DELETE route in the mesh app touches the
         policy surface -- mirrors the grep pin style used for other
         operator-gate invariants in this suite."""
@@ -375,6 +375,11 @@ class TestNoWriteSurface:
         from src.host.permissions import PermissionMatrix
         from src.host.server import create_mesh_app
 
+        # This suite's only mesh-app construction -- keep its stores off
+        # the shared cwd data/ paths so it never cross-contaminates (or
+        # gets contaminated by) other test files in the same process.
+        monkeypatch.setenv("OPENLEGION_PENDING_ACTIONS_DB", str(tmp_path / "pending_actions.db"))
+        monkeypatch.setenv("OPENLEGION_TRACK_RECORD_DB", str(tmp_path / "track_record.db"))
         blackboard = Blackboard(":memory:")
         app = create_mesh_app(
             blackboard=blackboard,

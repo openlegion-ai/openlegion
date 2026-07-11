@@ -48,7 +48,7 @@ def _store_with_linear(tmp_path, agents=("alpha",)) -> ConnectorStore:
 
 
 @pytest.fixture
-def mesh_env(tmp_path):
+def mesh_env(tmp_path, monkeypatch):
     """Mesh app with a real store + gateway (fake transport). Dev-mode
     auth (no auth_tokens) → X-Agent-ID is trusted, which lets tests
     impersonate the operator and workers directly."""
@@ -56,6 +56,10 @@ def mesh_env(tmp_path):
     from src.host.permissions import PermissionMatrix
     from src.host.server import create_mesh_app
 
+    # tmp_path-isolate the held-actions store — every mesh app in one
+    # pytest process would otherwise share a single cwd
+    # data/pending_actions.db (cross-file queue-capacity contamination).
+    monkeypatch.setenv("OPENLEGION_PENDING_ACTIONS_DB", str(tmp_path / "pending_actions.db"))
     store = _store_with_linear(tmp_path)
     gateway = MCPGateway(store, None, client_factory=_factory)
     bb = Blackboard(db_path=str(tmp_path / "bb.db"))
@@ -209,6 +213,9 @@ def mesh_env_hold(tmp_path, monkeypatch):
     policy_path = tmp_path / "policy.yaml"
     policy_path.write_text("version: 1\ntiers:\n  external_visible: hold\n")
     monkeypatch.setenv("OPENLEGION_POLICY_CONFIG", str(policy_path))
+    # tmp_path-isolate the held-actions store (see ``mesh_env``) — the
+    # queue-capacity tests below depend on starting from an empty store.
+    monkeypatch.setenv("OPENLEGION_PENDING_ACTIONS_DB", str(tmp_path / "pending_actions.db"))
 
     store = _store_with_linear(tmp_path)
     gateway = MCPGateway(store, None, client_factory=_factory)
@@ -278,32 +285,27 @@ class TestConnectorCallPolicyGate:
     def test_hold_queue_full_rejected_fail_closed(self, mesh_env_hold):
         """With the pending store at _MAX_PENDING, a hold-decision
         connector call is REFUSED (429) — never executed, never stored,
-        no existing row evicted."""
+        no existing row evicted. The store is tmp_path-isolated per test
+        (OPENLEGION_PENDING_ACTIONS_DB pin in ``mesh_env_hold``), so the
+        counts are exact and no post-test purge is needed."""
         from src.host.server import _MAX_PENDING
 
         client, *_ = mesh_env_hold
         pa = client.app.pending_actions
-        try:
-            for i in range(_MAX_PENDING):
-                pa.store(
-                    nonce=f"pre-conn-{i}", actor="operator", target_kind="agent",
-                    target_id="alpha", action_kind="delete", payload={},
-                    origin_kind="human",
-                )
-            before = len(pa.list_pending())
-            assert before >= _MAX_PENDING
-            resp = self._call(client, "alpha")
-            assert resp.status_code == 429
-            assert "Approval queue full" in resp.text
-            assert FakeSession.instances == []  # never executed
-            assert len(pa.list_pending()) == before  # not stored
-            for i in range(_MAX_PENDING):
-                assert pa.peek(f"pre-conn-{i}") is not None  # never evicted
-        finally:
-            # The store is a shared cwd data/pending_actions.db — drop the
-            # prefill so later hold tests don't inherit a full queue.
-            with pa._conn() as conn:
-                conn.execute("DELETE FROM pending_actions WHERE nonce LIKE 'pre-conn-%'")
+        for i in range(_MAX_PENDING):
+            pa.store(
+                nonce=f"pre-conn-{i}", actor="operator", target_kind="agent",
+                target_id="alpha", action_kind="delete", payload={},
+                origin_kind="human",
+            )
+        assert len(pa.list_pending()) == _MAX_PENDING
+        resp = self._call(client, "alpha")
+        assert resp.status_code == 429
+        assert "Approval queue full" in resp.text
+        assert FakeSession.instances == []  # never executed
+        assert len(pa.list_pending()) == _MAX_PENDING  # not stored
+        for i in range(_MAX_PENDING):
+            assert pa.peek(f"pre-conn-{i}") is not None  # never evicted
 
     def test_hold_confirm_executes_and_delivers_followup_note(self, mesh_env_hold):
         client, _store, _gateway, _bb, lane_manager = mesh_env_hold
