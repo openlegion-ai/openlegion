@@ -1787,6 +1787,39 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   ...test_handover_turn_timeout_is_bounded_never_hangs`, asserts elapsed < 3.0s) can trip
   under xdist CPU contention — green in isolation; same contention class as the known flakes.
 
+- **✅ Landed — U3 action-tier policy engine (#1245, §8 #17 + the #19 skeleton; C.1 row 6
+  COMPLETE).** `src/host/policy.py` (`ActionPolicyEngine`): static tier registry
+  (`agent_delete`/`team_delete` → irreversible, `wallet_transfer`/`wallet_execute` →
+  financial, `notify_user`/`connector_call` → external_visible; `reversible_internal`
+  documented, never gated — config edits stay on ChangeHistory, C.3-c boundary in the module
+  docstring), decisions `allow|allow_audit|hold|deny`, `config/policy.yaml`
+  (human/dashboard-write-only, ConnectorStore-style mtime reload, malformed-yaml fallback to
+  compiled defaults, per-agent override beats tier default, irreversible clamped ≥ hold —
+  deletes can never auto-execute). Defaults preserve every pre-U3 flow byte-for-byte.
+  Held-actions generalization: `pending_actions` gains `tier`; `confirm_config_change`
+  dispatches via `app.pending_executors` (delete = first registered executor, unchanged incl.
+  offboard-before-destroy; unknown kinds 400); notify gains its FIRST-ever gate (recon item 4
+  closed); connector calls assignment-checked at propose AND execution time, held results
+  delivered via followup system note; wallet holds re-run permissions + `_check_policy` caps
+  at execution time. **Recorded interpretation of #19's origin wording:** the live confirm
+  request requires verified human origin UNCONDITIONALLY for every action kind
+  (`_confirm_origin_check`); the STORED-row human-origin requirement stays delete-only —
+  agent-proposed holds definitionally carry agent origin, so a stored-origin requirement
+  would make them unconfirmable; unknown/expired kinds fail closed to the strict requirement.
+  **Recorded audit deviation:** plain `allow` (financial default) writes no `policy_decision`
+  row — `wallet.db` journals every attempt already; hold/deny/allow_audit each write one.
+  **Review fix (personal pre-merge diff review):** fail-closed `_require_held_queue_capacity`
+  on the four agent-initiated hold producers — reap, then 429 at `_MAX_PENDING`, NEVER evict
+  (hold spam cannot flood the Needs-you panel nor displace an operator's pending delete);
+  delete producers keep evict-oldest. Also caught post-gate: the `system_note=True` call-site
+  pin (`test_runtime.py`) updated for the eighth site (held connector result note) with its
+  enumeration entry. **Follow-ups recorded:** `pending_actions` still uses a fixed
+  `data/pending_actions.db` path (no `OPENLEGION_*_DB` env override like its siblings) — a
+  pre-existing test-isolation gap worth normalizing; a consumed-but-failed executor loses the
+  hold (row consumed before execute — same posture as delete, agent must re-propose);
+  `MCPGateway.assigned_connector()` extracted so propose-time assignment checks need no
+  network call. Full suite 8747 passed / 26 skipped / 0 failed.
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|
@@ -1847,6 +1880,7 @@ findings, if any, land as a follow-up fix PR recorded in this ledger.
 | #1239 | U0 — hardening prereqs (§8 #24 i–iii + recon minor items) | merged |
 | #1241 | U1 — durable per-agent track record ledger (§8 #18) | merged |
 | #1243 | U2 — positive feedback push to learnings/wins.md (§8 #23) | merged |
+| #1245 | U3 — action-tier policy engine, held-actions generalization (§8 #17, C.1 row 6) | merged |
 
 ### YOU ARE HERE → Phase 5
 
