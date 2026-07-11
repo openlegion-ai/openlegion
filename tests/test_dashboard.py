@@ -3765,14 +3765,19 @@ class TestDashboardBroadcastProjectScoping:
         assert set(agent_starts) == {"alpha", "beta", "gamma"}
 
     def test_broadcast_non_stream_scoped_to_project(self):
-        """Non-streaming broadcast with project only sends to members."""
+        """Non-streaming broadcast with project only sends to members.
+
+        Phase-4 unit 5: broadcast now routes through ``deliver_chat``
+        (the lane) instead of a direct agent ``/chat`` call — mock the
+        lane, not transport.
+        """
         sent_to = []
 
-        async def _mock_request(aid, method, path, **kwargs):
+        async def _mock_deliver_chat(aid, message, *, trace_id=None, origin=None):
             sent_to.append(aid)
-            return {"response": f"Reply from {aid}"}
+            return f"Reply from {aid}"
 
-        self.components["transport"].request = AsyncMock(side_effect=_mock_request)
+        self.components["lane_manager"].deliver_chat = AsyncMock(side_effect=_mock_deliver_chat)
 
         self.components["teams_store"].create_team("proj1")
         self.components["teams_store"].add_member("proj1", "beta")
@@ -3782,16 +3787,15 @@ class TestDashboardBroadcastProjectScoping:
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert "beta" in data["responses"]
-        assert "alpha" not in data["responses"]
-        assert "gamma" not in data["responses"]
+        assert data["responses"] == {"beta": "Reply from beta"}
+        assert sent_to == ["beta"]
 
     def test_broadcast_non_stream_without_project_sends_to_all(self):
         """Non-streaming broadcast without project sends to all agents."""
-        async def _mock_request(aid, method, path, **kwargs):
-            return {"response": f"Reply from {aid}"}
+        async def _mock_deliver_chat(aid, message, *, trace_id=None, origin=None):
+            return f"Reply from {aid}"
 
-        self.components["transport"].request = AsyncMock(side_effect=_mock_request)
+        self.components["lane_manager"].deliver_chat = AsyncMock(side_effect=_mock_deliver_chat)
 
         resp = self.client.post(
             "/dashboard/api/broadcast",
@@ -3799,7 +3803,11 @@ class TestDashboardBroadcastProjectScoping:
         )
         assert resp.status_code == 200
         data = resp.json()
-        assert set(data["responses"].keys()) == {"alpha", "beta", "gamma"}
+        assert data["responses"] == {
+            "alpha": "Reply from alpha",
+            "beta": "Reply from beta",
+            "gamma": "Reply from gamma",
+        }
 
     def test_broadcast_stream_project_no_matching_agents(self):
         """Streaming broadcast with project that has no running members."""
@@ -3896,10 +3904,10 @@ class TestDashboardBroadcastProjectScoping:
 
     def test_broadcast_non_stream_standalone_only(self):
         """Non-streaming broadcast with standalone=true targets only unassigned agents."""
-        async def _mock_request(aid, method, path, **kwargs):
-            return {"response": f"Reply from {aid}"}
+        async def _mock_deliver_chat(aid, message, *, trace_id=None, origin=None):
+            return f"Reply from {aid}"
 
-        self.components["transport"].request = AsyncMock(side_effect=_mock_request)
+        self.components["lane_manager"].deliver_chat = AsyncMock(side_effect=_mock_deliver_chat)
 
         self.components["teams_store"].create_team("proj1")
         self.components["teams_store"].add_member("proj1", "alpha")
@@ -6467,8 +6475,10 @@ class TestDashboardChatMintsTraceId:
     mint a per-turn trace_id. ``/chat`` forwards it to
     ``LaneManager.deliver_chat`` (priority steer lane, plan §8 #10 —
     routed through the lane instead of a direct agent call);
-    ``/broadcast`` still calls the agent directly and must NOT inherit
-    one. Regression for the dashboard-untraceable defect (server.py:3611
+    ``/broadcast`` now ALSO routes through ``deliver_chat`` (Phase-4 unit
+    5, the recorded Phase-3 residual) but deliberately does not mint —
+    it must carry no inherited trace_id from a prior /chat call.
+    Regression for the dashboard-untraceable defect (server.py:3611
     region) where trace_headers() ran without a seeded contextvar and
     emitted an empty correlation id.
     """
@@ -6476,22 +6486,16 @@ class TestDashboardChatMintsTraceId:
     def setup_method(self):
         self._tmpdir = tempfile.mkdtemp()
         self.components = _make_components(self._tmpdir, include_v2=True)
-        # Capture what /chat hands the lane, and what /broadcast forwards
-        # directly to the agent (two different delivery paths).
+        # Capture every call the lane sees — both /chat and /broadcast
+        # route through the same ``deliver_chat`` mock now.
         self._captured: dict = {}
-
-        async def _fake_request(agent_id, method, path, **kwargs):
-            self._captured["headers"] = kwargs.get("headers") or {}
-            self._captured["agent_id"] = agent_id
-            self._captured["path"] = path
-            return {"response": "ack"}
 
         async def _fake_deliver_chat(agent_id, message, *, trace_id=None, origin=None):
             self._captured["chat_trace_id"] = trace_id
             self._captured["chat_origin"] = origin
+            self._captured["chat_agent_id"] = agent_id
             return "ack"
 
-        self.components["transport"].request = AsyncMock(side_effect=_fake_request)
         self.components["lane_manager"].deliver_chat = AsyncMock(side_effect=_fake_deliver_chat)
         self.client = _make_client(self.components)
 
@@ -6526,9 +6530,9 @@ class TestDashboardChatMintsTraceId:
 
     def test_chat_trace_does_not_leak_into_broadcast(self):
         """Sequential attribution: after a /chat mints + seeds a trace, a
-        /api/broadcast (which calls trace_headers() WITHOUT minting) forwards
-        no stale X-Trace-Id. The /chat endpoint resets the contextvar via
-        token in its finally.
+        /api/broadcast (which reads current_trace_id.get() WITHOUT minting)
+        forwards no stale trace_id to ``deliver_chat``. The /chat endpoint
+        resets the contextvar via token in its finally.
 
         Honesty note (mutation-verified): the dashboard router is mounted on
         the mesh app, which runs requests under Starlette BaseHTTPMiddleware
@@ -6542,13 +6546,16 @@ class TestDashboardChatMintsTraceId:
         )
         chat_trace = self._captured.get("chat_trace_id")
         assert chat_trace and chat_trace.startswith("tr_")
-        # Broadcast does NOT mint a trace — it must carry no inherited one.
+        # Broadcast does NOT mint a trace — every recipient's deliver_chat
+        # call must carry no inherited one (both alpha and beta targeted;
+        # asyncio.as_completed order is non-deterministic, but every call
+        # passes the identical unminted value, so the last-writer capture
+        # is representative regardless of order).
         resp = self.client.post(
             "/dashboard/api/broadcast", json={"message": "to everyone"},
         )
         assert resp.status_code == 200, resp.text
-        bc_hdrs = self._captured.get("headers") or {}
-        bc_trace = bc_hdrs.get("X-Trace-Id") or bc_hdrs.get("x-trace-id")
+        bc_trace = self._captured.get("chat_trace_id")
         assert bc_trace != chat_trace
         assert not bc_trace, f"broadcast leaked a stale trace_id: {bc_trace!r}"
 
@@ -6701,3 +6708,248 @@ class TestDashboardChatPrioritySteerLane:
             "/dashboard/api/agents/alpha/chat", json={"message": "hi"},
         )
         assert resp.status_code == 502
+
+
+class TestDashboardChatStreamBusyAwareFork:
+    """Phase-4 unit 5 (plan §8 #10 residual): ``/api/agents/{id}/chat/stream``
+    forks on the lane's advisory busy flag (``lane_manager.get_status()``).
+    IDLE keeps the pre-existing direct ``transport.stream_request`` proxy —
+    true token streaming, byte-for-byte unchanged. BUSY never opens a
+    direct stream at all: the running turn's tokens physically cannot be
+    relayed to a second caller (a steered reply is the turn's OWN final
+    text, delivered only when the steer future resolves) — it routes
+    through ``LaneManager.deliver_chat`` (the SAME primitive the
+    non-streaming ``/chat`` endpoint uses) and relays the answer over the
+    frontend's EXISTING SSE vocabulary (``text_delta`` + ``done``) rather
+    than inventing a new event type."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_idle_uses_direct_stream_proxy_not_the_lane(self):
+        """Default lane status (``{}`` ⇒ not busy) pins today's behavior:
+        the direct agent stream is opened, ``deliver_chat`` is never
+        called."""
+        async def _mock_stream(agent_id, method, path, **kwargs):
+            yield {"type": "text_delta", "content": "hi "}
+            yield {"type": "done", "response": "hi there"}
+
+        self.components["transport"].stream_request = _mock_stream
+        resp = self.client.post(
+            "/dashboard/api/agents/alpha/chat/stream", json={"message": "hi"},
+        )
+        assert resp.status_code == 200
+        events = _parse_sse(resp.text)
+        assert [e["type"] for e in events] == ["text_delta", "done"]
+        assert events[-1]["response"] == "hi there"
+        self.components["lane_manager"].deliver_chat.assert_not_called()
+
+    def test_busy_routes_through_deliver_chat_not_direct_stream(self):
+        """B1 pin: a busy agent never gets a direct stream opened, and the
+        busy path never calls the agent's ``/chat`` or ``/chat/stream``
+        directly either — it can only reach the running turn's reply via
+        the lane's existing single-lane machinery."""
+        self.components["lane_manager"].get_status.return_value = {
+            "alpha": {"busy": True, "queued": 0, "pending": 0},
+        }
+        self.components["lane_manager"].deliver_chat = AsyncMock(
+            return_value="the turn's actual reply",
+        )
+        resp = self.client.post(
+            "/dashboard/api/agents/alpha/chat/stream", json={"message": "hurry up"},
+        )
+        assert resp.status_code == 200
+        self.components["lane_manager"].deliver_chat.assert_awaited_once()
+        call = self.components["lane_manager"].deliver_chat.await_args
+        assert call.args[0] == "alpha"
+        assert call.args[1] == "hurry up"
+        # B1 pin: no new path can start a second turn — the busy path
+        # never touches the agent transport directly.
+        self.components["transport"].stream_request.assert_not_called()
+        self.components["transport"].request.assert_not_called()
+
+    def test_busy_sse_shape_is_status_note_then_reply_then_done(self):
+        """The busy path emits exactly the shape the design specifies: an
+        immediate status ``text_delta`` (so the UI shows the message was
+        routed in as a priority interrupt), the turn's final reply as ONE
+        chunk (there is no token stream to relay), then the normal
+        ``done`` event — all over the frontend's EXISTING vocabulary, so
+        no app.js changes were needed to render it."""
+        self.components["lane_manager"].get_status.return_value = {
+            "alpha": {"busy": True},
+        }
+        self.components["lane_manager"].deliver_chat = AsyncMock(
+            return_value="steered answer from the running turn",
+        )
+        resp = self.client.post(
+            "/dashboard/api/agents/alpha/chat/stream", json={"message": "status?"},
+        )
+        assert resp.status_code == 200
+        events = _parse_sse(resp.text)
+        assert [e["type"] for e in events] == ["text_delta", "text_delta", "done"]
+        status_note, reply_chunk, done = events
+        assert "mid-task" in status_note["content"]
+        assert reply_chunk["content"] == "steered answer from the running turn"
+        assert done["response"] == "steered answer from the running turn"
+
+    def test_busy_timeout_placeholder_surfaces_sanely_over_sse(self):
+        """``deliver_chat``'s "still processing" placeholder (steer
+        injected but no reply within the wait window) is just another
+        final-chunk string to this endpoint — no special-casing needed,
+        it renders exactly like a real reply would."""
+        placeholder = (
+            "Steered: message injected into alpha's active "
+            "conversation — still processing."
+        )
+        self.components["lane_manager"].get_status.return_value = {
+            "alpha": {"busy": True},
+        }
+        self.components["lane_manager"].deliver_chat = AsyncMock(return_value=placeholder)
+        resp = self.client.post(
+            "/dashboard/api/agents/alpha/chat/stream", json={"message": "still there?"},
+        )
+        assert resp.status_code == 200
+        events = _parse_sse(resp.text)
+        assert events[-1]["type"] == "done"
+        assert events[-1]["response"] == placeholder
+        assert any(e["type"] == "text_delta" and e["content"] == placeholder for e in events)
+
+    def test_busy_path_delivery_failure_surfaces_as_sse_error(self):
+        """A ``deliver_chat`` exception on the busy path becomes an SSE
+        ``error`` event, mirroring the idle generator's own exception
+        handling — never an unhandled 500 mid-stream."""
+        self.components["lane_manager"].get_status.return_value = {
+            "alpha": {"busy": True},
+        }
+        self.components["lane_manager"].deliver_chat = AsyncMock(
+            side_effect=RuntimeError("agent unreachable"),
+        )
+        resp = self.client.post(
+            "/dashboard/api/agents/alpha/chat/stream", json={"message": "hi"},
+        )
+        assert resp.status_code == 200
+        events = _parse_sse(resp.text)
+        assert any(e["type"] == "error" for e in events)
+
+    def test_busy_path_without_lane_manager_falls_back_to_idle(self):
+        """No ``lane_manager`` wired at all → ``get_status()`` reads
+        ``{}`` → the busy check can never be True → falls straight to the
+        pre-existing direct-stream path, identical to today's behavior
+        when the subsystem is absent."""
+        self.components["lane_manager"] = None
+        client = _make_client(self.components)
+
+        async def _mock_stream(agent_id, method, path, **kwargs):
+            yield {"type": "done", "response": "ok"}
+
+        self.components["transport"].stream_request = _mock_stream
+        resp = client.post(
+            "/dashboard/api/agents/alpha/chat/stream", json={"message": "hi"},
+        )
+        assert resp.status_code == 200
+        events = _parse_sse(resp.text)
+        assert events[-1]["type"] == "done"
+
+
+class TestDashboardBroadcastPrioritySteerLane:
+    """Phase-4 unit 5 (plan §8 #10 residual): ``/api/broadcast`` fans out
+    through ``LaneManager.deliver_chat`` per recipient instead of calling
+    each agent's ``/chat`` directly — busy recipients get steered into
+    their running turn (reply back-edge), idle recipients get a normal
+    followup turn. ``test_busy_recipient_steered_idle_recipient_followup``
+    wires a REAL ``LaneManager`` (fake ``steer_fn``/``dispatch_fn``) so the
+    routing DECISION itself is exercised through the dashboard endpoint,
+    not just asserted against a bare mock."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_busy_recipient_steered_idle_recipient_followup(self):
+        from src.host.lanes import LaneManager
+
+        dispatched: list[str] = []
+
+        async def steer_fn(agent, message, *, wait_reply=False, timeout=None, system_note=False):
+            if agent == "alpha":
+                return {"injected": True, "reply": f"steered reply for {agent}"}
+            return {"injected": False}
+
+        async def dispatch_fn(agent, message, **kwargs):
+            dispatched.append(agent)
+            return f"followup reply for {agent}"
+
+        self.components["lane_manager"] = LaneManager(dispatch_fn=dispatch_fn, steer_fn=steer_fn)
+        client = _make_client(self.components)
+
+        resp = client.post("/dashboard/api/broadcast", json={"message": "status check"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["responses"] == {
+            "alpha": "steered reply for alpha",
+            "beta": "followup reply for beta",
+        }
+        # B1 pin: the busy (steered) recipient's turn never got a SECOND
+        # parallel dispatch — only the idle recipient hit dispatch_fn.
+        assert dispatched == ["beta"]
+
+    def test_response_shape_and_wait_contract_unchanged(self):
+        """Broadcast already WAITED for every reply before responding
+        (not fire-and-forget) — deliver_chat's wait-for-reply semantics
+        preserve that contract; the response shape (``{"responses": {...}}``)
+        is unchanged for the frontend."""
+        async def _mock_deliver_chat(aid, message, *, trace_id=None, origin=None):
+            return f"reply from {aid}"
+
+        self.components["lane_manager"].deliver_chat = AsyncMock(side_effect=_mock_deliver_chat)
+        client = _make_client(self.components)
+        resp = client.post("/dashboard/api/broadcast", json={"message": "hi all"})
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "responses": {
+                "alpha": "reply from alpha",
+                "beta": "reply from beta",
+            },
+        }
+
+    def test_recipients_dispatched_concurrently_not_serially(self):
+        """A barrier that only releases once BOTH in-flight deliveries
+        have started proves overlap — if broadcast dispatched serially,
+        the first call would deadlock waiting on a peer that can't start
+        until the first call finishes (caught by ``wait_for``'s timeout
+        instead of hanging the suite)."""
+        import asyncio
+
+        started: list[str] = []
+        barrier = asyncio.Event()
+
+        async def _mock_deliver_chat(aid, message, *, trace_id=None, origin=None):
+            started.append(aid)
+            if len(started) < 2:
+                await asyncio.wait_for(barrier.wait(), timeout=5)
+            else:
+                barrier.set()
+            return f"reply from {aid}"
+
+        self.components["lane_manager"].deliver_chat = AsyncMock(side_effect=_mock_deliver_chat)
+        client = _make_client(self.components)
+
+        resp = client.post("/dashboard/api/broadcast", json={"message": "hi"})
+        assert resp.status_code == 200
+        assert set(started) == {"alpha", "beta"}
+
+    def test_no_lane_manager_returns_503(self):
+        self.components["lane_manager"] = None
+        client = _make_client(self.components)
+        resp = client.post("/dashboard/api/broadcast", json={"message": "hi"})
+        assert resp.status_code == 503
