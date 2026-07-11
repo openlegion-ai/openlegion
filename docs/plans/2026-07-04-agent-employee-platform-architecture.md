@@ -1421,6 +1421,24 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   on onboarding hiccups. CLAUDE.md gains Known Constraint #13 (offboard-before-delete).
   Full local suite 8496 passed / 26 skipped / 0 failed.
 
+- **✅ Landed — Phase-4 unit 4: Team Room dashboard (#1224; §6 "who's doing what, thread activity,
+  plate per agent" — read-only, zero new write paths or agent-reachable endpoints).** Plate
+  snapshot: `CronScheduler._last_plate` records each heartbeat tick's gate computation as a
+  BYPRODUCT — `{checked_at, triggered_probes, has_recent_activity, is_default_heartbeat,
+  actionable, has_goals, utility_model_configured, dispatched}` — on every tick path
+  (actionable dispatch / goals-only dispatch / gated return); manual triggers never write; zero
+  extra container calls (pinned by a call-count test); `get_last_plate` is the sole reader and
+  agent deletion drops the entry. Composed read: `GET /api/teams/{name}/room` assembles team
+  meta + lead, members with busy/idle (lane status), current working task, plate snapshot, and
+  recent team threads — all in-process from the injected live objects, every source
+  None-guarded, 404 unknown team, auth rides the dashboard router (hosted-mode 401 tested).
+  UI: new `room` Team Hub sub-tab (now the team default — the old `work` default was unpinned):
+  member cards with Lead badge, busy dot, current task and a plate line; team-goal header;
+  scoped thread-activity pane reusing the Workplace Threads read-only pattern with its own
+  state; WS refresh rides the existing `queue_changed`/`thread_message` debounce (no new
+  polling); the four frozen top-nav tab IDs untouched and now pinned by a dedicated test.
+  28 new tests. Full local suite 8524 passed / 26 skipped / 0 failed.
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|
@@ -1468,6 +1486,7 @@ findings, if any, land as a follow-up fix PR recorded in this ledger.
 | #1218 | Lead role core — designation, advisory verdicts, host-published standup (unit 1) | merged |
 | #1220 | hiring wizard v2 — config file-lock (B-pre #2), role unfrozen, goals-driven hiring (unit 2) | merged |
 | #1222 | onboarding + offboarding-with-handover — three delete surfaces converge (unit 3) | merged |
+| #1224 | Team Room — plate snapshots, composed room read, default Team Hub sub-tab (unit 4) | merged |
 
 ### YOU ARE HERE → Phase 4
 
