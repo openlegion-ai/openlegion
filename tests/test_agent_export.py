@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 from fastapi.testclient import TestClient
 
 
-def _build_app(tmp_path, monkeypatch, *, transport=None, cron_scheduler=None):
+def _build_app(tmp_path, monkeypatch, *, transport=None, cron_scheduler=None, auth_tokens=None):
     import src.cli.config as cli_config
     from src.host.mesh import Blackboard, MessageRouter, PubSub
     from src.host.permissions import PermissionMatrix
@@ -22,6 +22,10 @@ def _build_app(tmp_path, monkeypatch, *, transport=None, cron_scheduler=None):
         "_load_config",
         lambda: {"agents": {"scout": {"role": "researcher", "model": "openai/gpt-4o-mini"}}},
     )
+    # Isolate the track-record ledger DB into tmp_path — otherwise every
+    # test file that doesn't override it shares one on-disk
+    # data/track_record.db and count assertions get flaky.
+    monkeypatch.setenv("OPENLEGION_TRACK_RECORD_DB", str(tmp_path / "track_record.db"))
 
     perms = PermissionMatrix()
     bb = Blackboard(db_path=str(tmp_path / "bb.db"))
@@ -33,7 +37,7 @@ def _build_app(tmp_path, monkeypatch, *, transport=None, cron_scheduler=None):
         pubsub=pubsub,
         router=router,
         permissions=perms,
-        auth_tokens={"operator": "tok-op"},
+        auth_tokens=auth_tokens or {"operator": "tok-op"},
         cron_scheduler=cron_scheduler,
         transport=transport,
     )
@@ -65,6 +69,8 @@ def test_export_bundles_config_permissions_cron(tmp_path, monkeypatch):
         assert body["workspace"] is None
         # no standing goals set → null, matching the optional-section style
         assert body["goals"] is None
+        # no track record events → empty (but present) section (§8 #18)
+        assert body["track_record"] == {"counts": {}, "recent": []}
     finally:
         bb.close()
 
@@ -141,5 +147,129 @@ def test_export_requires_operator(tmp_path, monkeypatch):
             headers={"Authorization": "Bearer tok-worker"},
         )
         assert resp.status_code in (401, 403), resp.text
+    finally:
+        bb.close()
+
+
+# =============================================================================
+# Durable track record (plan §8 #18) — Personnel-File section
+# =============================================================================
+
+
+def test_export_includes_track_record_counts_and_recent(tmp_path, monkeypatch):
+    app, bb = _build_app(tmp_path, monkeypatch)
+    try:
+        app.track_record_store.record(
+            source="task_outcome", ref_id="task_1", outcome="accepted",
+            rater_kind="human", agent_id="scout", rated_by="operator",
+        )
+        app.track_record_store.record(
+            source="task_outcome", ref_id="task_2", outcome="rework",
+            rater_kind="operator_agent", agent_id="scout", rated_by="operator",
+        )
+        resp = TestClient(app).get("/mesh/agents/scout/export", headers=_OP)
+        assert resp.status_code == 200, resp.text
+        tr = resp.json()["track_record"]
+        assert tr["counts"] == {"task_outcome": {"accepted": 1, "rework": 1}}
+        assert len(tr["recent"]) == 2
+        assert tr["recent"][0]["ref_id"] == "task_2"  # newest first
+    finally:
+        bb.close()
+
+
+def test_export_track_record_absent_when_read_fails(tmp_path, monkeypatch):
+    """Bundle build must not fail when the store is unreachable — the
+    ``track_record`` section degrades to None (mirrors ``workspace``)."""
+    app, bb = _build_app(tmp_path, monkeypatch)
+    try:
+        monkeypatch.setattr(
+            app.track_record_store, "counts_for_agent",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db gone")),
+        )
+        resp = TestClient(app).get("/mesh/agents/scout/export", headers=_OP)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["track_record"] is None
+    finally:
+        bb.close()
+
+
+# =============================================================================
+# GET /mesh/agents/{id}/track-record (plan §8 #18 read surface)
+# =============================================================================
+
+
+_SCOUT = {"Authorization": "Bearer tok-scout"}
+
+
+def test_track_record_endpoint_self_read_allowed(tmp_path, monkeypatch):
+    app, bb = _build_app(
+        tmp_path, monkeypatch, auth_tokens={"operator": "tok-op", "scout": "tok-scout"},
+    )
+    try:
+        app.track_record_store.record(
+            source="task_outcome", ref_id="task_1", outcome="accepted",
+            rater_kind="human", agent_id="scout", rated_by="operator",
+        )
+        resp = TestClient(app).get("/mesh/agents/scout/track-record", headers=_SCOUT)
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["agent_id"] == "scout"
+        assert body["counts"] == {"task_outcome": {"accepted": 1}}
+        assert len(body["recent"]) == 1
+    finally:
+        bb.close()
+
+
+def test_track_record_endpoint_other_agent_403(tmp_path, monkeypatch):
+    app, bb = _build_app(
+        tmp_path, monkeypatch,
+        auth_tokens={"operator": "tok-op", "scout": "tok-scout", "writer": "tok-writer"},
+    )
+    try:
+        resp = TestClient(app).get(
+            "/mesh/agents/scout/track-record",
+            headers={"Authorization": "Bearer tok-writer"},
+        )
+        assert resp.status_code == 403, resp.text
+    finally:
+        bb.close()
+
+
+def test_track_record_endpoint_operator_allowed(tmp_path, monkeypatch):
+    app, bb = _build_app(tmp_path, monkeypatch)
+    try:
+        resp = TestClient(app).get("/mesh/agents/scout/track-record", headers=_OP)
+        assert resp.status_code == 200, resp.text
+    finally:
+        bb.close()
+
+
+def test_track_record_endpoint_unknown_agent_404(tmp_path, monkeypatch):
+    app, bb = _build_app(tmp_path, monkeypatch)
+    try:
+        resp = TestClient(app).get("/mesh/agents/ghost/track-record", headers=_OP)
+        assert resp.status_code == 404, resp.text
+    finally:
+        bb.close()
+
+
+def test_track_record_endpoint_autonomy_counts_exclude_operator_agent(tmp_path, monkeypatch):
+    """Pins the rating-trust rule (plan §8 #18): an operator-agent-rated
+    event shows up in ``counts`` but never in ``autonomy_counts``."""
+    app, bb = _build_app(tmp_path, monkeypatch)
+    try:
+        app.track_record_store.record(
+            source="task_outcome", ref_id="task_1", outcome="accepted",
+            rater_kind="human", agent_id="scout", rated_by="operator",
+        )
+        app.track_record_store.record(
+            source="task_outcome", ref_id="task_2", outcome="accepted",
+            rater_kind="operator_agent", agent_id="scout", rated_by="operator",
+        )
+        resp = TestClient(app).get("/mesh/agents/scout/track-record", headers=_OP)
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["counts"] == {"task_outcome": {"accepted": 2}}
+        assert body["autonomy_counts"] == {"task_outcome": {"accepted": 1}}
     finally:
         bb.close()

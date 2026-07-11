@@ -720,6 +720,13 @@ def create_dashboard_router(
     # team_id) -> None`` — fire-and-forget (schedules its own background
     # task; never awaited here). Optional for the same reason.
     onboarding_wake: Any = None,
+    # Durable per-agent track record (plan §8 #18). The runtime passes
+    # the same instance the mesh app holds (``getattr(app,
+    # "track_record_store", None)``, mirroring ``summaries_store``
+    # above). Optional so existing dashboard tests keep working — the
+    # human-path write points below no-op (via ``record_best_effort``)
+    # when absent.
+    track_record_store: Any = None,
 ) -> APIRouter:
     """Create the dashboard FastAPI router."""
     if teams_store is None:
@@ -8621,7 +8628,7 @@ def create_dashboard_router(
                 "feedback is required for rating='rework'",
             )
         try:
-            return summaries_store.set_rating(
+            result = summaries_store.set_rating(
                 summary_id,
                 rating,
                 feedback or None,
@@ -8633,6 +8640,23 @@ def create_dashboard_router(
             raise HTTPException(409, str(e))
         except ValueError as e:
             raise HTTPException(400, str(e))
+        # Durable track record (plan §8 #18) — this is the HUMAN path
+        # (dashboard rating UI), so rater_kind is "human": counts at full
+        # weight in earned-autonomy scoring. solo scope maps to a single
+        # agent_id; team scope has no single rated agent.
+        from src.host.track_record import record_best_effort
+
+        record_best_effort(
+            track_record_store,
+            source="summary_rating",
+            ref_id=summary_id,
+            outcome=rating,
+            rater_kind="human",
+            agent_id=result["scope_id"] if result.get("scope_kind") == "solo" else None,
+            team_id=result["scope_id"] if result.get("scope_kind") == "team" else None,
+            rated_by="operator",
+        )
+        return result
 
     @api_router.get("/api/workplace/goals")
     async def api_workplace_goals() -> dict:
@@ -9256,6 +9280,21 @@ def create_dashboard_router(
         )
         if push_status:
             result["feedback_push"] = push_status
+        # Durable track record (plan §8 #18) — this is the HUMAN path
+        # (dashboard outcome UI), so rater_kind is "human": counts at
+        # full weight in earned-autonomy scoring.
+        from src.host.track_record import record_best_effort
+
+        record_best_effort(
+            track_record_store,
+            source="task_outcome",
+            ref_id=task_id,
+            outcome=outcome,
+            rater_kind="human",
+            agent_id=updated.get("assignee"),
+            team_id=updated.get("team_id"),
+            rated_by="operator",
+        )
         if outcome == "rework":
             try:
                 rework = tasks_store.create_rework_task(

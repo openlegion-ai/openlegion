@@ -841,6 +841,21 @@ def create_mesh_app(
     )
     app.summaries_store = summaries_store  # exposed for tests/dashboard
 
+    # Durable per-agent track record (plan §8 #18) — an append-only
+    # ledger of task-outcome / summary-rating / drive-review events,
+    # written host-side at rating time so history survives the 90d/30d
+    # reap on the two sources it's assembled from. NEVER reaped itself
+    # (see src/host/track_record.py). ``record_best_effort`` is the
+    # shared best-effort writer every write point below calls.
+    from src.host.track_record import AUTONOMY_RATER_KINDS, TrackRecordStore, record_best_effort
+
+    _track_record_db_path = os.environ.get(
+        "OPENLEGION_TRACK_RECORD_DB",
+        "data/track_record.db",
+    )
+    track_record_store = TrackRecordStore(db_path=_track_record_db_path)
+    app.track_record_store = track_record_store  # exposed for tests/dashboard
+
     # Durable verbatim-intent store (Phase 2, session observability).
     # Instantiated in cli/runtime and passed in; attached here so the
     # Phase 3 read endpoints / reader can reach it off the app.
@@ -6598,6 +6613,42 @@ def create_mesh_app(
             raise HTTPException(404, f"Review '{review_id}' not found for team '{team_id}'")
         return review
 
+    def _record_drive_review_outcome(
+        team_id: str, review_id: str, resolved: dict, resolution: str, resolver: str,
+    ) -> None:
+        """Durable track record write (plan §8 #18) for a merge/reject.
+
+        agent_id is the review AUTHOR (submitter); rater_kind is
+        "human" — today's only path to merge/reject is operator-or-
+        internal (``_require_operator_or_internal``), so every
+        resolution here is a human-executed or internally-confirmed
+        action. details_json carries the lead's advisory verdict
+        alongside the resolution so ``pair_trust`` can later measure
+        (lead, submitter) trust for kernel-executed auto-merge (§8 #20).
+        """
+        try:
+            team = teams_store.get_team(team_id) or {}
+        except Exception:
+            team = {}
+        record_best_effort(
+            track_record_store,
+            source="drive_review",
+            ref_id=review_id,
+            outcome=resolution,
+            rater_kind="human",
+            agent_id=resolved.get("author"),
+            team_id=team_id,
+            rated_by=resolver,
+            details={
+                "branch": resolved.get("branch"),
+                "lead_agent_id": team.get("lead_agent_id"),
+                "lead_verdict": resolved.get("lead_verdict"),
+                "lead_verdict_at": resolved.get("lead_verdict_at"),
+                "resolution": resolution,
+                "resolved_by": resolver,
+            },
+        )
+
     @app.post("/mesh/teams/{team_id}/drive/reviews/{review_id}/merge")
     async def drive_merge_review(team_id: str, review_id: str, request: Request) -> dict:
         """Integrate a reviewed branch into main (operator-or-internal).
@@ -6681,6 +6732,7 @@ def create_mesh_app(
             after_value=commit,
             provenance="user",
         )
+        _record_drive_review_outcome(team_id, review_id, resolved, "merged", caller)
         return {"merged": True, "review": resolved, "merge_commit": commit}
 
     @app.post("/mesh/teams/{team_id}/drive/reviews/{review_id}/reject")
@@ -6704,6 +6756,7 @@ def create_mesh_app(
             after_value=review_id,
             provenance="user",
         )
+        _record_drive_review_outcome(team_id, review_id, resolved, "rejected", caller)
         return {"rejected": True, "review": resolved}
 
     @app.post("/mesh/teams/{team_id}/drive/reviews/{review_id}/verdict")
@@ -8584,7 +8637,7 @@ def create_mesh_app(
                 SummaryNotFound,
             )
 
-            return summaries_store.set_rating(
+            result = summaries_store.set_rating(
                 summary_id,
                 rating,
                 feedback=sanitize_for_prompt(feedback) if feedback else None,
@@ -8596,6 +8649,21 @@ def create_mesh_app(
             raise HTTPException(409, str(e))
         except ValueError as e:
             raise HTTPException(400, str(e))
+        # Durable track record (plan §8 #18) — this is the operator-AGENT
+        # path (mesh-reachable), so rater_kind is "operator_agent" (the
+        # rating-trust rule excludes it from autonomy scoring). solo scope
+        # maps to a single agent_id; team scope has no single rated agent.
+        record_best_effort(
+            track_record_store,
+            source="summary_rating",
+            ref_id=summary_id,
+            outcome=rating,
+            rater_kind="operator_agent",
+            agent_id=result["scope_id"] if result.get("scope_kind") == "solo" else None,
+            team_id=result["scope_id"] if result.get("scope_kind") == "team" else None,
+            rated_by=caller,
+        )
+        return result
 
     # === Operator product surface (Task 7) — read tools ===
     #
@@ -9166,6 +9234,22 @@ def create_mesh_app(
                 logger.debug("agent bundle: workspace fetch for %s failed: %s", agent_id, e)
                 workspace = None
 
+        # Durable track record (plan §8 #18) — the ledger the two reaped
+        # sources (tasks/work_summaries) feed at rating time. None-guarded
+        # best-effort like ``workspace`` above: the store is always wired
+        # in normal boot, but a standalone/test construction may omit it,
+        # and a bundle build must never fail because of it.
+        track_record: dict | None = None
+        if track_record_store is not None:
+            try:
+                track_record = {
+                    "counts": track_record_store.counts_for_agent(agent_id),
+                    "recent": track_record_store.recent_events(agent_id, limit=20),
+                }
+            except Exception as e:
+                logger.warning("agent bundle: track record read for %s failed: %s", agent_id, e)
+                track_record = None
+
         return {
             "bundle_version": 1,
             "agent_id": agent_id,
@@ -9177,6 +9261,7 @@ def create_mesh_app(
             # C.3-b) — ``None`` when unset, matching ``workspace``'s
             # optional-section style.
             "goals": teams_store.get_agent_goals(agent_id),
+            "track_record": track_record,
         }
 
     @app.get("/mesh/agents/{agent_id}/export")
@@ -9197,6 +9282,44 @@ def create_mesh_app(
         if agent_cfg is None:
             raise HTTPException(404, f"Agent '{agent_id}' not found")
         return await _build_agent_bundle(agent_id, agent_cfg)
+
+    @app.get("/mesh/agents/{agent_id}/track-record")
+    async def get_agent_track_record(agent_id: str, request: Request) -> dict:
+        """Read an agent's durable track record (plan §8 #18).
+
+        Self-or-operator-or-internal — mirrors the standing-goals read
+        gate (``get_agent_goals_endpoint``). ``counts`` covers every
+        rater kind; ``autonomy_counts`` is restricted to
+        ``rater_kinds=("human", "system")`` — the rating-trust rule:
+        operator-agent ratings must never inflate the autonomy ladder
+        even though they're visible in ``counts`` and still feed
+        ``feedback_push`` learning.
+        """
+        caller = _extract_verified_agent_id(request)
+        if caller != agent_id and not _caller_is_operator(caller, request) and not _is_internal_caller(request):
+            _record_denial(
+                "permission",
+                caller=caller,
+                target=agent_id,
+                gate="track_record:read",
+            )
+            raise HTTPException(
+                403,
+                "Track record is readable by the agent itself or the operator only",
+            )
+        from src.cli.config import _load_config
+
+        cfg = _load_config()
+        if cfg.get("agents", {}).get(agent_id) is None:
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+        return {
+            "agent_id": agent_id,
+            "counts": track_record_store.counts_for_agent(agent_id),
+            "autonomy_counts": track_record_store.counts_for_agent(
+                agent_id, rater_kinds=AUTONOMY_RATER_KINDS,
+            ),
+            "recent": track_record_store.recent_events(agent_id, limit=20),
+        }
 
     # ── Offboarding-with-handover (plan §8 #15) ───────────────────
     #
@@ -10087,6 +10210,20 @@ def create_mesh_app(
         )
         if push_status:
             result["feedback_push"] = push_status
+        # Durable track record (plan §8 #18) — this is the operator-AGENT
+        # path (mesh-reachable), so rater_kind is "operator_agent": the
+        # rating-trust rule excludes it from autonomy scoring even though
+        # it's counted here and still feeds feedback_push above.
+        record_best_effort(
+            track_record_store,
+            source="task_outcome",
+            ref_id=task_id,
+            outcome=outcome,
+            rater_kind="operator_agent",
+            agent_id=updated.get("assignee"),
+            team_id=updated.get("team_id"),
+            rated_by="operator",
+        )
         if outcome == "rework":
             try:
                 rework = tasks_store.create_rework_task(

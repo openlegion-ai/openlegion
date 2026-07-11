@@ -1349,6 +1349,81 @@ class TestReviewFlow:
             live_server, f"/mesh/teams/team-x/drive/reviews/{review['id']}/reject", "operator",
         ).status_code == 409
 
+    @_requires_merge_tree
+    def test_merge_writes_track_record_event_with_lead_verdict_details(
+        self, live_server, drive_env, tmp_path,
+    ):
+        """Plan §8 #18: a merge is a HUMAN-executed resolution (today's
+        only path to merge is operator-or-internal) — the durable event
+        carries the review author as agent_id and the lead's advisory
+        verdict in details_json so ``pair_trust`` (§8 #20) can later
+        measure (lead, submitter) trust for kernel-executed auto-merge."""
+        store = drive_env["store"]
+        store.set_lead("team-x", "member2")
+        self._push_branch(live_server, tmp_path, "feat-tr", "tr.md", "content\n")
+        review = self._post(
+            live_server, "/mesh/teams/team-x/drive/reviews", "member1",
+            {"branch": "feat-tr", "title": "tr"},
+        ).json()["review"]
+        verdict_resp = self._post(
+            live_server, f"/mesh/teams/team-x/drive/reviews/{review['id']}/verdict", "member2",
+            {"verdict": "approve", "note": "lgtm"},
+        )
+        assert verdict_resp.status_code == 200, verdict_resp.text
+        merge = self._post(
+            live_server, f"/mesh/teams/team-x/drive/reviews/{review['id']}/merge", "operator",
+        )
+        assert merge.status_code == 200, merge.text
+
+        events = drive_env["app"].track_record_store.recent_events("member1")
+        assert len(events) == 1
+        event = events[0]
+        assert event["source"] == "drive_review"
+        assert event["ref_id"] == review["id"]
+        assert event["outcome"] == "merged"
+        assert event["rater_kind"] == "human"
+        assert event["team_id"] == "team-x"
+        assert event["rated_by"] == "operator"
+        details = event["details"]
+        assert details["branch"] == "feat-tr"
+        assert details["lead_agent_id"] == "member2"
+        assert details["lead_verdict"] == "approve"
+        assert details["lead_verdict_at"] is not None
+        assert details["resolution"] == "merged"
+        assert details["resolved_by"] == "operator"
+
+        # pair_trust reads exactly this shape for the auto-merge trust floor.
+        pair = drive_env["app"].track_record_store.pair_trust("member2", "member1")
+        assert pair["merged"] == 1
+        assert pair["rejected_after_approve"] == 0
+
+    def test_reject_writes_track_record_event_without_lead_verdict(
+        self, live_server, drive_env, tmp_path,
+    ):
+        """A reject with no lead verdict recorded still writes a durable
+        event — lead_agent_id/lead_verdict are simply None."""
+        self._push_branch(live_server, tmp_path, "feat-nope2", "n2.md", "no\n")
+        review = self._post(
+            live_server, "/mesh/teams/team-x/drive/reviews", "member1",
+            {"branch": "feat-nope2", "title": "nope2"},
+        ).json()["review"]
+        rej = self._post(
+            live_server, f"/mesh/teams/team-x/drive/reviews/{review['id']}/reject", "operator",
+        )
+        assert rej.status_code == 200
+
+        events = drive_env["app"].track_record_store.recent_events("member1")
+        assert len(events) == 1
+        event = events[0]
+        assert event["source"] == "drive_review"
+        assert event["outcome"] == "rejected"
+        assert event["rater_kind"] == "human"
+        assert event["team_id"] == "team-x"
+        details = event["details"]
+        assert details["lead_agent_id"] is None
+        assert details["lead_verdict"] is None
+        assert details["resolution"] == "rejected"
+
 
 # ── Agent-side team_drive tool ───────────────────────────────────────
 
