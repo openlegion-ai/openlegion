@@ -88,6 +88,22 @@ LIMIT_SPECS: dict[str, tuple[int, int, int]] = {
     # Mirrors ``ask_timeout_seconds``'s shape — a one-shot bounded LLM
     # turn, not a cost control.
     "offboard_handover_timeout_seconds": (180, 30, 600),
+    # Kernel-executed auto-merge (plan §8 #20) — count of TODAY's
+    # auto-merges across the whole deployment (UTC-midnight boundary,
+    # queried from the track record's system-rated `auto_merged` events)
+    # must stay below this cap. 0 DISABLES auto-merge entirely (B4-style
+    # 0-valid kill switch) — the low end is 0 on purpose, do not clamp it up.
+    "auto_merge_daily_cap": (3, 0, 1000),
+    # Kernel-executed auto-merge (plan §8 #20) — HUMAN-executed merges of
+    # this (lead, submitter) pair's lead-approved reviews required (zero
+    # rejected-after-approve, zero flag/revert decay events) before the
+    # kernel may auto-merge for the pair. A floor of 0 would make every
+    # pair trivially eligible, so the low end is clamped to 1.
+    "auto_merge_trust_floor": (5, 1, 10000),
+    # Kernel-executed auto-merge (plan §8 #20) — a pair's first this-many
+    # auto-merges sample at `auto_merge_sample_rate_initial`; afterward
+    # sampling decays to `auto_merge_sample_rate_floor`.
+    "auto_merge_sample_decay_after": (10, 1, 100000),
 }
 
 # key -> OPENLEGION_* env var name (the second-lowest precedence source).
@@ -105,6 +121,9 @@ ENV_NAMES: dict[str, str] = {
     "drive_artifact_max_mb": "OPENLEGION_DRIVE_ARTIFACT_MAX_MB",
     "steer_reply_timeout_seconds": "OPENLEGION_STEER_REPLY_TIMEOUT_SECONDS",
     "offboard_handover_timeout_seconds": "OPENLEGION_OFFBOARD_HANDOVER_TIMEOUT_SECONDS",
+    "auto_merge_daily_cap": "OPENLEGION_AUTO_MERGE_DAILY_CAP",
+    "auto_merge_trust_floor": "OPENLEGION_AUTO_MERGE_TRUST_FLOOR",
+    "auto_merge_sample_decay_after": "OPENLEGION_AUTO_MERGE_SAMPLE_DECAY_AFTER",
 }
 
 # Per-agent config keys (agents.yaml / edit_agent) -> limits key. Only the
@@ -220,6 +239,51 @@ def coordination_daily_cap_usd() -> float:
             value, clamped, lo, hi,
         )
     return clamped
+
+
+# Kernel-executed auto-merge sampling (plan §8 #20). Fraction of a
+# trust-cleared pair's auto-merges flagged for human post-review — high
+# at first, decaying once the pair has accumulated
+# `auto_merge_sample_decay_after` auto-merges with no flag/revert.
+# Float-valued, so these live outside the int-only LIMIT_SPECS table
+# with the same env-override + clamp contract as ask_bill_cap_usd /
+# coordination_daily_cap_usd.
+AUTO_MERGE_SAMPLE_RATE_INITIAL_DEFAULT = 0.20
+AUTO_MERGE_SAMPLE_RATE_FLOOR_DEFAULT = 0.05
+_AUTO_MERGE_SAMPLE_RATE_RANGE = (0.0, 1.0)
+
+
+def _resolve_rate_env(env_name: str, default: float) -> float:
+    """Shared float-limit resolver: env override, clamped to [0, 1]."""
+    raw = os.environ.get(env_name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning("Invalid %s=%r — using default %.2f", env_name, raw, default)
+        return default
+    lo, hi = _AUTO_MERGE_SAMPLE_RATE_RANGE
+    clamped = max(lo, min(value, hi))
+    if clamped != value:
+        logger.info("%s=%s clamped to %s (range %s-%s)", env_name, value, clamped, lo, hi)
+    return clamped
+
+
+def auto_merge_sample_rate_initial() -> float:
+    """Resolve the initial (pre-decay) auto-merge sampling rate."""
+    return _resolve_rate_env(
+        "OPENLEGION_AUTO_MERGE_SAMPLE_RATE_INITIAL",
+        AUTO_MERGE_SAMPLE_RATE_INITIAL_DEFAULT,
+    )
+
+
+def auto_merge_sample_rate_floor() -> float:
+    """Resolve the decayed (post-threshold) auto-merge sampling rate."""
+    return _resolve_rate_env(
+        "OPENLEGION_AUTO_MERGE_SAMPLE_RATE_FLOOR",
+        AUTO_MERGE_SAMPLE_RATE_FLOOR_DEFAULT,
+    )
 
 
 def clamp(key: str, value: int) -> int:

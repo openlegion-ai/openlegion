@@ -464,6 +464,77 @@ async def merge_branch(repo: Path, source_commit: str, *, message: str) -> str:
     return await loop.run_in_executor(None, _plumb)
 
 
+async def revert_commit(repo: Path, commit_sha: str) -> str:
+    """Revert ``commit_sha`` on main mesh-side (auto-merge undo, §8 #20 step 7).
+
+    Unlike :func:`merge_branch`, a revert has no pure-plumbing ``merge-tree``
+    equivalent — ``git revert`` needs a real working tree. This creates a
+    TEMPORARY linked worktree off the bare repo, detached at main's current
+    tip, runs the revert there, and reads the resulting commit straight back
+    out (a linked worktree shares the bare repo's object database, so the
+    revert commit is already reachable — no push needed). The new commit
+    lands on ``refs/heads/main`` via the same compare-and-swap ``update-ref``
+    pattern as :func:`merge_branch`: a racing main update since the read
+    fails the CAS instead of being silently overwritten. The worktree is
+    ALWAYS removed in a ``finally``, whether the revert succeeded or not —
+    a leaked worktree registration would wedge every future ``git worktree``
+    call against this repo.
+
+    ``commit_sha`` must be reverting a two-parent MERGE commit (auto-merge's
+    own commit shape) — ``-m 1`` pins parent 1 (main) as the mainline, so the
+    revert removes exactly the branch's changes and nothing of main's own
+    history. Returns the new revert commit sha. Raises :class:`MergeConflict`
+    on a revert conflict, :class:`RefMoved` on a lost CAS, and
+    :class:`DriveError` on anything else (including an unreachable/foreign
+    ``commit_sha``).
+    """
+    if not git_supports_merge_tree():
+        raise DriveError("mesh host git is too old for auto-merge revert: needs git >= 2.38")
+    loop = asyncio.get_running_loop()
+
+    def _plumb() -> str:
+        main_sha = _run_git(["rev-parse", "--verify", "refs/heads/main"], cwd=repo)
+        src_sha = _run_git(["rev-parse", "--verify", f"{commit_sha}^{{commit}}"], cwd=repo)
+        # Fail clean (not mid-revert) if the commit isn't on main today.
+        _run_git(["merge-base", "--is-ancestor", src_sha, main_sha], cwd=repo)
+        with tempfile.TemporaryDirectory() as tmp:
+            worktree = Path(tmp) / "revert-wt"
+            _run_git(["worktree", "add", "--detach", str(worktree), main_sha], cwd=repo)
+            try:
+                env = {**_subprocess_env(), **_MESH_GIT_IDENT}
+                proc = subprocess.run(
+                    ["git", "revert", "-m", "1", "--no-edit", src_sha],
+                    cwd=str(worktree),
+                    env=env,
+                    capture_output=True,
+                    timeout=GIT_RPC_TIMEOUT,
+                )
+                if proc.returncode != 0:
+                    detail = proc.stderr.decode("utf-8", errors="replace").strip()[:300]
+                    raise MergeConflict(f"revert of {src_sha[:10]} has conflicts: {detail}", conflict_info=[])
+                new_sha = _run_git(["rev-parse", "HEAD"], cwd=worktree)
+            finally:
+                # Best-effort in the finally's own right: a worktree-remove
+                # failure must not mask a real revert error, but must also
+                # never itself raise past this block (repo prune covers a
+                # dangling admin entry on the next unaffected call).
+                try:
+                    _run_git(["worktree", "remove", "--force", str(worktree)], cwd=repo)
+                except DriveError:
+                    logger.exception("auto-merge revert worktree cleanup failed for %s", repo)
+        try:
+            _run_git(
+                ["update-ref", "--stdin"],
+                cwd=repo,
+                input_bytes=f"update refs/heads/main {new_sha} {main_sha}\n".encode(),
+            )
+        except DriveError as e:
+            raise RefMoved(f"main moved during the revert (compare-and-swap failed) — retry: {e}")
+        return new_sha
+
+    return await loop.run_in_executor(None, _plumb)
+
+
 # Path grammar for direct-commit artifacts. Each ``/``-separated segment
 # is a POSIX-ish filename: letters, digits, dot, dash, underscore, space.
 # No leading dash (option-injection), no ``..`` traversal, no empty

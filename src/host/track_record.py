@@ -26,9 +26,20 @@ pass ``rater_kinds=AUTONOMY_RATER_KINDS`` to :meth:`counts_for_agent`.
 Enum values are NEVER unified across sources — task outcomes
 (accepted/rework/rejected/acknowledged), summary ratings
 (accepted/acknowledged/rework), and drive-review resolutions
-(merged/rejected) each keep their own raw vocabulary. Counts are
-reported keyed by ``(source, outcome)`` — no invented numeric score
-(none exists anywhere else in the codebase either).
+(merged/rejected, plus ``auto_merged``/``auto_merge_flagged``/
+``auto_merge_reverted`` from §8 #20's kernel-executed auto-merge) each
+keep their own raw vocabulary. Counts are reported keyed by
+``(source, outcome)`` — no invented numeric score (none exists
+anywhere else in the codebase either).
+
+Self-reinforcement guard (§8 #20, load-bearing, pinned by test):
+:meth:`pair_trust`'s auto-merge trust floor counts ``rater_kind="human"``
+merged events ONLY — a kernel-executed auto-merge is written with
+``rater_kind="system"`` and outcome ``auto_merged`` (never ``merged``)
+precisely so it can never feed the very floor that gates further
+auto-merges for the pair. ``system`` events are still counted (as
+``auto_merged``, read by the sampling-decay schedule), just never
+folded into the floor's ``merged`` count.
 
 Storage follows the canonical-v1 pattern (mirrors ``ThreadStore``): one
 ``executescript``, no lazy ``ALTER`` chains, ``PRAGMA user_version = 1``,
@@ -265,18 +276,68 @@ class TrackRecordStore:
             ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
-    def pair_trust(self, lead_agent_id: str, submitter_agent_id: str) -> dict:
-        """Auto-merge trust signal for a (lead, submitter) pair (§8 #20).
+    def count_events(
+        self,
+        *,
+        source: str,
+        outcome: str,
+        rater_kind: str | None = None,
+        since: float | None = None,
+    ) -> int:
+        """Count ``outcome_events`` matching source/outcome (optionally
+        rater_kind/since). Read-only helper for host-side kill-switch /
+        rate-cap checks — e.g. plan §8 #20's per-day auto-merge cap
+        (``source="drive_review", outcome="auto_merged",
+        rater_kind="system", since=<midnight UTC epoch>``). A plain
+        ``COUNT(*)`` over the append-only ledger, no new table.
+        """
+        clauses = ["source = ?", "outcome = ?"]
+        params: list[Any] = [source, outcome]
+        if rater_kind is not None:
+            clauses.append("rater_kind = ?")
+            params.append(rater_kind)
+        if since is not None:
+            clauses.append("created_at >= ?")
+            params.append(since)
+        where = " AND ".join(clauses)
+        with self._conn() as conn:
+            row = conn.execute(
+                f"SELECT COUNT(*) FROM outcome_events WHERE {where}", params
+            ).fetchone()
+        return int(row[0]) if row else 0
 
-        Scans this agent's ``drive_review`` events for ones whose
-        ``details_json`` carries ``lead_agent_id`` == ``lead_agent_id``
-        and ``lead_verdict == "approve"`` — i.e. reviews this lead
-        advisory-approved, authored by ``submitter_agent_id``. Returns
-        the count of human-executed merges of lead-approved reviews,
-        the count of rejects-after-approve, and the qualifying set's
-        most recent event timestamp — the raw inputs the earned-
-        autonomy trust floor / decay policy (§8 #19/#20) reads to decide
-        whether the kernel may auto-merge for this pair.
+    def pair_trust(self, lead_agent_id: str, submitter_agent_id: str) -> dict:
+        """Auto-merge trust signal for a (lead, submitter) pair (§8 #19/#20).
+
+        Scans this agent's ``drive_review`` events, split by
+        ``rater_kind``:
+
+        * ``human`` events whose ``details_json`` carries
+          ``lead_agent_id`` == ``lead_agent_id`` and
+          ``lead_verdict == "approve"`` count toward ``merged`` /
+          ``rejected_after_approve`` depending on ``outcome`` —
+          ``lead_agent_id`` in details carries the EXACT verdict author
+          for reviews resolved after §8 #20 landed
+          (``_record_drive_review_outcome`` prefers the review's
+          ``lead_verdict_by``, falling back to the team's then-current
+          lead only for rows recorded before that column existed — the
+          pre-U4 approximation, preserved for old data only).
+        * ``human`` events with outcome ``auto_merge_flagged`` /
+          ``auto_merge_reverted`` (§8 #20 steps 6/7 — operator trust-decay
+          signals) count toward ``flagged``, matched the same way but
+          WITHOUT requiring ``lead_verdict == "approve"`` in details (a
+          decay signal about an already-auto-merged review, whose
+          original verdict was necessarily an approve).
+        * ``system`` events (the kernel's own ``auto_merged`` writes) are
+          NEVER folded into ``merged`` — the self-reinforcement guard: an
+          auto-merge must not feed the very trust floor that gates
+          further auto-merges. Counted separately as ``auto_merged`` —
+          read by the sampling-rate decay schedule (§8 #20 step 5), not
+          the trust floor.
+
+        Floor policy (read by the auto-merge consumer, not enforced
+        here): eligible iff ``merged >= trust_floor`` AND
+        ``rejected_after_approve == 0`` AND ``flagged == 0``.
         """
         with self._conn() as conn:
             rows = conn.execute(
@@ -287,11 +348,25 @@ class TrackRecordStore:
             ).fetchall()
         merged = 0
         rejected_after_approve = 0
+        flagged = 0
+        auto_merged = 0
         last_event_at: float | None = None
         for r in rows:
             event = self._row_to_dict(r)
             details = event.get("details") or {}
             if details.get("lead_agent_id") != lead_agent_id:
+                continue
+            outcome = event["outcome"]
+            if event["rater_kind"] == "system":
+                # Self-reinforcement guard (§8 #20) — tracked separately,
+                # never counted toward `merged`.
+                if outcome == "auto_merged":
+                    auto_merged += 1
+                continue
+            if outcome in ("auto_merge_flagged", "auto_merge_reverted"):
+                flagged += 1
+                if last_event_at is None:
+                    last_event_at = event["created_at"]
                 continue
             if details.get("lead_verdict") != "approve":
                 continue
@@ -299,15 +374,17 @@ class TrackRecordStore:
                 # Rows are newest-first — the first qualifying row IS
                 # the most recent one for this pair.
                 last_event_at = event["created_at"]
-            if event["outcome"] == "merged":
+            if outcome == "merged":
                 merged += 1
-            elif event["outcome"] == "rejected":
+            elif outcome == "rejected":
                 rejected_after_approve += 1
         return {
             "lead_agent_id": lead_agent_id,
             "submitter_agent_id": submitter_agent_id,
             "merged": merged,
             "rejected_after_approve": rejected_after_approve,
+            "flagged": flagged,
+            "auto_merged": auto_merged,
             "last_event_at": last_event_at,
         }
 
