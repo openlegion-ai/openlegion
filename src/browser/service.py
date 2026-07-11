@@ -9635,27 +9635,56 @@ class BrowserManager:
                         )
                     raise
 
-                landed = None
+                # Verify the FULL selected set actually landed. A <select>
+                # whose change handler reverts (some of) the value makes
+                # Playwright return the requested options in ``selected`` even
+                # though the DOM snapped back — a contradictory success. The
+                # scalar ``input_value()`` reports only the FIRST selected
+                # option, so a multi-select revert of options 2..N is invisible
+                # to it; read EVERY currently-selected value straight off the
+                # element instead.
+                #
+                # ``select_option`` may redirect through a ``<label>`` to its
+                # associated control, so the located element here isn't
+                # guaranteed to BE the ``<select>``. Guard the read: an element
+                # with no ``selectedOptions`` yields ``null`` (INCONCLUSIVE —
+                # trust Playwright's ``selected``), never a thrown
+                # ``Array.from(undefined)`` that would masquerade as a failure.
                 try:
-                    landed = await locator.input_value()
-                except Exception:
-                    pass
+                    landed_values = await locator.evaluate(
+                        "el => el && el.selectedOptions "
+                        "? Array.from(el.selectedOptions, o => o.value) : null",
+                    )
+                except Exception as e:
+                    # Only an ACTUAL raise from the read-back is a non-success.
+                    # Classify: a detached/stale element → ref_stale
+                    # (re-snapshot); anything else is an infrastructure failure,
+                    # not a landed selection.
+                    msg_l = str(e).lower()
+                    if "not attached" in msg_l or "detached" in msg_l:
+                        return _err("ref_stale", str(e))
+                    return _err("service_unavailable", str(e))
 
-                # A <select> whose change handler reverts the value makes Playwright
-                # return the requested option in ``selected`` while ``input_value()``
-                # shows the OLD value — a contradictory success. Verify it stuck.
-                if landed is not None and selected and landed not in selected:
+                # ``None`` = the located element has no ``selectedOptions`` (a
+                # label wrapper / redirect target, not the <select> itself). The
+                # read is inconclusive, so trust Playwright's ``selected`` rather
+                # than fabricate a revert. When we DID read the <select>, compare
+                # multiplicity-preserving (duplicate option values are legal — do
+                # NOT collapse to a set) and order-insensitively; a legitimate
+                # clear (both empty) is equal and stays a success.
+                if landed_values is not None and sorted(landed_values) != sorted(selected):
                     return _err(
                         "selection_reverted",
-                        f"The <select> value did not change to the requested option "
-                        f"(page script may have reset it). Current value: {landed!r}.",
+                        f"The <select> did not settle on the requested option(s) "
+                        f"(page script may have reset it). Current value(s): "
+                        f"{landed_values!r}.",
                     )
 
                 result = {
                     "success": True,
                     "data": {
                         "selected": selected,
-                        "value": landed,
+                        "value": landed_values if landed_values is not None else selected,
                         "ref": ref or selector,
                     },
                 }
