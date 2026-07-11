@@ -1129,11 +1129,22 @@ async def _force_fingerprint_burn(
     """Mark agent as hard-burned. Returns True iff state transitioned."""
     async with _get_fingerprint_lock():
         already = agent_id in _fingerprint_hard_burned
+        prev_reason = _fingerprint_hard_burn_reason.get(agent_id)
+        # Always refresh the in-memory state — the last-signal timestamp
+        # and reason must track every block hit even on a repeat.
         _fingerprint_hard_burned.add(agent_id)
         _fingerprint_hard_burn_reason[agent_id] = (vendor, reason)
         _fingerprint_last_signal[agent_id] = time.time()
-        # Persist so a vendor-confirmed hard block survives a restart.
-        _snapshot_fingerprint_state_locked()
+        # Persist ONLY on a real transition: a new burn, or a changed
+        # (vendor, reason). A burned agent repeatedly hitting the same
+        # walled site fires this listener per block-response; fsyncing an
+        # identical state each time micro-stalls the shared event loop for
+        # the whole fleet. The durable facts (burn set + reason) haven't
+        # changed on a repeat — last_signal is a best-effort timestamp we
+        # deliberately don't fsync on an identical hit.
+        changed = (not already) or (prev_reason != (vendor, reason))
+        if changed:
+            _snapshot_fingerprint_state_locked()
     return not already
 
 
