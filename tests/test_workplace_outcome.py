@@ -24,6 +24,7 @@ from src.host.health import HealthMonitor
 from src.host.mesh import Blackboard
 from src.host.orchestration import Tasks
 from src.host.traces import TraceStore
+from src.host.track_record import TrackRecordStore
 
 
 def _make_components(tmp_path: str) -> dict:
@@ -60,10 +61,13 @@ class _CSRFTestClient(TestClient):
         return super().request(method, url, **kwargs)
 
 
-def _make_client(components: dict, tasks_store) -> TestClient:
+def _make_client(components: dict, tasks_store, track_record_store=None) -> TestClient:
     from src.dashboard.server import create_dashboard_router
     router = create_dashboard_router(
-        **components, mesh_port=8420, tasks_store=tasks_store,
+        **components,
+        mesh_port=8420,
+        tasks_store=tasks_store,
+        track_record_store=track_record_store,
     )
     app = FastAPI()
     app.include_router(router)
@@ -83,13 +87,17 @@ class TestWorkplaceOutcome:
         self._tmp = tempfile.mkdtemp()
         self.components = _make_components(self._tmp)
         self.tasks = Tasks(db_path=os.path.join(self._tmp, "tasks.db"))
-        self.client = _make_client(self.components, self.tasks)
+        self.track_record = TrackRecordStore(":memory:")
+        self.client = _make_client(
+            self.components, self.tasks, track_record_store=self.track_record,
+        )
 
     def teardown_method(self):
         try:
             self.tasks.close()
         except Exception:
             pass
+        self.track_record.close()
         self.components["cost_tracker"].close()
         self.components["trace_store"].close()
         self.components["blackboard"].close()
@@ -315,3 +323,59 @@ class TestWorkplaceOutcome:
             json=["accepted"],
         )
         assert resp.status_code == 400
+
+    # ── plan §8 #18 — durable track record write ──────────────────
+
+    def test_outcome_writes_track_record_event_as_human(self):
+        """The dashboard outcome endpoint is the HUMAN-driven path (plan
+        §8 #18) — its track-record write must be tagged
+        ``rater_kind="human"`` so it counts at full weight toward
+        earned-autonomy scoring."""
+        rec = _create_done_task(
+            self.tasks, creator="op", assignee="analyst",
+            title="t", team_id="research",
+        )
+        resp = self.client.post(
+            f"/dashboard/api/workplace/tasks/{rec['id']}/outcome",
+            json={"outcome": "accepted", "feedback": ""},
+        )
+        assert resp.status_code == 200
+        events = self.track_record.recent_events("analyst")
+        assert len(events) == 1
+        event = events[0]
+        assert event["source"] == "task_outcome"
+        assert event["ref_id"] == rec["id"]
+        assert event["outcome"] == "accepted"
+        assert event["rater_kind"] == "human"
+        assert event["team_id"] == "research"
+        autonomy_counts = self.track_record.counts_for_agent(
+            "analyst", rater_kinds=("human", "system"),
+        )
+        assert autonomy_counts == {"task_outcome": {"accepted": 1}}
+
+    def test_outcome_track_record_write_failure_does_not_fail_request(self):
+        """A ledger write failure must NEVER fail the source operation
+        (plan §8 #18's best-effort contract)."""
+        rec = _create_done_task(
+            self.tasks, creator="op", assignee="analyst", title="t",
+        )
+        self.track_record.close()  # subsequent .record() calls now raise
+        resp = self.client.post(
+            f"/dashboard/api/workplace/tasks/{rec['id']}/outcome",
+            json={"outcome": "accepted", "feedback": ""},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["task"]["outcome"] == "accepted"
+
+    def test_outcome_absent_track_record_store_is_a_noop(self):
+        """Existing dashboard test constructions that don't wire a
+        track_record_store (the default) keep working unchanged."""
+        client = _make_client(self.components, self.tasks)  # no track_record_store
+        rec = _create_done_task(
+            self.tasks, creator="op", assignee="writer2", title="t",
+        )
+        resp = client.post(
+            f"/dashboard/api/workplace/tasks/{rec['id']}/outcome",
+            json={"outcome": "accepted", "feedback": ""},
+        )
+        assert resp.status_code == 200

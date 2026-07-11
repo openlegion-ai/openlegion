@@ -1,0 +1,335 @@
+"""TrackRecordStore — durable, append-only per-agent outcome ledger.
+
+Plan §8 #18 (docs/plans/2026-07-04-agent-employee-platform-architecture.md):
+a recon correction on §6's "raw material already collected, just
+composed" — that claim is wrong on DURABILITY. Rated ``tasks`` rows
+reap at 90 days (``orchestration.py``) and ``work_summaries`` at 30
+(``summaries.py``); a live-query composition over either source would
+silently lose history the moment a row ages out. This store is the
+durable Layer-3 ledger those two (and Team-Drive-review resolution)
+feed AT RATING TIME: one ``outcome_events`` row appended host-side, in
+the same code paths that already call ``feedback_push`` (task
+``set_outcome``, summary ``set_rating``) plus the drive-review
+merge/reject paths. APPEND-ONLY, NEVER REAPED — no ``retention_until``
+column, no reap method — that durability is precisely what tells it
+apart from the two reaped sources it's assembled from.
+
+Rating-trust rule (load-bearing, pinned by test): earned-autonomy
+scoring (plan §8 #19) must use only HUMAN ratings (plus objective
+``system`` signals) at full weight. Operator-*agent* ratings — the
+internal mesh paths an agent's own heartbeat/tool call can reach —
+are EXCLUDED from autonomy scoring (agents grading agents must not
+feed the trust ladder) while still counted here and still feeding
+``feedback_push`` learning. Callers that need the autonomy-safe view
+pass ``rater_kinds=AUTONOMY_RATER_KINDS`` to :meth:`counts_for_agent`.
+
+Enum values are NEVER unified across sources — task outcomes
+(accepted/rework/rejected/acknowledged), summary ratings
+(accepted/acknowledged/rework), and drive-review resolutions
+(merged/rejected) each keep their own raw vocabulary. Counts are
+reported keyed by ``(source, outcome)`` — no invented numeric score
+(none exists anywhere else in the codebase either).
+
+Storage follows the canonical-v1 pattern (mirrors ``ThreadStore``): one
+``executescript``, no lazy ``ALTER`` chains, ``PRAGMA user_version = 1``,
+WAL + ``busy_timeout``, env override ``OPENLEGION_TRACK_RECORD_DB``.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any
+
+from src.shared.utils import dumps_safe, setup_logging
+
+logger = setup_logging("host.track_record")
+
+VALID_SOURCES: frozenset[str] = frozenset({"task_outcome", "summary_rating", "drive_review"})
+
+# Rater-kind vocabulary. ``human`` = a real user, via the dashboard's
+# human-driven surfaces; ``operator_agent`` = the same rating recorded
+# through a mesh-reachable (agent-callable) path — the operator trust
+# tier is still an agent identity that can act from its own heartbeat;
+# ``system`` = a deterministic mesh-computed signal (reserved for a
+# future objective-signal writer). See the module docstring's
+# rating-trust rule for why the split exists and matters.
+VALID_RATER_KINDS: frozenset[str] = frozenset({"human", "operator_agent", "system"})
+
+# The rating-trust rule, pinned: only these rater kinds count toward
+# earned-autonomy scoring (plan §8 #19 reads counts filtered to this).
+AUTONOMY_RATER_KINDS: tuple[str, ...] = ("human", "system")
+
+# Hard cap on details_json size so a runaway payload can't bloat the
+# durable ledger (mirrors the summaries/threads store caps).
+MAX_DETAILS_BYTES = 8192
+
+
+class TrackRecordStore:
+    """SQLite-backed, append-only outcome ledger. Never reaped.
+
+    Disk-backed access opens a fresh WAL connection per operation;
+    ``:memory:`` keeps a single shared connection behind a lock
+    (mirrors ``ThreadStore``).
+    """
+
+    _EVENT_COLS = (
+        "id, agent_id, team_id, source, ref_id, outcome, "
+        "rater_kind, rated_by, details_json, created_at"
+    )
+
+    def __init__(self, db_path: str = "data/track_record.db") -> None:
+        self.db_path = db_path
+        self._shared_conn: sqlite3.Connection | None = None
+        self._mem_lock = threading.Lock()
+        if db_path == ":memory:":
+            self._shared_conn = sqlite3.connect(":memory:", isolation_level=None, check_same_thread=False)
+            self._shared_conn.execute("PRAGMA busy_timeout=30000")
+        else:
+            Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        self._init_schema()
+
+    def close(self) -> None:
+        if self._shared_conn is not None:
+            self._shared_conn.close()
+            self._shared_conn = None
+
+    @contextmanager
+    def _conn(self):
+        if self._shared_conn is not None:
+            with self._mem_lock:
+                yield self._shared_conn
+            return
+        conn = sqlite3.connect(self.db_path, isolation_level=None)
+        try:
+            conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute("PRAGMA journal_mode=WAL")
+            yield conn
+        finally:
+            conn.close()
+
+    def _init_schema(self) -> None:
+        # Canonical schema v1 — exactly one shape, no lazy ALTER chains.
+        # Deliberately NO retention_until column and NO reap method: this
+        # table is append-only for the life of the deployment (see module
+        # docstring — that durability is the whole reason this store
+        # exists alongside the two reaped sources it's assembled from).
+        with self._conn() as conn:
+            conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS outcome_events (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    agent_id     TEXT,
+                    team_id      TEXT,
+                    source       TEXT NOT NULL,
+                    ref_id       TEXT NOT NULL,
+                    outcome      TEXT NOT NULL,
+                    rater_kind   TEXT NOT NULL,
+                    rated_by     TEXT,
+                    details_json TEXT,
+                    created_at   REAL NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_outcome_events_agent
+                    ON outcome_events(agent_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_outcome_events_ref
+                    ON outcome_events(source, ref_id);
+
+                PRAGMA user_version = 1;
+                """
+            )
+
+    @staticmethod
+    def _row_to_dict(row: tuple) -> dict:
+        details = None
+        if row[8]:
+            try:
+                details = json.loads(row[8])
+            except (ValueError, TypeError):
+                details = {"_decode_error": True}
+        return {
+            "id": row[0],
+            "agent_id": row[1],
+            "team_id": row[2],
+            "source": row[3],
+            "ref_id": row[4],
+            "outcome": row[5],
+            "rater_kind": row[6],
+            "rated_by": row[7],
+            "details": details,
+            "created_at": row[9],
+        }
+
+    # ── append ───────────────────────────────────────────────────
+
+    def record(
+        self,
+        *,
+        source: str,
+        ref_id: str,
+        outcome: str,
+        rater_kind: str,
+        agent_id: str | None = None,
+        team_id: str | None = None,
+        rated_by: str | None = None,
+        details: dict | None = None,
+    ) -> dict:
+        """Append one outcome event and return it.
+
+        Raises ``ValueError`` on a malformed call — write-site callers
+        are expected to go through :func:`record_best_effort` (or an
+        equivalent broad try/except) since a ledger write must NEVER
+        fail the source operation (task outcome / summary rating /
+        drive resolution) that triggered it.
+        """
+        if source not in VALID_SOURCES:
+            raise ValueError(f"source must be one of {sorted(VALID_SOURCES)}, got {source!r}")
+        if rater_kind not in VALID_RATER_KINDS:
+            raise ValueError(f"rater_kind must be one of {sorted(VALID_RATER_KINDS)}, got {rater_kind!r}")
+        if not ref_id:
+            raise ValueError("ref_id is required")
+        if not outcome:
+            raise ValueError("outcome is required")
+        if agent_id is None and team_id is None:
+            raise ValueError("at least one of agent_id/team_id is required")
+        details_json = None
+        if details is not None:
+            details_json = dumps_safe(details)
+            if len(details_json.encode("utf-8", errors="replace")) > MAX_DETAILS_BYTES:
+                # A truncated JSON document is worse than no document —
+                # replace the whole payload with a marker (mirrors
+                # ThreadStore.post_message's oversized-payload handling).
+                details_json = dumps_safe({"truncated": True})
+        now = time.time()
+        with self._conn() as conn:
+            cur = conn.execute(
+                "INSERT INTO outcome_events "
+                "(agent_id, team_id, source, ref_id, outcome, rater_kind, rated_by, details_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (agent_id, team_id, source, ref_id, outcome, rater_kind, rated_by, details_json, now),
+            )
+            event_id = cur.lastrowid
+        return self.get(event_id)  # type: ignore[return-value]
+
+    # ── reads ────────────────────────────────────────────────────
+
+    def get(self, event_id: int) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                f"SELECT {self._EVENT_COLS} FROM outcome_events WHERE id = ?",
+                (event_id,),
+            ).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def counts_for_agent(
+        self,
+        agent_id: str,
+        *,
+        rater_kinds: tuple[str, ...] | None = None,
+    ) -> dict[str, dict[str, int]]:
+        """Counts keyed ``source -> outcome -> count`` for one agent.
+
+        ``rater_kinds`` restricts to those rater kinds when given — the
+        rating-trust rule: pass :data:`AUTONOMY_RATER_KINDS` for the
+        autonomy-safe view. ``None`` (default) counts every rater kind.
+        """
+        clauses = ["agent_id = ?"]
+        params: list[Any] = [agent_id]
+        if rater_kinds is not None:
+            placeholders = ",".join("?" for _ in rater_kinds)
+            clauses.append(f"rater_kind IN ({placeholders})")
+            params.extend(rater_kinds)
+        where = " AND ".join(clauses)
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT source, outcome, COUNT(*) FROM outcome_events "
+                f"WHERE {where} GROUP BY source, outcome",
+                params,
+            ).fetchall()
+        counts: dict[str, dict[str, int]] = {}
+        for source, outcome, n in rows:
+            counts.setdefault(source, {})[outcome] = n
+        return counts
+
+    def recent_events(self, agent_id: str, limit: int = 20) -> list[dict]:
+        """Newest-first events for one agent, hard-capped at 200."""
+        limit = max(1, min(int(limit), 200))
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT {self._EVENT_COLS} FROM outcome_events "
+                "WHERE agent_id = ? ORDER BY created_at DESC, id DESC LIMIT ?",
+                (agent_id, limit),
+            ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def pair_trust(self, lead_agent_id: str, submitter_agent_id: str) -> dict:
+        """Auto-merge trust signal for a (lead, submitter) pair (§8 #20).
+
+        Scans this agent's ``drive_review`` events for ones whose
+        ``details_json`` carries ``lead_agent_id`` == ``lead_agent_id``
+        and ``lead_verdict == "approve"`` — i.e. reviews this lead
+        advisory-approved, authored by ``submitter_agent_id``. Returns
+        the count of human-executed merges of lead-approved reviews,
+        the count of rejects-after-approve, and the qualifying set's
+        most recent event timestamp — the raw inputs the earned-
+        autonomy trust floor / decay policy (§8 #19/#20) reads to decide
+        whether the kernel may auto-merge for this pair.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT {self._EVENT_COLS} FROM outcome_events "
+                "WHERE source = 'drive_review' AND agent_id = ? "
+                "ORDER BY created_at DESC, id DESC",
+                (submitter_agent_id,),
+            ).fetchall()
+        merged = 0
+        rejected_after_approve = 0
+        last_event_at: float | None = None
+        for r in rows:
+            event = self._row_to_dict(r)
+            details = event.get("details") or {}
+            if details.get("lead_agent_id") != lead_agent_id:
+                continue
+            if details.get("lead_verdict") != "approve":
+                continue
+            if last_event_at is None:
+                # Rows are newest-first — the first qualifying row IS
+                # the most recent one for this pair.
+                last_event_at = event["created_at"]
+            if event["outcome"] == "merged":
+                merged += 1
+            elif event["outcome"] == "rejected":
+                rejected_after_approve += 1
+        return {
+            "lead_agent_id": lead_agent_id,
+            "submitter_agent_id": submitter_agent_id,
+            "merged": merged,
+            "rejected_after_approve": rejected_after_approve,
+            "last_event_at": last_event_at,
+        }
+
+
+def record_best_effort(store: "TrackRecordStore | None", **kwargs: Any) -> None:
+    """Append an outcome event, swallowing every error.
+
+    Call-site contract (plan §8 #18): a ledger write failure must NEVER
+    fail the source operation (task outcome / summary rating / drive
+    resolution) that triggered it. Every write point in ``server.py`` /
+    ``dashboard/server.py`` calls this instead of ``store.record`` so
+    that contract holds without repeating a try/except at each site.
+    A ``None`` store (standalone constructions that didn't wire one) is
+    silently a no-op — the ledger is best-effort infrastructure, not a
+    hard dependency of the operations it observes.
+    """
+    if store is None:
+        return
+    try:
+        store.record(**kwargs)
+    except Exception as e:
+        logger.warning(
+            "track record event write failed (source=%s ref_id=%s): %s",
+            kwargs.get("source"), kwargs.get("ref_id"), e,
+        )

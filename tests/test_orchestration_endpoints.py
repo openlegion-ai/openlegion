@@ -61,6 +61,11 @@ def v2_app(tmp_path, monkeypatch):
     server_module = _reload_server(
         monkeypatch, tasks_db=str(tmp_path / "tasks.db"),
     )
+    # Pin the track-record ledger DB into tmp_path too — otherwise every
+    # test in this module (and every OTHER test file that doesn't
+    # override it) shares one on-disk data/track_record.db and accrues
+    # rows across the whole test session, making count assertions flaky.
+    monkeypatch.setenv("OPENLEGION_TRACK_RECORD_DB", str(tmp_path / "track_record.db"))
     perms_map = {
         "operator": {"can_route_tasks": True},
         "scout":    {"can_route_tasks": True, "can_message": ["analyst", "operator"]},
@@ -80,6 +85,7 @@ def v2_app(tmp_path, monkeypatch):
     yield app, server_module, tmp_path
     bb.close()
     monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
+    monkeypatch.delenv("OPENLEGION_TRACK_RECORD_DB", raising=False)
     importlib.reload(server_module)
 
 
@@ -1106,6 +1112,45 @@ async def test_outcome_endpoint_operator_accepts(v2_app):
         body = r.json()
         assert body["ok"] is True
         assert body["task"]["outcome"] == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_outcome_endpoint_writes_track_record_event_as_operator_agent(v2_app):
+    """The mesh ``/mesh/tasks/{id}/outcome`` path is agent-reachable (plan
+    §8 #17's ``_require_operator_or_internal``) — its track-record write
+    (§8 #18) must be tagged ``rater_kind="operator_agent"`` so the
+    rating-trust rule can exclude it from autonomy scoring."""
+    app, _, _ = v2_app
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://t",
+    ) as c:
+        tid = await _create_and_complete(c)
+        r = await c.post(
+            f"/mesh/tasks/{tid}/outcome",
+            json={"outcome": "accepted"},
+            headers={"X-Agent-ID": "operator"},
+        )
+        assert r.status_code == 200, r.text
+    events = app.track_record_store.recent_events("analyst")
+    assert len(events) == 1
+    event = events[0]
+    assert event["source"] == "task_outcome"
+    assert event["ref_id"] == tid
+    assert event["outcome"] == "accepted"
+    assert event["rater_kind"] == "operator_agent"
+    # _create_and_complete's task creation doesn't set team_id explicitly
+    # (a bare create call), so the recorded event carries whatever the
+    # task row carries — None here, mirroring "assignee"'s team-agnostic
+    # source of truth (the task row, not team membership).
+    assert event["team_id"] is None
+    counts = app.track_record_store.counts_for_agent("analyst")
+    assert counts == {"task_outcome": {"accepted": 1}}
+    # Rating-trust rule: an operator-agent-rated event is excluded from
+    # the autonomy-safe view even though it's present in plain counts.
+    autonomy_counts = app.track_record_store.counts_for_agent(
+        "analyst", rater_kinds=("human", "system"),
+    )
+    assert autonomy_counts == {}
 
 
 @pytest.mark.asyncio

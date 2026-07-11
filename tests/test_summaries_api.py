@@ -41,6 +41,12 @@ def mesh_setup(tmp_path, monkeypatch):
     monkeypatch.setenv(
         "OPENLEGION_WORK_SUMMARIES_DB", str(tmp_path / "summaries.db"),
     )
+    # Pin the track-record ledger DB too (plan §8 #18) — otherwise this
+    # module's app shares data/track_record.db with every other test
+    # file that doesn't override it, making count assertions flaky.
+    monkeypatch.setenv(
+        "OPENLEGION_TRACK_RECORD_DB", str(tmp_path / "track_record.db"),
+    )
     server = _reload_server()
 
     bb = Blackboard(db_path=str(tmp_path / "bb.db"))
@@ -87,9 +93,11 @@ def mesh_setup(tmp_path, monkeypatch):
     costs.close()
     traces.close()
     app.summaries_store.close()
+    app.track_record_store.close()
     monkeypatch.delenv("OPENLEGION_TEAM_SCOPE_MODE", raising=False)
     monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
     monkeypatch.delenv("OPENLEGION_WORK_SUMMARIES_DB", raising=False)
+    monkeypatch.delenv("OPENLEGION_TRACK_RECORD_DB", raising=False)
     _reload_server()
 
 
@@ -363,6 +371,69 @@ async def test_operator_can_rate_summary(mesh_setup):
     assert rated["rating"] == "accepted"
     assert rated["feedback"] == "good"
     assert rated["rated_by"] == "operator"
+
+
+@pytest.mark.asyncio
+async def test_rate_team_summary_writes_track_record_event_team_scoped(mesh_setup):
+    """Plan §8 #18: a team-scoped rating has no single rated agent —
+    ``agent_id`` is None, ``team_id`` carries the scope. This is the
+    mesh (agent-reachable) path, so ``rater_kind`` is "operator_agent"."""
+    store = mesh_setup["store"]
+    now = time.time()
+    row = store.create(
+        scope_kind="team", scope_id="content-seo",
+        period_start=now - 100, period_end=now,
+        narrative_md="x", metrics={}, generated_by="operator",
+    )
+    app = mesh_setup["app"]
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        resp = await client.post(
+            f"/mesh/work-summaries/{row['id']}/rating",
+            json={"rating": "accepted", "feedback": "good"},
+            headers=_hdr(mesh_setup["tokens"]["operator"]),
+        )
+    assert resp.status_code == 200, resp.text
+    events = app.track_record_store.recent_events("content-seo")
+    assert events == []  # team scope: nothing under the team's own "agent" bucket
+    counts = app.track_record_store.counts_for_agent("content-seo")
+    assert counts == {}
+    # Query by team_id directly via a raw event since counts_for_agent
+    # is agent-keyed; confirm the row landed with team_id set instead.
+    with app.track_record_store._conn() as conn:
+        row_db = conn.execute(
+            "SELECT agent_id, team_id, rater_kind FROM outcome_events WHERE source='summary_rating'"
+        ).fetchone()
+    assert row_db == (None, "content-seo", "operator_agent")
+
+
+@pytest.mark.asyncio
+async def test_rate_solo_summary_writes_track_record_event_agent_scoped(mesh_setup):
+    """Plan §8 #18: a solo-scoped rating's scope_id IS the agent id."""
+    store = mesh_setup["store"]
+    now = time.time()
+    row = store.create(
+        scope_kind="solo", scope_id="writer",
+        period_start=now - 100, period_end=now,
+        narrative_md="solo work", metrics={}, generated_by="operator",
+    )
+    app = mesh_setup["app"]
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test",
+    ) as client:
+        resp = await client.post(
+            f"/mesh/work-summaries/{row['id']}/rating",
+            json={"rating": "accepted"},
+            headers=_hdr(mesh_setup["tokens"]["operator"]),
+        )
+    assert resp.status_code == 200, resp.text
+    events = app.track_record_store.recent_events("writer")
+    assert len(events) == 1
+    assert events[0]["source"] == "summary_rating"
+    assert events[0]["outcome"] == "accepted"
+    assert events[0]["rater_kind"] == "operator_agent"
+    assert events[0]["team_id"] is None
 
 
 @pytest.mark.asyncio

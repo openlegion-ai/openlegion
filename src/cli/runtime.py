@@ -1956,6 +1956,10 @@ class RuntimeContext:
             tasks_store=getattr(app, "tasks_store", None),
             help_requests_store=getattr(app, "help_requests_store", None),
             summaries_store=getattr(app, "summaries_store", None),
+            # Durable per-agent track record (plan §8 #18) — same
+            # getattr(app, ...) injection pattern as summaries_store
+            # above (the store is constructed inside create_mesh_app).
+            track_record_store=getattr(app, "track_record_store", None),
             connector_store=self.connector_store,
             mcp_gateway=self.mcp_gateway,
             intent_store=self.intent_store,

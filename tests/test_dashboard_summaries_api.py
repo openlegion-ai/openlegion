@@ -18,6 +18,7 @@ from src.host.costs import CostTracker
 from src.host.mesh import Blackboard
 from src.host.summaries import WorkSummariesStore
 from src.host.traces import TraceStore
+from src.host.track_record import TrackRecordStore
 
 
 class _CSRFTestClient(TestClient):
@@ -55,6 +56,39 @@ def client(tmp_path):
     costs.close()
     traces.close()
     summaries.close()
+
+
+@pytest.fixture
+def client_with_track_record(tmp_path):
+    """Same wiring as ``client`` plus a real ``TrackRecordStore`` — a
+    separate fixture (rather than changing ``client``'s shape) so the
+    9 existing ``c, store = client`` call sites stay untouched."""
+    from src.dashboard.server import create_dashboard_router
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    costs = CostTracker(str(tmp_path / "costs.db"))
+    traces = TraceStore(str(tmp_path / "traces.db"))
+    summaries = WorkSummariesStore(":memory:")
+    track_record = TrackRecordStore(":memory:")
+
+    router = create_dashboard_router(
+        blackboard=bb,
+        health_monitor=None,
+        cost_tracker=costs,
+        trace_store=traces,
+        event_bus=None,
+        agent_registry={},
+        summaries_store=summaries,
+        track_record_store=track_record,
+    )
+    app = FastAPI()
+    app.include_router(router)
+    yield _CSRFTestClient(app), summaries, track_record
+    bb.close()
+    costs.close()
+    traces.close()
+    summaries.close()
+    track_record.close()
 
 
 def _seed(store, *, scope_id="content-seo", scope_kind="team", offset=0):
@@ -162,6 +196,37 @@ def test_rate_accepted_persists(client):
     rated = resp.json()
     assert rated["rating"] == "accepted"
     assert rated["rated_by"] == "operator"  # dashboard persona
+
+
+def test_rate_writes_track_record_event_as_human(client_with_track_record):
+    """Plan §8 #18: the dashboard rating endpoint is the HUMAN path —
+    its track-record write must be tagged ``rater_kind="human"``."""
+    c, store, track_record = client_with_track_record
+    row = _seed(store, scope_id="content-seo", scope_kind="team")
+    resp = c.post(
+        f"/dashboard/api/workplace/summaries/{row['id']}/rating",
+        json={"rating": "accepted"},
+    )
+    assert resp.status_code == 200, resp.text
+    with track_record._conn() as conn:
+        row_db = conn.execute(
+            "SELECT agent_id, team_id, source, outcome, rater_kind FROM outcome_events"
+        ).fetchone()
+    assert row_db == (None, "content-seo", "summary_rating", "accepted", "human")
+
+
+def test_rate_solo_scope_writes_agent_scoped_track_record_event(client_with_track_record):
+    c, store, track_record = client_with_track_record
+    row = _seed(store, scope_id="writer", scope_kind="solo")
+    resp = c.post(
+        f"/dashboard/api/workplace/summaries/{row['id']}/rating",
+        json={"rating": "accepted"},
+    )
+    assert resp.status_code == 200, resp.text
+    events = track_record.recent_events("writer")
+    assert len(events) == 1
+    assert events[0]["rater_kind"] == "human"
+    assert events[0]["team_id"] is None
 
 
 def test_rate_rework_with_feedback(client):
