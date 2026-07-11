@@ -571,6 +571,159 @@ Status: **RATIFIED** except items 1 and 4, which stand at their safe defaults pe
     template `resources` key round-trips into agents.yaml with NO reader anywhere — DELETED
     in-unit (destructive-cleanup mandate: write-only config is cruft; per-agent container limits,
     if ever wanted, are their own feature).
+17. ✅ **RATIFIED (2026-07-11) — action-tier policy engine: ONE mesh-side gate, static
+    classification, the pending_actions store EVOLVES into its held-actions ledger.** New
+    `src/host/policy.py` (`ActionPolicyEngine`): every consequential **mesh-terminating** action
+    declares a static `(action_kind, tier)` — `reversible-internal → external-visible →
+    irreversible → financial` — and the gate is one shared pre-check called at each endpoint
+    after the existing permission check + rate limit (the `_check_rate_limit`/`_record_denial`
+    placement). Decisions: `allow | allow_audit | hold | deny`; every decision audited.
+    Phase-5 classified actions: `agent_delete`/`team_delete` (irreversible),
+    `wallet_transfer`/`wallet_execute` (financial), `notify_user` (external-visible — recon
+    found `POST /mesh/notify` has NO permission check today; the tier gate becomes its first),
+    `connector_call` (external-visible), config edits (reversible-internal, staying on
+    ChangeHistory undo receipts). C.1 row 6 completes as: the store mechanics SURVIVE (nonce PK,
+    payload digest, TTL + opportunistic reap, `BEGIN IMMEDIATE` single-use consume, origin gate,
+    cancel — battle-tested) evolved under the engine with a `tier` column and a pluggable
+    executor registry keyed on `action_kind`; the NARROWNESS is what dies (the delete-only
+    producers/confirm hard-coding in `confirm_config_change` and `_apply_pending_delete`'s
+    hand-coded dispatch). One approval system at exit, grep-verified. The `pending_action_*`
+    WS event family + Needs-you panel + inline chat card are REUSED (no SPA event churn).
+    C.3-c honored and documented in-module: approval (gate before) and undo (revert after) are
+    different axes under this one policy surface; undo is never grafted onto
+    irreversible/financial actions. Policy config: `config/policy.yaml`, human/dashboard-write
+    ONLY (ConnectorStore posture), mtime reload, NO agent-facing write tool — the operator
+    *agent* cannot loosen its own governance. Constraint #12 absolute: thresholds are operator
+    policy; no lead/agent carve-outs. Recorded residuals (explicit): in-container `http_request`
+    + `run_command` egress cannot be mesh-gated (the container is the boundary); browser
+    per-action writes stay on `can_browser_action` (per-click holds unusable); per-remote-tool
+    read/write distinction on MCP connectors deferred (all connector calls classify
+    external-visible).
+18. ✅ **RATIFIED (2026-07-11) — durable per-agent track record: an append-only ledger written
+    at rating time (recon correction: the raw material is NOT durable today).** §6's "raw
+    material already collected, just composed" is wrong on durability — rated `tasks` rows reap
+    at 90 days, `work_summaries` at 30; a live-query composition silently loses history. New
+    `src/host/track_record.py` (`data/track_record.db`, WAL, canonical v1, **never reaped** —
+    Layer-3): one `outcome_events` row appended host-side in the same code paths that already
+    call `feedback_push` — task `set_outcome` (all four enum values) and summary `set_rating`
+    (its three values; enum asymmetry PRESERVED, counts reported by source+value, no invented
+    unified scale, no numeric scores — none exist anywhere in the codebase). `drive_reviews`
+    rows join as labeled datapoints: `lead_verdict` vs final `merged|rejected` status measures
+    lead verdict-accuracy; submitter + status measures submitter delivery quality — auto-merge
+    trust (#20) is a property of the *(lead, submitter) pair*. **Rating-trust rule:** autonomy
+    scoring uses objective signals (merged-without-revert, rejected-after-approve, terminal task
+    status) and HUMAN ratings at full weight; operator-*agent* ratings (the internal
+    `POST /mesh/tasks/{id}/outcome` path) are EXCLUDED from autonomy scoring — agents grading
+    agents must not feed the trust ladder — while remaining inputs to `feedback_push` learning.
+    No backfill (no users; the ledger starts at deploy). Read surface
+    `GET /mesh/agents/{id}/track-record` (self-or-operator); composed into `_build_agent_bundle`
+    as a `track_record` section — the Personnel File finally carries it, and the git-backed
+    `handovers/{agent}/` commits (the most durable store in the system) inherit it.
+19. ✅ **RATIFIED (2026-07-11) — earned-autonomy policy = f(action tier, track record, budget);
+    defaults preserve today's behavior; probation is an opt-in preset; held actions are released
+    by HUMANS ONLY.** `policy.evaluate()` reads TrackRecordStore counts + existing budget reads
+    (`check_budget`, `team_envelope_check`, wallet caps — pure reads). Default posture (B4
+    precedent — never ship a default that blocks existing deployments): irreversible holds (as
+    delete already does), financial stays capped by wallet policy, external-visible =
+    `allow_audit`. A documented **probation preset** the operator enables makes low-track-record
+    agents' external-visible/financial actions `hold` until N accepted outcomes (§6's example,
+    opt-in). The human-origin confirm gate is PRESERVED for every held action (recon: the
+    confirm chain requires verified human origin on both the live request and the stored
+    proposal — by construction no agent, lead included, can release a hold; this invariant
+    survives absorption as top-tier policy, not scattered hardcode). Lead involvement is
+    advisory only: a lead-plate probe surfaces held actions pending on teammates (mirrors the
+    lead-review probe) and a recommend surface records approve/reject + note on the held action,
+    shown on the human's Needs-you card — zero enforcement (declined alternative, recorded:
+    lead releases holds via an ask round — rejected as the first agent-verdict-releases-action
+    gate, violating Constraint #12's construction). By-exception review = the held-action queue
+    plus a cheap read view of recent `allow_audit` decisions (audit-log filter on the
+    dashboard), not new hold machinery. **Scope fence for this cycle:** the earned-autonomy
+    *executor* covers the reversible-internal tier only (drive merges, #20); external-visible
+    actions stay human/policy-held until the track record has real data.
+20. ✅ **RATIFIED (2026-07-11) — kernel-executed auto-merge consuming lead verdicts (supersedes
+    the zero-enforcement clause of §8 #13 at the KERNEL layer only).** The lead's drive-review
+    verdict remains advisory **at the permission layer** — the verdict endpoint's lead-only
+    gate, the merge/reject endpoints' `_require_operator_or_internal` gates, and the pinned
+    operator-only tests are all UNTOUCHED. What changes: the governance kernel may act on the
+    verdict. A host-side in-process consumer fires when `record_lead_verdict` records `approve`
+    on an open review; if earned-autonomy policy (#19) clears the *(lead, submitter)* pair, the
+    mesh itself executes the merge through the existing internal merge path (the same
+    internal-caller pattern as the `OL_DRIVE_PRIVILEGED=1` review-merge env). Reuses drive.py's
+    claim-first atomic merge — `head_sha` pinning already 409s a post-approval branch advance,
+    exactly the property auto-merge needs. Guardrails are policy, `limits.py`-tunable,
+    conservative defaults: trust floor (~5 human-executed merges of lead-approved reviews for
+    the pair, zero rejected-after-approve in the window, before the first auto-merge); sampling
+    (20% of auto-merges flagged for human post-review, decaying to 5%); trust decay (one revert
+    or rejected-after-approve returns the pair to human-merge); per-day rate cap; every
+    auto-merge emits an undo receipt + an operator-chat notification (the ChainWatcher
+    `POST /chat/note` delivery path). A drive merge is genuinely reversible-internal (git revert
+    exists) — the right FIRST consumer for earned autonomy.
+21. ✅ **RATIFIED (2026-07-11) — lead budget allocation within the human envelope (activates the
+    item §8 #12 reserved for Phase 5).** A lead-reachable allocation surface, gated exactly like
+    the verdict endpoint (verified caller == `teams.lead_agent_id` — team data, not a permission
+    tier): Σ(per-agent allocations) ≤ team envelope, clamped via `limits.py`, every reallocation
+    audited. The surface can NEVER raise the envelope — top-ups stay human-only forever. This is
+    the second lead-gated agent-reachable surface (after the verdict endpoint), acknowledged
+    explicitly; Constraint #12 is untouched (allocation within a human-set envelope is
+    stewardship of team data, not a permission ceiling change). Composition payoff with the #22
+    ladder: budget-blocked task → `blocker_note` → ladder reaches the lead → lead reallocates
+    headroom → task retried — self-healing inside the human's money wall.
+22. ✅ **RATIFIED (2026-07-11) — delivery loops on already-legal primitives; goals agent-write
+    carve-out DECLINED (again).** The unratified §8 #1-adjacent standing gate stays closed: no
+    agent — lead included — writes team or standing goals; if decomposition quality ever
+    demonstrably needs durable sub-goals, a lead-scoped write is a NEW ratification. Instead:
+    (a) **goal-coverage probe** — a cheap deterministic lead-plate check (team goals set but
+    fewer than N open non-terminal tasks advancing them, via `tasks_store.list_team`) escalates
+    the lead's agenda turn to decompose under-covered goals into tasks via the already-legal
+    `hand_off`. Pure layer-2: cron probe + prompt scaffolding. (b) **blocked-task escalation
+    ladder** — rungs on existing delivery primitives: (1) re-drive the assignee with the
+    `blocker_note` (`deliver_chat`/`try_steer`); (2) escalate to the task creator (followup
+    turn); (3) the lead's plate (extend the lead-duty cron probe with a blocked-tasks feed) —
+    the lead reassigns via `hand_off`, answers, or reallocates budget (#21); (4) HUMAN, only for
+    credential / envelope-exhausted / irreversible-tier blockers (routed into the durable
+    `help_requests.py` Needs-you registry) plus a max-age fallback (~48h). Rungs 1–3 retry
+    within budget indefinitely and bill the nudged agent's work ledger; the existing single
+    stall nudge (`chain_watcher._maybe_nudge_stall`) becomes rung 4; rung climbs rate-limited
+    via the watcher's existing claim semantics.
+23. ✅ **RATIFIED (2026-07-11) — positive feedback push lands in its OWN file.** `accepted`
+    outcomes with non-empty feedback text push to a new `learnings/wins.md` — never the
+    corrections file, whose praise-exclusion design intent survives verbatim — surfaced via a
+    new bounded `## What worked (keep doing)` section in `get_learnings_context` (same size
+    caps/rotation). `acknowledged` still pushes nothing; rework/rejected behavior unchanged.
+    The #18 rating-trust rule applies (operator-agent praise reaches learnings, never the trust
+    ladder).
+24. ✅ **RATIFIED (2026-07-11) — hibernation: the B3 scoping design (the standing gate is now
+    satisfied; hibernation may be built as the LAST Phase-5 unit).** New durable state
+    `hibernated` in agents.yaml status (`active | archived | hibernated`): hibernated = in
+    service, container stopped, volume persisted, AUTO-WAKES on demand; archived keeps meaning
+    out-of-service, never auto-woken. **Prerequisite fixes land first** (live bugs regardless):
+    (i) boot `_start_agents()` must skip archived/hibernated agents — today it resurrects
+    archived containers on every mesh restart; (ii) `_reconcile_heartbeats()` gains the archived
+    filter its sibling reconciles already have; (iii) the heartbeat `pending_tasks` probe is
+    repointed from the legacy blackboard `tasks/{agent}` prefix to the durable tasks store —
+    today a pending `hand_off` task CANNOT trigger the heartbeat safety net (the probe reads the
+    wrong store), and `hand_off` to a stopped agent reports full success while the dispatch
+    fails silently. Three-subsystem resolution: (1) health monitor — hibernate = `unregister`
+    (the archive-proven mechanism), wake = re-register, no new monitor states; (2) cron —
+    hibernated agents KEEP their cron jobs; ticks become mesh-probe-only (skip the container
+    `/heartbeat-context` call, which fails soft toward FEWER wakes today); actionable plate →
+    cold-wake → dispatch, empty plate → zero container contact; (3) delivery — ONE
+    wake-then-forward seam at the transport layer: `HttpTransport` gains an injected
+    `ensure_running_fn` (no-op when running; cold-wake + `wait_for_agent` when hibernated;
+    archived unchanged), uniformly covering lane dispatch AND the direct-bypass paths the
+    Phase-4 busy-fork cannot help with (CLI REPL idle stream, dashboard idle stream branch,
+    cron fns) — a hibernated agent is by definition idle, so those always take the direct path.
+    Idle→hibernate: new per-agent `last_activity_ts` (stamped at lane-dispatch end/steer/chat
+    end); a mesh-side sweep hibernates agents with busy=false, empty queue, no `working` tasks,
+    no open asks, idle ≥ `limits.hibernate_idle_minutes`. **Default OFF** (unset/0 = disabled,
+    B4 semantics); the operator agent is exempt (the human's front door never cold-starts).
+    Cold-wake latency ~2–5s accepted (plain `docker run` + FastAPI boot; no image build in the
+    hot path — verified). Hardening in-scope (hibernation makes these routine): `__SILENT__`
+    filtered at channels + dashboard chat; heartbeat `"Error: …"` strings rejected by
+    `usable_agent_reply` (stops a stopped lead's standup posting raw errors to the team
+    channel); dispatch connect-failures emit an observability event (task status semantics
+    deliberately unchanged — lane rehydration's transient-unreachable-safety depends on them;
+    B9 stays out of scope).
 
 Chronological record of what has actually landed on the branch, and any plan
 corrections discovered during implementation. Keeps this doc the source of truth
@@ -1523,6 +1676,58 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   truthful display; the operator can unassign. Full local suite 8556 passed / 26 skipped /
   0 failed.
 
+- **✅ Landed — Phase-5 pre-decisions ratified (§8 #17–#24) + build order.** Recon fan-out
+  (five parallel read-only passes: pending_actions surface, consequential-action inventory,
+  track-record raw material, earned-autonomy mechanics, B3 subsystem behavior) preceded the
+  ratification; its corrections are folded into the §8 entries above. The load-bearing ones:
+  1. **Durability inversion** — rated `tasks` rows reap at 90d, `work_summaries` at 30d, while
+     `audit_log` and Team Drive git history never reap; the track record must be a rating-time
+     append-only ledger (#18), not a live-query composition.
+  2. **`hand_off` to a stopped agent reports full success today** — `/mesh/wake` 200s
+     fire-and-forget, the background dispatch swallows the connect failure
+     (`SILENT_REPLY_TOKEN`), the task sits `pending` forever, and the heartbeat safety net the
+     code comments assume does NOT fire: the `pending_tasks` probe reads the legacy blackboard
+     `tasks/{agent}` prefix, not the durable tasks store (#24 prereq iii).
+  3. **Archive is leakier than B3 recorded** — boot `_start_agents()` resurrects archived
+     agents' containers on every mesh restart (no status filter) and `_reconcile_heartbeats()`
+     lacks the archived filter its siblings have (#24 prereqs i–ii).
+  4. **`POST /mesh/notify` has no permission check at all** — any agent can broadcast to every
+     paired human on every channel (#17 closes this).
+  5. **The confirm chain is human-origin-only by construction** (live request AND stored
+     proposal) — no agent, lead included, can release a hold; preserved verbatim under #19.
+  6. Minor: `__SILENT__` leaks raw into channel replies + dashboard chat for stopped agents;
+     CLI `openlegion confirm`/`cancel` send no auth headers (mock-tested only, likely broken
+     live); two stale comments point approvals UI at a System-panel removed in PR #1044; dead
+     `pending_actions` kwarg in `create_dashboard_router`.
+  A companion review doc (`docs/plans/2026-07-11-hands-off-teams-phase5.md`) records the
+  before/after system review, the human-intervention map, and the permanent-touchpoints list;
+  its decisions are THESE §8 entries (one numbering, one source of truth). An earlier draft of
+  that review was PR #1231, closed unmerged in favor of this PR.
+  **Build order (each unit a separate PR off `main`, full-suite gate per merge; personal
+  pre-merge diff review on permission-surface and data-loss-critical units):**
+  - **U0 — hardening prereqs** (#24 i–iii + recon minor items 6): archive boot-resurrection
+    fix, heartbeat-reconcile archived filter, pending_tasks probe repoint, `__SILENT__` leak
+    filters, heartbeat error-string reply gate, CLI confirm auth fix, stale comments, dead
+    kwarg.
+  - **U1 — track record** (#18): store + rating-trust rule + Personnel-File composition + read
+    endpoint.
+  - **U2 — positive feedback push** (#23).
+  - **U3 — policy engine core** (#17 + #19 skeleton): tier registry, `evaluate()`,
+    `config/policy.yaml`, held-actions store evolution absorbing delete-confirm (C.1 row 6
+    completes HERE), notify/connectors/wallet classified `allow_audit` (no behavior change by
+    default). *[diff review]*
+  - **U4 — auto-merge consumer** (#20). *[diff review]*
+  - **U5 — earned-autonomy completion** (#19): probation preset, lead advisory
+    probe/recommend, recent-autonomous-actions audit view. *[diff review]*
+  - **U6 — delivery loops** (#22): escalation ladder + goal-coverage probe.
+  - **U7 — lead budget allocation** (#21). *[diff review]*
+  - **U8 — hibernation** (#24). *[diff review]*
+  Order rationale: U1 first because every autonomy decision consumes it; U3 ships with
+  behavior-preserving defaults so U4 (the highest single-leverage unlock) lands early; U5–U7
+  close the daily-path loops; U8 last — it advances cost/scale, not hands-off, and its
+  prerequisites land in U0. Branch prefix `feat/p5gov-*` (`feat/phase5-*` is taken by an
+  unrelated browser work stream).
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|
@@ -1575,6 +1780,12 @@ findings, if any, land as a follow-up fix PR recorded in this ledger.
 | #1229 | end-of-phase review fixes — permissions lock coverage, reply gate, standup leaks, lead | merged |
 | #1227 | streaming/broadcast steer-routing — busy-aware SSE fork + broadcast via deliver_chat (unit 5) | merged |
 
+### PR ledger — Phase 5 (as of 2026-07-11)
+| PR | Unit | CI |
+|---|---|---|
+| — | Phase-5 pre-decisions ratified (§8 #17–#24) + build order + companion review doc | this PR |
+| #1231 | earlier draft of the companion review — closed unmerged, superseded by this PR | closed |
+
 ### YOU ARE HERE → Phase 5
 
 **Phase 3 (the workday) is COMPLETE.** All four units landed as separate green PRs off `main`,
@@ -1625,18 +1836,20 @@ units landed as separate green PRs off `main`, exit checks green (see the Phase-
 The consolidated end-of-phase adversarial review of all Phase-4 PRs runs at phase close
 (Phase-3 pattern) — findings land as a fix PR recorded in the Phase-4 ledger.
 
-**Phase 5 (governance at scale) is next** — see §6 Phase 5: **action-tier policy engine**
-(reversible-internal → external-visible → irreversible → financial; absorbs `pending_actions`),
-**per-agent track record** (accepted/rework/rejected outcomes composed into the Personnel File),
-**earned-autonomy policy** = f(action tier, track record, budget), **positive feedback push**
-(extend `feedback_push.py` beyond rework/rejected), **hibernation** (stop idle containers,
-cold-wake on task/ask/mention/cron). Standing gates carried forward: hibernation still needs
-**B3's three-subsystem scoping** (health-monitor auto-restart, cron heartbeats, lane rehydration
-all fight container stopping — B-pre #1 landed long ago, the other legs are undesigned); a goals
-agent-write carve-out (team or standing) remains UNRATIFIED — do not build one without an
-explicit user decision; per-agent budget allocation by the lead is NOT built (§8 #12 — revisit
-with earned autonomy); Personnel-file *import* is unblocked (B-pre #2 fixed) but unscheduled;
-raw shared `/team/scratch` stays unratified (§8 #1, sandbox story per §8 #9).
+**Phase 5 (governance at scale) is IN PROGRESS** — pre-decisions ratified as **§8 #17–#24**
+(2026-07-11) with the U0–U8 build order recorded in the Phase-5 landed entry above: action-tier
+policy engine (#17), durable track record + rating-trust rule (#18), earned autonomy with
+human-only hold release + lead advisory (#19), kernel-executed auto-merge consuming lead
+verdicts (#20), lead budget allocation within the human envelope (#21 — activates the item #12
+reserved), delivery loops + goals carve-out declined again (#22), positive feedback push (#23),
+and the **B3 hibernation scoping design (#24 — the standing B3 gate is SATISFIED; hibernation
+builds last, U8, after its prerequisite fixes land in U0)**. The companion review doc
+`2026-07-11-hands-off-teams-phase5.md` maps the human-intervention points and permanent
+touchpoints. Standing gates carried forward: a goals agent-write carve-out (team or standing)
+remains UNRATIFIED (declined again in #22) — do not build one without an explicit user
+decision; Personnel-file *import* is unblocked (B-pre #2 fixed) but unscheduled; raw shared
+`/team/scratch` stays unratified (§8 #1, sandbox story per §8 #9); Constraint #12 absolute —
+leads/agents gain no permission carve-out, policy thresholds are OPERATOR policy.
 
 **Handoff note:** this doc is the source of truth — a fresh session can continue from here without
 this session's chat history. Read §5 (keep/refactor/remove), Appendices A–C, §8 (ratified
