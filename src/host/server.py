@@ -11988,14 +11988,31 @@ def create_mesh_app(
         """
         caller_id = _extract_verified_agent_id(request)
         body = await request.json()
+        # Validate the request SHAPE before target resolution or any permission
+        # work. Otherwise ``body.get(...)`` raises AttributeError on a non-dict
+        # body (→ opaque 500), and — more subtly — delegation resolution would
+        # run on structurally-invalid input, so a shape error (e.g. a list
+        # ``action``) combined with an unauthorized target could surface as a
+        # 403 instead of the intended 400. Hoist the ``action``/``params`` reads
+        # here so both are validated up front (read once, no later re-read).
+        if not isinstance(body, dict):
+            raise HTTPException(400, "request body must be a JSON object")
+        action = body.get("action", "")
+        # A non-string ``action`` (e.g. a list) is unhashable and would raise at
+        # the ``action not in _ALLOWED_BROWSER_ACTIONS`` membership check → 500.
+        if not isinstance(action, str):
+            raise HTTPException(400, "action must be a string")
+        params = body.get("params", {})
+        # A non-dict ``params`` fails later at ``params.get("url")`` or ships
+        # invalid JSON downstream — reject it up front.
+        if not isinstance(params, dict):
+            raise HTTPException(400, "params must be a JSON object")
+
         req_agent_id = _resolve_browser_target(
             caller_id,
             body.get("target_agent_id") or "",
             request,
         )
-
-        action = body.get("action", "")
-        params = body.get("params", {})
 
         if not action:
             raise HTTPException(400, "action is required")
