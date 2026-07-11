@@ -490,6 +490,42 @@ class TestSilentResponseSuppression:
         assert "[alpha]" in result
         assert "reply from alpha" in result
 
+    @pytest.mark.asyncio
+    async def test_silent_token_suppressed(self):
+        """Plan §8 #24 recon minor item: a stopped/unresponsive agent's
+        ``__SILENT__`` sentinel must never leak raw to a channel user —
+        it must be suppressed exactly like an empty response."""
+        from src.shared.types import SILENT_REPLY_TOKEN
+
+        async def silent_token_dispatch(agent: str, message: str, **_kwargs) -> str:
+            return SILENT_REPLY_TOKEN
+
+        ch = _make_channel(dispatch_fn=silent_token_dispatch)
+        result = await ch.handle_message("u1", "hi")
+        assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_no_response_marker_suppressed(self):
+        """The lane dispatcher's "(no response)" unreachable-agent success
+        marker must also be suppressed, not echoed as real text."""
+        async def no_response_dispatch(agent: str, message: str, **_kwargs) -> str:
+            return "(no response)"
+
+        ch = _make_channel(dispatch_fn=no_response_dispatch)
+        result = await ch.handle_message("u1", "hi")
+        assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_dispatch_error_prefix_suppressed(self):
+        """A ``dispatch_error:``-prefixed string (the except-branch note)
+        must be suppressed, never shown as the agent's words."""
+        async def dispatch_error_dispatch(agent: str, message: str, **_kwargs) -> str:
+            return "dispatch_error: connection reset"
+
+        ch = _make_channel(dispatch_fn=dispatch_error_dispatch)
+        result = await ch.handle_message("u1", "hi")
+        assert result == ""
+
 
 # ── /steer command ────────────────────────────────────────────
 

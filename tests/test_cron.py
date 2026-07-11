@@ -252,6 +252,85 @@ class TestCronDispatch:
         assert origin.channel == "cron"
         assert origin.user == ""
 
+    # ── Plan §8 #24 recon minor item: heartbeat dispatch errors must be
+    # rejected by the shared ``usable_agent_reply`` gate ─────────────────
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_dispatch_error_response_rejected_by_usable_gate(self):
+        """``RuntimeContext._create_cron_scheduler``'s ``heartbeat_dispatch``
+        used to return ``f"Error: {e}"`` on a transport failure — a string
+        ``usable_agent_reply`` does NOT reject, so a stopped lead's standup
+        cron could post the raw error into the team channel as its own
+        words. The producer must emit the ``dispatch_error:`` prefix the
+        gate already expects."""
+        from src.cli.runtime import RuntimeContext
+        from src.shared.utils import usable_agent_reply
+
+        ctx = RuntimeContext.__new__(RuntimeContext)
+        ctx.async_dispatch = AsyncMock(return_value="ok")
+        ctx.transport = MagicMock()
+        ctx.transport.request = AsyncMock(side_effect=RuntimeError("connection reset"))
+        ctx.blackboard = None
+        ctx.trace_store = None
+        ctx.event_bus = None
+        ctx.cfg = {}
+        ctx.health_monitor = None
+
+        ctx._create_cron_scheduler()
+        result = await ctx.cron_scheduler.heartbeat_dispatch_fn("agent1", "check in")
+
+        assert result["outcome"] == "error"
+        assert result["response"].startswith("dispatch_error:")
+        assert "connection reset" in result["response"]
+        assert usable_agent_reply(result["response"]) is False
+
+    # ── ``agent_pending_tasks`` wiring (plan §8 #24 prereq iii) ─────────
+
+    @pytest.mark.asyncio
+    async def test_pending_tasks_fn_reads_durable_tasks_store(self):
+        """``RuntimeContext._create_cron_scheduler`` wires a
+        ``pending_tasks_fn`` that counts non-terminal ``pending`` tasks
+        for ``agent`` from ``self._tasks_store_ref`` — the same durable
+        table ``hand_off``/``create_task`` write to."""
+        from src.cli.runtime import RuntimeContext
+        from src.host.orchestration import Tasks
+
+        ctx = RuntimeContext.__new__(RuntimeContext)
+        ctx.async_dispatch = AsyncMock(return_value="ok")
+        ctx.transport = MagicMock()
+        ctx.blackboard = None
+        ctx.trace_store = None
+        ctx.event_bus = None
+        ctx.cfg = {}
+        ctx.health_monitor = None
+
+        tasks_store = Tasks(db_path=":memory:")
+        tasks_store.create(creator="op", assignee="worker-1", title="do the thing")
+        ctx._tasks_store_ref = tasks_store
+
+        ctx._create_cron_scheduler()
+        assert ctx.cron_scheduler.pending_tasks_fn("worker-1") == 1
+        assert ctx.cron_scheduler.pending_tasks_fn("worker-2") == 0
+
+    @pytest.mark.asyncio
+    async def test_pending_tasks_fn_no_store_returns_zero(self):
+        """Missing ``_tasks_store_ref`` (store not yet wired) degrades to
+        0 — conservative, mirrors ``agent_standing_goals``."""
+        from src.cli.runtime import RuntimeContext
+
+        ctx = RuntimeContext.__new__(RuntimeContext)
+        ctx.async_dispatch = AsyncMock(return_value="ok")
+        ctx.transport = MagicMock()
+        ctx.blackboard = None
+        ctx.trace_store = None
+        ctx.event_bus = None
+        ctx.cfg = {}
+        ctx.health_monitor = None
+        # No ``_tasks_store_ref`` attribute at all.
+
+        ctx._create_cron_scheduler()
+        assert ctx.cron_scheduler.pending_tasks_fn("worker-1") == 0
+
 
 class TestHeartbeat:
     def setup_method(self):
@@ -296,6 +375,84 @@ class TestHeartbeat:
         signal_probes = [r for r in results if r.name == "pending_signals"]
         assert len(signal_probes) == 1
         assert signal_probes[0].triggered is False
+
+    # ── pending_durable_tasks probe (plan §8 #24 prereq iii) ────────────
+    #
+    # The legacy blackboard ``tasks/{agent}`` scan (probe 3, above) never
+    # sees a task ``hand_off``/``create_task`` write — those land only in
+    # the durable SQLite tasks table. ``pending_tasks_fn`` is the mesh-side
+    # seam (mirroring ``lead_reviews_fn``) that reads that table instead.
+
+    def test_pending_durable_tasks_probe_absent_when_unwired(self):
+        """No ``pending_tasks_fn`` configured → no probe entry at all
+        (back-compat: deployments that haven't wired the seam yet)."""
+        sched = CronScheduler(config_path=self.config_path)
+        results = sched._run_heartbeat_probes("test")
+        assert not any(r.name == "pending_durable_tasks" for r in results)
+
+    def test_pending_durable_tasks_probe_fires_on_pending_count(self):
+        sched = CronScheduler(
+            config_path=self.config_path,
+            pending_tasks_fn=lambda agent: 3,
+        )
+        results = sched._run_heartbeat_probes("test")
+        durable_probes = [r for r in results if r.name == "pending_durable_tasks"]
+        assert len(durable_probes) == 1
+        assert durable_probes[0].triggered is True
+        assert "3" in durable_probes[0].detail
+
+    def test_pending_durable_tasks_probe_quiet_when_zero(self):
+        sched = CronScheduler(
+            config_path=self.config_path,
+            pending_tasks_fn=lambda agent: 0,
+        )
+        results = sched._run_heartbeat_probes("test")
+        durable_probes = [r for r in results if r.name == "pending_durable_tasks"]
+        assert len(durable_probes) == 1
+        assert durable_probes[0].triggered is False
+
+    def test_pending_durable_tasks_probe_failure_degrades_quietly(self):
+        def _boom(agent):
+            raise RuntimeError("db locked")
+
+        sched = CronScheduler(config_path=self.config_path, pending_tasks_fn=_boom)
+        results = sched._run_heartbeat_probes("test")  # must not raise
+        durable_probes = [r for r in results if r.name == "pending_durable_tasks"]
+        assert durable_probes[0].triggered is False
+
+    def test_pending_durable_tasks_probe_coexists_with_blackboard_scan(self):
+        """Both sources stay wired: the legacy blackboard probe (still
+        exercised by template ``claim_task`` flows) and the durable-store
+        probe fire independently off the same tick."""
+        mock_bb = MagicMock()
+        mock_bb.list_by_prefix.side_effect = (
+            lambda prefix: [MagicMock(key="tasks/test/legacy", value={})]
+            if "tasks" in prefix else []
+        )
+        sched = CronScheduler(
+            config_path=self.config_path,
+            blackboard=mock_bb,
+            pending_tasks_fn=lambda agent: 1,
+        )
+        results = sched._run_heartbeat_probes("test")
+        names = {r.name for r in results if r.triggered}
+        assert "pending_tasks" in names
+        assert "pending_durable_tasks" in names
+
+    @pytest.mark.asyncio
+    async def test_pending_durable_tasks_probe_makes_tick_actionable(self):
+        """A durable-store hit alone (no blackboard, no activity) must
+        escalate the heartbeat to a real dispatch — the whole point of the
+        fix (a hand_off to a stopped agent trips the safety net)."""
+        dispatch = AsyncMock(return_value="handling the queued task")
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            pending_tasks_fn=lambda agent: 1,
+        )
+        job = sched.add_job(agent="test", schedule="every 15m", message="heartbeat", heartbeat=True)
+        result = await sched._execute_job(job)
+        dispatch.assert_called_once()
+        assert result == "handling the queued task"
 
     @pytest.mark.asyncio
     async def test_heartbeat_skips_when_clean_no_context(self):

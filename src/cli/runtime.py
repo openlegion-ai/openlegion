@@ -792,6 +792,16 @@ class RuntimeContext:
                 pass
 
         for agent_id, agent_cfg in agents_cfg.items():
+            # Plan §8 #24 prereq (i): an archived agent was deliberately torn
+            # down by ``_archive_agent_core`` (container stopped, health
+            # deregistered) — without this filter every mesh restart
+            # resurrected the container and re-registered health, fighting
+            # the archive. Mirrors the ``status`` check the sibling boot
+            # reconciles (``_reconcile_work_summary_jobs`` /
+            # ``_reconcile_standup_jobs``) already apply.
+            if (agent_cfg.get("status") or "active") == "archived":
+                logger.info("Skipping boot for archived agent '%s' (no container, no health registration)", agent_id)
+                continue
             if agent_id in RESERVED_AGENT_IDS and agent_id != _OPERATOR_AGENT_ID:
                 raise click.ClickException(f"Agent ID '{agent_id}' is reserved for internal use")
             budget = agent_cfg.get("budget", {})
@@ -1917,9 +1927,12 @@ class RuntimeContext:
 
         from src.dashboard.server import create_dashboard_router, create_spa_catchall_router
 
-        # Task 9 — pass the mesh's pending-action and tasks stores into
-        # the dashboard so the new ``/api/workplace/*`` endpoints can
-        # render the Board tab without a second HTTP hop.
+        # Task 9 — pass the mesh's tasks store into the dashboard so the
+        # ``/api/workplace/*`` endpoints can render the Board tab without a
+        # second HTTP hop. Pending actions are read via the dashboard's
+        # ``/api/workplace/pending*`` loopback proxy to ``/mesh/pending*``
+        # instead (the permission tier is enforced mesh-side); no store is
+        # injected for that surface.
         dashboard_router = create_dashboard_router(
             blackboard=self.blackboard,
             health_monitor=self.health_monitor,
@@ -1940,7 +1953,6 @@ class RuntimeContext:
             channel_manager=self.channel_manager,
             wallet_service_ref=wallet_ref,
             api_key_manager=self._api_key_manager,
-            pending_actions=getattr(app, "pending_actions", None),
             tasks_store=getattr(app, "tasks_store", None),
             help_requests_store=getattr(app, "help_requests_store", None),
             summaries_store=getattr(app, "summaries_store", None),
@@ -1951,8 +1963,7 @@ class RuntimeContext:
             thread_store=self.thread_store,
             # Offboarding-with-handover + onboarding wake (plan §8 #15):
             # cross-router seams into the mesh app's own closures, same
-            # ``getattr(app, ...)`` injection pattern as pending_actions/
-            # tasks_store above.
+            # ``getattr(app, ...)`` injection pattern as tasks_store above.
             offboard_agent=getattr(app, "_offboard_agent", None),
             onboarding_wake=getattr(app, "_schedule_onboarding_wake", None),
         )
@@ -2051,6 +2062,20 @@ class RuntimeContext:
             reviews = store.list_reviews(team_id, status="open")
             return {"team_id": team_id, "count": len(reviews)} if reviews else None
 
+        def agent_pending_tasks(agent: str) -> int:
+            """Durable-tasks probe input (plan §8 #24 prereq iii): the
+            durable tasks table is what ``hand_off``/``create_task``
+            actually write to (never the legacy blackboard ``tasks/{agent}``
+            prefix), so this is the authoritative count of un-started work
+            waiting for ``agent``. Lazy — resolves ``self._tasks_store_ref``
+            at call time (set after ``create_mesh_app`` in ``start()``);
+            missing store ⇒ 0 (conservative, mirrors ``agent_standing_goals``
+            above)."""
+            store = getattr(self, "_tasks_store_ref", None)
+            if store is None:
+                return 0
+            return store.count_pending_for_assignee(agent)
+
         def deployment_utility_model() -> str:
             """Deployment ``llm.utility_model`` for the cron plate gate.
 
@@ -2120,7 +2145,16 @@ class RuntimeContext:
                 )
             except Exception as e:
                 logger.warning("Heartbeat dispatch failed for '%s': %s", agent_name, e)
-                return {"response": f"Error: {e}", "outcome": "error", "skipped": False}
+                # Plan §8 #24 recon minor item: ``usable_agent_reply`` (the
+                # shared gate every "is this real agent-authored text"
+                # consumer shares) only rejects ``__SILENT__``, "(no
+                # response)", and a ``"dispatch_error:"`` prefix — a bare
+                # ``f"Error: {e}"`` string passed the gate and a stopped
+                # lead's standup cron could post it into the team channel
+                # as the lead's own words (see ``_post_to_channel`` gating
+                # in ``_execute_job`` above). Match the prefix the gate
+                # already expects instead of inventing a new one.
+                return {"response": f"dispatch_error: {e}", "outcome": "error", "skipped": False}
 
         self.cron_scheduler = CronScheduler(
             dispatch_fn=cron_dispatch,
@@ -2148,12 +2182,20 @@ class RuntimeContext:
             # only a handful of attrs, mirroring the ``health_monitor``
             # note above) from needing to know about every new seam.
             lead_reviews_fn=lead_pending_reviews,
+            pending_tasks_fn=agent_pending_tasks,
             thread_store=getattr(self, "thread_store", None),
         )
         self._cron_job_count = len(self.cron_scheduler.jobs)
 
     def _reconcile_heartbeats(self) -> None:
-        """Ensure every agent in config has a heartbeat cron job."""
+        """Ensure every agent in config has a heartbeat cron job.
+
+        Skips archived agents (plan §8 #24 prereq ii) — unlike this
+        reconcile, its siblings ``_reconcile_work_summary_jobs`` and
+        ``_reconcile_standup_jobs`` already excluded archived rows; without
+        the same filter here, a boot recreated a heartbeat cron job for an
+        agent that was deliberately torn down and never re-woken.
+        """
         if not self.cron_scheduler:
             return
         from src.cli.config import _OPERATOR_AGENT_ID
@@ -2164,7 +2206,9 @@ class RuntimeContext:
             "heartbeat_schedule",
             CronScheduler.DEFAULT_HEARTBEAT_SCHEDULE,
         )
-        for agent_id in agents_cfg:
+        for agent_id, agent_cfg in agents_cfg.items():
+            if (agent_cfg or {}).get("status", "active") == "archived":
+                continue
             # Operator heartbeat is faster than the fleet default so
             # fleet-health regressions surface within minutes rather
             # than hours. The previous 1h cadence was set when the

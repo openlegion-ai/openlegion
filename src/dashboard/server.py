@@ -57,6 +57,7 @@ from src.shared.utils import (
     sanitize_for_prompt,
     set_llm_max_tokens_env,
     setup_logging,
+    usable_agent_reply,
 )
 
 if TYPE_CHECKING:
@@ -655,11 +656,14 @@ def create_dashboard_router(
     channel_manager: Any = None,
     wallet_service_ref: list | None = None,
     api_key_manager: Any = None,
-    # Task 9 — Workplace tab + pending action review surface. Both are
-    # optional so existing dashboard tests that don't construct them
-    # keep working; the new endpoints fall back to empty/disabled when
-    # the relevant store is absent.
-    pending_actions: Any = None,
+    # Task 9 — Workplace tab pending-action review surface. The dashboard
+    # never reads a ``PendingActions`` store directly — ``/api/workplace/
+    # pending*`` proxies to the mesh's ``/mesh/pending*`` endpoints over
+    # loopback so the operator-or-internal permission tier is enforced
+    # (reading the store here would bypass that gate). A prior revision
+    # accepted an unused ``pending_actions`` kwarg for this surface; it has
+    # been removed (plan §8 #24 recon minor item — dead parameter, grep
+    # confirmed no body reference).
     tasks_store: Any = None,
     # Open help-requests registry (credential / browser-login / captcha asks)
     # backing the "Needs you" feed. Optional so existing tests keep working;
@@ -706,8 +710,8 @@ def create_dashboard_router(
     thread_store: Any = None,
     # Offboarding-with-handover (plan §8 #15). Cross-router seam into the
     # mesh app's internal ``_offboard_agent`` helper — injected the same
-    # way ``pending_actions``/``tasks_store`` are (``getattr(app, ...)``
-    # in ``cli/runtime.py``). ``async def offboard_agent(agent_id, *,
+    # way ``tasks_store`` is (``getattr(app, ...)`` in ``cli/runtime.py``).
+    # ``async def offboard_agent(agent_id, *,
     # reason) -> dict``; optional so dashboard-only test constructions
     # keep working — the delete endpoint skips the offboard attempt when
     # absent (no manifest to run).
@@ -3782,6 +3786,13 @@ def create_dashboard_router(
             response = await lane_manager.deliver_chat(
                 agent_id, message, trace_id=trace_id, origin=origin,
             )
+            # Plan §8 #24 recon minor item: a stopped/unresponsive agent's
+            # ``__SILENT__`` sentinel (or the "(no response)"/
+            # ``dispatch_error:`` lane-dispatch shapes) must never reach the
+            # operator raw — substitute a human-readable fallback so the
+            # dashboard chat never shows a literal internal token.
+            if not usable_agent_reply(response):
+                response = "The agent did not produce a reply."
             if event_bus:
                 event_bus.emit("chat_done", agent=agent_id, data={"response": response, "session": chat_session})
             return {"response": response}
@@ -8766,7 +8777,8 @@ def create_dashboard_router(
 
     @api_router.get("/api/workplace/pending")
     async def api_workplace_pending() -> dict:
-        """List open pending actions for inline + System>Operator review.
+        """List open pending actions for the Work tab "Needs you" panel
+        and the inline operator-chat ``pending_action_card`` review.
 
         Proxies to the mesh's ``GET /mesh/pending`` over loopback with
         the ``x-mesh-internal`` + ``X-Agent-ID: operator`` headers so the
