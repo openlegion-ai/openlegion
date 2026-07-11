@@ -1820,6 +1820,31 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   `MCPGateway.assigned_connector()` extracted so propose-time assignment checks need no
   network call. Full suite 8747 passed / 26 skipped / 0 failed.
 
+- **✅ Landed — U4 kernel-executed auto-merge (#1247, §8 #20).** New `src/host/auto_merge.py`
+  (pure decision pipeline, git-transport-agnostic, injectable seams) + server.py wiring: an
+  `approve` verdict on an open review fires a fire-and-forget consumer — daily cap
+  (`auto_merge_daily_cap`, default 3, **0 = kill switch**) → self-approval hard block (a lead
+  approving its own submission is never a pair) → pair trust floor
+  (`auto_merge_trust_floor`, default 5 HUMAN-executed merges of the pair's lead-approved
+  reviews, zero rejected-after-approve, zero decay events) → the SAME
+  claim-first/head-sha-re-verified/CAS machinery as the human merge endpoint (every failure
+  path reverts the claim; a lost race to a human merge aborts harmlessly) → system-rated
+  track-record event + audit row → best-effort operator-chat note (ChainWatcher `/chat/note`
+  primitive) with decaying post-review sampling (20% for a pair's first 10, then 5%).
+  Merge/reject endpoints and gates BYTE-UNTOUCHED (diff-verified; pinned tests unmodified).
+  **Self-reinforcement guard is structural:** system-rated events land in `pair_trust`'s
+  separate `auto_merged` bucket, never the floor's `merged` count — pinned at store and
+  pipeline level. `lead_verdict_by` column added at verdict-record time (mirrors the Phase-4
+  column additions) — closes U1's recorded pair-attribution approximation; U1's
+  `_record_drive_review_outcome` now prefers it. Trust decay: operator-or-internal
+  `flag-auto-merge` (records a decay event zeroing pair eligibility) and `revert-merge`
+  (mesh-side `git revert -m 1` in a TEMPORARY linked worktree — ancestor pre-check before any
+  mutation, hermetic env, worktree removed in `finally`, old-value-guarded CAS on main).
+  **Recorded residuals:** a manual out-of-band git revert bypasses decay detection (the
+  endpoints ARE the detection); a finalize-divergence after a landed commit is logged and
+  surfaced honestly rather than rolled back (commit is already on main). Full suite 8780
+  passed / 26 skipped / 0 failed, first run, no flakes.
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|
@@ -1881,6 +1906,7 @@ findings, if any, land as a follow-up fix PR recorded in this ledger.
 | #1241 | U1 — durable per-agent track record ledger (§8 #18) | merged |
 | #1243 | U2 — positive feedback push to learnings/wins.md (§8 #23) | merged |
 | #1245 | U3 — action-tier policy engine, held-actions generalization (§8 #17, C.1 row 6) | merged |
+| #1247 | U4 — kernel-executed auto-merge consuming lead verdicts (§8 #20) | merged |
 
 ### YOU ARE HERE → Phase 5
 
