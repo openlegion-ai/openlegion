@@ -1845,6 +1845,33 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   surfaced honestly rather than rolled back (commit is already on main). Full suite 8780
   passed / 26 skipped / 0 failed, first run, no flakes.
 
+- **✅ Landed — U5 earned-autonomy completion (#1249, §8 #19).** (a) **Probation preset**:
+  optional `probation:` yaml block (`enabled`/`min_accepted` default 5/`tiers` default
+  external_visible+financial); precedence **per-agent override > probation > tier override >
+  compiled default**; escalate-only (a weaker-than-hold decision rises to `hold`; a `deny`
+  stays; irreversible untouchable); accepted count = TrackRecordStore autonomy-rater-kinds
+  `accepted` events (task+summary) — the U3 constructor seam finally read; store failures
+  fail TOWARD hold (logged); escalated audit rows carry `probation: true`; absent block =
+  byte-identical U3 defaults (pinned). (b) **Lead advisory recommendations**: additive
+  `lead_recommendation*` columns + `record_recommendation` (live rows, re-recommend
+  overwrites); `POST /mesh/pending/{nonce}/recommend` gated exactly like the drive verdict
+  endpoint (caller == the PROPOSING agent's team lead; 404 unknown → 409
+  teamless/operator-proposed/leaderless → 403 non-lead incl. non-lead operator; new
+  `pending_recommend` rate bucket); `recommend_pending_action` tool; `lead_pending_holds`
+  plate probe (mirrors lead-reviews, returns a capped nonce sample for actionability);
+  Needs-you rows + inline card render the recommendation line. **ZERO enforcement pinned
+  both directions** (reject never blocks confirm; approve never executes). Delete rows are
+  operator-proposed by construction → excluded from recommendation routing (409). (c)
+  **Autonomy log**: `GET /api/workplace/autonomy-log` (direct blackboard read, operator-audit
+  mirror) over `policy_decision` + `drive_review_auto_merged` rows; collapsible read-only
+  Work-tab section; the auto-merge audit payload widened from bare sha to structured JSON
+  (no pinned consumer of the old shape). (d) **Isolation fix (review-required)**:
+  `OPENLEGION_PENDING_ACTIONS_DB` env override (closes the U3 follow-up); held-action suites
+  pinned to tmp_path; the pre-existing cross-file "Approval queue full" collision proven gone
+  in-combination (261/261 both orderings). **Recorded residual:** no agent-facing "list my
+  team's holds" tool — the plate probe's nonce sample is the stand-in until a need is shown.
+  Full suite 8865 passed / 26 skipped / 0 failed.
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|
@@ -1907,6 +1934,7 @@ findings, if any, land as a follow-up fix PR recorded in this ledger.
 | #1243 | U2 — positive feedback push to learnings/wins.md (§8 #23) | merged |
 | #1245 | U3 — action-tier policy engine, held-actions generalization (§8 #17, C.1 row 6) | merged |
 | #1247 | U4 — kernel-executed auto-merge consuming lead verdicts (§8 #20) | merged |
+| #1249 | U5 — probation preset, lead advisory recommendations, autonomy log (§8 #19) | merged |
 
 ### YOU ARE HERE → Phase 5
 
