@@ -2,11 +2,13 @@
 
 Covers:
 * A1 — ``push_outcome_feedback`` helper + agent ``POST /learnings/feedback``
-  endpoint + the mesh outcome endpoint pushing on rework/rejected.
+  endpoint + the mesh outcome endpoint pushing on rework/rejected/accepted.
 * A3 — rework briefs carry the original description; retry briefs carry
   the previous attempt's blocker_note.
 * A4 — ``_format_fleet_health`` digest rendering.
 * A6 — task-level failed/blocked closes write the learnings errors file.
+* §8 #23 (Phase-5 U2) — an ``accepted`` outcome with non-empty feedback
+  pushes a WIN to the assignee's separate wins learnings file.
 """
 
 from __future__ import annotations
@@ -52,11 +54,32 @@ async def test_push_feedback_on_rework():
 
 
 @pytest.mark.asyncio
+async def test_push_win_on_accepted_with_feedback():
+    """§8 #23: accepted + non-empty feedback pushes a WIN, same endpoint."""
+    transport = _FakeTransport()
+    record = {"id": "task_1", "title": "SEO audit", "assignee": "analyst"}
+
+    status = await push_outcome_feedback(
+        transport, record, "accepted", "Great catch on the schema markup",
+    )
+
+    assert status == "recorded"
+    assert len(transport.calls) == 1
+    call = transport.calls[0]
+    assert call["agent_id"] == "analyst"
+    assert call["path"] == "/learnings/feedback"
+    assert call["json"]["outcome"] == "accepted"
+    assert call["json"]["feedback"] == "Great catch on the schema markup"
+
+
+@pytest.mark.asyncio
 async def test_push_skipped_for_non_actionable_outcomes():
     transport = _FakeTransport()
     record = {"id": "task_1", "assignee": "analyst"}
 
-    assert await push_outcome_feedback(transport, record, "accepted", "nice") is None
+    # accepted with no comment (or only whitespace) has nothing to record.
+    assert await push_outcome_feedback(transport, record, "accepted", "") is None
+    assert await push_outcome_feedback(transport, record, "accepted", "   ") is None
     assert await push_outcome_feedback(transport, record, "acknowledged", "ok") is None
     assert await push_outcome_feedback(transport, record, "rework", "") is None
     assert transport.calls == []
@@ -275,6 +298,27 @@ async def test_outcome_endpoint_pushes_feedback_to_assignee(tmp_path, monkeypatc
         assert r2.status_code == 200
         assert "feedback_push" not in r2.json()
         assert len(fake_transport.calls) == 1
+
+        # accepted WITH feedback → pushes a win (§8 #23), same endpoint.
+        rec3 = app.tasks_store.create(
+            creator="operator", assignee="analyst", title="great work",
+        )
+        app.tasks_store.update_status(rec3["id"], "working", actor="analyst")
+        app.tasks_store.update_status(rec3["id"], "done", actor="analyst")
+        async with AsyncClient(
+            transport=HTTPXASGITransport(app=app), base_url="http://t",
+        ) as c:
+            r3 = await c.post(
+                f"/mesh/tasks/{rec3['id']}/outcome",
+                json={"outcome": "accepted", "feedback": "Nice structure, keep it up"},
+                headers={"X-Agent-ID": "operator"},
+            )
+        assert r3.status_code == 200
+        assert r3.json()["feedback_push"] == "recorded"
+        assert len(fake_transport.calls) == 2
+        win_call = fake_transport.calls[-1]
+        assert win_call["json"]["outcome"] == "accepted"
+        assert win_call["json"]["feedback"] == "Nice structure, keep it up"
     finally:
         blackboard.close()
         monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)

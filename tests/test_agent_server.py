@@ -929,7 +929,12 @@ class TestHeartbeatEndpointNoForceLlm:
 
 
 class TestLearningsFeedbackEndpoint:
-    """A1: mesh-pushed rating feedback lands in the corrections file."""
+    """A1: mesh-pushed rating feedback lands in the corrections file.
+
+    §8 #23 (Phase-5 U2): an ``accepted`` outcome routes to the SEPARATE
+    wins file instead; every other outcome (including unknown ones)
+    keeps routing to corrections, unchanged.
+    """
 
     @pytest.mark.asyncio
     async def test_feedback_recorded_to_corrections(self, tmp_workspace):
@@ -954,9 +959,85 @@ class TestLearningsFeedbackEndpoint:
         ).read_text()
         assert "Task task_1: SEO audit" in corrections
         assert "[rework] Too shallow" in corrections
+        assert not (Path(tmp_workspace) / "learnings" / "wins.md").exists()
         # ...and it reaches the prompt-injection surface.
         ctx = loop.workspace.get_learnings_context()
         assert "Too shallow" in ctx
+
+    @pytest.mark.asyncio
+    async def test_rejected_outcome_recorded_to_corrections(self, tmp_workspace):
+        """Regression: ``rejected`` keeps routing to corrections too."""
+        app, _ = _make_app(tmp_workspace)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t",
+        ) as c:
+            r = await c.post(
+                "/learnings/feedback",
+                json={
+                    "task_id": "task_2",
+                    "outcome": "rejected",
+                    "feedback": "Wrong data source entirely",
+                },
+                headers={"x-mesh-internal": "1"},
+            )
+        assert r.status_code == 200
+        corrections = (
+            Path(tmp_workspace) / "learnings" / "corrections.md"
+        ).read_text()
+        assert "[rejected] Wrong data source entirely" in corrections
+
+    @pytest.mark.asyncio
+    async def test_accepted_feedback_recorded_to_wins(self, tmp_workspace):
+        """§8 #23: accepted + feedback lands in the SEPARATE wins file,
+        never in corrections, and surfaces under its own heading."""
+        app, loop = _make_app(tmp_workspace)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t",
+        ) as c:
+            r = await c.post(
+                "/learnings/feedback",
+                json={
+                    "task_id": "task_3",
+                    "title": "SEO audit",
+                    "outcome": "accepted",
+                    "feedback": "Great per-keyword breakdown, keep doing this",
+                },
+                headers={"x-mesh-internal": "1"},
+            )
+        assert r.status_code == 200
+        assert r.json()["recorded"] is True
+        wins = (Path(tmp_workspace) / "learnings" / "wins.md").read_text()
+        assert "Task task_3: SEO audit" in wins
+        assert "Great per-keyword breakdown" in wins
+        assert not (Path(tmp_workspace) / "learnings" / "corrections.md").exists()
+        # ...and it reaches the prompt-injection surface under its own heading.
+        ctx = loop.workspace.get_learnings_context()
+        assert "## What worked (keep doing)" in ctx
+        assert "Great per-keyword breakdown" in ctx
+
+    @pytest.mark.asyncio
+    async def test_unknown_outcome_falls_back_to_correction(self, tmp_workspace):
+        """Unknown outcomes are treated as corrections — the safe
+        default, unchanged from before §8 #23."""
+        app, _ = _make_app(tmp_workspace)
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t",
+        ) as c:
+            r = await c.post(
+                "/learnings/feedback",
+                json={
+                    "task_id": "task_4",
+                    "outcome": "somethingweird",
+                    "feedback": "unclear signal",
+                },
+                headers={"x-mesh-internal": "1"},
+            )
+        assert r.status_code == 200
+        corrections = (
+            Path(tmp_workspace) / "learnings" / "corrections.md"
+        ).read_text()
+        assert "[somethingweird] unclear signal" in corrections
+        assert not (Path(tmp_workspace) / "learnings" / "wins.md").exists()
 
     @pytest.mark.asyncio
     async def test_requires_mesh_internal_header(self, tmp_workspace):

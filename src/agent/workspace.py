@@ -275,6 +275,7 @@ class WorkspaceManager:
     LEARNINGS_DIR = "learnings"
     ERRORS_FILE = "learnings/errors.md"
     CORRECTIONS_FILE = "learnings/corrections.md"
+    WINS_FILE = "learnings/wins.md"
     CHAT_TRANSCRIPT = "chat_transcript.jsonl"
     CHAT_ARCHIVE_DIR = "chat_archive"
     ACTIVITY_LOG = "activity.jsonl"
@@ -994,16 +995,42 @@ class WorkspaceManager:
             f.write(entry)
         self._learnings_cache = None
 
+    def record_win(self, original: str, feedback: str) -> None:
+        """Record positive feedback (praise) for learning.
+
+        Mirrors ``record_correction`` — same truncation caps, same
+        timestamped append, same size-based rotation — but writes to
+        the separate wins file so praise never dilutes the corrections
+        signal (§8 #23).
+        """
+        path = self.root / self.WINS_FILE
+        self._rotate_if_large(path)
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+        entry = (
+            f"- [{timestamp}] Original: {original[:200]}\n"
+            f"  What worked: {feedback[:500]}\n"
+        )
+        with path.open("a") as f:
+            f.write(entry)
+        self._learnings_cache = None
+
     @staticmethod
     def looks_like_correction(message: str) -> bool:
         """Heuristic: does this user message look like a correction?"""
         lower = message.lower().strip()
         return any(lower.startswith(s) for s in _CORRECTION_SIGNALS)
 
-    _LEARNINGS_FILES = (ERRORS_FILE, CORRECTIONS_FILE)
+    _LEARNINGS_FILES = (ERRORS_FILE, CORRECTIONS_FILE, WINS_FILE)
 
     def get_learnings_context(self, max_chars: int = 3000) -> str:
-        """Load recent errors and corrections for system prompt injection.
+        """Load recent errors, corrections, and wins for system prompt injection.
+
+        Sections are assembled in a fixed order — errors, then
+        corrections, then wins (§8 #23) — and the combined string is
+        capped at ``max_chars`` from the front. Because wins is always
+        LAST, errors/corrections keep exactly the space they had before
+        wins existed; wins only gets whatever room is left over under
+        the shared cap, and drops out entirely once that room is gone.
 
         Results are cached with mtime-based invalidation and pre-sanitized.
         """
@@ -1016,6 +1043,7 @@ class WorkspaceManager:
         for relpath, heading in [
             (self.ERRORS_FILE, "## Recent Errors (avoid repeating)"),
             (self.CORRECTIONS_FILE, "## User Corrections (follow these)"),
+            (self.WINS_FILE, "## What worked (keep doing)"),
         ]:
             content = self._read_file(relpath)
             if content and content.strip():

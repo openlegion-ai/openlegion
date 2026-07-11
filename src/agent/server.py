@@ -829,9 +829,13 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         A1 (rating → learning loop): the mesh pushes the operator's /
         user's ``rework`` / ``rejected`` feedback here; it lands in the
         corrections learnings file and rides ``get_learnings_context``
-        into every future prompt. Mesh-internal only — same gate as
-        ``PUT /team`` so agents can't forge corrections into their own
-        (or via SSRF, a peer's) learnings.
+        into every future prompt. Phase-5 U2 (§8 #23): an ``accepted``
+        outcome routes to the SEPARATE wins file instead, so praise
+        never dilutes the corrections signal. Any other/unknown outcome
+        is treated as a correction — the safe default, unchanged from
+        before U2. Mesh-internal only — same gate as ``PUT /team`` so
+        agents can't forge corrections into their own (or via SSRF, a
+        peer's) learnings.
         """
         if not request.headers.get("x-mesh-internal"):
             raise HTTPException(
@@ -848,10 +852,16 @@ def create_agent_app(loop: AgentLoop) -> FastAPI:
         title = str(body.get("title", ""))[:200]
         outcome = str(body.get("outcome", ""))[:32] or "rework"
         original = f"Task {task_id}: {title}" if title else f"Task {task_id}"
-        loop.workspace.record_correction(
-            original=sanitize_for_prompt(original),
-            correction=f"[{outcome}] {sanitize_for_prompt(feedback)}",
-        )
+        if outcome == "accepted":
+            loop.workspace.record_win(
+                original=sanitize_for_prompt(original),
+                feedback=sanitize_for_prompt(feedback),
+            )
+        else:
+            loop.workspace.record_correction(
+                original=sanitize_for_prompt(original),
+                correction=f"[{outcome}] {sanitize_for_prompt(feedback)}",
+            )
         return {"recorded": True}
 
     @app.post("/config")

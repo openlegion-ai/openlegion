@@ -602,6 +602,24 @@ class TestLearnings:
         assert "JSON format" in content
         assert "YAML instead" in content
 
+    def test_record_win_creates_file(self):
+        self.ws.record_win("Good report", "Loved the structure and depth")
+        path = Path(self._tmpdir) / "learnings" / "wins.md"
+        assert path.exists()
+        content = path.read_text()
+        assert "Good report" in content
+        assert "Loved the structure and depth" in content
+
+    def test_record_win_rotates_large_file(self):
+        path = Path(self._tmpdir) / "learnings" / "wins.md"
+        with path.open("w") as f:
+            for i in range(5000):
+                f.write(f"- Win {i}: did something great\n")
+        original_lines = len(path.read_text().splitlines())
+        self.ws.record_win("new win", "even better this time")
+        new_lines = len(path.read_text().splitlines())
+        assert new_lines < original_lines
+
     def test_get_learnings_context_empty_when_no_learnings(self):
         context = self.ws.get_learnings_context()
         assert context == ""
@@ -616,6 +634,65 @@ class TestLearnings:
         self.ws.record_correction("Said hello", "Actually say 'hi'")
         context = self.ws.get_learnings_context()
         assert "Corrections" in context
+
+    def test_get_learnings_context_includes_wins(self):
+        self.ws.record_win("Nice catch", "Great attention to detail")
+        context = self.ws.get_learnings_context()
+        assert "## What worked (keep doing)" in context
+        assert "Great attention to detail" in context
+
+    def test_get_learnings_context_no_wins_heading_when_absent(self):
+        self.ws.record_error("exec", "boom")
+        self.ws.record_correction("said x", "say y")
+        context = self.ws.get_learnings_context()
+        assert "What worked" not in context
+
+    def test_get_learnings_context_section_order(self):
+        self.ws.record_error("exec", "boom")
+        self.ws.record_correction("said x", "say y")
+        self.ws.record_win("nice", "great structure")
+        context = self.ws.get_learnings_context()
+        assert (
+            context.index("Recent Errors")
+            < context.index("User Corrections")
+            < context.index("What worked")
+        )
+
+    def test_get_learnings_context_wins_windowed_to_last_20_lines(self):
+        path = Path(self._tmpdir) / "learnings" / "wins.md"
+        path.write_text("\n".join(f"line {i}" for i in range(30)) + "\n")
+        context = self.ws.get_learnings_context(max_chars=100_000)
+        assert "line 29" in context
+        assert "line 10" in context
+        assert "line 9" not in context  # dropped: only the last 20 lines survive
+
+    def test_get_learnings_context_wins_get_remainder(self):
+        """Wins fill whatever room is left under the cap, without
+        displacing errors/corrections that already fit (§8 #23)."""
+        self.ws.record_correction("short original", "short fix")
+        before = self.ws.get_learnings_context(max_chars=1000)
+
+        self.ws.record_win("nice work", "very thorough coverage")
+        after = self.ws.get_learnings_context(max_chars=1000)
+
+        assert after.startswith(before)
+        assert "What worked" in after
+        assert "very thorough coverage" in after
+
+    def test_get_learnings_context_corrections_priority_under_cap(self):
+        """When errors+corrections already exceed the shared cap, wins
+        must NOT steal any of the space they already had (§8 #23) —
+        the output is byte-identical with or without a wins file."""
+        self.ws.record_error("exec", "x" * 100)
+        self.ws.record_correction("y" * 100, "z" * 100)
+        before = self.ws.get_learnings_context(max_chars=50)
+        assert len(before) == 50
+
+        self.ws.record_win("great job", "keep doing this " * 20)
+        after = self.ws.get_learnings_context(max_chars=50)
+
+        assert after == before
+        assert "What worked" not in after
 
     def test_looks_like_correction(self):
         assert self.ws.looks_like_correction("No, I meant something else")
