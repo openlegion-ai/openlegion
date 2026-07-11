@@ -121,6 +121,8 @@ class CronScheduler:
         pending_tasks_fn: Callable | None = None,
         thread_store: Any = None,
         lead_holds_fn: Callable | None = None,
+        lead_blocked_tasks_fn: Callable | None = None,
+        goal_coverage_fn: Callable | None = None,
     ):
         self.config_path = Path(config_path)
         self.jobs: dict[str, CronJob] = {}
@@ -155,6 +157,22 @@ class CronScheduler:
         # needs a nonce; there is no agent-facing "list my team's holds"
         # tool this unit builds).
         self.lead_holds_fn = lead_holds_fn
+        # Lead-duty probe input (plan §8 #22 rung 3): ``lead_blocked_tasks_fn(
+        # agent) -> {"team_id", "count", "task_ids"} | None`` mirrors
+        # ``lead_reviews_fn`` exactly — one cheap ``led_team`` lookup
+        # short-circuits non-leads, and only blocked tasks the escalation
+        # ladder has climbed to rung >= 3 count (a freshly-blocked task
+        # stays off the lead's plate). No direct message to the lead is
+        # ever sent — this probe IS rung 3's mechanism.
+        self.lead_blocked_tasks_fn = lead_blocked_tasks_fn
+        # Goal-coverage probe input (plan §8 #22): ``goal_coverage_fn(agent)
+        # -> {"team_id", "count", "min_open"} | None`` — None for non-leads,
+        # leads whose team has no goals set, teams with enough open tasks,
+        # or a 0-disabled ``goal_coverage_min_open_tasks``. The escalated
+        # agenda turn rides the existing plate mechanism (the probe detail
+        # is the directive); goals stay operator-write-only — the lead
+        # decomposes via the already-legal ``hand_off``.
+        self.goal_coverage_fn = goal_coverage_fn
         # Durable-tasks probe input (plan §8 #24 prereq iii): ``pending_
         # tasks_fn(agent) -> int`` counts non-terminal (``pending``) tasks
         # assigned to ``agent`` in the mesh-side durable tasks table (a
@@ -1105,6 +1123,59 @@ class CronScheduler:
                         f"{count} teammate action(s) held for policy review on team "
                         f"{team_id}{sample} -- use recommend_pending_action(nonce=...) "
                         "to record your advisory opinion."
+                    ),
+                ))
+
+        # Probe 6: lead-duty blocked-task escalations (plan §8 #22 rung 3).
+        # Mirrors probe 4 exactly: mesh-side Team-store + tasks-store data
+        # only, one cheap lookup for non-leads (the seam short-circuits
+        # before touching the tasks store); a read failure degrades to
+        # "no probe" rather than raising into the tick. This probe IS the
+        # ladder's rung-3 mechanism — the lead is never messaged directly.
+        if self.lead_blocked_tasks_fn is not None:
+            try:
+                escalated = self.lead_blocked_tasks_fn(agent)
+            except Exception as e:
+                logger.debug("lead_blocked_tasks_fn failed for '%s': %s", agent, e)
+                escalated = None
+            if escalated:
+                count = escalated.get("count", 0)
+                team_id = escalated.get("team_id", "")
+                task_ids = escalated.get("task_ids") or []
+                sample = f" (e.g. {', '.join(task_ids[:3])})" if task_ids else ""
+                results.append(HeartbeatProbeResult(
+                    name="lead_blocked_tasks",
+                    triggered=bool(count),
+                    detail=(
+                        f"{count} blocked task(s) escalated to your plate for team "
+                        f"{team_id}{sample} -- review each blocker and unblock it: "
+                        "answer it, hand_off the work elsewhere, or get the task's "
+                        "status updated."
+                    ),
+                ))
+
+        # Probe 7: goal-coverage gap (plan §8 #22). Mirrors probe 4's
+        # degradation posture; the seam itself returns None for non-leads,
+        # goal-less teams, covered teams, and the 0-disabled knob, so the
+        # probe stays free for everyone who isn't a lead sitting on
+        # under-covered goals. The detail is the directive — the escalated
+        # agenda turn needs no new prompt plumbing.
+        if self.goal_coverage_fn is not None:
+            try:
+                coverage = self.goal_coverage_fn(agent)
+            except Exception as e:
+                logger.debug("goal_coverage_fn failed for '%s': %s", agent, e)
+                coverage = None
+            if coverage:
+                count = coverage.get("count", 0)
+                team_id = coverage.get("team_id", "")
+                results.append(HeartbeatProbeResult(
+                    name="goal_coverage",
+                    triggered=True,
+                    detail=(
+                        f"Team goals are set but only {count} open task(s) advance "
+                        f"them for team {team_id} -- review the goals, decompose "
+                        "under-covered ones into tasks, and hand them off to the team."
                     ),
                 ))
 

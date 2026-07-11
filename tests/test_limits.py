@@ -99,3 +99,21 @@ def test_set_llm_limits_env_no_ops_on_non_dict_config():
     limits.set_llm_limits_env(env, None)
     limits.set_llm_limits_env(env, "not-a-dict")
     assert env == {}
+
+
+def test_delivery_loop_knobs_and_zero_valid_kill_switches(monkeypatch):
+    """Plan §8 #22 (U6): the ladder + goal-coverage knobs. The two
+    0-valid kill switches (interval disables the WHOLE ladder,
+    min-open disables the probe) must keep a 0 low end — resolve()
+    may never clamp an explicit 0 up."""
+    assert limits.LIMIT_SPECS["ladder_rung_interval_minutes"] == (30, 0, 10080)
+    assert limits.LIMIT_SPECS["ladder_human_fallback_hours"][0] == 48
+    assert limits.LIMIT_SPECS["goal_coverage_min_open_tasks"] == (1, 0, 1000)
+    monkeypatch.setenv("OPENLEGION_LADDER_RUNG_INTERVAL_MINUTES", "0")
+    assert limits.resolve("ladder_rung_interval_minutes") == 0
+    monkeypatch.setenv("OPENLEGION_GOAL_COVERAGE_MIN_OPEN_TASKS", "0")
+    assert limits.resolve("goal_coverage_min_open_tasks") == 0
+    # The fallback is NOT independently disableable (lo=1) — the
+    # interval kill switch owns turning the ladder off.
+    monkeypatch.setenv("OPENLEGION_LADDER_HUMAN_FALLBACK_HOURS", "0")
+    assert limits.resolve("ladder_human_fallback_hours") == 1

@@ -1,9 +1,10 @@
 """Persistent registry of open "agent asks the user for help" requests.
 
-Covers the three user-actionable asks that drive the dashboard "Needs you"
+Covers the user-actionable asks that drive the dashboard "Needs you"
 panel: ``credential_request``, ``browser_login_request``,
-``browser_captcha_help_request``. Each row is one open ask, keyed by a minted
-``request_id`` (uuid).
+``browser_captcha_help_request``, and the blocked-task ladder's
+``blocked_task_escalation`` (plan §8 #22). Each row is one open ask, keyed
+by a minted ``request_id`` (uuid).
 
 Why this exists (replaces a process-local dict): the panel is the
 authoritative list of "what currently needs the user". If the backing state
@@ -46,6 +47,11 @@ _KINDS = (
     "credential_request",
     "browser_login_request",
     "browser_captcha_help_request",
+    # Blocked-task escalation ladder rung 4 (plan §8 #22): the ONE durable
+    # "a blocked task needs you" entry the ChainWatcher's ladder files per
+    # task (budget-exhausted blockers or the max-age fallback). Dedup is
+    # the tasks store's ``blocked_human_notices`` claim, not this registry.
+    "blocked_task_escalation",
 )
 
 

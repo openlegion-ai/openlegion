@@ -104,6 +104,23 @@ LIMIT_SPECS: dict[str, tuple[int, int, int]] = {
     # auto-merges sample at `auto_merge_sample_rate_initial`; afterward
     # sampling decays to `auto_merge_sample_rate_floor`.
     "auto_merge_sample_decay_after": (10, 1, 100000),
+    # Blocked-task escalation ladder (plan §8 #22) — minutes a task must
+    # sit blocked before each rung climb (rung 1 re-drives the assignee,
+    # rung 2 the creator, rung 3 lands on the lead's plate). 0 DISABLES
+    # the ENTIRE ladder including the rung-4 budget fast path (B4-style
+    # 0-valid kill switch) — the low end is 0 on purpose, do not clamp it up.
+    "ladder_rung_interval_minutes": (30, 0, 10080),
+    # Blocked-task escalation ladder (plan §8 #22) — hours blocked after
+    # which rung 4 (ONE durable human Needs-you entry per task) fires for
+    # any blocker; budget-exhausted blockers skip straight to rung 4
+    # without waiting. Not independently disableable — the interval kill
+    # switch above turns the whole ladder off.
+    "ladder_human_fallback_hours": (48, 1, 8760),
+    # Goal-coverage probe (plan §8 #22) — a lead whose team has goals set
+    # (north_star / success_criteria) but fewer than this many open
+    # (pending/accepted/working) team tasks gets a plate alert to
+    # decompose the goals into tasks. 0 DISABLES the probe (B4-style).
+    "goal_coverage_min_open_tasks": (1, 0, 1000),
 }
 
 # key -> OPENLEGION_* env var name (the second-lowest precedence source).
@@ -124,6 +141,9 @@ ENV_NAMES: dict[str, str] = {
     "auto_merge_daily_cap": "OPENLEGION_AUTO_MERGE_DAILY_CAP",
     "auto_merge_trust_floor": "OPENLEGION_AUTO_MERGE_TRUST_FLOOR",
     "auto_merge_sample_decay_after": "OPENLEGION_AUTO_MERGE_SAMPLE_DECAY_AFTER",
+    "ladder_rung_interval_minutes": "OPENLEGION_LADDER_RUNG_INTERVAL_MINUTES",
+    "ladder_human_fallback_hours": "OPENLEGION_LADDER_HUMAN_FALLBACK_HOURS",
+    "goal_coverage_min_open_tasks": "OPENLEGION_GOAL_COVERAGE_MIN_OPEN_TASKS",
 }
 
 # Per-agent config keys (agents.yaml / edit_agent) -> limits key. Only the

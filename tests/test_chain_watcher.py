@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from src.host.chain_watcher import ChainWatcher
+from src.host.chain_watcher import BlockedTaskLadder, ChainWatcher
 from src.host.orchestration import Tasks
 
 HUMAN = {"kind": "human", "channel": "dashboard", "user": "u1"}
@@ -473,3 +473,464 @@ async def test_stall_then_terminal_both_delivered():
     assert [c[1] for c in d.calls] == ["stall", "done"]
 
 
+# ── Blocked-task escalation ladder (plan §8 #22) ─────────────────
+#
+# Store-level ladder state + the BlockedTaskLadder sweep semantics.
+# The ladder is INFLUENCE ONLY — a pinned test asserts the task row is
+# byte-identical after a full climb to rung 4.
+
+INTERVAL = 600.0
+FALLBACK = 48 * 3600.0
+
+
+def _blocked_task(
+    store: Tasks, *, creator: str = "ops", assignee: str = "scout",
+    team_id: str | None = None, note: str = "stuck on X",
+    title: str = "do the thing",
+) -> dict:
+    t = store.create(
+        creator=creator, assignee=assignee, title=title, team_id=team_id,
+    )
+    store.update_status(t["id"], "working", actor=assignee)
+    store.update_status(t["id"], "blocked", actor=assignee, blocker_note=note)
+    return store.get(t["id"])
+
+
+class _Sender:
+    def __init__(self):
+        self.calls: list[tuple[str, str]] = []
+
+    def __call__(self, agent, message):
+        self.calls.append((agent, message))
+
+
+class _HelpRegistry:
+    def __init__(self):
+        self.records: list[dict] = []
+
+    def record(self, kind, agent_id, payload):
+        self.records.append(
+            {"kind": kind, "agent_id": agent_id, "payload": payload},
+        )
+        return f"req-{len(self.records)}"
+
+
+class _Audit:
+    def __init__(self):
+        self.rows: list[tuple[str, int, dict]] = []
+
+    def __call__(self, task_id, rung, detail):
+        self.rows.append((task_id, rung, detail))
+
+
+def _ladder(store: Tasks, clk: list, **kw) -> BlockedTaskLadder:
+    defaults: dict = dict(
+        interval_s=INTERVAL,
+        fallback_s=FALLBACK,
+        wall_clock=lambda: clk[0],
+    )
+    defaults.update(kw)
+    return BlockedTaskLadder(store, **defaults)
+
+
+# ── Store: ladder state / claims ─────────────────────────────────
+
+
+def test_ladder_observe_and_climb_cas():
+    s = _store()
+    t = _blocked_task(s)
+    assert s.ladder_state(t["id"]) is None
+    st = s.ladder_observe_blocked(t["id"], now=100.0)
+    assert st == {
+        "task_id": t["id"], "blocked_since": 100.0,
+        "rung": 0, "last_climb_at": 100.0,
+    }
+    # Re-observe is idempotent (INSERT OR IGNORE) — state untouched.
+    assert s.ladder_observe_blocked(t["id"], now=999.0)["blocked_since"] == 100.0
+    # CAS climb: the right from_rung wins once; a stale replay loses.
+    assert s.ladder_climb(t["id"], 0, 1, now=200.0) is True
+    assert s.ladder_climb(t["id"], 0, 1, now=200.0) is False
+    st = s.ladder_state(t["id"])
+    assert (st["rung"], st["last_climb_at"]) == (1, 200.0)
+
+
+def test_ladder_reset_clears_only_unblocked():
+    s = _store()
+    still = _blocked_task(s)
+    gone = _blocked_task(s, assignee="other")
+    s.ladder_observe_blocked(still["id"], now=1.0)
+    s.ladder_observe_blocked(gone["id"], now=1.0)
+    s.update_status(gone["id"], "working", actor="x")   # unblocked
+    assert s.ladder_reset_unblocked() == 1
+    assert s.ladder_state(still["id"]) is not None
+    assert s.ladder_state(gone["id"]) is None
+
+
+def test_claim_blocked_human_notice_exactly_once():
+    s = _store()
+    assert s.claim_blocked_human_notice("task-1") is True
+    assert s.claim_blocked_human_notice("task-1") is False
+
+
+def test_list_blocked_returns_only_blocked():
+    s = _store()
+    b = _blocked_task(s)
+    w = s.create(creator="ops", assignee="scout", title="working one")
+    s.update_status(w["id"], "working", actor="x")
+    assert [t["id"] for t in s.list_blocked()] == [b["id"]]
+
+
+def test_escalated_blocked_for_team_filters_rung_team_and_status():
+    s = _store()
+    hot = _blocked_task(s, team_id="alpha")            # rung 3 — counts
+    cold = _blocked_task(s, team_id="alpha")           # rung 1 — too low
+    other = _blocked_task(s, team_id="beta")           # rung 3, other team
+    fixed = _blocked_task(s, team_id="alpha")          # rung 3 but unblocked
+    for task, rung in ((hot, 3), (cold, 1), (other, 3), (fixed, 3)):
+        s.ladder_observe_blocked(task["id"], now=1.0)
+        for step in range(1, rung + 1):
+            s.ladder_climb(task["id"], step - 1, step, now=float(step))
+    s.update_status(fixed["id"], "working", actor="x")
+    count, sample = s.escalated_blocked_for_team("alpha")
+    assert (count, sample) == (1, [hot["id"]])
+    # Rung 4 still counts as "on the lead's plate" (>= min_rung).
+    s.ladder_climb(hot["id"], 3, 4, now=9.0)
+    assert s.escalated_blocked_for_team("alpha")[0] == 1
+
+
+# ── Ladder: rung progression ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_ladder_rung_progression_at_intervals():
+    s = _store()
+    task = _blocked_task(s, team_id="alpha")
+    clk = [10_000.0]
+    assignee, creator = _Sender(), _Sender()
+    hp, audit = _HelpRegistry(), _Audit()
+    lad = _ladder(
+        s, clk, deliver_assignee=assignee, deliver_creator=creator,
+        lead_of_fn=lambda team: "lead-1", help_requests=hp, audit_fn=audit,
+    )
+
+    await lad.sweep_once()          # first observation → rung 0, no sends
+    assert s.ladder_state(task["id"])["rung"] == 0
+    assert assignee.calls == [] and creator.calls == []
+
+    clk[0] += INTERVAL              # rung 1 due → assignee re-driven
+    await lad.sweep_once()
+    assert s.ladder_state(task["id"])["rung"] == 1
+    assert [a for a, _ in assignee.calls] == ["scout"]
+    assert creator.calls == []
+
+    clk[0] += INTERVAL              # rung 2 → creator followup
+    await lad.sweep_once()
+    assert s.ladder_state(task["id"])["rung"] == 2
+    assert [a for a, _ in creator.calls] == ["ops"]
+
+    clk[0] += INTERVAL              # rung 3 → lead plate, NO message
+    await lad.sweep_once()
+    assert s.ladder_state(task["id"])["rung"] == 3
+    assert len(assignee.calls) == 1 and len(creator.calls) == 1
+    assert s.escalated_blocked_for_team("alpha") == (1, [task["id"]])
+
+    clk[0] += INTERVAL              # parked at rung 3 — no interval climb
+    await lad.sweep_once()
+    assert s.ladder_state(task["id"])["rung"] == 3
+    assert hp.records == []
+    # One audit row per climb, carrying the rung + task id.
+    assert [(tid, rung) for tid, rung, _ in audit.rows] == [
+        (task["id"], 1), (task["id"], 2), (task["id"], 3),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ladder_climbs_one_rung_per_sweep():
+    """A long-overdue task climbs one rung per sweep — never skips
+    straight past a rung's nudge (rung 4's own triggers excepted)."""
+    s = _store()
+    task = _blocked_task(s)
+    clk = [0.0]
+    assignee = _Sender()
+    lad = _ladder(s, clk, deliver_assignee=assignee)
+    await lad.sweep_once()          # observe
+    clk[0] += INTERVAL * 3          # three intervals overdue
+    await lad.sweep_once()
+    assert s.ladder_state(task["id"])["rung"] == 1
+    assert len(assignee.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_rung1_message_carries_blocker_note_via_deliver_seam():
+    s = _store()
+    task = _blocked_task(s, note="waiting on prod schema decision")
+    clk = [0.0]
+    assignee = _Sender()
+    lad = _ladder(s, clk, deliver_assignee=assignee)
+    await lad.sweep_once()
+    clk[0] += INTERVAL
+    await lad.sweep_once()
+    [(agent, message)] = assignee.calls
+    assert agent == "scout"
+    assert task["id"] in message
+    assert "waiting on prod schema decision" in message
+    assert "update the task status" in message
+
+
+@pytest.mark.asyncio
+async def test_rung2_skips_creator_equals_assignee():
+    s = _store()
+    task = _blocked_task(s, creator="scout", assignee="scout")
+    clk = [0.0]
+    creator = _Sender()
+    audit = _Audit()
+    lad = _ladder(s, clk, deliver_creator=creator, audit_fn=audit)
+    await lad.sweep_once()
+    clk[0] += INTERVAL
+    await lad.sweep_once()          # rung 1
+    clk[0] += INTERVAL
+    await lad.sweep_once()          # rung 2 — climb happens, message skipped
+    assert s.ladder_state(task["id"])["rung"] == 2
+    assert creator.calls == []
+    assert audit.rows[-1] == (task["id"], 2, {"skipped": "creator_is_assignee"})
+
+
+@pytest.mark.asyncio
+async def test_rung2_skips_operator_creator():
+    """The operator path is rung 4's job — rung 2 never pings the human's
+    agent about its own hand-offs."""
+    s = _store()
+    task = _blocked_task(s, creator="operator")
+    clk = [0.0]
+    creator = _Sender()
+    audit = _Audit()
+    lad = _ladder(s, clk, deliver_creator=creator, audit_fn=audit)
+    await lad.sweep_once()
+    clk[0] += INTERVAL
+    await lad.sweep_once()
+    clk[0] += INTERVAL
+    await lad.sweep_once()
+    assert s.ladder_state(task["id"])["rung"] == 2
+    assert creator.calls == []
+    assert audit.rows[-1] == (task["id"], 2, {"skipped": "creator_is_operator"})
+
+
+@pytest.mark.asyncio
+async def test_rung3_teamless_climbs_straight_past():
+    """Teamless (or leaderless) tasks climb rung 3 on schedule but nothing
+    surfaces them — no lead plate exists; rung 4 waits for its own
+    triggers (budget / max age)."""
+    s = _store()
+    task = _blocked_task(s, team_id=None)
+    clk = [0.0]
+    audit = _Audit()
+    hp = _HelpRegistry()
+    lad = _ladder(s, clk, lead_of_fn=lambda team: None, audit_fn=audit, help_requests=hp)
+    await lad.sweep_once()
+    for _ in range(3):
+        clk[0] += INTERVAL
+        await lad.sweep_once()
+    assert s.ladder_state(task["id"])["rung"] == 3
+    assert audit.rows[-1] == (task["id"], 3, {"skipped": "no_lead"})
+    # No team ⇒ no lead-plate probe surface anywhere; rung 4 not yet due.
+    assert hp.records == []
+
+
+# ── Ladder: rung 4 (human) ───────────────────────────────────────
+
+
+@pytest.mark.parametrize("note", [
+    "Budget exceeded: $2.00/$2.00 daily, $10.00/$50.00 monthly",
+    "Team budget exceeded for team 'alpha': $9.00/$9.00 daily",
+    "Coordination budget exceeded: $2.00/$2.00 daily",
+])
+@pytest.mark.asyncio
+async def test_rung4_budget_fast_path_fires_immediately(note):
+    """The verified budget-error family escalates straight to the human
+    on the FIRST sweep — no interval wait, from rung 0."""
+    s = _store()
+    task = _blocked_task(s, note=note)
+    clk = [0.0]
+    assignee = _Sender()
+    hp, audit = _HelpRegistry(), _Audit()
+    lad = _ladder(
+        s, clk, deliver_assignee=assignee, help_requests=hp, audit_fn=audit,
+    )
+    await lad.sweep_once()
+    assert s.ladder_state(task["id"])["rung"] == 4
+    assert assignee.calls == []     # rungs 1-3 never fired
+    [rec] = hp.records
+    assert rec["kind"] == "blocked_task_escalation"
+    assert rec["agent_id"] == "scout"
+    assert rec["payload"]["name"] == task["id"]
+    assert "budget" in rec["payload"]["description"].lower()
+    assert audit.rows == [
+        (task["id"], 4, {"reason": "budget_exhausted", "help_request_filed": True}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_rung4_max_age_fallback_fires():
+    s = _store()
+    task = _blocked_task(s, note="waiting on upstream API contract")
+    clk = [50_000.0]
+    hp, audit = _HelpRegistry(), _Audit()
+    lad = _ladder(s, clk, help_requests=hp, audit_fn=audit)
+    await lad.sweep_once()          # observe at rung 0
+    clk[0] += FALLBACK              # 48h blocked → human, from any rung
+    await lad.sweep_once()
+    assert s.ladder_state(task["id"])["rung"] == 4
+    [rec] = hp.records
+    assert rec["kind"] == "blocked_task_escalation"
+    assert audit.rows[-1] == (
+        task["id"], 4, {"reason": "max_age", "help_request_filed": True},
+    )
+
+
+@pytest.mark.asyncio
+async def test_rung4_fires_once_across_sweeps_and_restart():
+    s = _store()
+    task = _blocked_task(s, note="Budget exceeded: $2.00/$2.00 daily")
+    clk = [0.0]
+    hp = _HelpRegistry()
+    lad = _ladder(s, clk, help_requests=hp)
+    await lad.sweep_once()
+    await lad.sweep_once()          # rung already 4 → no re-file
+    assert len(hp.records) == 1
+    # "Restart": a fresh ladder over the same durable store — the rung-4
+    # state AND the human-notice claim both survive.
+    lad2 = _ladder(s, clk, help_requests=hp)
+    await lad2.sweep_once()
+    assert len(hp.records) == 1
+    assert s.ladder_state(task["id"])["rung"] == 4
+
+
+@pytest.mark.asyncio
+async def test_unblock_reblock_resets_rungs_but_never_refiles_human():
+    s = _store()
+    task = _blocked_task(s, note="Budget exceeded: $2.00/$2.00 daily")
+    clk = [0.0]
+    assignee = _Sender()
+    hp = _HelpRegistry()
+    lad = _ladder(s, clk, deliver_assignee=assignee, help_requests=hp)
+    await lad.sweep_once()          # budget fast path → rung 4, one entry
+    assert len(hp.records) == 1
+    # Unblock, sweep (state clears), re-block with an ordinary note.
+    s.update_status(task["id"], "working", actor="scout")
+    await lad.sweep_once()
+    assert s.ladder_state(task["id"]) is None
+    s.update_status(task["id"], "blocked", actor="scout", blocker_note="stuck again")
+    await lad.sweep_once()          # fresh episode → rung 0
+    assert s.ladder_state(task["id"])["rung"] == 0
+    clk[0] += INTERVAL
+    await lad.sweep_once()          # the ladder re-runs: assignee re-driven
+    assert s.ladder_state(task["id"])["rung"] == 1
+    assert len(assignee.calls) == 1
+    # But the human entry is at-most-once PER TASK EVER: age it to the
+    # fallback — rung 4 climbs again, files nothing.
+    clk[0] += FALLBACK
+    await lad.sweep_once()
+    assert s.ladder_state(task["id"])["rung"] == 4
+    assert len(hp.records) == 1
+
+
+@pytest.mark.asyncio
+async def test_ladder_never_mutates_task_rows():
+    """Influence only — a full climb to rung 4 leaves the task row
+    byte-identical (status, assignee, blocker_note, updated_at: only
+    real actors move tasks)."""
+    s = _store()
+    task = _blocked_task(s, team_id="alpha")
+    before = s.get(task["id"])
+    clk = [0.0]
+    hp = _HelpRegistry()
+    lad = _ladder(
+        s, clk, deliver_assignee=_Sender(), deliver_creator=_Sender(),
+        lead_of_fn=lambda team: "lead-1", help_requests=hp,
+    )
+    await lad.sweep_once()
+    for _ in range(3):
+        clk[0] += INTERVAL
+        await lad.sweep_once()
+    clk[0] += FALLBACK
+    await lad.sweep_once()          # rung 4 via max age
+    assert s.ladder_state(task["id"])["rung"] == 4
+    assert len(hp.records) == 1
+    assert s.get(task["id"]) == before
+
+
+@pytest.mark.asyncio
+async def test_interval_zero_disables_whole_ladder():
+    """``ladder_rung_interval_minutes=0`` turns the ENTIRE ladder off —
+    no state rows, no nudges, and no rung-4 fast path (B4-style 0-valid
+    kill switch, pinned here)."""
+    s = _store()
+    task = _blocked_task(s, note="Budget exceeded: $2.00/$2.00 daily")
+    clk = [0.0]
+    assignee = _Sender()
+    hp = _HelpRegistry()
+    lad = _ladder(
+        s, clk, interval_s=0.0,
+        deliver_assignee=assignee, help_requests=hp,
+    )
+    for _ in range(3):
+        await lad.sweep_once()
+        clk[0] += FALLBACK
+    assert s.ladder_state(task["id"]) is None
+    assert assignee.calls == []
+    assert hp.records == []
+
+
+@pytest.mark.asyncio
+async def test_ladder_send_failure_does_not_stall_the_climb():
+    """A raising delivery seam is logged and isolated — the rung climb
+    (already claimed) stands and later rungs still fire."""
+    s = _store()
+    task = _blocked_task(s)
+    clk = [0.0]
+
+    def _boom(agent, message):
+        raise RuntimeError("transport down")
+
+    creator = _Sender()
+    lad = _ladder(s, clk, deliver_assignee=_boom, deliver_creator=creator)
+    await lad.sweep_once()
+    clk[0] += INTERVAL
+    await lad.sweep_once()          # rung 1 send raises — isolated
+    assert s.ladder_state(task["id"])["rung"] == 1
+    clk[0] += INTERVAL
+    await lad.sweep_once()          # rung 2 proceeds normally
+    assert [a for a, _ in creator.calls] == ["ops"]
+
+
+# ── Ladder: chain-watcher piggyback ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_chain_watcher_runs_ladder_on_its_cadence():
+    s = _store()
+    task = _blocked_task(s)
+    clk = [0.0]
+    lad = _ladder(s, clk)
+    w = ChainWatcher(s, _Deliver(), settle_s=0, ladder=lad)
+    await w.sweep_once()
+    assert s.ladder_state(task["id"]) is not None   # ladder swept
+
+
+@pytest.mark.asyncio
+async def test_ladder_failure_isolated_from_terminal_delivery():
+    """A ladder blow-up must never starve the watcher's terminal-outcome
+    guarantee."""
+    s = _store()
+    r = _human_root(s)
+    _finish(s, r["id"], "done", result_summary="r")
+
+    class _BoomLadder:
+        async def sweep_once(self):
+            raise RuntimeError("ladder boom")
+
+    d = _Deliver()
+    w = ChainWatcher(s, d, settle_s=0, ladder=_BoomLadder())
+    await w.sweep_once()            # arm settle (ladder raises, isolated)
+    await w.sweep_once()            # settled → deliver
+    assert [c[1] for c in d.calls] == ["done"]

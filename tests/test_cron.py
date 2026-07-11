@@ -2098,3 +2098,224 @@ class TestPerAgentCronCap:
         monkeypatch.setenv("OPENLEGION_MAX_CRON_JOBS_PER_AGENT", "0")
         assert _max_cron_jobs_per_agent() == 50
 
+
+
+class TestLeadBlockedTasksProbe:
+    """Mesh-side lead-duty probe (plan §8 #22 rung 3): blocked tasks the
+    escalation ladder has climbed to rung >= 3 in the lead's team land
+    on the lead's plate. Mirrors ``TestLeadDutyProbe`` exactly — the
+    probe IS the rung-3 mechanism (no direct message to the lead), and
+    non-leads pay one cheap ``lead_blocked_tasks_fn`` lookup."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.config_path = f"{self._tmpdir}/cron.json"
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_non_lead_gets_no_probe(self):
+        sched = CronScheduler(
+            config_path=self.config_path,
+            lead_blocked_tasks_fn=lambda agent: None,
+        )
+        results = sched._run_heartbeat_probes("worker")
+        assert not any(r.name == "lead_blocked_tasks" for r in results)
+
+    def test_lead_with_escalated_blocked_tasks_gets_triggered_probe(self):
+        sched = CronScheduler(
+            config_path=self.config_path,
+            lead_blocked_tasks_fn=lambda agent: {
+                "team_id": "alpha", "count": 2,
+                "task_ids": ["task_aa1", "task_bb2"],
+            },
+        )
+        results = sched._run_heartbeat_probes("lead-1")
+        probe = next(r for r in results if r.name == "lead_blocked_tasks")
+        assert probe.triggered is True
+        assert "2 blocked task(s) escalated to your plate" in probe.detail
+        assert "alpha" in probe.detail
+        assert "task_aa1" in probe.detail
+        # Directive: the lead acts via already-legal verbs only.
+        assert "hand_off" in probe.detail
+
+    def test_probe_works_without_a_task_id_sample(self):
+        sched = CronScheduler(
+            config_path=self.config_path,
+            lead_blocked_tasks_fn=lambda agent: {"team_id": "alpha", "count": 1},
+        )
+        results = sched._run_heartbeat_probes("lead-1")
+        probe = next(r for r in results if r.name == "lead_blocked_tasks")
+        assert probe.triggered is True
+        assert "1 blocked task(s)" in probe.detail
+
+    def test_fn_failure_degrades_gracefully(self):
+        def _boom(agent):
+            raise RuntimeError("store unavailable")
+
+        sched = CronScheduler(
+            config_path=self.config_path, lead_blocked_tasks_fn=_boom,
+        )
+        results = sched._run_heartbeat_probes("lead-1")
+        assert not any(r.name == "lead_blocked_tasks" for r in results)
+
+    def test_unwired_is_a_noop(self):
+        sched = CronScheduler(config_path=self.config_path)
+        results = sched._run_heartbeat_probes("lead-1")
+        assert not any(r.name == "lead_blocked_tasks" for r in results)
+
+
+class TestGoalCoverageProbe:
+    """Goal-coverage lead-plate probe (plan §8 #22): a lead whose team
+    has goals set but under-covered by open tasks gets a directive
+    plate alert. The detail text is PINNED — it is the entire prompt
+    surface of the decomposition loop (no new prompt plumbing)."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.config_path = f"{self._tmpdir}/cron.json"
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_quiet_when_fn_returns_none(self):
+        sched = CronScheduler(
+            config_path=self.config_path,
+            goal_coverage_fn=lambda agent: None,
+        )
+        results = sched._run_heartbeat_probes("lead-1")
+        assert not any(r.name == "goal_coverage" for r in results)
+
+    def test_triggered_with_pinned_directive_detail(self):
+        sched = CronScheduler(
+            config_path=self.config_path,
+            goal_coverage_fn=lambda agent: {
+                "team_id": "alpha", "count": 0, "min_open": 1,
+            },
+        )
+        results = sched._run_heartbeat_probes("lead-1")
+        probe = next(r for r in results if r.name == "goal_coverage")
+        assert probe.triggered is True
+        assert probe.detail == (
+            "Team goals are set but only 0 open task(s) advance them for "
+            "team alpha -- review the goals, decompose under-covered ones "
+            "into tasks, and hand them off to the team."
+        )
+
+    def test_fn_failure_degrades_gracefully(self):
+        def _boom(agent):
+            raise RuntimeError("store unavailable")
+
+        sched = CronScheduler(config_path=self.config_path, goal_coverage_fn=_boom)
+        results = sched._run_heartbeat_probes("lead-1")
+        assert not any(r.name == "goal_coverage" for r in results)
+
+    def test_unwired_is_a_noop(self):
+        sched = CronScheduler(config_path=self.config_path)
+        results = sched._run_heartbeat_probes("lead-1")
+        assert not any(r.name == "goal_coverage" for r in results)
+
+    @pytest.mark.asyncio
+    async def test_goal_coverage_escalates_an_otherwise_empty_plate(self):
+        """The probe rides the existing plate mechanism: a triggered
+        goal-coverage alert is actionable and escalates the agenda turn
+        with the directive in the Probe Alerts section — no new prompt
+        plumbing."""
+        dispatch = AsyncMock(return_value="decomposing goals now")
+        mock_bb = MagicMock()
+        mock_bb.list_by_prefix.return_value = []
+        ctx = AsyncMock(return_value={
+            "heartbeat_rules": "", "daily_logs": "",
+            "is_default_heartbeat": True, "has_recent_activity": False,
+        })
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            blackboard=mock_bb, context_fn=ctx,
+            goals_fn=lambda agent: None, utility_model_fn=lambda: "",
+            goal_coverage_fn=lambda agent: {
+                "team_id": "alpha", "count": 0, "min_open": 1,
+            },
+        )
+        job = sched.add_job(
+            agent="lead-1", schedule="every 15m", message="heartbeat",
+            heartbeat=True,
+        )
+        result = await sched._execute_job(job)
+        assert result is not None
+        dispatch.assert_called_once()
+        call_msg = dispatch.call_args[0][1]
+        assert "Probe Alerts" in call_msg
+        assert "decompose under-covered ones into tasks" in call_msg
+
+
+class TestGoalCoverageGapHelper:
+    """The mesh-side decision helper the ``goal_coverage_fn`` closure
+    delegates to (``src.cli.runtime._goal_coverage_gap``) — quiet unless
+    a LEAD's team has goals set and fewer than ``min_open`` open
+    (pending/accepted/working) tasks; 0 disables."""
+
+    def _stores(self):
+        from src.host.orchestration import Tasks
+        from src.host.teams import TeamStore
+
+        teams = TeamStore(db_path=":memory:")
+        tasks = Tasks(db_path=":memory:")
+        teams.create_team("alpha", "test team")
+        teams.add_member("alpha", "lead-1")
+        teams.add_member("alpha", "w1")
+        teams.set_lead("alpha", "lead-1")
+        return teams, tasks
+
+    def _gap(self, teams, tasks, agent="lead-1", min_open=1):
+        from src.cli.runtime import _goal_coverage_gap
+
+        return _goal_coverage_gap(teams, tasks, agent, min_open=min_open)
+
+    def test_alerts_when_goals_set_and_no_open_tasks(self):
+        teams, tasks = self._stores()
+        teams.set_goal("alpha", "Ship the product")
+        assert self._gap(teams, tasks) == {
+            "team_id": "alpha", "count": 0, "min_open": 1,
+        }
+
+    def test_quiet_when_enough_open_tasks_exist(self):
+        teams, tasks = self._stores()
+        teams.set_goal("alpha", "Ship the product")
+        tasks.create(creator="lead-1", assignee="w1", title="do it", team_id="alpha")
+        assert self._gap(teams, tasks) is None
+
+    def test_blocked_tasks_do_not_count_as_coverage(self):
+        """Blocked work is the escalation ladder's lane — a team whose
+        only task is blocked still reads as an uncovered goal."""
+        teams, tasks = self._stores()
+        teams.set_goal("alpha", "Ship the product")
+        t = tasks.create(creator="lead-1", assignee="w1", title="stuck", team_id="alpha")
+        tasks.update_status(t["id"], "working", actor="w1")
+        tasks.update_status(t["id"], "blocked", actor="w1", blocker_note="stuck")
+        gap = self._gap(teams, tasks)
+        assert gap == {"team_id": "alpha", "count": 0, "min_open": 1}
+
+    def test_quiet_when_no_goals_set(self):
+        teams, tasks = self._stores()
+        assert self._gap(teams, tasks) is None
+
+    def test_success_criteria_alone_counts_as_goals(self):
+        teams, tasks = self._stores()
+        teams.set_goal("alpha", None, success_criteria=["10 signups"])
+        gap = self._gap(teams, tasks)
+        assert gap is not None and gap["count"] == 0
+
+    def test_quiet_for_non_lead(self):
+        teams, tasks = self._stores()
+        teams.set_goal("alpha", "Ship the product")
+        assert self._gap(teams, tasks, agent="w1") is None
+
+    def test_zero_min_open_disables_the_probe(self):
+        teams, tasks = self._stores()
+        teams.set_goal("alpha", "Ship the product")
+        assert self._gap(teams, tasks, min_open=0) is None
+
+    def test_missing_stores_are_quiet(self):
+        teams, tasks = self._stores()
+        assert self._gap(None, tasks) is None
+        assert self._gap(teams, None) is None

@@ -3024,8 +3024,10 @@ class TestSystemNoteCallSites:
 
     def test_runtime_sites_flagged(self):
         src = self._src("src/cli/runtime.py")
-        # cron_dispatch + verification wake.
-        assert src.count("system_note=True") == 2
+        # cron_dispatch + verification wake + the blocked-task ladder's
+        # rung-2 creator followup (``_ladder_send_creator``, plan §8 #22
+        # — mesh-composed, no human typed it).
+        assert src.count("system_note=True") == 3
 
     def test_webhooks_flagged(self):
         src = self._src("src/host/webhooks.py")
