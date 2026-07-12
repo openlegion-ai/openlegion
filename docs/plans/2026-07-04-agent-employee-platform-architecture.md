@@ -1897,6 +1897,28 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   rung (bounded, benign). Full suite 8907 passed / 26 skipped / sole failure = known flake
   #1, green in isolation.
 
+- **✅ Landed — U7 lead budget allocation (#1253, §8 #21; activates the item #12 reserved).**
+  `POST /mesh/teams/{team_id}/members/{agent_id}/budget` — lead-only in the U5 gate taxonomy
+  (404 unknown team → 409 leaderless → 403 non-lead incl. non-lead operator,
+  denial-recorded → member-of-THIS-team check), envelope existence per requested period
+  (unset/0 = unlimited = nothing to allocate within, 409, B4), **Σ(explicit member
+  allocations) ≤ envelope per requested period** (409 names remaining headroom;
+  exact-boundary passes; members without an explicit override count 0 — the envelope still
+  bounds them via `team_envelope_check`). Writes the SAME `CostTracker.budgets` store the
+  operator uses — enforcement needed zero changes; provenance lives in the audit trail
+  (`lead_budget_allocation`, after_value re-read from the persisted row). **The envelope can
+  never be raised here** (teams row unchanged — pinned); lead-set 0 deliberately blocks the
+  member's work-LLM spend (B4 store semantics — the lead's reversible throttle, documented).
+  `allocate_member_budget` tool (lead-only docstring pinned). **Recorded for future budget
+  writers:** `CostTracker.set_budget` is NOT preserve-on-omit — a bare None refills from the
+  deployment default, so this endpoint reads-before-writes; and a first-ever single-period
+  allocation materializes an explicit value for the other period via that same default-fill
+  (accepted; the seam to revisit if stricter Σ guarantees are ever wanted). costs.py gained
+  its first CLAUDE.md row. Gate note: two full-suite background runs were killed by external
+  machine load (Spotlight/Chrome contention, load avg >90); the merge gate ran as two
+  foreground halves (test_[a-l]/test_[m-z], glob coverage verified complete) — 8931 passed /
+  0 failed combined, the known TelegramStop flake passing this round.
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|
@@ -1961,6 +1983,7 @@ findings, if any, land as a follow-up fix PR recorded in this ledger.
 | #1247 | U4 — kernel-executed auto-merge consuming lead verdicts (§8 #20) | merged |
 | #1249 | U5 — probation preset, lead advisory recommendations, autonomy log (§8 #19) | merged |
 | #1251 | U6 — blocked-task escalation ladder + goal-coverage probe (§8 #22) | merged |
+| #1253 | U7 — lead budget allocation within the human envelope (§8 #21) | merged |
 
 ### YOU ARE HERE → Phase 5
 
