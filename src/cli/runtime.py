@@ -246,6 +246,37 @@ def _bind_mesh_socket(host: str, port: int) -> socket.socket:
     return sock
 
 
+def _goal_coverage_gap(teams_store, tasks_store, agent: str, *, min_open: int) -> dict | None:
+    """Goal-coverage decision for the lead-plate probe (plan §8 #22).
+
+    Module-level (pure reads over the two stores) so the logic is testable
+    without a RuntimeContext; the cron ``goal_coverage_fn`` closure wires
+    the live stores + the ``goal_coverage_min_open_tasks`` limit into it.
+
+    Returns ``None`` (quiet) unless ALL of: the probe is enabled
+    (``min_open > 0``), ``agent`` leads a team, that team has goals set
+    (``north_star`` or ``success_criteria``), and fewer than ``min_open``
+    team tasks are open (``pending``/``accepted``/``working`` — blocked
+    work is the escalation ladder's lane, not goal coverage). Non-leads
+    pay exactly one cheap ``led_team`` lookup.
+    """
+    if min_open <= 0 or teams_store is None or tasks_store is None:
+        return None
+    team_id = teams_store.led_team(agent)
+    if not team_id:
+        return None
+    team = teams_store.get_team(team_id) or {}
+    if not (team.get("north_star") or team.get("success_criteria")):
+        return None
+    open_tasks = tasks_store.list_team(
+        team_id, statuses=["pending", "accepted", "working"],
+    )
+    count = len(open_tasks)
+    if count >= min_open:
+        return None
+    return {"team_id": team_id, "count": count, "min_open": min_open}
+
+
 class RuntimeContext:
     """Manages the full OpenLegion runtime lifecycle."""
 
@@ -2121,6 +2152,45 @@ class RuntimeContext:
                 return 0
             return store.count_pending_for_assignee(agent)
 
+        def lead_blocked_tasks(agent: str) -> dict | None:
+            """Lead-duty probe input (plan §8 #22 rung 3): mirrors
+            ``lead_pending_reviews`` exactly, but over the escalation
+            ladder's durable rung state in the tasks store. Only blocked
+            tasks the ladder has climbed to rung >= 3 in the lead's team
+            count — the probe IS rung 3 (no direct message to the lead).
+            Returns None fast for non-leads (one cheap ``led_team``
+            lookup) or leads with nothing escalated; otherwise
+            ``{"team_id", "count", "task_ids"}`` — ``task_ids`` is a small
+            capped sample so the plate line is directly actionable."""
+            store = getattr(self, "teams_store", None)
+            if store is None:
+                return None
+            team_id = store.led_team(agent)
+            if not team_id:
+                return None
+            tasks_store = getattr(self, "_tasks_store_ref", None)
+            if tasks_store is None:
+                return None
+            count, sample = tasks_store.escalated_blocked_for_team(team_id)
+            if not count:
+                return None
+            return {"team_id": team_id, "count": count, "task_ids": sample}
+
+        def goal_coverage(agent: str) -> dict | None:
+            """Goal-coverage probe input (plan §8 #22): delegates to the
+            module-level ``_goal_coverage_gap`` (quiet for non-leads /
+            goal-less teams / covered teams / the 0-disabled knob). Store
+            refs resolve lazily like the sibling seams; the limit resolves
+            per call so an env change applies without a restart."""
+            from src.shared import limits as shared_limits
+
+            return _goal_coverage_gap(
+                getattr(self, "teams_store", None),
+                getattr(self, "_tasks_store_ref", None),
+                agent,
+                min_open=shared_limits.resolve("goal_coverage_min_open_tasks"),
+            )
+
         def deployment_utility_model() -> str:
             """Deployment ``llm.utility_model`` for the cron plate gate.
 
@@ -2237,6 +2307,11 @@ class RuntimeContext:
             # ``create_mesh_app`` — which owns ``pending_actions`` — runs
             # AFTER this scheduler is constructed.
             lead_holds_fn=lead_pending_holds,
+            # Plan §8 #22 (U6): the two delivery-loop lead-plate probes.
+            # Both mirror ``lead_reviews_fn``'s shape — mesh-side reads
+            # only, None short-circuit for non-leads, lazy store refs.
+            lead_blocked_tasks_fn=lead_blocked_tasks,
+            goal_coverage_fn=goal_coverage,
         )
         self._cron_job_count = len(self.cron_scheduler.jobs)
 
@@ -2495,13 +2570,80 @@ class RuntimeContext:
 
         # Start chain watcher — delivers a guaranteed terminal outcome for
         # user-originated task chains so the operator can hand off and
-        # release instead of block-watching a multi-hop pipeline.
+        # release instead of block-watching a multi-hop pipeline. The
+        # blocked-task escalation ladder (plan §8 #22) rides its sweep.
         if self._tasks_store_ref is not None and self.transport is not None:
-            from src.host.chain_watcher import ChainWatcher
+            from src.host.chain_watcher import BlockedTaskLadder, ChainWatcher
+            from src.shared.utils import dumps_safe
 
+            def _log_ladder_send(fut) -> None:
+                try:
+                    fut.result()
+                except Exception as e:
+                    logger.warning("ladder nudge dispatch failed: %s", e)
+
+            def _ladder_send_assignee(agent: str, message: str) -> None:
+                # Rung 1 — fire-and-forget onto the dispatch loop: the
+                # ladder sweep must never block on a full agent turn.
+                # ``deliver_chat`` forks busy→steer / idle→followup and the
+                # turn bills the nudged agent's normal WORK ledger (no
+                # coordination-exempt path).
+                if self.lane_manager is None or self._dispatch_loop is None:
+                    return
+                fut = asyncio.run_coroutine_threadsafe(
+                    self.lane_manager.deliver_chat(agent, message),
+                    self._dispatch_loop,
+                )
+                fut.add_done_callback(_log_ladder_send)
+
+            def _ladder_send_creator(agent: str, message: str) -> None:
+                # Rung 2 — a followup turn on the task creator. System-
+                # composed (no human typed it), same fire-and-forget +
+                # work-ledger posture as rung 1.
+                if self.lane_manager is None or self._dispatch_loop is None:
+                    return
+                fut = asyncio.run_coroutine_threadsafe(
+                    self.lane_manager.enqueue(
+                        agent, message, mode="followup", system_note=True,
+                    ),
+                    self._dispatch_loop,
+                )
+                fut.add_done_callback(_log_ladder_send)
+
+            def _ladder_lead_of(team_id: str | None) -> str | None:
+                store = getattr(self, "teams_store", None)
+                if store is None or not team_id:
+                    return None
+                team = store.get_team(team_id) or {}
+                return team.get("lead_agent_id") or None
+
+            def _ladder_audit(task_id: str, rung: int, detail: dict) -> None:
+                try:
+                    self.blackboard.log_audit(
+                        action="blocked_task_escalation",
+                        target=task_id,
+                        field=f"rung_{rung}",
+                        after_value=dumps_safe(detail),
+                        actor="chain_watcher",
+                        provenance="system",
+                    )
+                except Exception as e:
+                    logger.debug("ladder audit write failed for %s: %s", task_id, e)
+
+            ladder = BlockedTaskLadder(
+                self._tasks_store_ref,
+                deliver_assignee=_ladder_send_assignee,
+                deliver_creator=_ladder_send_creator,
+                lead_of_fn=_ladder_lead_of,
+                help_requests=getattr(
+                    getattr(self, "_app", None), "help_requests_store", None,
+                ),
+                audit_fn=_ladder_audit,
+            )
             self.chain_watcher = ChainWatcher(
                 self._tasks_store_ref,
                 self._deliver_chain_outcome,
+                ladder=ladder,
             )
 
             def run_chain_watcher():

@@ -2455,6 +2455,25 @@ class TestPolishFixesApplied:
             "an unwired seam deliberately SKIPS the handover" in claude_md
         ), "Constraint #13 should state the unwired seam skips with a printed note"
 
+    def test_claudemd_documents_delivery_loops(self):
+        """CLAUDE.md documents the U6 delivery loops (plan §8 #22): the
+        blocked-task escalation ladder on the chain_watcher row (influence
+        only + rung-4 once-per-task) and the two new lead-plate probes on
+        the cron row."""
+        claude_md = (_REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        assert "Blocked-task escalation ladder" in claude_md, (
+            "chain_watcher.py row should document the escalation ladder"
+        )
+        assert "INFLUENCE ONLY" in claude_md, (
+            "the ladder row should pin the influence-only invariant"
+        )
+        assert "per task EVER" in claude_md, (
+            "the ladder row should pin the once-per-task rung-4 claim"
+        )
+        assert "lead_blocked_tasks_fn" in claude_md and "goal_coverage_fn" in claude_md, (
+            "cron.py row should enumerate the two U6 lead-plate probes"
+        )
+
 
 # ── EventBus coverage — JS handlers wired in onWsEvent ────────────────
 

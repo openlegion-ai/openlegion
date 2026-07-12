@@ -80,3 +80,30 @@ def test_reap_old_drops_only_aged_rows(tmp_path):
     # Everything older than 0s is reaped.
     assert store.reap_old(max_age_sec=0) == 1
     assert store.get(rid) is None
+
+
+def test_blocked_task_escalation_is_a_known_kind(tmp_path, caplog):
+    """The ladder's rung-4 entry (plan §8 #22) is a first-class kind —
+    recording it must not trip the unknown-kind warning, and it flows
+    through the open feed like the credential/browser asks."""
+    import logging
+
+    store = HelpRequests(db_path=str(tmp_path / "hr.db"))
+    with caplog.at_level(logging.WARNING, logger="host.help_requests"):
+        rid = store.record(
+            "blocked_task_escalation",
+            "scout",
+            {
+                "name": "task_abc123",
+                "service": "tasks",
+                "description": "Task 'x' (task_abc123) is blocked (budget_exhausted).",
+                "reason": "budget_exhausted",
+                "team_id": "alpha",
+            },
+        )
+    assert "unknown kind" not in caplog.text
+    rec = store.get(rid)
+    assert rec["kind"] == "blocked_task_escalation"
+    assert rec["name"] == "task_abc123"
+    assert rec["service"] == "tasks"
+    assert [r["request_id"] for r in store.list_open()] == [rid]

@@ -368,6 +368,26 @@ class Tasks:
                     notified_at REAL NOT NULL
                 );
 
+                -- Blocked-task escalation ladder (plan §8 #22). One row per
+                -- currently-escalating blocked task: the rung reached and
+                -- when it was last climbed. Cleared by the ladder sweep when
+                -- the task leaves ``blocked`` (a re-block restarts at rung 0).
+                CREATE TABLE IF NOT EXISTS blocked_escalations (
+                    task_id TEXT PRIMARY KEY,
+                    blocked_since REAL NOT NULL,
+                    rung INTEGER NOT NULL DEFAULT 0,
+                    last_climb_at REAL NOT NULL
+                );
+
+                -- Rung-4 (human) claim ledger — mirrors chain_stall_notices:
+                -- INSERT OR IGNORE on the task id makes the durable Needs-you
+                -- entry at-most-once PER TASK EVER, surviving sweeps, mesh
+                -- restarts, and unblock→re-block cycles.
+                CREATE TABLE IF NOT EXISTS blocked_human_notices (
+                    task_id TEXT PRIMARY KEY,
+                    notified_at REAL NOT NULL
+                );
+
                 PRAGMA user_version = 1;
             """)
 
@@ -586,6 +606,135 @@ class Tasks:
                 (root_task_id, terminal_kind, time.time()),
             )
             return cur.rowcount == 1
+
+    # ── Blocked-task escalation ladder (plan §8 #22) ──────────────
+    #
+    # Durable per-task ladder state for the ChainWatcher's blocked-task
+    # sweep. Same persistence posture as the chain-delivery/stall claims
+    # above: sibling tables in this store, claim-style writes, restart-
+    # safe. The ladder is INFLUENCE ONLY — nothing here (or in the
+    # sweep) ever transitions a task, reassigns it, or touches goals.
+
+    def list_blocked(self) -> list[dict]:
+        """All ``blocked`` tasks, oldest-updated first.
+
+        Feeds the escalation-ladder sweep. ``blocked`` is non-terminal so
+        rows here are never reaped mid-escalation; a task that leaves
+        ``blocked`` simply drops out of the scan (and
+        :meth:`ladder_reset_unblocked` clears its ladder state).
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT {self._SELECT_COLS} FROM tasks "
+                "WHERE status = 'blocked' ORDER BY updated_at ASC",
+            ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def ladder_state(self, task_id: str) -> dict | None:
+        """The task's ladder row (``blocked_since`` / ``rung`` /
+        ``last_climb_at``), or ``None`` before first observation."""
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT task_id, blocked_since, rung, last_climb_at "
+                "FROM blocked_escalations WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "task_id": row[0],
+            "blocked_since": row[1],
+            "rung": row[2],
+            "last_climb_at": row[3],
+        }
+
+    def ladder_observe_blocked(self, task_id: str, *, now: float | None = None) -> dict:
+        """Register first observation of a blocked task (rung 0).
+
+        ``INSERT OR IGNORE`` so a concurrent sweep can't double-create;
+        returns the (possibly pre-existing) row. ``blocked_since`` is the
+        observation time — within one sweep interval of the actual
+        transition, which is close enough for interval math measured in
+        tens of minutes.
+        """
+        ts = time.time() if now is None else now
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO blocked_escalations "
+                "(task_id, blocked_since, rung, last_climb_at) "
+                "VALUES (?, ?, 0, ?)",
+                (task_id, ts, ts),
+            )
+        return self.ladder_state(task_id)  # type: ignore[return-value]
+
+    def ladder_climb(
+        self, task_id: str, from_rung: int, to_rung: int, *, now: float | None = None,
+    ) -> bool:
+        """Atomically climb ``from_rung`` → ``to_rung`` (CAS on the rung).
+
+        Returns ``True`` only for the caller that actually moved the row —
+        the claim discipline the chain watcher's stall nudge uses, so two
+        racing sweeps (or a restart replay) can't both dispatch the same
+        rung's nudge. The loser sees ``False`` and sends nothing.
+        """
+        ts = time.time() if now is None else now
+        with self._conn() as conn:
+            cur = conn.execute(
+                "UPDATE blocked_escalations SET rung = ?, last_climb_at = ? "
+                "WHERE task_id = ? AND rung = ?",
+                (to_rung, ts, task_id, from_rung),
+            )
+            return cur.rowcount == 1
+
+    def ladder_reset_unblocked(self) -> int:
+        """Drop ladder state for tasks no longer ``blocked``. Returns count.
+
+        Run at the top of each ladder sweep: an unblocked (or reaped)
+        task's ladder resets, so a later re-block restarts at rung 0.
+        The rung-4 human claim (``blocked_human_notices``) deliberately
+        survives — that entry is at-most-once per task ever.
+        """
+        with self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM blocked_escalations WHERE task_id NOT IN "
+                "(SELECT id FROM tasks WHERE status = 'blocked')",
+            )
+            return cur.rowcount
+
+    def claim_blocked_human_notice(self, task_id: str) -> bool:
+        """Atomically claim the ONE rung-4 human escalation for a task.
+
+        Mirrors :meth:`claim_chain_stall` exactly: ``INSERT OR IGNORE`` on
+        the primary key — first caller ``True``, everyone after ``False``
+        forever (across sweeps, restarts, and re-block cycles).
+        """
+        with self._conn() as conn:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO blocked_human_notices "
+                "(task_id, notified_at) VALUES (?, ?)",
+                (task_id, time.time()),
+            )
+            return cur.rowcount == 1
+
+    def escalated_blocked_for_team(
+        self, team_id: str, *, min_rung: int = 3, sample_limit: int = 3,
+    ) -> tuple[int, list[str]]:
+        """Count + small id sample of a team's blocked tasks at rung ≥ ``min_rung``.
+
+        Feeds the lead-plate ``lead_blocked_tasks_fn`` cron probe (plan §8
+        #22 rung 3): only tasks the ladder has escalated onto the lead's
+        plate count — a freshly-blocked task (rung < 3) stays off it.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT t.id FROM tasks t "
+                "JOIN blocked_escalations b ON b.task_id = t.id "
+                "WHERE t.team_id = ? AND t.status = 'blocked' AND b.rung >= ? "
+                "ORDER BY b.blocked_since ASC",
+                (team_id, min_rung),
+            ).fetchall()
+        ids = [r[0] for r in rows]
+        return len(ids), ids[: max(0, int(sample_limit))]
 
     @staticmethod
     def _row_to_dict(row: tuple) -> dict:
