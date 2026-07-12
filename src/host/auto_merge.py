@@ -64,6 +64,29 @@ logger = setup_logging("host.auto_merge")
 # unambiguously as kernel-executed in every listing/audit trail.
 AUTO_MERGE_RATER = "policy_engine"
 
+# Per-event-loop serialization lock for the daily-cap window (Phase-5
+# review finding). The consumer is fired fire-and-forget, once per
+# ``approve`` verdict; a lead clearing a backlog of approvals in one turn
+# spawns several consumers concurrently. Each claims a DIFFERENT review, so
+# the claim-first merge machinery does not serialize them — and the daily
+# cap is a read-decide-then-record-later window, so without this lock every
+# consumer reads the same pre-merge count and all proceed, blowing past the
+# operator's ``auto_merge_daily_cap``. Holding one lock from the cap read
+# through the ``auto_merged`` record makes count→merge→record atomic across
+# consumers (auto-merges are rare and the cap is small, so serializing them
+# is free and arguably correct — the kernel merges one at a time). Keyed by
+# running loop so a fresh test loop never reuses a lock bound to another.
+_cap_locks: dict[Any, asyncio.Lock] = {}
+
+
+def _cap_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _cap_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _cap_locks[loop] = lock
+    return lock
+
 
 def midnight_utc_ts(now: float | None = None) -> float:
     """Epoch seconds for the most recent UTC midnight at or before ``now``."""
@@ -145,10 +168,22 @@ async def consider_auto_merge(
     def _skip(reason: str) -> None:
         logger.info("auto-merge skipped for review %s (team %s): %s", review_id, team_id, reason)
 
+    lock: asyncio.Lock | None = None
+    lock_held = False
     try:
         if track_record_store is None:
             _skip("no track record store wired")
             return
+
+        # Serialize the daily-cap window (Phase-5 review finding): held from
+        # the cap read through the ``auto_merged`` record so concurrent
+        # consumers (a lead approving a backlog in one turn) can't all read the
+        # same pre-merge count and each proceed past ``auto_merge_daily_cap``.
+        # Released before the best-effort notify below (which need not be
+        # serialized) and, on any early return/exception, by the ``finally``.
+        lock = _cap_lock()
+        await lock.acquire()
+        lock_held = True
 
         # Step 1: kill switch / daily rate cap.
         cap = limits_mod.resolve("auto_merge_daily_cap")
@@ -291,6 +326,12 @@ async def consider_auto_merge(
             review_id, team_id, branch, commit, lead_verdict_by, author, sampled,
         )
 
+        # The cap slot is now durably recorded — release before the notify so
+        # a slow operator-chat post doesn't serialize the next consumer.
+        if lock_held:
+            lock.release()
+            lock_held = False
+
         # Step 5: notify (best-effort — never blocks/fails the pipeline
         # outcome, the merge already landed).
         if notify_fn is not None:
@@ -310,3 +351,8 @@ async def consider_auto_merge(
         # Outermost net: the verdict endpoint's response must never block
         # on, or fail because of, this consumer.
         logger.exception("auto-merge consumer raised for review %s (team %s)", review_id, team_id)
+    finally:
+        # Release the cap lock on any early return (cap reached, trust floor,
+        # lost claim, git failure) or exception before the pre-notify release.
+        if lock_held and lock is not None:
+            lock.release()

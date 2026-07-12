@@ -964,6 +964,11 @@ class DashboardEvent(BaseModel):
         "pending_action_created",
         "pending_action_resolved",
         "pending_action_expired",
+        # A lead recorded an advisory approve/reject recommendation on a held
+        # action (plan §8 #19). Additive display update — carries the nonce +
+        # recommendation fields so the Needs-you row and the already-rendered
+        # inline card refresh live instead of only on a full reload.
+        "pending_action_updated",
         # PR — close EventBus coverage gaps. Without these literals,
         # ``EventBus.emit`` raises a Pydantic ValidationError that the
         # debug-level ``except Exception`` swallows and the dashboard

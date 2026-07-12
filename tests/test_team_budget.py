@@ -498,6 +498,39 @@ class TestAllocateMemberBudgetEnvelope:
             bb.close()
             tracker.close()
 
+    def test_first_partial_allocation_rejects_default_materialization_blowout(self, tmp_path):
+        """Phase-5 review finding: a first-ever DAILY-only allocation to a
+        member with no prior explicit budget must NOT let ``set_budget``
+        silently materialize the global default monthly cap ($200) against a
+        tight monthly envelope — that blows Σ ≤ envelope and locks other
+        members out. The endpoint rejects it, directing the lead to name the
+        monthly period explicitly; nothing is written."""
+        app, bb, store, tracker = _setup_lead_teams(tmp_path)
+        try:
+            # Generous daily, tight $1 monthly envelope (below any plausible
+            # deployment default, so the default-materialization always breaches).
+            store.set_budget("alpha", 100.0, 1.0)
+            resp = TestClient(app).post(
+                "/mesh/teams/alpha/members/member2/budget",
+                headers=_hdr(_LEAD_TOKENS["lead1"]),
+                json={"daily_usd": 10.0},
+            )
+            assert resp.status_code == 409, resp.text
+            assert "monthly" in resp.json()["detail"].lower()
+            # Nothing persisted — no silent blowout.
+            assert tracker.budgets.get("member2") is None
+            # Naming both periods within headroom succeeds and writes exactly that.
+            resp2 = TestClient(app).post(
+                "/mesh/teams/alpha/members/member2/budget",
+                headers=_hdr(_LEAD_TOKENS["lead1"]),
+                json={"daily_usd": 10.0, "monthly_usd": 0.5},
+            )
+            assert resp2.status_code == 200, resp2.text
+            assert tracker.budgets["member2"] == {"daily_usd": 10.0, "monthly_usd": 0.5}
+        finally:
+            bb.close()
+            tracker.close()
+
     def test_sigma_boundary_exactly_equal_passes(self, tmp_path):
         app, bb, store, tracker = _setup_lead_teams(tmp_path)
         try:

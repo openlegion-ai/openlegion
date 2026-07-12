@@ -257,6 +257,45 @@ class TestDailyCap:
 
         assert repo_env["store"].get_review(review["id"])["status"] == "open"
 
+    async def test_concurrent_burst_respects_cap_no_toctou(self, repo_env, monkeypatch):
+        """Phase-5 review finding: a lead approving a backlog fires several
+        consumers at once, each claiming a DIFFERENT review. The daily-cap
+        window (read count → merge → record) must be serialized so they can't
+        all read the same pre-merge count and blow past ``auto_merge_daily_cap``.
+        Git is stubbed (a slow, awaiting merge) to force interleaving and isolate
+        the cap logic from real CAS timing."""
+        monkeypatch.setenv("OPENLEGION_AUTO_MERGE_DAILY_CAP", "1")
+        store, track = repo_env["store"], repo_env["track"]
+        _seed_events(track, submitter="member1", lead="member2", outcome="merged", count=5)
+        r1 = _make_review(repo_env, "feat-burst-1")
+        r2 = _make_review(repo_env, "feat-burst-2")
+
+        # Map each branch to its pinned head_sha so the live==recorded check
+        # passes and the (stubbed, slow) merge proceeds for both consumers.
+        head_by_branch = {r1["branch"]: r1["head_sha"], r2["branch"]: r2["head_sha"]}
+
+        async def _slow_merge(repo, sha, *, message):
+            await asyncio.sleep(0.02)  # yield so the sibling consumer interleaves
+            return "deadbeef" * 5
+
+        def _stub_head(repo, branch):
+            return head_by_branch.get(branch, "")
+
+        stub = {"merge_branch_fn": _slow_merge, "branch_head_sha_fn": _stub_head}
+
+        results = await asyncio.gather(
+            _run(repo_env, r1, **stub),
+            _run(repo_env, r2, **stub),
+            return_exceptions=True,
+        )
+        assert all(not isinstance(x, Exception) for x in results), results
+        merged = track.count_events(
+            source="drive_review", outcome="auto_merged", rater_kind="system",
+        )
+        assert merged == 1, f"cap=1 but {merged} auto-merges recorded (TOCTOU)"
+        statuses = {store.get_review(r1["id"])["status"], store.get_review(r2["id"])["status"]}
+        assert statuses == {"merged", "open"}, statuses
+
 
 class TestConcurrencyAndSampling:
     @_requires_merge_tree

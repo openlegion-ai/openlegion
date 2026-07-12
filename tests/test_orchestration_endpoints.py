@@ -901,6 +901,46 @@ async def test_recommend_lead_records_and_surfaces(v2_app):
 
 
 @pytest.mark.asyncio
+async def test_recommend_emits_pending_action_updated_event(tmp_path, monkeypatch):
+    """Phase-5 review finding: recording a recommendation must push a
+    ``pending_action_updated`` WS event so an already-rendered inline card
+    refreshes live instead of only on a full dashboard reload."""
+    from src.dashboard.events import EventBus
+
+    server_module = _reload_server(monkeypatch, tasks_db=str(tmp_path / "tasks.db"))
+    monkeypatch.setenv("OPENLEGION_TRACK_RECORD_DB", str(tmp_path / "track_record.db"))
+    monkeypatch.setenv("OPENLEGION_PENDING_ACTIONS_DB", str(tmp_path / "pending_actions.db"))
+    bus = EventBus()
+    blackboard = Blackboard(str(tmp_path / "bb.db"))
+    permissions = PermissionMatrix()
+    for aid in ("scout", "analyst"):
+        permissions.permissions[aid] = AgentPermissions(agent_id=aid, can_route_tasks=True)
+    router = MessageRouter(permissions, {"scout": "http://s:8400", "analyst": "http://a:8400"})
+    app = server_module.create_mesh_app(
+        blackboard=blackboard, pubsub=PubSub(), router=router,
+        permissions=permissions, event_bus=bus,
+    )
+    _seed_teams(app)
+    app.teams_store.set_lead("research", "scout")
+    _store_wallet_hold(app, "n1", "analyst")
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/pending/n1/recommend",
+            json={"recommendation": "reject", "note": "hold off"},
+            headers={"X-Agent-ID": "scout", "X-Mesh-Internal": "1"},
+        )
+    assert r.status_code == 200, r.text
+    updates = [e for e in bus._buffer if e["type"] == "pending_action_updated"]
+    assert len(updates) == 1, bus._buffer
+    data = updates[0]["data"]
+    assert data["nonce"] == "n1"
+    assert data["lead_recommendation"] == "reject"
+    assert data["lead_recommendation_note"] == "hold off"
+    assert data["lead_recommendation_by"] == "scout"
+
+
+@pytest.mark.asyncio
 async def test_recommend_non_lead_teammate_403(v2_app):
     """The proposer itself is NOT the lead — recommending is still
     denied (analyst proposed this hold and is not research's lead)."""
