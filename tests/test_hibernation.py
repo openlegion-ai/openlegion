@@ -169,6 +169,22 @@ class TestHibernateEndpoint:
         assert cm.stopped == [("scout", False)]
         bb.close()
 
+    def test_hibernate_endpoint_409_when_wake_seam_unavailable(self, tmp_path, monkeypatch):
+        """Phase-5 review finding: the manual endpoint must refuse (409) under a
+        transport without the cold-wake seam (sandbox), rather than stopping an
+        agent that could never auto-wake."""
+        from src.host.transport import SandboxTransport
+        app, bb, cm, tr, hm, eb, cfg = _build_app(
+            tmp_path, monkeypatch, transport=SandboxTransport(),
+        )
+        resp = TestClient(app).post("/mesh/agents/scout/hibernate", headers=_OP)
+        assert resp.status_code == 409, resp.text
+        assert "wake" in resp.json()["detail"].lower()
+        # Nothing was stopped — the agent stays running/active.
+        assert cm.stopped == []
+        assert cfg["agents"]["scout"]["status"] == "active"
+        bb.close()
+
     def test_hibernate_keeps_cron_jobs(self, tmp_path, monkeypatch):
         sched = CronScheduler(config_path=str(tmp_path / "cron.json"))
         sched.ensure_heartbeat("scout")
@@ -396,6 +412,32 @@ class TestWake:
         assert ok is False
         # Status stays hibernated — never falsely flips to active.
         assert cfg["agents"]["scout"]["status"] == "hibernated"
+        # Phase-5 review finding: a failed wake must NOT leave a running,
+        # health-registered container labelled "hibernated" (the health
+        # monitor would fight it with restarts). Teardown restores a clean
+        # hibernated state: the started container is stopped WITHOUT data
+        # removal, and health is deregistered again.
+        assert ("scout", False) in cm.stopped
+        assert not any(remove for _a, remove in cm.stopped), cm.stopped
+        # register happened during the wake attempt, unregister undid it.
+        hm.register.assert_called_with("scout")
+        hm.unregister.assert_called_with("scout")
+        bb.close()
+
+    async def test_wake_teardown_on_status_flip_failure(self, tmp_path, monkeypatch):
+        """The second failure branch (status write raises after the container
+        is up + registered) must also tear down to a clean hibernated state."""
+        cm = _FakeContainerManager()
+        cm.wait_result = True
+        app, bb, _cm, tr, hm, eb, cfg = _build_app(
+            tmp_path, monkeypatch, agent_status="hibernated", container_manager=cm,
+        )
+        with patch("src.cli.config._wake_agent_status", side_effect=ValueError("boom")):
+            ok = await app.ensure_agent_running("scout")
+        assert ok is False
+        assert cfg["agents"]["scout"]["status"] == "hibernated"
+        assert ("scout", False) in cm.stopped
+        hm.unregister.assert_called_with("scout")
         bb.close()
 
 
@@ -681,7 +723,8 @@ class TestCronHibernatedTicks:
 # ── Idle sweep ────────────────────────────────────────────────────────
 
 
-def _sweeper(tmp_path, *, agents_cfg, lane_manager=None, tasks_store=None, ask_broker=None):
+def _sweeper(tmp_path, *, agents_cfg, lane_manager=None, tasks_store=None,
+             ask_broker=None, wake_available_fn=None):
     hibernate_calls: list[tuple[str, str]] = []
 
     async def hibernate_fn(agent_id, *, caller="sweep"):
@@ -694,6 +737,7 @@ def _sweeper(tmp_path, *, agents_cfg, lane_manager=None, tasks_store=None, ask_b
         tasks_store=tasks_store,
         ask_broker=ask_broker,
         config_fn=lambda: {"agents": agents_cfg},
+        wake_available_fn=wake_available_fn,
     )
     return sweeper, hibernate_calls
 
@@ -707,6 +751,22 @@ class TestHibernationSweeper:
         )
         await sweeper._tick()
         assert calls == []
+
+    async def test_wake_seam_unavailable_skips_sweep_fail_closed(self, tmp_path, monkeypatch):
+        """Phase-5 review finding: under a backend whose transport lacks the
+        cold-wake seam (sandbox), the idle sweep must hibernate NOBODY — an
+        agent stopped there would never auto-wake and would strand forever."""
+        monkeypatch.setenv("OPENLEGION_HIBERNATE_IDLE_MINUTES", "10")
+        lm = LaneManager(dispatch_fn=AsyncMock())
+        lm._activity["scout"] = time.time() - 20 * 60  # idle, would otherwise hibernate
+        tasks = Tasks(db_path=str(tmp_path / "tasks.db"))
+        broker = AskBroker()
+        sweeper, calls = _sweeper(
+            tmp_path, agents_cfg={"scout": {"status": "active"}}, lane_manager=lm,
+            tasks_store=tasks, ask_broker=broker, wake_available_fn=lambda: False,
+        )
+        await sweeper._tick()
+        assert calls == []  # fail-closed: nobody hibernated without a wake path
 
     async def test_all_conditions_met_hibernates(self, tmp_path, monkeypatch):
         monkeypatch.setenv("OPENLEGION_HIBERNATE_IDLE_MINUTES", "10")

@@ -2738,15 +2738,26 @@ class RuntimeContext:
                     logger.warning("ladder nudge dispatch failed: %s", e)
 
             def _ladder_send_assignee(agent: str, message: str) -> None:
-                # Rung 1 — fire-and-forget onto the dispatch loop: the
-                # ladder sweep must never block on a full agent turn.
-                # ``deliver_chat`` forks busy→steer / idle→followup and the
-                # turn bills the nudged agent's normal WORK ledger (no
-                # coordination-exempt path).
+                # Rung 1 — a followup turn on the assignee. System-composed
+                # (no human typed it), so it MUST carry the system-note flag
+                # exactly like rung 2 below: without it the nudge lands in the
+                # assignee's transcript as a role=user message (indistinguishable
+                # from a real operator message) and runs through
+                # ``looks_like_correction`` — a host-authored escalation must
+                # never be able to write itself into the agent's corrections
+                # learnings. (Phase-5 review finding: the prior ``deliver_chat``
+                # path had no ``system_note`` parameter to thread the flag
+                # through, so the busy→steer fork silently bypassed the marker;
+                # a queued followup is the correct posture for a not-time-
+                # critical blocked-task nudge anyway.) Fire-and-forget onto the
+                # dispatch loop so the sweep never blocks; bills the nudged
+                # agent's normal WORK ledger.
                 if self.lane_manager is None or self._dispatch_loop is None:
                     return
                 fut = asyncio.run_coroutine_threadsafe(
-                    self.lane_manager.deliver_chat(agent, message),
+                    self.lane_manager.enqueue(
+                        agent, message, mode="followup", system_note=True,
+                    ),
                     self._dispatch_loop,
                 )
                 fut.add_done_callback(_log_ladder_send)

@@ -742,6 +742,7 @@ class HibernationSweeper:
         ask_broker: Any,
         config_fn: Callable[[], dict],
         operator_agent_id: str = "operator",
+        wake_available_fn: Callable[[], bool] | None = None,
     ):
         self._hibernate_fn = hibernate_fn
         self._lane_manager = lane_manager
@@ -749,6 +750,11 @@ class HibernationSweeper:
         self._ask_broker = ask_broker
         self._config_fn = config_fn
         self._operator_agent_id = operator_agent_id
+        # Fail-closed gate (Phase-5 review finding): the idle sweep must not
+        # hibernate anyone when the cold-wake seam isn't wired (sandbox
+        # backend), or agents would stop and never auto-wake. None ⇒ assume
+        # available (test/legacy construction).
+        self._wake_available_fn = wake_available_fn
         self._running = False
 
     async def start(self) -> None:
@@ -767,6 +773,8 @@ class HibernationSweeper:
         idle_minutes = shared_limits.resolve("hibernate_idle_minutes")
         if idle_minutes <= 0:
             return  # sweep disabled — B4-style 0-valid default-off
+        if self._wake_available_fn is not None and not self._wake_available_fn():
+            return  # cold-wake seam unavailable (sandbox backend) — never strand
         if self._lane_manager is None:
             return
         try:
@@ -9948,6 +9956,35 @@ def create_mesh_app(
         new_daily = daily_req if daily_req is not None else old_daily
         new_monthly = monthly_req if monthly_req is not None else old_monthly
 
+        # Phase-5 review finding: a FIRST-EVER partial allocation (a period
+        # unnamed AND with no prior explicit value) leaves ``new_*`` None, and
+        # ``set_budget`` then materializes the GLOBAL deployment default for it
+        # ($50/$200 by default) — unvalidated against the envelope, so a
+        # daily-only allocation to a fresh member could silently materialize a
+        # $200 monthly cap against a $50 monthly envelope (Σ blown 4×, locking
+        # every other teammate out of monthly headroom). Validate the
+        # would-be-materialized default against the SAME Σ headroom check and
+        # reject on breach, directing the lead to name that period explicitly.
+        from src.host.costs import _default_budget as _default_member_budget
+
+        _defaults = _default_member_budget()
+        for _period, _env, _new, _label in (
+            ("daily_usd", daily_env, new_daily, "DAILY"),
+            ("monthly_usd", monthly_env, new_monthly, "MONTHLY"),
+        ):
+            if _new is None and _env > 0:
+                materialized = _defaults.get(_period, 0.0)
+                others = _others_explicit_sum(_period)
+                if others + materialized > _env + 1e-9:
+                    headroom = round(max(_env - others, 0.0), 4)
+                    raise HTTPException(
+                        409,
+                        f"Allocating to '{agent_id}' with no {_label} budget yet would "
+                        f"materialize the deployment default (${materialized:.2f}), which "
+                        f"exceeds the team's {_label} envelope headroom (${headroom:.2f}). "
+                        f"Specify {_period} explicitly (≤ ${headroom:.2f}) to allocate safely.",
+                    )
+
         cost_tracker.set_budget(agent_id, daily_usd=new_daily, monthly_usd=new_monthly)
 
         # Re-read the persisted row for the audit's ``after_value`` (rather
@@ -10147,6 +10184,14 @@ def create_mesh_app(
             raise HTTPException(403, "Only the operator can hibernate agents")
         if agent_id == "operator":
             raise HTTPException(400, "The operator agent cannot be hibernated")
+        if not _hibernation_wake_available():
+            raise HTTPException(
+                409,
+                "Hibernation is unavailable on this deployment: the wake-on-demand seam "
+                "is wired only for the HTTP transport (Docker backend). Under the sandbox "
+                "backend a hibernated agent would never auto-wake, so hibernation is "
+                "refused rather than silently stranding the agent.",
+            )
         from src.cli.config import _agent_status, _load_config
 
         cfg_now = _load_config()
@@ -10570,6 +10615,18 @@ def create_mesh_app(
                 logger.debug("agent_archived emit failed: %s", e)
         return {"archived": True, "agent_id": agent_id}
 
+    def _hibernation_wake_available() -> bool:
+        """True iff the cold-wake seam is actually wired for this deployment
+        (Phase-5 review finding). The seam lives on ``HttpTransport`` and is
+        installed by ``cli/runtime.py`` only ``if isinstance(transport,
+        HttpTransport)`` — the sandbox backend's ``SandboxTransport`` never
+        calls ``ensure_running``, so a hibernated agent under ``--sandbox``
+        would stop and never auto-wake. Hibernation fails closed there (the
+        manual endpoint 409s and the idle sweep skips) rather than stranding
+        agents, mirroring how Team Drive is scoped Docker-only (§8 #9)."""
+        from src.host.transport import HttpTransport as _HttpTransportForGate
+        return isinstance(transport, _HttpTransportForGate)
+
     async def _hibernate_agent_core(agent_id: str, *, caller: str = "operator") -> dict:
         """Hibernate-agent side effects (plan §8 #24). Mirrors
         ``_archive_agent_core``'s shape with ONE deliberate difference:
@@ -10711,15 +10768,39 @@ def create_mesh_app(
         if health_monitor is not None:
             health_monitor.register(agent_id)
 
+        def _wake_teardown() -> None:
+            """Restore a CLEAN hibernated state after a failed wake (Phase-5
+            review finding). ``start_agent`` already ran (container up) and
+            transport/router/health are re-registered; a bare ``return False``
+            here would leave a container running AND health-registered while
+            the status stays ``hibernated`` — the exact inverse of the
+            hibernate invariant, so the health monitor would fight it with
+            restarts and every later dispatch would force-recreate the
+            container. Undo the registration + container so the next dispatch
+            retries a genuinely-asleep agent instead of a health-monitored
+            zombie. Status is deliberately LEFT ``hibernated``."""
+            if health_monitor is not None:
+                try:
+                    health_monitor.unregister(agent_id)
+                except Exception as e:
+                    logger.warning("wake_teardown: health dereg for %s failed: %s", agent_id, e)
+            if container_manager is not None:
+                try:
+                    container_manager.stop_agent(agent_id, remove_data=False)
+                except Exception as e:
+                    logger.warning("wake_teardown: container stop for %s failed: %s", agent_id, e)
+
         ready = await container_manager.wait_for_agent(agent_id, timeout=60)
         if not ready:
             logger.error("wake_agent: '%s' did not become ready after cold-wake", agent_id)
+            _wake_teardown()
             return False
 
         try:
             _wake_agent_status(agent_id)
         except ValueError as e:
             logger.error("wake_agent: status flip failed for '%s': %s", agent_id, e)
+            _wake_teardown()
             return False
         _status_overrides.pop(agent_id, None)
         if lane_manager is not None:
@@ -10812,6 +10893,7 @@ def create_mesh_app(
         tasks_store=tasks_store,
         ask_broker=ask_broker,
         config_fn=_load_config_for_sweep,
+        wake_available_fn=_hibernation_wake_available,
     )
 
     @app.post("/mesh/agents/{agent_id}/offboard")
@@ -13105,6 +13187,24 @@ def create_mesh_app(
             after_value=recommendation,
             provenance="agent",
         )
+        # Push the advisory live (Phase-5 review finding): without this, an
+        # already-rendered inline pending_action_card never shows the lead's
+        # recommendation (the card injector is create-once and chat history is
+        # client-persisted) — the operator would only see it on a full reload.
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "pending_action_updated",
+                    agent="operator",
+                    data={
+                        "nonce": nonce,
+                        "lead_recommendation": record.get("lead_recommendation"),
+                        "lead_recommendation_note": record.get("lead_recommendation_note"),
+                        "lead_recommendation_by": record.get("lead_recommendation_by"),
+                    },
+                )
+            except Exception as e:
+                logger.debug("pending_action_updated emit failed for %s: %s", nonce, e)
         return {"recorded": True, "pending": record}
 
     @app.post("/mesh/audit/archive")

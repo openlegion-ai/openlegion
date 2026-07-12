@@ -3025,9 +3025,14 @@ class TestSystemNoteCallSites:
     def test_runtime_sites_flagged(self):
         src = self._src("src/cli/runtime.py")
         # cron_dispatch + verification wake + the blocked-task ladder's
-        # rung-2 creator followup (``_ladder_send_creator``, plan §8 #22
-        # — mesh-composed, no human typed it).
-        assert src.count("system_note=True") == 3
+        # rung-1 assignee followup AND rung-2 creator followup
+        # (``_ladder_send_assignee`` / ``_ladder_send_creator``, plan §8 #22
+        # — both mesh-composed, no human typed them; rung 1 was corrected
+        # from a ``deliver_chat`` call that could not carry the flag,
+        # Phase-5 review finding).
+        assert src.count("system_note=True") == 4
+        # Rung 1 must NOT regress to the flag-less deliver_chat path.
+        assert "self.lane_manager.deliver_chat(agent, message)" not in src
 
     def test_webhooks_flagged(self):
         src = self._src("src/host/webhooks.py")

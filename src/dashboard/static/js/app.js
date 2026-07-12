@@ -149,6 +149,7 @@ function dashboard() {
       // Task 9 — Workplace tab + pending action review
       'task_created', 'task_status_changed', 'task_outcome',
       'pending_action_created', 'pending_action_resolved', 'pending_action_expired',
+      'pending_action_updated',
       // PR 1 — soft-edit receipts + undo
       'operator_action_receipt', 'operator_action_receipt_undone',
       'operator_action_receipt_superseded',
@@ -4068,7 +4069,17 @@ function dashboard() {
       const existing = this.chatHistories[target].find(
         m => m.role === 'pending_action_card' && m.event_id === data.nonce,
       );
-      if (existing) return;
+      if (existing) {
+        // Card already rendered — refresh the advisory recommendation fields
+        // in place (plan §8 #19; Phase-5 review finding) so a lead's later
+        // recommendation shows on the existing card instead of being dropped.
+        // Everything else about a held action is immutable once proposed.
+        if (data.lead_recommendation !== undefined) {
+          existing.lead_recommendation = data.lead_recommendation || null;
+          existing.lead_recommendation_note = data.lead_recommendation_note || null;
+        }
+        return;
+      }
       const isDestructive = (
         data.action_kind === 'delete'
         && (data.target_kind === 'team' || data.target_kind === 'agent')
@@ -4424,6 +4435,16 @@ function dashboard() {
         // Also surface as an inline chat card in the operator chat —
         // the new single visual language for "operator wants the human
         // to act." Idempotent on event_id.
+        this._injectPendingActionCard(data);
+      } else if (evt.type === 'pending_action_updated') {
+        // A lead recorded an advisory recommendation (plan §8 #19). Patch the
+        // Needs-you row and the already-rendered inline card live, in place —
+        // the held action itself is unchanged (Phase-5 review finding).
+        const row = this.workplacePending.find(p => p.nonce === data.nonce);
+        if (row) {
+          row.lead_recommendation = data.lead_recommendation || null;
+          row.lead_recommendation_note = data.lead_recommendation_note || null;
+        }
         this._injectPendingActionCard(data);
       } else if (evt.type === 'pending_action_resolved') {
         this.workplacePending = this.workplacePending.filter(p => p.nonce !== data.nonce);
