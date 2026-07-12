@@ -1872,6 +1872,31 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   team's holds" tool — the plate probe's nonce sample is the stand-in until a need is shown.
   Full suite 8865 passed / 26 skipped / 0 failed.
 
+- **✅ Landed — U6 delivery loops (#1251, §8 #22).** (a) **Blocked-task escalation ladder**
+  (`BlockedTaskLadder`, swept on the chain watcher's cadence, exception-isolated from
+  terminal delivery; durable rung state + once-ever rung-4 claim as sibling tables in
+  tasks.db mirroring `chain_stall_notices`): rung 1 assignee re-drive via `deliver_chat`
+  with sanitized `blocker_note`; rung 2 creator followup (skips creator==assignee/operator);
+  rung 3 lead-plate probe only (`lead_blocked_tasks_fn`, rung≥3 count + sample; teamless
+  climbs past, audited `skipped: no_lead`); rung 4 ONE durable `help_requests` entry per task
+  EVER (`INSERT OR IGNORE` claim; fires immediately on the in-tree-verified budget-exceeded
+  error family, else at `ladder_human_fallback_hours` default 48). CAS one-rung-per-sweep
+  climbs, every climb audited (`blocked_task_escalation`), ZERO task mutations (pinned),
+  `ladder_rung_interval_minutes` default 30 / **0 kills the whole ladder** (B4-style).
+  `cred:` blocker codes deliberately unmatched (recon: no producer). Unblock resets rungs
+  1–3; the rung-4 claim survives re-block (stall-nudge precedent). (b) **Goal-coverage
+  probe** (`goal_coverage_fn` + probe, `lead_reviews_fn` shape): lead + team goals set +
+  fewer than `goal_coverage_min_open_tasks` (default 1, 0 disables) open tasks → directive
+  decompose-and-`hand_off` plate alert; blocked tasks deliberately don't count as coverage;
+  goals stay operator-write-only. **Recorded:** budget exhaustion on the task path lands
+  terminal-`failed` today (the B4 plan correction), so the rung-4 fast path covers
+  agent-set blocked+budget-note cases — teaching the failure path to prefer `blocked` for
+  recoverable budget errors is a possible follow-up, deliberately not built; SPA card
+  rendering for the new help-request kind is cosmetic follow-up (same class as U2's
+  wins-parity gap); a blocked→working→blocked flip faster than one sweep keeps its prior
+  rung (bounded, benign). Full suite 8907 passed / 26 skipped / sole failure = known flake
+  #1, green in isolation.
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|
@@ -1935,6 +1960,7 @@ findings, if any, land as a follow-up fix PR recorded in this ledger.
 | #1245 | U3 — action-tier policy engine, held-actions generalization (§8 #17, C.1 row 6) | merged |
 | #1247 | U4 — kernel-executed auto-merge consuming lead verdicts (§8 #20) | merged |
 | #1249 | U5 — probation preset, lead advisory recommendations, autonomy log (§8 #19) | merged |
+| #1251 | U6 — blocked-task escalation ladder + goal-coverage probe (§8 #22) | merged |
 
 ### YOU ARE HERE → Phase 5
 
