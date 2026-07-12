@@ -1919,6 +1919,52 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   foreground halves (test_[a-l]/test_[m-z], glob coverage verified complete) — 8931 passed /
   0 failed combined, the known TelegramStop flake passing this round.
 
+- **✅ Landed — U8 hibernation (#1255, §8 #24 — the final Phase-5 unit; every element landed
+  as ratified).** `hibernated` third status (`active | archived | hibernated` — in service,
+  container stopped, volume persisted, auto-wakes; archived never blurred).
+  `_hibernate_agent_core` mirrors archive with ONE difference: cron jobs KEPT (mesh-side
+  ticks are the cold-wake trigger); `stop_agent(agent_id, remove_data=False)` is a pinned
+  LITERAL — volume loss impossible by construction. Wake seam: `ensure_agent_running`
+  injected into `HttpTransport` (request/stream/sync; `is_reachable` exempt) — covers lane
+  dispatch AND every direct-bypass path (CLI REPL idle stream, dashboard idle stream, cron
+  fns) with zero caller changes; fast path is one dict read (`_status_overrides` cache);
+  archived NEVER wakes. **Recorded mechanism deviation:** the ratified sketch's "asyncio
+  per-agent lock" is loop-bound and unsafe across the mesh's ≥3 event loops — single-flight
+  is a `threading.Lock` + per-agent `concurrent.futures.Future` joined via
+  `asyncio.wrap_future` (two triggers from any loops wake exactly once; pinned). Cron:
+  hibernated ticks skip the container `/heartbeat-context` call (it fails soft toward FEWER
+  wakes — the wrong direction), mesh probes still run; actionable → dispatch wakes en route;
+  empty → zero contact; plate snapshot carries `hibernated: true`. Idle sweep: default OFF
+  (`hibernate_idle_minutes`, 0-valid B4), operator exempt, requires busy=false + empty queue
+  + no `working` tasks (`Tasks.has_working_task`, new — `count_pending_for_assignee`
+  deliberately excludes working) + no open asks (`AskBroker.has_open_asks`, new) + idle ≥
+  threshold; uncertain reads fail CLOSED. Activity stamped at lane-finally/steer/chat-done
+  AND after real cron dispatches (prevents hibernate-wake churn for cron-only agents — a
+  chokepoint the ratified list missed); persisted best-effort
+  (`config/agent_activity.json`, atomic tmp+rename) with a conservative `_boot_ts` fallback
+  — a restart never mass-hibernates (the FALLBACK is the pin). Observability: rate-limited
+  `agent_unreachable` event on dispatch connect-failures; task status semantics untouched
+  (B9 stays out of scope). Latent near-bug fixed en route: archive/unarchive endpoints now
+  sync the status cache the wake seam reads (post-boot archives could otherwise be woken).
+  B3's three-subsystem analysis held exactly — health.py needed ZERO code changes.
+  Residual: `request_sync` inside a live loop skips the wake (logged; unreachable at current
+  call sites). Full split suite 8993 passed / 0 failed.
+
+- **✅ Phase-5 exit checks (run on merged main ced6c04d, 2026-07-12).** (1) **C.1 row 6 /
+  C.4 "one approval surface":** grep-zero in `src/` for the delete-only confirm dispatch
+  ("not a delete confirmation"); every held action flows through `app.pending_executors` +
+  the unconditional live human-origin check. (2) **Goals agent-write still closed:**
+  `_require_goals_writer` unchanged (gate + its two operator call sites; no agent-facing
+  goals write exists). (3) **`remove_data=True` confined to the delete path** (single
+  executable site, `_apply_pending_delete`'s agent branch; hibernation statically pinned to
+  `False`). (4) **All §8 #17–#24 artifacts on main:** policy.py, track_record.py,
+  auto_merge.py, wins-file push, BlockedTaskLadder + goal-coverage probe,
+  allocate_member_budget, hibernation core. (5) **Constitutional pins pass unmodified:**
+  `test_merge_reject_are_operator_only` and
+  `test_operator_still_gated_surfaces_not_in_bypass_grep` (Constraint #12). The consolidated
+  end-of-phase 3-lane adversarial review runs next (Phase-3/4 pattern); findings land as a
+  fix PR recorded in the Phase-5 ledger.
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|
@@ -1984,6 +2030,7 @@ findings, if any, land as a follow-up fix PR recorded in this ledger.
 | #1249 | U5 — probation preset, lead advisory recommendations, autonomy log (§8 #19) | merged |
 | #1251 | U6 — blocked-task escalation ladder + goal-coverage probe (§8 #22) | merged |
 | #1253 | U7 — lead budget allocation within the human envelope (§8 #21) | merged |
+| #1255 | U8 — hibernation: stop idle containers, cold-wake on demand (§8 #24) | merged |
 
 ### YOU ARE HERE → Phase 5
 
@@ -2035,24 +2082,26 @@ units landed as separate green PRs off `main`, exit checks green (see the Phase-
 The consolidated end-of-phase adversarial review of all Phase-4 PRs runs at phase close
 (Phase-3 pattern) — findings land as a fix PR recorded in the Phase-4 ledger.
 
-**Phase 5 (governance at scale) is IN PROGRESS** — pre-decisions ratified as **§8 #17–#24**
-(2026-07-11) with the U0–U8 build order recorded in the Phase-5 landed entry above: action-tier
-policy engine (#17), durable track record + rating-trust rule (#18), earned autonomy with
-human-only hold release + lead advisory (#19), kernel-executed auto-merge consuming lead
-verdicts (#20), lead budget allocation within the human envelope (#21 — activates the item #12
-reserved), delivery loops + goals carve-out declined again (#22), positive feedback push (#23),
-and the **B3 hibernation scoping design (#24 — the standing B3 gate is SATISFIED; hibernation
-builds last, U8, after its prerequisite fixes land in U0)**. The companion review doc
-`2026-07-11-hands-off-teams-phase5.md` maps the human-intervention points and permanent
-touchpoints. Standing gates carried forward: a goals agent-write carve-out (team or standing)
-remains UNRATIFIED (declined again in #22) — do not build one without an explicit user
-decision; Personnel-file *import* is unblocked (B-pre #2 fixed) but unscheduled; raw shared
-`/team/scratch` stays unratified (§8 #1, sandbox story per §8 #9); Constraint #12 absolute —
-leads/agents gain no permission carve-out, policy thresholds are OPERATOR policy.
+**Phase 5 (governance at scale) — ALL NINE UNITS LANDED** (pre-decisions §8 #17–#24 ratified
+2026-07-11; built 2026-07-11/12, PRs #1232–#1255): U0 hardening prereqs, U1 durable track
+record + rating-trust rule (#18), U2 positive feedback push (#23), U3 action-tier policy
+engine with C.1 row 6 COMPLETE (#17), U4 kernel-executed auto-merge (#20), U5 probation +
+lead advisory + autonomy log (#19), U6 escalation ladder + goal-coverage probe (#22), U7
+lead budget allocation (#21), U8 hibernation (#24 — B3 resolved as designed; health.py
+needed zero changes). Exit checks green (see the Phase-5 exit entry above). **The
+consolidated end-of-phase 3-lane adversarial review is IN PROGRESS** — findings land as a
+fix PR + review-record doc PR in the Phase-5 ledger; the phase is not closed until that
+review record lands. Standing gates carried forward: a goals agent-write carve-out (team or
+standing) remains UNRATIFIED (declined again in #22) — do not build one without an explicit
+user decision; Personnel-file *import* is unblocked (B-pre #2 fixed) but unscheduled; raw
+shared `/team/scratch` stays unratified (§8 #1, sandbox story per §8 #9); Constraint #12
+absolute — leads/agents gain no permission carve-out, policy thresholds are OPERATOR policy.
+The companion review doc `2026-07-11-hands-off-teams-phase5.md` maps the human-intervention
+points and permanent touchpoints.
 
 **Handoff note:** this doc is the source of truth — a fresh session can continue from here without
 this session's chat history. Read §5 (keep/refactor/remove), Appendices A–C, §8 (ratified
-decisions), and the Phase-1/2/3/4 landed entries above (they record implementation corrections,
+decisions), and the Phase-1/2/3/4/5 landed entries above (they record implementation corrections,
 recorded deviations, and review findings the appendices don't).
 
 ---
