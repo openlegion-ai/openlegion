@@ -8,6 +8,7 @@ UNLIMITED — are pinned at the costs layer in test_costs.py; here we pin
 the surfaces.
 """
 
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -297,3 +298,369 @@ class TestImageGenEnvelope:
         assert result.success is False
         assert "Team budget exceeded" in result.error
         tracker.close()
+
+
+# ── Lead budget allocation within the human envelope (plan §8 #21) ──────
+
+
+def _build_lead_app(tmp_path, *, teams_store, cost_tracker=None, extra_tokens=None):
+    """Like ``_build_app`` above but with a caller-identity token per
+    fixture agent (lead/teammate/other-team-lead), not just operator/worker."""
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {}
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    tokens = {"operator": "tok-op"}
+    tokens.update(extra_tokens or {})
+    router = MessageRouter(permissions=perms, agent_registry={"operator": "http://op:8400"})
+    app = create_mesh_app(
+        bb, PubSub(), router, perms,
+        cost_tracker=cost_tracker, teams_store=teams_store,
+        auth_tokens=tokens,
+    )
+    return app, bb
+
+
+def _hdr(token: str) -> dict:
+    return {"Authorization": f"Bearer {token}"}
+
+
+_LEAD_TOKENS = {
+    "lead1": "tok-lead1",
+    "member2": "tok-member2",
+    "member3": "tok-member3",
+    "lead2": "tok-lead2",
+    "m1": "tok-m1",
+}
+
+
+def _setup_lead_teams(tmp_path):
+    """alpha: lead1 (lead) + member2 + member3. beta: lead2 (lead).
+    gamma: m1, no lead assigned (leaderless)."""
+    store = TeamStore(db_path=":memory:")
+    store.create_team("alpha")
+    store.add_member("alpha", "lead1")
+    store.add_member("alpha", "member2")
+    store.add_member("alpha", "member3")
+    store.set_lead("alpha", "lead1")
+    store.create_team("beta")
+    store.add_member("beta", "lead2")
+    store.set_lead("beta", "lead2")
+    store.create_team("gamma")
+    store.add_member("gamma", "m1")
+    tracker = CostTracker(db_path=str(tmp_path / "costs.db"))
+    tracker.set_team_store(store)
+    app, bb = _build_lead_app(
+        tmp_path, teams_store=store, cost_tracker=tracker, extra_tokens=_LEAD_TOKENS,
+    )
+    return app, bb, store, tracker
+
+
+class TestAllocateMemberBudgetGates:
+    """404 unknown team -> 409 leaderless -> 403 non-lead -> 404 target
+    not a member -- exactly the U5 recommend/verdict gate taxonomy."""
+
+    def test_unknown_team_404(self, tmp_path):
+        app, bb, store, tracker = _setup_lead_teams(tmp_path)
+        try:
+            resp = TestClient(app).post(
+                "/mesh/teams/ghost/members/member2/budget",
+                headers=_hdr(_LEAD_TOKENS["lead1"]),
+                json={"daily_usd": 5.0},
+            )
+            assert resp.status_code == 404
+        finally:
+            bb.close()
+            tracker.close()
+
+    def test_leaderless_team_409(self, tmp_path):
+        app, bb, store, tracker = _setup_lead_teams(tmp_path)
+        try:
+            resp = TestClient(app).post(
+                "/mesh/teams/gamma/members/m1/budget",
+                headers=_hdr(_LEAD_TOKENS["m1"]),
+                json={"daily_usd": 5.0},
+            )
+            assert resp.status_code == 409
+            assert "no lead" in resp.json()["detail"].lower()
+        finally:
+            bb.close()
+            tracker.close()
+
+    def test_non_lead_teammate_403(self, tmp_path):
+        app, bb, store, tracker = _setup_lead_teams(tmp_path)
+        try:
+            resp = TestClient(app).post(
+                "/mesh/teams/alpha/members/member3/budget",
+                headers=_hdr(_LEAD_TOKENS["member2"]),
+                json={"daily_usd": 5.0},
+            )
+            assert resp.status_code == 403
+        finally:
+            bb.close()
+            tracker.close()
+
+    def test_non_lead_operator_403(self, tmp_path):
+        """The operator's own budget surfaces are untouched -- but acting
+        AS the operator through this new lead-gated endpoint is denied
+        exactly like any other non-lead caller."""
+        app, bb, store, tracker = _setup_lead_teams(tmp_path)
+        try:
+            resp = TestClient(app).post(
+                "/mesh/teams/alpha/members/member2/budget",
+                headers=_hdr("tok-op"),
+                json={"daily_usd": 5.0},
+            )
+            assert resp.status_code == 403
+        finally:
+            bb.close()
+            tracker.close()
+
+    def test_lead_of_another_team_403(self, tmp_path):
+        app, bb, store, tracker = _setup_lead_teams(tmp_path)
+        try:
+            resp = TestClient(app).post(
+                "/mesh/teams/alpha/members/member2/budget",
+                headers=_hdr(_LEAD_TOKENS["lead2"]),
+                json={"daily_usd": 5.0},
+            )
+            assert resp.status_code == 403
+        finally:
+            bb.close()
+            tracker.close()
+
+    def test_target_not_a_member_404(self, tmp_path):
+        app, bb, store, tracker = _setup_lead_teams(tmp_path)
+        try:
+            client = TestClient(app)
+            # Unknown agent id entirely.
+            resp = client.post(
+                "/mesh/teams/alpha/members/ghost_agent/budget",
+                headers=_hdr(_LEAD_TOKENS["lead1"]),
+                json={"daily_usd": 5.0},
+            )
+            assert resp.status_code == 404
+            # A real agent, but on a different team.
+            resp = client.post(
+                "/mesh/teams/alpha/members/lead2/budget",
+                headers=_hdr(_LEAD_TOKENS["lead1"]),
+                json={"daily_usd": 5.0},
+            )
+            assert resp.status_code == 404
+        finally:
+            bb.close()
+            tracker.close()
+
+
+class TestAllocateMemberBudgetEnvelope:
+    def test_no_envelope_at_all_409(self, tmp_path):
+        app, bb, store, tracker = _setup_lead_teams(tmp_path)
+        try:
+            resp = TestClient(app).post(
+                "/mesh/teams/alpha/members/member2/budget",
+                headers=_hdr(_LEAD_TOKENS["lead1"]),
+                json={"daily_usd": 5.0},
+            )
+            assert resp.status_code == 409
+            assert "envelope" in resp.json()["detail"].lower()
+        finally:
+            bb.close()
+            tracker.close()
+
+    def test_daily_only_envelope_monthly_request_409(self, tmp_path):
+        app, bb, store, tracker = _setup_lead_teams(tmp_path)
+        try:
+            store.set_budget("alpha", 100.0, None)
+            resp = TestClient(app).post(
+                "/mesh/teams/alpha/members/member2/budget",
+                headers=_hdr(_LEAD_TOKENS["lead1"]),
+                json={"monthly_usd": 50.0},
+            )
+            assert resp.status_code == 409
+            assert "monthly" in resp.json()["detail"].lower()
+        finally:
+            bb.close()
+            tracker.close()
+
+    def test_sigma_violation_409_names_headroom(self, tmp_path):
+        app, bb, store, tracker = _setup_lead_teams(tmp_path)
+        try:
+            store.set_budget("alpha", 100.0, None)
+            tracker.set_budget("member3", 80.0, 80.0)
+            resp = TestClient(app).post(
+                "/mesh/teams/alpha/members/member2/budget",
+                headers=_hdr(_LEAD_TOKENS["lead1"]),
+                json={"daily_usd": 30.0},
+            )
+            assert resp.status_code == 409, resp.text
+            detail = resp.json()["detail"]
+            assert "20.00" in detail  # headroom = 100 - 80
+        finally:
+            bb.close()
+            tracker.close()
+
+    def test_sigma_boundary_exactly_equal_passes(self, tmp_path):
+        app, bb, store, tracker = _setup_lead_teams(tmp_path)
+        try:
+            store.set_budget("alpha", 100.0, None)
+            tracker.set_budget("member3", 80.0, 80.0)
+            resp = TestClient(app).post(
+                "/mesh/teams/alpha/members/member2/budget",
+                headers=_hdr(_LEAD_TOKENS["lead1"]),
+                json={"daily_usd": 20.0},
+            )
+            assert resp.status_code == 200, resp.text
+            assert resp.json()["allocation"]["daily_usd"] == 20.0
+        finally:
+            bb.close()
+            tracker.close()
+
+    def test_allocation_never_mutates_teams_row(self, tmp_path):
+        """The surface can NEVER raise the envelope -- pin that the teams
+        row is byte-unchanged by any allocation call."""
+        app, bb, store, tracker = _setup_lead_teams(tmp_path)
+        try:
+            store.set_budget("alpha", 100.0, 500.0)
+            before = store.get_team("alpha")
+            client = TestClient(app)
+            resp = client.post(
+                "/mesh/teams/alpha/members/member2/budget",
+                headers=_hdr(_LEAD_TOKENS["lead1"]),
+                json={"daily_usd": 30.0, "monthly_usd": 200.0},
+            )
+            assert resp.status_code == 200, resp.text
+            resp2 = client.post(
+                "/mesh/teams/alpha/members/member3/budget",
+                headers=_hdr(_LEAD_TOKENS["lead1"]),
+                json={"daily_usd": 0.0},
+            )
+            assert resp2.status_code == 200, resp2.text
+            after = store.get_team("alpha")
+            assert before == after
+        finally:
+            bb.close()
+            tracker.close()
+
+
+class TestAllocateMemberBudgetWrites:
+    def test_partial_update_preserves_other_period(self, tmp_path):
+        app, bb, store, tracker = _setup_lead_teams(tmp_path)
+        try:
+            store.set_budget("alpha", 100.0, 500.0)
+            client = TestClient(app)
+            r1 = client.post(
+                "/mesh/teams/alpha/members/member2/budget",
+                headers=_hdr(_LEAD_TOKENS["lead1"]),
+                json={"daily_usd": 10.0, "monthly_usd": 50.0},
+            )
+            assert r1.status_code == 200, r1.text
+            r2 = client.post(
+                "/mesh/teams/alpha/members/member2/budget",
+                headers=_hdr(_LEAD_TOKENS["lead1"]),
+                json={"daily_usd": 20.0},
+            )
+            assert r2.status_code == 200, r2.text
+            assert r2.json()["allocation"]["daily_usd"] == 20.0
+            assert r2.json()["allocation"]["monthly_usd"] == 50.0
+            assert tracker.budgets["member2"]["monthly_usd"] == 50.0
+        finally:
+            bb.close()
+            tracker.close()
+
+    def test_zero_blocks_while_envelope_has_headroom(self, tmp_path):
+        """Preflight integration: a lead-set 0 allocation blocks that
+        member's own work-LLM spend even though the team envelope still
+        has plenty of headroom (B4 per-agent semantics untouched)."""
+        app, bb, store, tracker = _setup_lead_teams(tmp_path)
+        try:
+            store.set_budget("alpha", 100.0, 500.0)
+            resp = TestClient(app).post(
+                "/mesh/teams/alpha/members/member2/budget",
+                headers=_hdr(_LEAD_TOKENS["lead1"]),
+                json={"daily_usd": 0.0, "monthly_usd": 0.0},
+            )
+            assert resp.status_code == 200, resp.text
+            check = tracker.check_budget("member2")
+            assert check["allowed"] is False
+            preflight = tracker.preflight_check("member2", "openai/gpt-4o-mini")
+            assert preflight["allowed"] is False
+        finally:
+            bb.close()
+            tracker.close()
+
+    def test_audit_row_records_old_and_new(self, tmp_path):
+        app, bb, store, tracker = _setup_lead_teams(tmp_path)
+        try:
+            store.set_budget("alpha", 100.0, 500.0)
+            client = TestClient(app)
+            client.post(
+                "/mesh/teams/alpha/members/member2/budget",
+                headers=_hdr(_LEAD_TOKENS["lead1"]),
+                json={"daily_usd": 10.0},
+            )
+            client.post(
+                "/mesh/teams/alpha/members/member2/budget",
+                headers=_hdr(_LEAD_TOKENS["lead1"]),
+                json={"daily_usd": 25.0},
+            )
+            log = bb.get_audit_log(action="lead_budget_allocation", agent_id="member2")
+            assert log["total"] == 2
+            latest = log["entries"][0]
+            assert latest["actor"] == "lead1"
+            before = json.loads(latest["before_value"])
+            after = json.loads(latest["after_value"])
+            assert before["daily_usd"] == 10.0
+            assert after["daily_usd"] == 25.0
+        finally:
+            bb.close()
+            tracker.close()
+
+    def test_response_headroom_math(self, tmp_path):
+        app, bb, store, tracker = _setup_lead_teams(tmp_path)
+        try:
+            store.set_budget("alpha", 100.0, None)
+            tracker.set_budget("member3", 20.0, 20.0)
+            resp = TestClient(app).post(
+                "/mesh/teams/alpha/members/member2/budget",
+                headers=_hdr(_LEAD_TOKENS["lead1"]),
+                json={"daily_usd": 30.0},
+            )
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            assert body["envelope"]["daily_usd"] == 100.0
+            assert body["envelope"]["monthly_usd"] is None
+            # headroom = 100 - (20 [member3] + 30 [member2]) = 50
+            assert body["headroom"]["daily_usd"] == 50.0
+            assert body["headroom"]["monthly_usd"] is None
+        finally:
+            bb.close()
+            tracker.close()
+
+
+class TestAllocateMemberBudgetValidation:
+    def test_missing_both_fields_400(self, tmp_path):
+        app, bb, store, tracker = _setup_lead_teams(tmp_path)
+        try:
+            store.set_budget("alpha", 100.0, 500.0)
+            resp = TestClient(app).post(
+                "/mesh/teams/alpha/members/member2/budget",
+                headers=_hdr(_LEAD_TOKENS["lead1"]),
+                json={},
+            )
+            assert resp.status_code == 400
+        finally:
+            bb.close()
+            tracker.close()
+
+    def test_negative_value_400(self, tmp_path):
+        app, bb, store, tracker = _setup_lead_teams(tmp_path)
+        try:
+            store.set_budget("alpha", 100.0, 500.0)
+            resp = TestClient(app).post(
+                "/mesh/teams/alpha/members/member2/budget",
+                headers=_hdr(_LEAD_TOKENS["lead1"]),
+                json={"daily_usd": -1.0},
+            )
+            assert resp.status_code == 400
+        finally:
+            bb.close()
+            tracker.close()

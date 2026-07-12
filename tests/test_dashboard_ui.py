@@ -2474,6 +2474,23 @@ class TestPolishFixesApplied:
             "cron.py row should enumerate the two U6 lead-plate probes"
         )
 
+    def test_claudemd_documents_lead_budget_allocation(self):
+        """CLAUDE.md documents the U7 lead budget allocation (plan §8
+        #21): a new `costs.py` row explaining the store's B4-per-agent vs
+        B4-team-envelope split + the lead-write seam, and a server.py
+        mention of the new endpoint's gate/409 taxonomy."""
+        claude_md = (_REPO_ROOT / "CLAUDE.md").read_text(encoding="utf-8")
+        assert "src/host/costs.py" in claude_md, "CLAUDE.md should document src/host/costs.py"
+        assert "Lead budget allocation" in claude_md, (
+            "costs.py/server.py rows should document the U7 lead budget allocation surface"
+        )
+        assert "/mesh/teams/{id}/members/{agent}/budget" in claude_md, (
+            "server.py row should name the new lead-budget-allocation endpoint path"
+        )
+        assert "never a `costs.py` invariant" in claude_md or "not a `costs.py` invariant" in claude_md, (
+            "costs.py row should clarify the Σ-over-explicit-allocations check lives at the endpoint"
+        )
+
 
 # ── EventBus coverage — JS handlers wired in onWsEvent ────────────────
 

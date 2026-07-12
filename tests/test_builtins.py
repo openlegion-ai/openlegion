@@ -2210,6 +2210,68 @@ class TestRecommendPendingAction:
         assert "ZERO effect" in description
 
 
+# ── allocate_member_budget (plan §8 #21) ──────────────────────
+
+
+class TestAllocateMemberBudget:
+    @pytest.mark.asyncio
+    async def test_success(self):
+        from src.agent.builtins.mesh_tool import allocate_member_budget
+
+        mock_mesh = AsyncMock()
+        mock_mesh.allocate_member_budget = AsyncMock(
+            return_value={"team": "alpha", "agent": "worker", "allocation": {"daily_usd": 5.0}},
+        )
+        result = await allocate_member_budget(agent_id="worker", daily_usd=5.0, mesh_client=mock_mesh)
+        assert result["ok"] is True
+        assert result["agent_id"] == "worker"
+        mock_mesh.allocate_member_budget.assert_awaited_once_with("worker", 5.0, None)
+
+    @pytest.mark.asyncio
+    async def test_no_mesh_client(self):
+        from src.agent.builtins.mesh_tool import allocate_member_budget
+
+        result = await allocate_member_budget(agent_id="worker", daily_usd=5.0, mesh_client=None)
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_missing_both_fields_is_a_local_error(self):
+        from src.agent.builtins.mesh_tool import allocate_member_budget
+
+        mock_mesh = AsyncMock()
+        result = await allocate_member_budget(agent_id="worker", mesh_client=mock_mesh)
+        assert "error" in result
+        mock_mesh.allocate_member_budget.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_failure_returns_directive_envelope(self):
+        """A 403 (not the lead) or 409 (no envelope / Σ exceeded) from the
+        mesh must surface as an actionable error, not a crash."""
+        from src.agent.builtins.mesh_tool import allocate_member_budget
+
+        mock_mesh = AsyncMock()
+        mock_mesh.allocate_member_budget = AsyncMock(
+            side_effect=RuntimeError("403: Only this team's lead can allocate member budgets"),
+        )
+        result = await allocate_member_budget(agent_id="worker", daily_usd=5.0, mesh_client=mock_mesh)
+        assert "error" in result
+        assert "recovery_hint" in result
+
+    def test_docstring_pins_lead_only_and_envelope(self):
+        """Pin: the tool description must tell the agent this is
+        lead-only and that it cannot raise the envelope (plan §8 #21)."""
+        import importlib
+
+        import src.agent.builtins.mesh_tool as mesh_tool
+        importlib.reload(mesh_tool)
+        from src.agent.tools import _tool_staging
+
+        description = _tool_staging["allocate_member_budget"]["description"]
+        assert "LEAD-ONLY" in description
+        assert "NEVER raise the envelope" in description
+        assert "0" in description  # documents 0 as a deliberate throttle
+
+
 # ── LLMClient embedding model ───────────────────────────────
 
 

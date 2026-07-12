@@ -118,6 +118,60 @@ async def recommend_pending_action(
 
 
 @tool(
+    name="allocate_member_budget",
+    description=(
+        "Allocate a teammate's per-agent LLM budget WITHIN your team's "
+        "human-set budget envelope (plan §8 #21). LEAD-ONLY, enforced "
+        "server-side: you must be this team's lead, or this fails with a "
+        "403. Pass at least one of daily_usd/monthly_usd (non-negative). "
+        "This can NEVER raise the envelope itself -- only the operator can "
+        "top up the team's envelope; you are only reallocating headroom "
+        "that already exists inside it, and the mesh 409s if the sum of "
+        "every member's explicit allocation for that period would exceed "
+        "it. Setting 0 deliberately blocks that teammate's work-LLM spend "
+        "-- a legitimate throttle you (or the operator) can reverse later. "
+        "A partial call (only one of the two fields) preserves the "
+        "other field's current value."
+    ),
+    parameters={
+        "agent_id": {
+            "type": "string",
+            "description": "The teammate to allocate a budget for (must be on your team).",
+        },
+        "daily_usd": {
+            "type": "number",
+            "description": "New daily budget in USD for this teammate, or omit to leave unchanged.",
+        },
+        "monthly_usd": {
+            "type": "number",
+            "description": "New monthly budget in USD for this teammate, or omit to leave unchanged.",
+        },
+    },
+)
+async def allocate_member_budget(
+    agent_id: str, daily_usd: float | None = None, monthly_usd: float | None = None,
+    *, mesh_client=None,
+) -> dict:
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if daily_usd is None and monthly_usd is None:
+        return {"error": "Provide at least one of daily_usd/monthly_usd."}
+    try:
+        result = await mesh_client.allocate_member_budget(agent_id, daily_usd, monthly_usd)
+    except Exception as e:
+        return {
+            "error": f"Allocating budget failed: {e}",
+            "recovery_hint": (
+                "Only this team's lead can allocate a teammate's budget, and only within "
+                "the team's existing envelope -- if you aren't the lead, the team has no "
+                "envelope set for the period you're allocating, or the sum of every "
+                "member's explicit allocation would exceed it, this will fail."
+            ),
+        }
+    return {"ok": True, "agent_id": agent_id, "result": result}
+
+
+@tool(
     name="list_agents",
     description=(
         "List agents in your team (solo agents see themselves and the "
