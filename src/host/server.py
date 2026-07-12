@@ -1235,6 +1235,10 @@ def create_mesh_app(
         # gets its own bucket at the same generosity (240/min is far above
         # any legitimate lead's recommend rate).
         "pending_recommend": (240, 60),
+        # Lead budget allocation within the team envelope (plan §8 #21) —
+        # agent-reachable like the two buckets above, same generosity: a
+        # lead reallocating teammates' budgets is rare and never bursty.
+        "budget_allocate": (120, 60),
     }
 
     async def _check_rate_limit(endpoint: str, agent_id: str) -> None:
@@ -9650,6 +9654,207 @@ def create_mesh_app(
             "budget_daily_usd": daily,
             "budget_monthly_usd": monthly,
             "unlimited": daily is None and monthly is None,
+        }
+
+    @app.post("/mesh/teams/{team_id}/members/{agent_id}/budget")
+    async def allocate_member_budget_endpoint(team_id: str, agent_id: str, request: Request) -> dict:
+        """Lead-only allocation of a teammate's per-agent budget WITHIN the
+        team's human-set envelope (plan §8 #21, activating the item §8 #12
+        deferred to Phase 5).
+
+        Body ``{daily_usd?, monthly_usd?}`` — at least one, each a
+        non-negative finite number. Gated EXACTLY like the drive-review
+        verdict / held-action recommend endpoints (lead-only taxonomy):
+        404 unknown team, 409 leaderless team, 403 non-lead caller
+        (including a non-lead operator — the operator's own budget
+        surfaces are untouched), 404 target not a member of THIS team.
+
+        THE ENVELOPE CAN NEVER BE RAISED by this surface: ``teams.
+        budget_daily_usd``/``budget_monthly_usd`` are read-only here —
+        top-ups stay human-only forever (``PUT /mesh/teams/{id}/budget``).
+        An unset/0 envelope means UNLIMITED (plan B4) — the opposite of
+        the per-agent ledger's arithmetic — so there is nothing to
+        allocate WITHIN and the whole call 409s with a directive message;
+        allocating a period the envelope doesn't set (e.g. a monthly
+        amount when only a daily envelope exists) 409s for that period
+        alone.
+
+        Σ CONSTRAINT: the sum of every team member's EXPLICITLY-SET
+        per-agent budget (``CostTracker.budgets`` — a member with no
+        explicit override counts 0; the envelope itself still bounds
+        their spend via ``team_envelope_check``) must stay ≤ the
+        envelope, checked per period actually being allocated in this
+        call. A violation 409s naming the remaining headroom.
+
+        The write lands in the SAME ``CostTracker.budgets`` store the
+        operator's own per-agent budget field uses — ``preflight_check``
+        / ``check_budget`` / ``team_envelope_check`` need zero changes.
+        Provenance (human top-up vs. lead stewardship) lives in the audit
+        trail, not the store. A lead deliberately setting 0 blocks that
+        member's work-LLM spend outright (existing B4 per-agent
+        semantics: 0 = block, only a truly-missing override falls back
+        to the deployment default) — a legitimate throttle, reversible by
+        the lead (re-allocate) or the operator (edit the agent's budget
+        field directly). Partial updates (only one of daily/monthly)
+        PRESERVE the other period's existing explicit value — this
+        endpoint reads it first and passes it straight through, since
+        ``CostTracker.set_budget`` itself would otherwise refill a bare
+        ``None`` with the global default instead of the agent's own
+        current setting.
+        """
+        caller = _extract_verified_agent_id(request)
+        if not teams_store.team_exists(team_id):
+            raise HTTPException(404, f"Team '{team_id}' not found")
+        team = teams_store.get_team(team_id) or {}
+        lead_agent_id = team.get("lead_agent_id")
+        if not lead_agent_id:
+            raise HTTPException(409, f"Team '{team_id}' has no lead assigned")
+        if caller != lead_agent_id:
+            _record_denial("permission", caller=caller, target=team_id, gate="budget:allocate:not_lead")
+            raise HTTPException(403, "Only this team's lead can allocate member budgets")
+        await _check_rate_limit("budget_allocate", caller)
+
+        members = team.get("members") or []
+        if agent_id not in members:
+            raise HTTPException(404, f"Agent '{agent_id}' is not a member of team '{team_id}'")
+
+        if cost_tracker is None:
+            raise HTTPException(503, "Cost tracker not available")
+
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, "body must be a JSON object")
+
+        def _parse_alloc(field: str, cap: float) -> float | None:
+            raw = body.get(field)
+            if raw is None:
+                return None
+            if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                raise HTTPException(400, f"{field} must be a number or null")
+            val = float(raw)
+            if val != val or val in (float("inf"), float("-inf")):
+                raise HTTPException(400, f"{field} must be a finite number")
+            if val < 0:
+                raise HTTPException(400, f"{field} must be >= 0")
+            if val > cap:
+                raise HTTPException(400, f"{field} exceeds the maximum of {cap:g}")
+            # Deliberately NOT normalized to None at 0 — unlike the team
+            # envelope, 0 is a meaningful per-agent value (B4: 0 blocks
+            # that member's work-LLM spend outright).
+            return val
+
+        daily_req = _parse_alloc("daily_usd", 10_000.0)
+        monthly_req = _parse_alloc("monthly_usd", 100_000.0)
+        if daily_req is None and monthly_req is None:
+            raise HTTPException(400, "At least one of daily_usd/monthly_usd is required")
+
+        daily_env = team.get("budget_daily_usd") or 0.0
+        monthly_env = team.get("budget_monthly_usd") or 0.0
+        if daily_env <= 0 and monthly_env <= 0:
+            raise HTTPException(
+                409,
+                f"Team '{team_id}' has no budget envelope set — there is nothing to allocate "
+                "within; ask the operator to set one via PUT /mesh/teams/{team}/budget first",
+            )
+        if daily_req is not None and daily_env <= 0:
+            raise HTTPException(
+                409, f"Team '{team_id}' has no DAILY envelope set — cannot allocate a daily amount",
+            )
+        if monthly_req is not None and monthly_env <= 0:
+            raise HTTPException(
+                409, f"Team '{team_id}' has no MONTHLY envelope set — cannot allocate a monthly amount",
+            )
+
+        def _others_explicit_sum(period_key: str) -> float:
+            total = 0.0
+            for m in members:
+                if m == agent_id:
+                    continue
+                b = cost_tracker.budgets.get(m)
+                if b:
+                    total += b.get(period_key, 0.0)
+            return total
+
+        if daily_req is not None:
+            others = _others_explicit_sum("daily_usd")
+            projected = others + daily_req
+            if projected > daily_env + 1e-9:
+                headroom = round(max(daily_env - others, 0.0), 4)
+                raise HTTPException(
+                    409,
+                    f"Daily allocation would exceed the team envelope (${projected:.2f} > "
+                    f"${daily_env:.2f} across explicit member allocations) — headroom "
+                    f"remaining for '{agent_id}' is ${headroom:.2f}",
+                )
+        if monthly_req is not None:
+            others = _others_explicit_sum("monthly_usd")
+            projected = others + monthly_req
+            if projected > monthly_env + 1e-9:
+                headroom = round(max(monthly_env - others, 0.0), 4)
+                raise HTTPException(
+                    409,
+                    f"Monthly allocation would exceed the team envelope (${projected:.2f} > "
+                    f"${monthly_env:.2f} across explicit member allocations) — headroom "
+                    f"remaining for '{agent_id}' is ${headroom:.2f}",
+                )
+
+        # Partial-update semantics for THIS surface: preserve the other
+        # period's existing EXPLICIT value. CostTracker.set_budget's own
+        # None-handling would otherwise refill an untouched field with
+        # the global default rather than the agent's current setting.
+        current = cost_tracker.budgets.get(agent_id)
+        old_daily = current["daily_usd"] if current else None
+        old_monthly = current["monthly_usd"] if current else None
+        new_daily = daily_req if daily_req is not None else old_daily
+        new_monthly = monthly_req if monthly_req is not None else old_monthly
+
+        cost_tracker.set_budget(agent_id, daily_usd=new_daily, monthly_usd=new_monthly)
+
+        # Re-read the persisted row for the audit's ``after_value`` (rather
+        # than the possibly-``None`` values just passed in): a first-ever
+        # allocation that only names one period leaves the OTHER period as
+        # ``None`` here, but ``set_budget`` itself refills a bare ``None``
+        # from the deployment default — the audit trail must record what
+        # actually landed in the store, not what this call happened to pass.
+        stored = cost_tracker.budgets.get(agent_id) or {}
+
+        blackboard.log_audit(
+            action="lead_budget_allocation",
+            actor=caller,
+            target=agent_id,
+            field="budget",
+            before_value=json.dumps({"daily_usd": old_daily, "monthly_usd": old_monthly}),
+            after_value=json.dumps(
+                {"daily_usd": stored.get("daily_usd"), "monthly_usd": stored.get("monthly_usd")}
+            ),
+            provenance="agent",
+        )
+
+        def _headroom(period_key: str, env: float) -> float | None:
+            if env <= 0:
+                return None
+            total = 0.0
+            for m in members:
+                b = cost_tracker.budgets.get(m)
+                if b:
+                    total += b.get(period_key, 0.0)
+            return round(max(env - total, 0.0), 4)
+
+        return {
+            "team": team_id,
+            "agent": agent_id,
+            "allocation": {
+                "daily_usd": stored.get("daily_usd"),
+                "monthly_usd": stored.get("monthly_usd"),
+            },
+            "envelope": {
+                "daily_usd": daily_env if daily_env > 0 else None,
+                "monthly_usd": monthly_env if monthly_env > 0 else None,
+            },
+            "headroom": {
+                "daily_usd": _headroom("daily_usd", daily_env),
+                "monthly_usd": _headroom("monthly_usd", monthly_env),
+            },
         }
 
     @app.post("/mesh/teams/{team_name}/archive")

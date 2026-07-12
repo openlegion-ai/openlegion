@@ -1862,6 +1862,34 @@ class MeshClient:
         _raise_with_body(response)
         return response.json()
 
+    # ---- Lead budget allocation within the human envelope (plan §8 #21) --
+    async def allocate_member_budget(
+        self, agent_id: str, daily_usd: float | None = None, monthly_usd: float | None = None,
+    ) -> dict:
+        """Allocate a teammate's per-agent budget within THIS agent's team
+        envelope. Server-enforced lead-only: the mesh 403s any caller
+        that isn't the team's ``lead_agent_id``, and 409s when the team
+        has no envelope (or no envelope for the requested period) to
+        allocate within, or when the Σ of members' explicit allocations
+        for that period would exceed the envelope. Can NEVER raise the
+        envelope itself — only the operator can do that.
+        """
+        if not self.team_name:
+            raise RuntimeError("No team scope available: agent has no team")
+        client = await self._get_client()
+        body: dict = {}
+        if daily_usd is not None:
+            body["daily_usd"] = daily_usd
+        if monthly_usd is not None:
+            body["monthly_usd"] = monthly_usd
+        response = await client.post(
+            f"{self.mesh_url}/mesh/teams/{self.team_name}/members/{agent_id}/budget",
+            json=body,
+            headers=self._trace_headers(),
+        )
+        _raise_with_body(response)
+        return response.json()
+
     async def commit_drive_artifact(
         self, team: str, *, name: str, content: str, kind: str = "artifact",
         encoding: str = "utf8",
