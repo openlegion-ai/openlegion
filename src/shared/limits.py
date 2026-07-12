@@ -121,6 +121,14 @@ LIMIT_SPECS: dict[str, tuple[int, int, int]] = {
     # (pending/accepted/working) team tasks gets a plate alert to
     # decompose the goals into tasks. 0 DISABLES the probe (B4-style).
     "goal_coverage_min_open_tasks": (1, 0, 1000),
+    # Idle-agent hibernation sweep (plan §8 #24) — minutes an agent must
+    # sit idle (no busy/queued lane work, no working task, no open ask)
+    # before the mesh-side sweep stops its container (data persisted,
+    # cron jobs kept, auto-wakes on demand). 0 DISABLES the sweep
+    # entirely (B4-style 0-valid default) — hibernation is opt-in; the
+    # wake path itself works regardless (an operator can hibernate
+    # manually via the endpoint even with the sweep off).
+    "hibernate_idle_minutes": (0, 0, 43200),
 }
 
 # key -> OPENLEGION_* env var name (the second-lowest precedence source).
@@ -144,6 +152,7 @@ ENV_NAMES: dict[str, str] = {
     "ladder_rung_interval_minutes": "OPENLEGION_LADDER_RUNG_INTERVAL_MINUTES",
     "ladder_human_fallback_hours": "OPENLEGION_LADDER_HUMAN_FALLBACK_HOURS",
     "goal_coverage_min_open_tasks": "OPENLEGION_GOAL_COVERAGE_MIN_OPEN_TASKS",
+    "hibernate_idle_minutes": "OPENLEGION_HIBERNATE_IDLE_MINUTES",
 }
 
 # Per-agent config keys (agents.yaml / edit_agent) -> limits key. Only the

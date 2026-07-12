@@ -163,6 +163,17 @@ class AskBroker:
             if record is not None:
                 record.path = path
 
+    def has_open_asks(self, agent_id: str) -> bool:
+        """Whether ``agent_id`` is a party (asker or recipient) to any
+        in-flight ask. Used by the hibernation sweep (plan §8 #24) — an
+        agent waiting on an answer, or one that owes an answer, is not a
+        hibernation candidate even if its lane is otherwise idle."""
+        with self._lock:
+            return any(
+                not r.finished and (r.asker == agent_id or r.recipient == agent_id)
+                for r in self._asks.values()
+            )
+
     # ── resolution ───────────────────────────────────────────────────
 
     def resolve(self, ask_id: str, answer: str, by: str) -> dict:

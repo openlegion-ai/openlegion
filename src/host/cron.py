@@ -123,6 +123,8 @@ class CronScheduler:
         lead_holds_fn: Callable | None = None,
         lead_blocked_tasks_fn: Callable | None = None,
         goal_coverage_fn: Callable | None = None,
+        agent_status_fn: Callable | None = None,
+        activity_fn: Callable | None = None,
     ):
         self.config_path = Path(config_path)
         self.jobs: dict[str, CronJob] = {}
@@ -186,6 +188,18 @@ class CronScheduler:
         # a regression test pins it — the durable count is the primary,
         # authoritative source; the blackboard scan is additional coverage.
         self.pending_tasks_fn = pending_tasks_fn
+        # Hibernation (plan §8 #24): ``agent_status_fn(agent) -> str``
+        # reads the mesh-side status-override cache (never a config file
+        # read — cheap enough for every tick) so the heartbeat branch can
+        # skip the container ``context_fn`` call entirely for a
+        # hibernated agent — fetching context would cold-wake the agent
+        # (via the transport seam) just to enrich a probe-only tick that
+        # doesn't need it, the exact wrong direction to fail soft on.
+        # ``activity_fn(agent)`` stamps the idle-sweep's last-activity
+        # clock after a real (non-suppressed) dispatch — covers cron
+        # paths that bypass the lane (tool-invoke jobs, ``/heartbeat``).
+        self.agent_status_fn = agent_status_fn
+        self.activity_fn = activity_fn
         # Host-published channel post (§8 #14): wired so ``_execute_job``
         # can post a standup (or any ``post_to_channel``-tagged) job's
         # dispatch response into the team's channel thread. None in
@@ -679,9 +693,28 @@ class CronScheduler:
                         probes = self._run_heartbeat_probes(job.agent)
                         triggered = [p for p in probes if p.triggered]
 
+                        # Hibernation (plan §8 #24 leg 2): a hibernated
+                        # agent's container is stopped — fetching context
+                        # would cold-wake it (via the transport seam) just
+                        # to enrich a tick that may turn out empty, the
+                        # exact wrong direction to fail soft on. Mesh-side
+                        # probes above already ran with zero container
+                        # contact; skip the context call entirely and let
+                        # ``ctx``'s empty-dict defaults (``is_default=True``,
+                        # ``has_activity=False``) fall through below, so
+                        # ``actionable`` is driven purely by the probes.
+                        is_hibernated = False
+                        if self.agent_status_fn is not None:
+                            try:
+                                is_hibernated = self.agent_status_fn(job.agent) == "hibernated"
+                            except Exception as e:
+                                logger.debug(
+                                    "agent_status_fn failed for '%s': %s", job.agent, e,
+                                )
+
                         # Fetch agent workspace context (HEARTBEAT.md, daily logs)
                         ctx = {}
-                        if self.context_fn:
+                        if self.context_fn and not is_hibernated:
                             try:
                                 ctx = await self.context_fn(job.agent)
                             except Exception as e:
@@ -723,7 +756,7 @@ class CronScheduler:
                                 job.agent, triggered=triggered, has_activity=has_activity,
                                 is_default=is_default, actionable=actionable,
                                 has_goals=has_goals, utility_ready=utility_ready,
-                                dispatched=dispatched,
+                                dispatched=dispatched, hibernated=is_hibernated,
                             )
                             if not dispatched:
                                 logger.debug(
@@ -749,7 +782,7 @@ class CronScheduler:
                                 job.agent, triggered=triggered, has_activity=has_activity,
                                 is_default=is_default, actionable=actionable,
                                 has_goals=has_goals, utility_ready=utility_ready,
-                                dispatched=True,
+                                dispatched=True, hibernated=is_hibernated,
                             )
                         # else: manual trigger — never writes a plate
                         # snapshot (Phase-4 unit 4 §Part A.4); a manual
@@ -886,6 +919,18 @@ class CronScheduler:
                         self._emit_cron_change("executed", job)
                         return response
                     logger.info(f"Cron {job.id} executed for agent '{job.agent}'")
+                    # Idle-sweep activity stamp (plan §8 #24): a real
+                    # (non-suppressed) dispatch means the agent is NOT
+                    # idle right now — covers cron paths that bypass the
+                    # lane entirely (tool-invoke jobs, ``/heartbeat``),
+                    # which the lane worker's own stamp never sees.
+                    if self.activity_fn is not None:
+                        try:
+                            self.activity_fn(job.agent)
+                        except Exception as e:
+                            logger.debug(
+                                "activity_fn failed for '%s': %s", job.agent, e,
+                            )
 
                     # Host-published channel post (§8 #14): a standup (or
                     # any message job the host tagged) publishes its
@@ -993,6 +1038,7 @@ class CronScheduler:
         has_goals: bool,
         utility_ready: bool,
         dispatched: bool,
+        hibernated: bool = False,
     ) -> None:
         """Record a byproduct snapshot of this tick's heartbeat plate.
 
@@ -1001,7 +1047,9 @@ class CronScheduler:
         already used elsewhere on the gate path) — this never adds a
         probe, ``context_fn``, or container call of its own. Overwrites
         any prior snapshot for the agent; only the latest tick matters
-        to the Team Room panel.
+        to the Team Room panel. ``hibernated`` (plan §8 #24, additive) —
+        the tick ran mesh-probe-only with zero container contact; the
+        Team Room surfaces this so it's clear why the agent looks quiet.
         """
         self._last_plate[agent] = {
             "checked_at": time.time(),
@@ -1012,6 +1060,7 @@ class CronScheduler:
             "has_goals": has_goals,
             "utility_model_configured": utility_ready,
             "dispatched": dispatched,
+            "hibernated": hibernated,
         }
 
     def _run_heartbeat_probes(self, agent: str) -> list[HeartbeatProbeResult]:

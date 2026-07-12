@@ -1028,6 +1028,21 @@ class Tasks:
             ).fetchone()
         return int(row[0]) if row else 0
 
+    def has_working_task(self, assignee: str) -> bool:
+        """Whether ``assignee`` currently has any ``working`` task.
+
+        Used by the hibernation sweep (plan §8 #24) to refuse hibernating
+        an agent mid-task even when its lane is otherwise idle (a task can
+        be ``working`` via a path that never touches the lane's busy
+        flag). Also backs the manual hibernate endpoint's 409 refusal.
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM tasks WHERE assignee = ? AND status = 'working' LIMIT 1",
+                (assignee,),
+            ).fetchone()
+        return row is not None
+
     def _guard_parent_chain(
         self, parent_task_id: str, *, proposed_id: str | None = None,
     ) -> None:
