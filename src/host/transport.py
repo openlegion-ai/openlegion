@@ -14,6 +14,7 @@ import abc
 import asyncio
 import json as json_module
 import re
+from collections.abc import Awaitable, Callable
 
 import httpx
 
@@ -34,10 +35,48 @@ class Transport(abc.ABC):
         # dict, so restart-rotated tokens are picked up automatically) or
         # ``register_token`` (granular, mirrors ``register(agent_id, url)``).
         self._agent_tokens: dict[str, str] = {}
+        # Cold-wake seam (plan §8 #24 leg 3). ``None`` (the default, every
+        # test construction) means hibernation isn't wired at all — every
+        # request path below is then a pure no-op branch. Production
+        # wiring (``cli/runtime.py``) sets this to the mesh app's
+        # ``ensure_agent_running`` closure AFTER ``create_mesh_app`` runs
+        # (mirrors ``bind_tokens``'s post-construction wiring). Deliberately
+        # NOT called from ``is_reachable`` — health polls must never wake a
+        # hibernated agent (it is health-unregistered anyway; belt and
+        # suspenders).
+        self._ensure_running_fn: Callable[[str], Awaitable[bool]] | None = None
 
     def register_token(self, agent_id: str, token: str) -> None:
         """Record the mesh→agent bearer token for *agent_id*."""
         self._agent_tokens[agent_id] = token
+
+    def set_ensure_running_fn(
+        self, fn: Callable[[str], Awaitable[bool]] | None,
+    ) -> None:
+        """Wire the cold-wake seam (plan §8 #24) after construction.
+
+        ``fn(agent_id) -> bool`` is a cheap no-op (a cached status check,
+        no I/O) when the agent isn't hibernated, and cold-wakes + waits
+        for readiness when it is. Called at the top of ``request`` /
+        ``stream_request`` / ``request_sync`` — never from
+        ``is_reachable``. Pass ``None`` to disable (the default).
+        """
+        self._ensure_running_fn = fn
+
+    async def _ensure_running(self, agent_id: str) -> None:
+        """Best-effort cold-wake check before forwarding a request.
+
+        Never raises and never blocks the caller on a wake failure — a
+        hibernated agent that fails to wake just stays unreachable, which
+        the caller's existing connect-failure handling already covers.
+        """
+        fn = self._ensure_running_fn
+        if fn is None or not agent_id:
+            return
+        try:
+            await fn(agent_id)
+        except Exception as e:
+            logger.warning("ensure_running_fn failed for '%s': %s", agent_id, e)
 
     def bind_tokens(self, tokens: dict[str, str]) -> None:
         """Bind a LIVE agent_id→token mapping (kept by reference, not copied).
@@ -160,6 +199,7 @@ class HttpTransport(Transport):
         timeout: int = 120,
         headers: dict[str, str] | None = None,
     ) -> dict:
+        await self._ensure_running(agent_id)
         url = self._urls.get(agent_id)
         if not url:
             return {"error": f"Agent '{agent_id}' not registered in transport"}
@@ -182,6 +222,10 @@ class HttpTransport(Transport):
             return {"error": f"Connection failed: {e}"}
 
     async def is_reachable(self, agent_id: str, timeout: int = 5) -> bool:
+        # Deliberately does NOT call ``_ensure_running`` (plan §8 #24) —
+        # health polls must never wake a hibernated agent. A hibernated
+        # agent is health-unregistered anyway (belt and suspenders): the
+        # health monitor never calls this for one in the first place.
         url = self._urls.get(agent_id)
         if not url:
             return False
@@ -203,6 +247,7 @@ class HttpTransport(Transport):
         headers: dict[str, str] | None = None,
     ):
         """Streaming HTTP request. Yields parsed SSE data lines."""
+        await self._ensure_running(agent_id)
         url = self._urls.get(agent_id)
         if not url:
             yield {"type": "error", "message": f"Agent '{agent_id}' not registered in transport"}
@@ -249,6 +294,7 @@ class HttpTransport(Transport):
         timeout: int = 120,
         headers: dict[str, str] | None = None,
     ) -> dict:
+        self._ensure_running_sync(agent_id)
         url = self._urls.get(agent_id)
         if not url:
             return {"error": f"Agent '{agent_id}' not registered in transport"}
@@ -265,6 +311,40 @@ class HttpTransport(Transport):
         except (httpx.TimeoutException, httpx.ConnectError) as e:
             logger.warning("Sync request failed for agent '%s' %s: %s", agent_id, path, e)
             return {"error": str(e)}
+
+    def _ensure_running_sync(self, agent_id: str) -> None:
+        """Best-effort cold-wake check for the sync request path.
+
+        ``request_sync`` is documented as "for use in non-async contexts"
+        (CLI REPL, callbacks) — there is normally no running loop to hop
+        onto, so a fresh one is spun up via ``asyncio.run`` for the
+        one-shot wake check. RESIDUAL: if this is somehow called from
+        inside an already-running loop, the wake is skipped (logged, not
+        raised) rather than crashing on ``asyncio.run()``'s "cannot be
+        called from a running event loop" — a missed wake here degrades
+        to the pre-existing "agent unreachable" behavior, never a hard
+        failure. Every current call site (CLI REPL, the channel-manager
+        status/reset callbacks) runs synchronously with no loop, so the
+        residual is not believed to be reachable in practice.
+        """
+        fn = self._ensure_running_fn
+        if fn is None or not agent_id:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        else:
+            logger.debug(
+                "request_sync ensure-running skipped for '%s': called from "
+                "a running event loop",
+                agent_id,
+            )
+            return
+        try:
+            asyncio.run(fn(agent_id))
+        except Exception as e:
+            logger.debug("request_sync ensure-running failed for '%s': %s", agent_id, e)
 
 
 class SandboxTransport(Transport):

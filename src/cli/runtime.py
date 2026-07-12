@@ -66,6 +66,14 @@ _EMBEDDING_MODEL_DIMS: dict[str, int] = {
 }
 _DEFAULT_EMBEDDING_DIM = 1536
 
+# Dispatch connect-failure observability (plan §8 #24 hardening) — how
+# often ``_direct_dispatch``'s error-dict branch may emit a fresh
+# ``agent_unreachable`` dashboard event for the SAME agent. A persistent
+# outage (agent stuck down) would otherwise fire one event per dispatch
+# attempt; this caps it to roughly once per window. Task status is
+# untouched by this — observability only.
+_UNREACHABLE_EVENT_RATE_LIMIT_SECONDS = 300
+
 
 def _embedding_providers_with_keys() -> set[str]:
     """Embedding-capable providers (from the ladder) that have a SYSTEM API
@@ -303,6 +311,18 @@ class RuntimeContext:
         self.lifecycle_store = None
         self.teams_store = None
         self.thread_store = None
+        # Idle-agent hibernation sweep (plan §8 #24) — the mesh app builds
+        # it inside ``create_mesh_app`` (it needs ``lane_manager``/
+        # ``tasks_store``/``ask_broker``, all resolved there); wired here
+        # in ``_start_mesh_server`` (mirrors ``offboard_agent`` below) and
+        # started as a background thread in ``_start_background``.
+        self.hibernation_sweeper = None
+        # Dispatch connect-failure observability (plan §8 #24 hardening):
+        # last ``agent_unreachable`` emit time per agent, rate-limited to
+        # ~1/5min in-memory so a persistent outage doesn't spam the
+        # dashboard. Task status is deliberately untouched — see
+        # ``_direct_dispatch``'s error-dict branch.
+        self._unreachable_event_ts: dict[str, float] = {}
         # Offboarding-with-handover helper (plan §8 #15) — wired from the
         # mesh app's ``_offboard_agent`` once ``_start_mesh_server`` runs;
         # ``None`` until then (mirrors every other subsystem attribute
@@ -361,6 +381,8 @@ class RuntimeContext:
             self.health_monitor.stop()
         if self.cron_scheduler:
             self.cron_scheduler.stop()
+        if self.hibernation_sweeper:
+            self.hibernation_sweeper.stop()
         if self.runtime:
             self.runtime.stop_all()
             if hasattr(self.runtime, "stop_browser_service"):
@@ -434,6 +456,29 @@ class RuntimeContext:
         from src.shared.trace import current_trace_id, new_trace_id
 
         return current_trace_id.get() or new_trace_id()
+
+    def _maybe_emit_unreachable(self, agent_name: str, err: str) -> None:
+        """Best-effort, rate-limited ``agent_unreachable`` dashboard event.
+
+        Plan §8 #24 hardening: a dispatch connect-failure (as opposed to a
+        normal turn error) is worth surfacing to the operator, but a
+        persistent outage must not spam the dashboard with one event per
+        attempt. In-memory per-agent rate limit (~1/5min); task status
+        semantics are deliberately unchanged — this is observability only.
+        """
+        if self.event_bus is None:
+            return
+        now = time.time()
+        last = self._unreachable_event_ts.get(agent_name, 0.0)
+        if (now - last) < _UNREACHABLE_EVENT_RATE_LIMIT_SECONDS:
+            return
+        self._unreachable_event_ts[agent_name] = now
+        try:
+            self.event_bus.emit(
+                "agent_unreachable", agent=agent_name, data={"error": err[:200]},
+            )
+        except Exception as e:
+            logger.debug("agent_unreachable emit failed for '%s': %s", agent_name, e)
 
     def dispatch(
         self,
@@ -829,9 +874,17 @@ class RuntimeContext:
             # resurrected the container and re-registered health, fighting
             # the archive. Mirrors the ``status`` check the sibling boot
             # reconciles (``_reconcile_work_summary_jobs`` /
-            # ``_reconcile_standup_jobs``) already apply.
-            if (agent_cfg.get("status") or "active") == "archived":
-                logger.info("Skipping boot for archived agent '%s' (no container, no health registration)", agent_id)
+            # ``_reconcile_standup_jobs``) already apply. Extended to
+            # ``hibernated`` (§8 #24 leg 1): a hibernated agent's container
+            # is also intentionally stopped — it wakes ON DEMAND via
+            # ``ensure_agent_running`` the next time something reaches it,
+            # never at boot.
+            _boot_status = agent_cfg.get("status") or "active"
+            if _boot_status in ("archived", "hibernated"):
+                logger.info(
+                    "Skipping boot for %s agent '%s' (no container, no health registration)",
+                    _boot_status, agent_id,
+                )
                 continue
             if agent_id in RESERVED_AGENT_IDS and agent_id != _OPERATOR_AGENT_ID:
                 raise click.ClickException(f"Agent ID '{agent_id}' is reserved for internal use")
@@ -1227,6 +1280,12 @@ class RuntimeContext:
                         )
                     from src.shared.types import SILENT_REPLY_TOKEN
 
+                    # Observability (plan §8 #24 hardening): a connect
+                    # failure is worth surfacing to the operator even
+                    # though the task/dispatch semantics below are
+                    # unchanged. Rate-limited so a persistent outage
+                    # doesn't spam the dashboard.
+                    self._maybe_emit_unreachable(agent_name, err)
                     return SILENT_REPLY_TOKEN
                 response = result.get("response", "(no response)")
                 duration_ms = int((_time.time() - t0) * 1000)
@@ -1335,12 +1394,42 @@ class RuntimeContext:
             trace_store=self.trace_store,
             notify_fn=self._handle_notify_origin,
             quarantine_check=(self.health_monitor.is_quarantined if self.health_monitor is not None else None),
+            # Idle-sweep activity persistence (plan §8 #24): a real path
+            # (not the default None every test construction gets) so a
+            # mesh restart doesn't reset every agent's idle clock to
+            # "just used" — see ``LaneManager.last_activity``'s
+            # conservative fallback for the no-record case either way.
+            activity_path=os.environ.get(
+                "OPENLEGION_AGENT_ACTIVITY_PATH", "config/agent_activity.json",
+            ),
         )
         # Bug 1: hand the lane queue-depth lookup to the health monitor so
         # the staleness check (reachable+busy+no-tick → unhealthy) has
         # the data it needs. Health monitor was built before the lane.
         if self.health_monitor is not None:
             self.health_monitor.set_queue_depth_fn(self.lane_manager.get_queue_depth)
+
+        # Idle-sweep activity stamp for the direct-bypass chat paths (plan
+        # §8 #24) — ``chat_done`` covers the dashboard idle/busy stream +
+        # non-stream chat + every lane-mediated ``_direct_dispatch`` turn;
+        # ``message_sent`` additionally covers the CLI REPL streaming path
+        # (which never emits ``chat_done``). Lane-internal activity
+        # (worker finally / steer injection) is already stamped directly
+        # inside ``lanes.py`` — this listener only needs to reach the
+        # paths that bypass the lane entirely.
+        def _activity_event_listener(evt: dict) -> None:
+            if evt.get("type") not in ("chat_done", "message_sent"):
+                return
+            agent = evt.get("agent")
+            if not agent or self.lane_manager is None:
+                return
+            try:
+                self.lane_manager.mark_activity(agent)
+            except Exception as e:
+                logger.debug("activity stamp failed for '%s': %s", agent, e)
+
+        if self.event_bus is not None:
+            self.event_bus.add_listener(_activity_event_listener)
 
         self._dispatch_loop = asyncio.new_event_loop()
 
@@ -1902,6 +1991,26 @@ class RuntimeContext:
         app.include_router(webhook_manager.create_router())
         self.health_monitor._cleanup_agent = app.cleanup_agent  # type: ignore[attr-defined]
 
+        # Cold-wake seam (plan §8 #24 leg 3): wire the mesh app's
+        # ``ensure_agent_running`` into the transport AFTER
+        # ``create_mesh_app`` runs (mirrors ``bind_tokens``'s
+        # post-construction wiring in ``_select_backend``) — the closure
+        # needs ``container_manager``/``transport``/``health_monitor``/
+        # ``blackboard``, all only fully resolved once the app exists.
+        # HttpTransport-only (SandboxTransport doesn't gain the seam).
+        from src.host.transport import HttpTransport
+
+        if isinstance(self.transport, HttpTransport):
+            self.transport.set_ensure_running_fn(
+                getattr(app, "ensure_agent_running", None),
+            )
+        # Idle-agent hibernation sweep (plan §8 #24) — built inside
+        # ``create_mesh_app`` (needs lane_manager/tasks_store/ask_broker,
+        # all resolved there); started as a background thread in
+        # ``_start_background``, mirroring the health monitor and cron
+        # scheduler.
+        self.hibernation_sweeper = getattr(app, "hibernation_sweeper", None)
+
         # Bug 4: lane watchdog needs the durable task store so a per-task
         # timeout can mark the row ``failed`` (back-edge inbox event fires)
         # instead of leaving the originator waiting forever. The store is
@@ -2271,6 +2380,29 @@ class RuntimeContext:
                 # already expects instead of inventing a new one.
                 return {"response": f"dispatch_error: {e}", "outcome": "error", "skipped": False}
 
+        def agent_status(agent: str) -> str:
+            """Hibernation (plan §8 #24): mesh-side status-override cache
+            read (never a config file), gating the heartbeat branch's
+            container-context skip. ``create_mesh_app`` (which owns the
+            cache via ``app.get_agent_status``) runs AFTER this scheduler
+            is constructed — same lazy ``getattr(self, "_app", None)``
+            pattern as ``lead_holds_fn`` above. Missing app/getter ⇒
+            "active" (conservative — never skips context on a read
+            failure)."""
+            app_ref = getattr(self, "_app", None)
+            getter = getattr(app_ref, "get_agent_status", None) if app_ref is not None else None
+            return getter(agent) if getter is not None else "active"
+
+        def agent_activity(agent: str) -> None:
+            """Hibernation (plan §8 #24): stamp the idle-sweep's
+            last-activity clock after a real cron dispatch (tool invoke,
+            message job, or heartbeat) — covers the cron paths that
+            bypass the lane entirely. Lazy ``self.lane_manager`` lookup
+            mirrors the pattern above; a missing lane manager is a no-op.
+            """
+            if self.lane_manager is not None:
+                self.lane_manager.mark_activity(agent)
+
         self.cron_scheduler = CronScheduler(
             dispatch_fn=cron_dispatch,
             invoke_fn=invoke_tool,
@@ -2312,6 +2444,8 @@ class RuntimeContext:
             # only, None short-circuit for non-leads, lazy store refs.
             lead_blocked_tasks_fn=lead_blocked_tasks,
             goal_coverage_fn=goal_coverage,
+            agent_status_fn=agent_status,
+            activity_fn=agent_activity,
         )
         self._cron_job_count = len(self.cron_scheduler.jobs)
 
@@ -2323,6 +2457,14 @@ class RuntimeContext:
         ``_reconcile_standup_jobs`` already excluded archived rows; without
         the same filter here, a boot recreated a heartbeat cron job for an
         agent that was deliberately torn down and never re-woken.
+
+        Deliberately does NOT skip ``hibernated`` agents (plan §8 #24 leg
+        2) — the whole point of hibernation is that the mesh-side
+        heartbeat tick keeps running mesh-probe-only (see cron.py's
+        ``agent_status_fn`` gate) so an actionable plate can cold-wake the
+        container. Only ``archived`` stays filtered; that asymmetry
+        (archived = permanently unscheduled, hibernated = still scheduled)
+        IS the design, not an oversight.
         """
         if not self.cron_scheduler:
             return
@@ -2567,6 +2709,19 @@ class RuntimeContext:
 
         health_thread = threading.Thread(target=run_health, daemon=True)
         health_thread.start()
+
+        # Start the idle-agent hibernation sweep (plan §8 #24) — a no-op
+        # loop when ``limits.hibernate_idle_minutes`` is unset/0 (the
+        # default), so this thread runs harmlessly even when hibernation
+        # is disabled fleet-wide.
+        if self.hibernation_sweeper is not None:
+
+            def run_hibernation_sweep():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(self.hibernation_sweeper.start())
+
+            threading.Thread(target=run_hibernation_sweep, daemon=True).start()
 
         # Start chain watcher — delivers a guaranteed terminal outcome for
         # user-originated task chains so the operator can hand off and

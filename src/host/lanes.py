@@ -13,9 +13,13 @@ Two queue modes control how incoming messages interact with busy agents:
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import tempfile
 import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from src.host.orchestration import InvalidStatusTransition
@@ -83,6 +87,7 @@ class LaneManager:
         task_timeout_seconds: int | None = None,
         quarantine_check: Callable[[str], bool] | None = None,
         queue_maxsize: int | None = None,
+        activity_path: str | None = None,
     ):
         self._dispatch_fn = dispatch_fn
         # Rehydration cutoff: only tasks created BEFORE this process's
@@ -154,6 +159,23 @@ class LaneManager:
         # instead of polling. ``None`` (the default) means no-op — the lane
         # works identically without it.
         self._event_bus: Any = None
+        # Per-agent last-activity registry (plan §8 #24 idle sweep):
+        # stamped at lane-dispatch end (worker ``finally``) and a
+        # successful steer injection; the mesh-side ``chat_done`` /
+        # ``message_sent`` EventBus listener wired in ``cli/runtime.py``
+        # covers the direct-bypass chat paths outside the lane. Purely
+        # in-memory (``activity_path=None``, the default every test
+        # construction gets) unless a caller wires a real path — the
+        # production wiring in ``cli/runtime.py`` passes one so a mesh
+        # restart doesn't lose every agent's idle clock. Even with no
+        # persisted record, ``last_activity`` falls back to this
+        # LaneManager's OWN construction time (``_boot_ts``, already
+        # computed above) — a conservative "just became active" default
+        # so a restart never makes the whole fleet look instantly
+        # hibernate-eligible.
+        self._activity: dict[str, float] = {}
+        self._activity_path: Path | None = Path(activity_path) if activity_path else None
+        self._load_activity()
 
     def set_event_bus(self, bus: Any) -> None:
         """Wire the dashboard EventBus after construction.
@@ -178,6 +200,70 @@ class LaneManager:
             bus.emit("queue_changed", agent=agent, data={"agent": agent})
         except Exception as exc:  # pragma: no cover - observability only
             logger.debug("queue_changed emit failed for %s: %s", agent, exc)
+
+    def _load_activity(self) -> None:
+        """Best-effort load of a prior process's persisted activity map.
+        Missing/malformed/no-path is a silent no-op — every agent then
+        reads as active-since-boot via ``last_activity``'s fallback."""
+        if self._activity_path is None or not self._activity_path.exists():
+            return
+        try:
+            data = json.loads(self._activity_path.read_text())
+            if isinstance(data, dict):
+                self._activity = {
+                    k: float(v) for k, v in data.items() if isinstance(v, (int, float))
+                }
+        except Exception as e:
+            logger.warning("lane activity: failed to load %s: %s", self._activity_path, e)
+
+    def _save_activity(self) -> None:
+        """Best-effort atomic persist — write-to-temp + rename, mirroring
+        ``CronScheduler._save``'s pattern (config/cron.json). No-op when
+        no path was wired (test constructions, by default)."""
+        if self._activity_path is None:
+            return
+        try:
+            self._activity_path.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(self._activity_path.parent), suffix=".tmp",
+            )
+            try:
+                with os.fdopen(fd, "w") as f:
+                    f.write(json.dumps(self._activity))
+            except BaseException:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                Path(tmp_path).unlink(missing_ok=True)
+                raise
+            Path(tmp_path).replace(self._activity_path)
+        except Exception as e:
+            logger.debug("lane activity: persist failed: %s", e)
+
+    def mark_activity(self, agent: str) -> None:
+        """Stamp ``agent``'s last-activity timestamp to now.
+
+        Called at lane-dispatch end (worker ``finally``), a successful
+        steer injection (``_handle_steer`` / ``try_steer`` /
+        ``try_steer_and_wait``), and — via the mesh-side EventBus
+        listener wired in ``cli/runtime.py`` — chat/stream completion on
+        the direct-bypass paths (dashboard idle stream, CLI REPL). Feeds
+        the hibernation sweep's idle threshold (plan §8 #24).
+        """
+        self._activity[agent] = time.time()
+        self._save_activity()
+
+    def last_activity(self, agent: str) -> float:
+        """Last-known activity timestamp for ``agent``.
+
+        Falls back to this LaneManager's construction time (``_boot_ts``)
+        when there is no record — a freshly-restarted mesh (or an agent
+        this process has never seen touch the lane) reads as "just
+        active" so the hibernation sweep never mass-hibernates on a cold
+        boot.
+        """
+        return self._activity.get(agent, self._boot_ts)
 
     def set_tasks_store(self, store: Any) -> None:
         """Wire the durable tasks store after construction.
@@ -474,6 +560,9 @@ class LaneManager:
                 result = await self._steer_fn(agent, message)
             injected = result.get("injected", False) if isinstance(result, dict) else False
             if injected:
+                # Steer landed on a live turn — bypasses the worker
+                # entirely, so stamp activity here (plan §8 #24).
+                self.mark_activity(agent)
                 return f"Steered: message injected into {agent}'s active conversation"
             else:
                 # Agent is idle — dispatch as followup to wake it up.
@@ -510,7 +599,10 @@ class LaneManager:
         except Exception as e:
             logger.warning("try_steer to '%s' failed: %s", agent, e)
             return False
-        return bool(result.get("injected", False)) if isinstance(result, dict) else False
+        injected = bool(result.get("injected", False)) if isinstance(result, dict) else False
+        if injected:
+            self.mark_activity(agent)
+        return injected
 
     async def try_steer_and_wait(
         self, agent: str, message: str, *, timeout: float | None = None,
@@ -539,7 +631,10 @@ class LaneManager:
             return False, None
         if not isinstance(result, dict):
             return False, None
-        return bool(result.get("injected", False)), result.get("reply")
+        injected = bool(result.get("injected", False))
+        if injected:
+            self.mark_activity(agent)
+        return injected, result.get("reply")
 
     async def deliver_chat(
         self, agent: str, message: str, *,
@@ -861,6 +956,10 @@ class LaneManager:
                 # Terminal transition (complete / timeout / error) — queue
                 # depth dropped and the agent went idle, so refresh badges.
                 self._emit_queue_changed(agent)
+                # Lane-dispatch end (plan §8 #24 idle sweep) — every
+                # completed turn (success, timeout, or error) resets the
+                # agent's idle clock regardless of outcome.
+                self.mark_activity(agent)
 
     def get_status(self) -> dict[str, dict]:
         """Return queue depth, pending task count, and busy flag per agent."""

@@ -13,12 +13,14 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import concurrent.futures
 import contextlib
 import hmac
 import inspect
 import json
 import os
 import re
+import threading
 import time
 import uuid as _uuid
 from collections import defaultdict, deque
@@ -714,6 +716,110 @@ def _record_denial(
     )
 
 
+class HibernationSweeper:
+    """Periodic mesh-side sweep that hibernates idle agents (plan §8 #24).
+
+    Mirrors ``HealthMonitor``'s loop shape (``start``/``stop``, its own
+    background thread+loop wired in ``cli/runtime.py``'s
+    ``_start_background``). Every tick is best-effort: a read failure on
+    any per-agent check is treated as "not a candidate" (fail CLOSED
+    toward never hibernating on an uncertain signal), and the whole tick
+    is wrapped so a bug here can never take down the sweep loop.
+
+    Default OFF: ``limits.hibernate_idle_minutes`` unset/0 means the tick
+    returns immediately — the sweep never hibernates anyone (B4
+    semantics). The wake path works regardless of this knob.
+    """
+
+    INTERVAL_SECONDS = 60
+
+    def __init__(
+        self,
+        *,
+        hibernate_fn: Callable[..., Coroutine],
+        lane_manager: Any,
+        tasks_store: Any,
+        ask_broker: Any,
+        config_fn: Callable[[], dict],
+        operator_agent_id: str = "operator",
+    ):
+        self._hibernate_fn = hibernate_fn
+        self._lane_manager = lane_manager
+        self._tasks_store = tasks_store
+        self._ask_broker = ask_broker
+        self._config_fn = config_fn
+        self._operator_agent_id = operator_agent_id
+        self._running = False
+
+    async def start(self) -> None:
+        self._running = True
+        while self._running:
+            try:
+                await self._tick()
+            except Exception:
+                logger.exception("hibernation sweep tick failed")
+            await asyncio.sleep(self.INTERVAL_SECONDS)
+
+    def stop(self) -> None:
+        self._running = False
+
+    async def _tick(self) -> None:
+        idle_minutes = shared_limits.resolve("hibernate_idle_minutes")
+        if idle_minutes <= 0:
+            return  # sweep disabled — B4-style 0-valid default-off
+        if self._lane_manager is None:
+            return
+        try:
+            cfg = self._config_fn() or {}
+        except Exception as e:
+            logger.warning("hibernation sweep: config read failed: %s", e)
+            return
+        agents_cfg = cfg.get("agents", {}) or {}
+        idle_seconds = idle_minutes * 60
+        now = time.time()
+        lane_status = self._lane_manager.get_status()
+        for agent_id, agent_cfg in agents_cfg.items():
+            if agent_id == self._operator_agent_id:
+                continue  # the human's front door never cold-starts
+            status = (agent_cfg or {}).get("status", "active") or "active"
+            if status != "active":
+                continue  # already hibernated/archived — not a candidate
+            st = lane_status.get(agent_id, {})
+            if st.get("busy") or st.get("queued", 0) > 0:
+                continue
+            if self._tasks_store is not None:
+                try:
+                    if self._tasks_store.has_working_task(agent_id):
+                        continue
+                except Exception as e:
+                    logger.debug(
+                        "hibernation sweep: task check failed for %s: %s", agent_id, e,
+                    )
+                    continue  # fail CLOSED — never hibernate on an uncertain read
+            if self._ask_broker is not None:
+                try:
+                    if self._ask_broker.has_open_asks(agent_id):
+                        continue
+                except Exception as e:
+                    logger.debug(
+                        "hibernation sweep: ask check failed for %s: %s", agent_id, e,
+                    )
+                    continue
+            last_activity = self._lane_manager.last_activity(agent_id)
+            if (now - last_activity) < idle_seconds:
+                continue
+            try:
+                await self._hibernate_fn(agent_id, caller="sweep")
+                logger.info(
+                    "hibernation sweep: hibernated idle agent '%s' (idle >= %dm)",
+                    agent_id, idle_minutes,
+                )
+            except Exception as e:
+                logger.warning(
+                    "hibernation sweep: failed to hibernate '%s': %s", agent_id, e,
+                )
+
+
 def create_mesh_app(
     blackboard: Blackboard,
     pubsub: PubSub,
@@ -1035,6 +1141,40 @@ def create_mesh_app(
     # Strong refs for same-loop ask delivery tasks (no dispatch_loop
     # wired): the event loop holds only weak refs to tasks.
     _ask_delivery_tasks: set[asyncio.Task] = set()
+
+    # Hibernation (plan §8 #24) — mesh-side status-override cache + a
+    # per-agent lock so the cold-wake seam (called on EVERY mesh->agent
+    # request) is a cheap dict lookup, never a config-file read. Only
+    # agents in a non-"active" state get an entry; "active" is the
+    # implicit default for everyone else. Updated at every
+    # archive/unarchive/hibernate/wake transition below — never read
+    # from disk again after boot.
+    _status_overrides: dict[str, str] = {}
+    try:
+        if cfg is not None:
+            _boot_status_cfg = cfg
+        else:
+            from src.cli.config import _load_config as _load_config_for_status
+
+            _boot_status_cfg = _load_config_for_status()
+        for _aid, _acfg in (_boot_status_cfg or {}).get("agents", {}).items():
+            _st = (_acfg or {}).get("status", "active") or "active"
+            if _st != "active":
+                _status_overrides[_aid] = _st
+    except Exception as e:
+        logger.warning("hibernation: failed to seed status-override cache: %s", e)
+    # Wake concurrency claim (plan §8 #24): the cold-wake seam is called
+    # from AT LEAST three independent event loops in this process (the
+    # uvicorn/dashboard loop, the dedicated lane dispatch loop, the cron
+    # scheduler's own loop) — an ``asyncio.Lock`` is NOT safe to await
+    # across different loops (its internal waiter queue is loop-bound).
+    # ``threading.Lock`` + ``concurrent.futures.Future`` ARE thread/loop
+    # safe; ``asyncio.wrap_future`` bridges a waiter on any loop onto the
+    # SAME in-flight future via ``call_soon_threadsafe`` — so two
+    # simultaneous triggers (from the same or different loops) wake the
+    # container exactly once.
+    _wake_claim_lock = threading.Lock()
+    _wake_futures: dict[str, "concurrent.futures.Future"] = {}
 
     def _caller_teams(agent_id: str) -> set[str]:
         """Return the team memberships visible to ``agent_id``.
@@ -9978,6 +10118,7 @@ def create_mesh_app(
             _unarchive_agent(agent_id)
         except ValueError as e:
             raise HTTPException(404, str(e))
+        _status_overrides.pop(agent_id, None)
         if event_bus is not None:
             try:
                 event_bus.emit(
@@ -9988,6 +10129,79 @@ def create_mesh_app(
             except Exception as e:
                 logger.debug("agent_unarchived emit failed: %s", e)
         return {"archived": False, "agent_id": agent_id}
+
+    @app.post("/mesh/agents/{agent_id}/hibernate")
+    async def hibernate_agent_endpoint(agent_id: str, request: Request) -> dict:
+        """Hibernate an agent (operator-or-internal; plan §8 #24).
+
+        Unlike archive, ``hibernated`` stays IN SERVICE — cron jobs keep
+        ticking and the container auto-wakes on the next mesh->agent
+        request (``ensure_agent_running``). Refuses the operator (never
+        hibernated), an already-archived agent (409 — unarchive first),
+        and an agent that is busy / has a queued lane message / has a
+        ``working`` task (409 — hibernating mid-work is the sweep's job
+        to avoid; this manual endpoint refuses too).
+        """
+        caller = _extract_verified_agent_id(request)
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can hibernate agents")
+        if agent_id == "operator":
+            raise HTTPException(400, "The operator agent cannot be hibernated")
+        from src.cli.config import _agent_status, _load_config
+
+        cfg_now = _load_config()
+        if agent_id not in cfg_now.get("agents", {}):
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+        try:
+            current_status = _agent_status(agent_id)
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+        if current_status == "archived":
+            raise HTTPException(
+                409,
+                f"Agent '{agent_id}' is archived — unarchive before hibernating",
+            )
+        if lane_manager is not None:
+            lstatus = lane_manager.get_status().get(agent_id, {})
+            if lstatus.get("busy") or lstatus.get("queued", 0) > 0:
+                raise HTTPException(
+                    409, f"Agent '{agent_id}' is busy — cannot hibernate mid-work",
+                )
+        if tasks_store is not None and tasks_store.has_working_task(agent_id):
+            raise HTTPException(
+                409, f"Agent '{agent_id}' has a working task — cannot hibernate mid-work",
+            )
+        return await _hibernate_agent_core(
+            agent_id,
+            caller="operator" if _caller_is_operator(caller, request) else "internal",
+        )
+
+    @app.post("/mesh/agents/{agent_id}/wake-from-hibernation")
+    async def wake_from_hibernation_endpoint(agent_id: str, request: Request) -> dict:
+        """Manually cold-wake a hibernated agent (operator-or-internal).
+
+        No-ops (returns ``woke: True``) for an already-active agent. 409s
+        for an archived agent — archived agents never auto-wake by
+        design; unarchive + restart is the correct recovery there.
+        """
+        caller = _extract_verified_agent_id(request)
+        if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
+            raise HTTPException(403, "Only the operator can wake a hibernated agent")
+        from src.cli.config import _load_config
+
+        cfg_now = _load_config()
+        if agent_id not in cfg_now.get("agents", {}):
+            raise HTTPException(404, f"Agent '{agent_id}' not found")
+        woke = await ensure_agent_running(agent_id, trigger="manual")
+        if not woke:
+            if _status_overrides.get(agent_id) == "archived":
+                raise HTTPException(
+                    409,
+                    f"Agent '{agent_id}' is archived — archived agents never "
+                    "auto-wake; unarchive and restart instead",
+                )
+            raise HTTPException(502, f"Failed to wake agent '{agent_id}'")
+        return {"woke": True, "agent_id": agent_id}
 
     async def _build_agent_bundle(agent_id: str, agent_cfg: dict | None) -> dict:
         """Host-side agent personnel-file bundle.
@@ -10317,6 +10531,12 @@ def create_mesh_app(
             _archive_agent(agent_id)
         except ValueError as e:
             raise HTTPException(404, str(e))
+        # Hibernation status-override cache (plan §8 #24): keep it in sync
+        # so ``ensure_agent_running`` correctly refuses to wake an agent
+        # archived after boot (its fast path would otherwise still read
+        # the stale pre-archive entry — "active" or "hibernated" — from
+        # the cache and either no-op or attempt a wake).
+        _status_overrides[agent_id] = "archived"
         # Stop scheduling: drop heartbeat and any cron jobs the agent owns.
         if cron_scheduler is not None:
             try:
@@ -10349,6 +10569,250 @@ def create_mesh_app(
             except Exception as e:
                 logger.debug("agent_archived emit failed: %s", e)
         return {"archived": True, "agent_id": agent_id}
+
+    async def _hibernate_agent_core(agent_id: str, *, caller: str = "operator") -> dict:
+        """Hibernate-agent side effects (plan §8 #24). Mirrors
+        ``_archive_agent_core``'s shape with ONE deliberate difference:
+        cron jobs are KEPT (not removed) — the mesh-side heartbeat ticks
+        are the cold-wake trigger while the agent sleeps. Caller has
+        already verified auth, target != operator, target isn't already
+        archived, and the agent has no busy lane / working task (the
+        manual endpoint checks this; the sweep only ever calls here when
+        those same conditions already held at sweep time).
+
+        ``caller`` is audit provenance only: "operator"/"internal" for
+        the manual endpoint, "sweep" for the automatic idle sweep.
+        """
+        from src.cli.config import _hibernate_agent
+
+        try:
+            _hibernate_agent(agent_id)
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+        _status_overrides[agent_id] = "hibernated"
+        # Deregister from health monitoring — the archive-proven
+        # mechanism (B3 leg 1) — so the poller doesn't see the
+        # intentional stop as a failure and fight the hibernate by
+        # auto-restarting it. Re-established on wake.
+        if health_monitor is not None:
+            try:
+                health_monitor.unregister(agent_id)
+            except Exception as e:
+                logger.warning(
+                    "hibernate_agent: health deregister for %s failed: %s", agent_id, e,
+                )
+        # Best-effort container stop WITHOUT data removal — the
+        # invariant that makes hibernation volume-loss-impossible by
+        # construction. Never pass a variable here; this literal is
+        # the pin.
+        if container_manager is not None:
+            try:
+                container_manager.stop_agent(agent_id, remove_data=False)
+            except Exception as e:
+                logger.warning(
+                    "hibernate_agent: container stop for %s failed: %s", agent_id, e,
+                )
+        # Cron jobs are DELIBERATELY left untouched — unlike archive,
+        # a hibernated agent's heartbeat keeps ticking mesh-probe-only
+        # (see cron.py's ``agent_status_fn`` gate) so it can cold-wake
+        # itself the next time its plate turns actionable.
+        try:
+            blackboard.log_audit(
+                action="agent_hibernated",
+                target=agent_id,
+                actor=caller,
+                provenance="user" if caller == "operator" else "system",
+            )
+        except Exception as e:
+            logger.warning("hibernate audit log failed for %s: %s", agent_id, e)
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "agent_hibernated",
+                    agent=agent_id,
+                    data={"agent_id": agent_id, "trigger": caller},
+                )
+            except Exception as e:
+                logger.debug("agent_hibernated emit failed: %s", e)
+        return {"hibernated": True, "agent_id": agent_id}
+
+    async def _wake_agent_core(agent_id: str, *, trigger: str) -> bool:
+        """Cold-wake an agent whose container was stopped by hibernation
+        (plan §8 #24 leg 3). Mirrors the dashboard single-agent restart
+        path: fresh config read (role/tools_dir/model/thinking + proxy +
+        per-agent LLM limits as ``env_overrides``), ``start_agent`` (fresh
+        token + ConnectorStore MCP snapshot — the normal ``start_agent``
+        machinery, no special-casing needed), ``wait_for_agent``, then
+        re-register transport/router/health, flip status back to
+        ``active``, stamp activity, and audit. Returns False (never
+        raises) on any failure so the caller degrades to "still
+        unreachable" instead of crashing the request that triggered it.
+        """
+        if container_manager is None or transport is None:
+            logger.warning(
+                "wake_agent: no container_manager/transport wired — cannot wake '%s'",
+                agent_id,
+            )
+            return False
+        from src.cli.config import _load_config as _wake_load_config
+        from src.cli.config import _wake_agent_status
+        from src.cli.proxy import build_proxy_env_vars, resolve_agent_proxy
+        from src.shared.limits import set_llm_limits_env
+        from src.shared.utils import set_llm_max_tokens_env
+
+        try:
+            fresh_cfg = _wake_load_config()
+        except Exception as e:
+            logger.error("wake_agent: config reload failed for '%s': %s", agent_id, e)
+            return False
+        agents_cfg = fresh_cfg.get("agents", {})
+        agent_cfg = agents_cfg.get(agent_id)
+        if agent_cfg is None:
+            logger.error("wake_agent: '%s' missing from agents.yaml — cannot rebuild", agent_id)
+            return False
+        default_model = fresh_cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+        _td = agent_cfg.get("tools_dir", "")
+        tools_dir = os.path.abspath(_td) if _td else ""
+
+        env_overrides: dict[str, str] = {}
+        _network_cfg = fresh_cfg.get("network", {})
+        _proxy_url = resolve_agent_proxy(agent_id, agents_cfg, _network_cfg)
+        env_overrides.update(
+            build_proxy_env_vars(_proxy_url, _network_cfg.get("no_proxy", "")),
+        )
+        set_llm_max_tokens_env(env_overrides, agent_cfg)
+        set_llm_limits_env(env_overrides, agent_cfg)
+
+        try:
+            loop = asyncio.get_running_loop()
+            url = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: container_manager.start_agent(
+                        agent_id=agent_id,
+                        role=agent_cfg.get("role", agent_id),
+                        tools_dir=tools_dir,
+                        model=agent_cfg.get("model", default_model),
+                        thinking=agent_cfg.get("thinking", ""),
+                        env_overrides=env_overrides,
+                    ),
+                ),
+                timeout=60,
+            )
+        except Exception as e:
+            logger.error("wake_agent: start_agent failed for '%s': %s", agent_id, e)
+            return False
+
+        router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
+        from src.host.transport import HttpTransport as _HttpTransportForWake
+
+        if isinstance(transport, _HttpTransportForWake):
+            transport.register(agent_id, url)
+        if health_monitor is not None:
+            health_monitor.register(agent_id)
+
+        ready = await container_manager.wait_for_agent(agent_id, timeout=60)
+        if not ready:
+            logger.error("wake_agent: '%s' did not become ready after cold-wake", agent_id)
+            return False
+
+        try:
+            _wake_agent_status(agent_id)
+        except ValueError as e:
+            logger.error("wake_agent: status flip failed for '%s': %s", agent_id, e)
+            return False
+        _status_overrides.pop(agent_id, None)
+        if lane_manager is not None:
+            try:
+                lane_manager.mark_activity(agent_id)
+            except Exception as e:
+                logger.debug("wake_agent: activity stamp failed for %s: %s", agent_id, e)
+        try:
+            blackboard.log_audit(
+                action="agent_woken",
+                target=agent_id,
+                field=trigger,
+                actor="mesh",
+                provenance="system",
+            )
+        except Exception as e:
+            logger.warning("wake audit log failed for %s: %s", agent_id, e)
+        if event_bus is not None:
+            try:
+                event_bus.emit(
+                    "agent_woken",
+                    agent=agent_id,
+                    data={"agent_id": agent_id, "trigger": trigger},
+                )
+            except Exception as e:
+                logger.debug("agent_woken emit failed: %s", e)
+        return True
+
+    async def ensure_agent_running(agent_id: str, *, trigger: str = "dispatch") -> bool:
+        """Cold-wake seam (plan §8 #24 leg 3) — the injectable
+        ``ensure_running_fn`` wired into ``HttpTransport`` in
+        ``cli/runtime.py``, and also the direct entry point for the
+        manual wake endpoint.
+
+        Fast no-op (a cache-only dict lookup, no I/O) when the agent
+        isn't hibernated — cheap enough to call on every mesh->agent
+        request. For ``hibernated``: restarts the container, waits for
+        readiness, re-registers transport/router/health, flips status to
+        ``active``, stamps activity, and audits — see
+        ``_wake_agent_core``. For ``archived``: NEVER wakes — returns
+        False (archived stays permanently out of service).
+
+        Concurrency: a thread/loop-safe claim (``_wake_futures`` +
+        ``_wake_claim_lock``) so two simultaneous triggers — from the
+        SAME or DIFFERENT event loops (this seam is called from at least
+        three: the uvicorn/dashboard loop, the lane dispatch loop, the
+        cron loop) — wake the container exactly once; every waiter after
+        the first joins the SAME in-flight wake via
+        ``asyncio.wrap_future`` and no-ops once it resolves.
+        """
+        status = _status_overrides.get(agent_id, "active")
+        if status == "active":
+            return True
+        if status == "archived":
+            return False
+        # status == "hibernated" — claim the wake or join the one in flight.
+        with _wake_claim_lock:
+            fut = _wake_futures.get(agent_id)
+            is_claimer = fut is None
+            if is_claimer:
+                fut = concurrent.futures.Future()
+                _wake_futures[agent_id] = fut
+
+        if not is_claimer:
+            try:
+                return await asyncio.wrap_future(fut)
+            except Exception:
+                return False
+
+        try:
+            result = await _wake_agent_core(agent_id, trigger=trigger)
+        except Exception as e:
+            logger.error("wake_agent: unhandled error for '%s': %s", agent_id, e)
+            result = False
+            fut.set_exception(e)
+        else:
+            fut.set_result(result)
+        finally:
+            with _wake_claim_lock:
+                _wake_futures.pop(agent_id, None)
+        return result
+
+    app.ensure_agent_running = ensure_agent_running  # exposed for the transport seam
+    app.get_agent_status = lambda agent_id: _status_overrides.get(agent_id, "active")
+    from src.cli.config import _load_config as _load_config_for_sweep
+
+    app.hibernation_sweeper = HibernationSweeper(
+        hibernate_fn=_hibernate_agent_core,
+        lane_manager=lane_manager,
+        tasks_store=tasks_store,
+        ask_broker=ask_broker,
+        config_fn=_load_config_for_sweep,
+    )
 
     @app.post("/mesh/agents/{agent_id}/offboard")
     async def offboard_agent_endpoint(agent_id: str, request: Request) -> dict:

@@ -978,10 +978,23 @@ class DashboardEvent(BaseModel):
         # refreshes the relevant list without a full reload.
         "agent_archived",
         "agent_unarchived",
+        # Hibernation (plan §8 #24) — hibernate/wake so the SPA refreshes
+        # the agent's live status without polling. ``hibernated`` stays
+        # IN SERVICE (cron keeps ticking, auto-wakes on demand) —
+        # distinct from ``agent_archived``, which is out-of-service.
+        "agent_hibernated",
+        "agent_woken",
         # Agent restart — split start/finish so the SPA can render a
         # pulsing "Restarting" indicator and clear it on completion.
         "agent_restarting",
         "agent_restarted",
+        # Dispatch connect-failure observability (plan §8 #24 hardening)
+        # — emitted by ``cli/runtime.py``'s ``_direct_dispatch`` when a
+        # lane/cron dispatch can't reach the agent's container at all (as
+        # opposed to a normal turn error), rate-limited per agent (~1/5min)
+        # so a persistent outage doesn't spam the dashboard. Task status
+        # is deliberately untouched — this is observability only.
+        "agent_unreachable",
         # Hard-field config apply — emitted from
         # ``_apply_pending_change`` so the agent config card flips to
         # the new value live (secret fields are redacted in the

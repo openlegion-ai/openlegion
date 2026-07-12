@@ -1101,6 +1101,28 @@ def _unarchive_agent(name: str) -> None:
     _set_agent_status(name, "active")
 
 
+def _hibernate_agent(name: str) -> None:
+    """Mark an agent as hibernated (plan §8 #24).
+
+    Unlike ``archived``, ``hibernated`` stays IN SERVICE: cron jobs keep
+    ticking and the wake path (``ensure_agent_running``) auto-wakes the
+    container on the next mesh->agent request. Only the container is
+    stopped (data volume kept) — see ``_hibernate_agent_core`` in
+    ``host/server.py`` for the full side-effect sequence.
+    """
+    _set_agent_status(name, "hibernated")
+
+
+def _wake_agent_status(name: str) -> None:
+    """Flip a hibernated agent's status back to ``active`` (plan §8 #24).
+
+    Called by ``ensure_agent_running`` once the cold-woken container is
+    confirmed ready — never called for ``archived`` agents, which never
+    auto-wake.
+    """
+    _set_agent_status(name, "active")
+
+
 def _agent_status(name: str) -> str:
     """Read an agent's status. Returns ``"active"`` for legacy rows missing the field."""
     if not AGENTS_FILE.exists():
