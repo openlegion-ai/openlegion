@@ -1965,6 +1965,81 @@ and green (908 passed)**. Reviewed via a full pre-merge pass (findings + fixes r
   end-of-phase 3-lane adversarial review runs next (Phase-3/4 pattern); findings land as a
   fix PR recorded in the Phase-5 ledger.
 
+- **✅ Landed — Phase-5 end-of-phase review + fixes (#1257).** Consolidated 3-lane
+  adversarial review of all Phase-5 PRs on the merged tree (`dc96487d`): a deep opus lane
+  (lifecycle/permission/concurrency with pytest repros), a breadth/integration lane
+  (unit-by-unit + cross-seam, self-forked into parallel deep-dives), and a phase-wide
+  invariant sweep. **The invariant sweep PASSED all ten families with evidence** — Constraint
+  #12 zero-carve-out (three lead-gated surfaces all advisory/envelope-bounded; merge/reject
+  handler bodies byte-identical vs Phase-4 baseline; both constitutional pins green),
+  human-origin hold release (unconditional `_confirm_origin_check` on every confirm path; no
+  agent-facing confirm tool; recommend writes advisory columns only), goals operator-write-
+  only (`_require_goals_writer` untouched), one approval surface (C.1 row 6 —
+  `pending_executors` registry, no delete-only dispatch survives), policy.yaml human-write-
+  only, durability (track record never reaped; `remove_data=True` delete-path-only), trust-
+  ladder integrity (system-rated events excluded from the floor; operator-agent ratings
+  excluded from autonomy_counts), B4 semantics on all four new knobs, repo hygiene (all
+  commits single-authored bic, no forbidden attribution, clean branch names), doc accuracy
+  (sampled "pinned by test" claims all real). **Six confirmed findings, all fixed in #1257
+  with negative-control-verified regression tests** (each test fails on pre-fix code):
+  1. **MAJOR — auto-merge daily-cap TOCTOU** (`auto_merge.py`): the cap count is read before
+     the merge `await`s and the counting event written after, so a lead approving a review
+     backlog in one turn fires N fire-and-forget consumers (each claiming a different review,
+     so claim-first doesn't serialize them) that all read the same pre-merge count and merge
+     past `auto_merge_daily_cap`. Fixed with a per-event-loop lock held across the
+     cap-read→record window, released before the best-effort notify.
+  2. **MAJOR — hibernation wake-failure zombie** (`server.py`): `_wake_agent_core`'s
+     `wait_for_agent` / status-flip failure branches returned False without undoing the
+     container start or health re-register — leaving a running, health-registered container
+     labelled `hibernated` that the health monitor then fights with restarts. Both branches
+     now tear down (health unregister + `stop_agent(remove_data=False)`); the pre-existing
+     test only checked the return value.
+  3. **MAJOR — lead recommendation invisible on the rendered card** (`server.py`/`app.js`/
+     `types.py`): the inline `pending_action_card` injector is create-once and chat history is
+     client-persisted, and nothing pushed on recommend — so a lead's advisory recommendation
+     (§8 #19) reached the operator only on a full reload. Added a `pending_action_updated` WS
+     event; the injector patches an existing card and the handler refreshes the Needs-you row
+     + card live.
+  4. **MAJOR — ladder rung-1 bypassed the `system_note` marker** (`runtime.py`): rung 1 sent
+     via `deliver_chat`, which has NO `system_note` parameter (unlike the `enqueue` path rung 2
+     uses), so the escalation nudge landed in the assignee's transcript as a role=user message
+     and ran through `looks_like_correction` — a host-authored nudge could write into the
+     agent's corrections learnings (bounded today only by the incidental `[blocked-task
+     escalation]` prefix). Rung 1 now uses the same followup + `system_note=True` path as
+     rung 2.
+  5. **MAJOR — U7 first-ever partial allocation blew Σ ≤ envelope** (`server.py`,
+     sharpens the recorded U7 residual): a daily-only allocation to a member with no prior
+     explicit budget let `set_budget` materialize the GLOBAL default monthly cap ($200)
+     unvalidated against the envelope — a near-guaranteed full-headroom exhaustion (e.g. $200
+     against a $50 envelope), not the marginal edge the residual implied. The endpoint now
+     validates the would-be-materialized default against the same Σ headroom check and 409s,
+     directing the lead to name that period explicitly.
+  6. **MAJOR — hibernation never auto-wakes under `SandboxBackend`** (`server.py`): the wake
+     seam is wired only for `HttpTransport`, so under `--sandbox` a hibernated agent would
+     stop and never auto-wake (every later dispatch hits a dead sandbox until a manual wake).
+     Hibernation now fails closed there — the manual endpoint 409s and the idle sweep skips —
+     mirroring how Team Drive is scoped Docker-only (§8 #9). Two opt-ins gated it (sandbox +
+     non-default `hibernate_idle_minutes>0`), no data loss, manual recovery existed — hence
+     MAJOR not CRITICAL.
+  **Deep-lane cleared hypotheses (verified sound, not re-chased):** hold release without human
+  origin (the CRITICAL-class target — unreachable: `MeshClient.confirm_config_change` sends no
+  `X-Origin`, `http_request` is SSRF-blocked from loopback, bridge-mode peer is non-loopback);
+  held-action double-execution (`BEGIN IMMEDIATE` single-use consume); auto-merge vs human
+  merge/reject (claim-first CAS); pair_trust system-rated leak; lead budget Σ-check race
+  (no `await` between sum and write, single mesh process); probation mtime-reload race
+  (RLock-serialized); rung-4 CAS dedup (`INSERT OR IGNORE` once-ever); wake single-flight.
+  **Breadth-lane cleared families:** U3 byte-identical defaults + directive envelopes + notify
+  first-gate + irreversible clamp; U1→U4→U5 zero-reap + enum-gated + self-reinforcement guard +
+  lead_verdict_by attribution + probation autonomy-rater exclusion; U2 outcome routing +
+  byte-identical learnings priority; U6 host-text can't hit the sentinel gates + goal-coverage
+  wired into the plate loop; U7 ledger binding (lead-set-0 throttles work only, not
+  coordination) + envelope read-only; U8 (under Docker) all agent-dispatch surfaces inherit
+  the wake seam. **Recorded residuals confirmed still-only-cosmetic (not findings):** U2
+  `/workspace-learnings` wins-parity gap; U6 SPA card for the new help-request kind; U8
+  `request_sync`-inside-live-loop (unreachable at current call sites); U6 blocked→working→
+  blocked sub-sweep rung retention. Full split suite after #1257: 8999 passed / 42 skipped /
+  0 failed (the known `TestTelegramStop` ordering flake passed this round).
+
 ### PR ledger — Phase 1 (as of 2026-07-07)
 | PR | Unit | CI |
 |---|---|---|
@@ -2031,6 +2106,8 @@ findings, if any, land as a follow-up fix PR recorded in this ledger.
 | #1251 | U6 — blocked-task escalation ladder + goal-coverage probe (§8 #22) | merged |
 | #1253 | U7 — lead budget allocation within the human envelope (§8 #21) | merged |
 | #1255 | U8 — hibernation: stop idle containers, cold-wake on demand (§8 #24) | merged |
+| #1256 | Phase-5 exit — U8 landed, exit checks, YOU ARE HERE | merged |
+| #1257 | Phase-5 end-of-phase review fixes — 6 MAJOR (cap TOCTOU, wake zombie, recommend live, ladder system_note, U7 Σ, hibernation sandbox) | merged |
 
 ### YOU ARE HERE → Phase 5
 
@@ -2082,22 +2159,30 @@ units landed as separate green PRs off `main`, exit checks green (see the Phase-
 The consolidated end-of-phase adversarial review of all Phase-4 PRs runs at phase close
 (Phase-3 pattern) — findings land as a fix PR recorded in the Phase-4 ledger.
 
-**Phase 5 (governance at scale) — ALL NINE UNITS LANDED** (pre-decisions §8 #17–#24 ratified
-2026-07-11; built 2026-07-11/12, PRs #1232–#1255): U0 hardening prereqs, U1 durable track
+**Phase 5 (governance at scale) is COMPLETE** (pre-decisions §8 #17–#24 ratified 2026-07-11;
+built + reviewed 2026-07-11/12, PRs #1232–#1257): U0 hardening prereqs, U1 durable track
 record + rating-trust rule (#18), U2 positive feedback push (#23), U3 action-tier policy
 engine with C.1 row 6 COMPLETE (#17), U4 kernel-executed auto-merge (#20), U5 probation +
 lead advisory + autonomy log (#19), U6 escalation ladder + goal-coverage probe (#22), U7
-lead budget allocation (#21), U8 hibernation (#24 — B3 resolved as designed; health.py
-needed zero changes). Exit checks green (see the Phase-5 exit entry above). **The
-consolidated end-of-phase 3-lane adversarial review is IN PROGRESS** — findings land as a
-fix PR + review-record doc PR in the Phase-5 ledger; the phase is not closed until that
-review record lands. Standing gates carried forward: a goals agent-write carve-out (team or
-standing) remains UNRATIFIED (declined again in #22) — do not build one without an explicit
-user decision; Personnel-file *import* is unblocked (B-pre #2 fixed) but unscheduled; raw
-shared `/team/scratch` stays unratified (§8 #1, sandbox story per §8 #9); Constraint #12
+lead budget allocation (#21), U8 hibernation (#24 — B3 resolved as designed; health.py needed
+zero changes). Exit checks green; the consolidated 3-lane end-of-phase adversarial review ran
+on merged main and its six confirmed MAJORs landed as the fix PR #1257 (invariant sweep passed
+all ten families with zero findings — see the Phase-5 review entry above for the fixes +
+cleared hypotheses). Standing gates carried forward UNCHANGED: a goals agent-write carve-out
+(team or standing) remains UNRATIFIED (declined again in #22) — do not build one without an
+explicit user decision; Personnel-file *import* is unblocked (B-pre #2 fixed) but unscheduled;
+raw shared `/team/scratch` stays unratified (§8 #1, sandbox story per §8 #9); Constraint #12
 absolute — leads/agents gain no permission carve-out, policy thresholds are OPERATOR policy.
 The companion review doc `2026-07-11-hands-off-teams-phase5.md` maps the human-intervention
 points and permanent touchpoints.
+
+**Deferred / not-yet-built after Phase 5** (nothing in §6 remains for a defined phase; these
+are the explicit backlog): the "Deferred until it hurts" items (§6 — per-team DB sharding,
+multi-host teams, cross-org mobility, raw shared scratch); Personnel-file import (unblocked,
+unscheduled); the cosmetic residuals above (wins-parity in `/workspace-learnings`, SPA card
+for the blocked-task help-request kind); and any future ratification of the standing gates.
+A hardening follow-up worth scheduling: fix the pre-existing `TestTelegramStop` /
+`_tool_staging` xdist test-ordering flakes (test-isolation only, not product code).
 
 **Handoff note:** this doc is the source of truth — a fresh session can continue from here without
 this session's chat history. Read §5 (keep/refactor/remove), Appendices A–C, §8 (ratified
