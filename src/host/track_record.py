@@ -265,6 +265,61 @@ class TrackRecordStore:
             counts.setdefault(source, {})[outcome] = n
         return counts
 
+    def distinct_accepted_count(
+        self,
+        agent_id: str,
+        *,
+        rater_kinds: tuple[str, ...] = AUTONOMY_RATER_KINDS,
+        outcome: str = "accepted",
+    ) -> int:
+        """Count DISTINCT deliverables whose LATEST outcome is ``outcome``.
+
+        Unlike :meth:`counts_for_agent` (raw append-only row counts — kept
+        for display/learning), this collapses the ledger to ONE event per
+        ``(source, ref_id)`` — the newest by ``(created_at, id)`` — before
+        counting. So re-rating the same task N times counts as ONE
+        deliverable, and a later ``accepted -> rejected`` correction drops
+        the deliverable from the count entirely (the latest event wins).
+
+        Restricted to ``rater_kinds`` (the rating-trust rule — defaults to
+        :data:`AUTONOMY_RATER_KINDS`) so an operator-*agent* re-rate can
+        neither inflate the count nor retract a human acceptance: the
+        autonomy-relevant state of a deliverable is decided only by the
+        rater kinds that feed the trust ladder. Used by the probation
+        preset's "after N accepted deliverables" release gate (plan §8
+        #19) — the raw ledger stays the display/learning surface.
+
+        Only ``task_outcome`` / ``summary_rating`` sources ever carry an
+        ``accepted`` outcome (drive-review vocabulary is merged/rejected/
+        auto_merged), so the default matches the pre-fix
+        task_outcome+summary_rating restriction on WHICH sources count,
+        while fixing the re-rate/retract miscount.
+        """
+        if not rater_kinds:
+            return 0
+        placeholders = ",".join("?" for _ in rater_kinds)
+        params: list[Any] = [agent_id, *rater_kinds]
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT source, ref_id, outcome FROM outcome_events "
+                f"WHERE agent_id = ? AND rater_kind IN ({placeholders}) "
+                "ORDER BY created_at DESC, id DESC",
+                params,
+            ).fetchall()
+        seen: set[tuple[str, str]] = set()
+        count = 0
+        for source, ref_id, ev_outcome in rows:
+            key = (source, ref_id)
+            if key in seen:
+                # Older event for a deliverable whose latest was already
+                # seen (rows are newest-first) — the latest already decided
+                # this deliverable's state.
+                continue
+            seen.add(key)
+            if ev_outcome == outcome:
+                count += 1
+        return count
+
     def recent_events(self, agent_id: str, limit: int = 20) -> list[dict]:
         """Newest-first events for one agent, hard-capped at 200."""
         limit = max(1, min(int(limit), 200))
