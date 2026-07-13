@@ -328,6 +328,12 @@ class RuntimeContext:
         # ``None`` until then (mirrors every other subsystem attribute
         # above).
         self.offboard_agent = None
+        # Per-agent runtime-state teardown helper (M11 parity, plan §8 #15):
+        # the mesh app's ``cleanup_agent`` (vault/blackboard/costs/traces/
+        # wallet + ``permissions.reload()``). Wired from the mesh app once
+        # ``_start_mesh_server`` runs; the CLI ``/remove`` runs it so it
+        # clears the SAME per-agent stores the mesh + dashboard delete paths do.
+        self.cleanup_agent = None
         self.agent_urls: dict[str, str] = {}
         self._dispatch_loop = None
         # Post-completion verification wakes (success path) — sliding
@@ -2123,6 +2129,11 @@ class RuntimeContext:
         # offboard_agent`` (mirrors how the REPL already reads
         # ``self.ctx.lane_manager`` / ``self.ctx.teams_store``).
         self.offboard_agent = getattr(app, "_offboard_agent", None)
+        # CLI REPL access to the mesh app's per-agent teardown (M11) — the
+        # same helper the mesh + dashboard delete paths call, so ``/remove``
+        # clears the agent's vault/blackboard/costs/traces/wallet + reloads
+        # permissions instead of leaking them for a same-name recreate.
+        self.cleanup_agent = getattr(app, "cleanup_agent", None)
 
         server_config = uvicorn.Config(app, host="0.0.0.0", port=mesh_port, log_level="warning")
         self._server = uvicorn.Server(server_config)
