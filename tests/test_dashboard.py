@@ -6993,6 +6993,91 @@ class TestDashboardChatStreamBusyAwareFork:
         assert events[-1]["type"] == "done"
 
 
+class TestDashboardBusyStreamHardening:
+    """M15 regression — the busy /chat/stream relay and /api/broadcast must
+    (a) gate lane sentinels through ``usable_agent_reply`` so a stopped or
+    unreachable agent's internal token never renders as its reply, and
+    (b) emit keepalive comments while ``deliver_chat`` is pending so a
+    busy-steered reply taking >120s isn't client-aborted before it lands."""
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.components = _make_components(self._tmpdir, include_v2=True)
+        self.client = _make_client(self.components)
+
+    def teardown_method(self):
+        _teardown(self.components)
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_busy_stream_gates_silent_sentinel(self):
+        """M15a: a ``__SILENT__`` lane sentinel must not render as the
+        agent's reply — it is replaced with the human-readable fallback."""
+        from src.shared.types import SILENT_REPLY_TOKEN
+
+        self.components["lane_manager"].get_status.return_value = {"alpha": {"busy": True}}
+        self.components["lane_manager"].deliver_chat = AsyncMock(return_value=SILENT_REPLY_TOKEN)
+        resp = self.client.post(
+            "/dashboard/api/agents/alpha/chat/stream", json={"message": "hi"},
+        )
+        assert resp.status_code == 200
+        events = _parse_sse(resp.text)
+        assert SILENT_REPLY_TOKEN not in resp.text
+        assert events[-1]["type"] == "done"
+        assert events[-1]["response"] == "The agent did not produce a reply."
+        reply_chunk = [e for e in events if e["type"] == "text_delta"][-1]
+        assert reply_chunk["content"] == "The agent did not produce a reply."
+
+    def test_busy_stream_gates_dispatch_error_sentinel(self):
+        """M15a: a ``dispatch_error:`` lane shape is gated too."""
+        self.components["lane_manager"].get_status.return_value = {"alpha": {"busy": True}}
+        self.components["lane_manager"].deliver_chat = AsyncMock(
+            return_value="dispatch_error: container gone",
+        )
+        resp = self.client.post(
+            "/dashboard/api/agents/alpha/chat/stream", json={"message": "hi"},
+        )
+        events = _parse_sse(resp.text)
+        assert "dispatch_error:" not in resp.text
+        assert events[-1]["response"] == "The agent did not produce a reply."
+
+    def test_broadcast_gates_sentinel(self):
+        """M15a: /api/broadcast gates the same sentinels per recipient."""
+        from src.shared.types import SILENT_REPLY_TOKEN
+
+        self.components["lane_manager"].deliver_chat = AsyncMock(return_value=SILENT_REPLY_TOKEN)
+        resp = self.client.post("/dashboard/api/broadcast", json={"message": "hello all"})
+        assert resp.status_code == 200
+        for reply in resp.json()["responses"].values():
+            assert reply == "The agent did not produce a reply."
+            assert SILENT_REPLY_TOKEN not in reply
+
+    def test_busy_stream_emits_keepalive_while_pending(self, monkeypatch):
+        """M15b: while ``deliver_chat`` is pending, the busy generator emits
+        ``: keepalive`` SSE comments so the SPA's 120s no-data abort can't
+        fire before the steered reply lands."""
+        import asyncio
+
+        import src.dashboard.server as ds_server
+
+        monkeypatch.setattr(ds_server, "_BUSY_KEEPALIVE_INTERVAL_SECONDS", 0.02)
+        self.components["lane_manager"].get_status.return_value = {"alpha": {"busy": True}}
+
+        async def _slow_deliver(aid, message, *, trace_id=None, origin=None):
+            await asyncio.sleep(0.12)
+            return "the steered reply"
+
+        self.components["lane_manager"].deliver_chat = AsyncMock(side_effect=_slow_deliver)
+        resp = self.client.post(
+            "/dashboard/api/agents/alpha/chat/stream", json={"message": "hurry"},
+        )
+        assert resp.status_code == 200
+        # Keepalive comments are present (pre-fix the generator went silent).
+        assert ": keepalive" in resp.text
+        events = _parse_sse(resp.text)
+        assert events[-1]["type"] == "done"
+        assert events[-1]["response"] == "the steered reply"
+
+
 class TestDashboardBroadcastPrioritySteerLane:
     """Phase-4 unit 5 (plan §8 #10 residual): ``/api/broadcast`` fans out
     through ``LaneManager.deliver_chat`` per recipient instead of calling
