@@ -9171,6 +9171,12 @@
                               x-text="'Expires in ' + workplaceFormatExpiry(msg.expires_at)"></span>
                           </div>
                           <p class="text-xs text-gray-200 mb-2" x-text="msg.summary || (msg.action_kind + ' on ' + (msg.target_kind || '?') + ' ' + (msg.target_id || '?'))"></p>
+                          <!-- Lead advisory recommendation (plan §8 #19)
+                               — additive, read-only. Zero effect on
+                               Confirm/Cancel below. Mirrors the Chat-tab
+                               operator-panel card (M18 parity). -->
+                          <p x-show="msg.lead_recommendation" class="text-[11px] text-indigo-300 mb-2"
+                            x-text="'Lead recommends: ' + msg.lead_recommendation + (msg.lead_recommendation_note ? ' — ' + msg.lead_recommendation_note : '')"></p>
                           <template x-if="msg.preview_diff">
                             <div class="mb-3">
                               <button @click="diffOpen = !diffOpen"
