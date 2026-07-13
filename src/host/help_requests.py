@@ -217,13 +217,58 @@ class HelpRequests:
     # ── Maintenance ────────────────────────────────────────────────
 
     def reap_old(self, max_age_sec: float = _MAX_AGE_SEC) -> int:
-        """Delete asks older than ``max_age_sec``. Returns count deleted."""
+        """Delete asks older than ``max_age_sec``. Returns count deleted.
+
+        ``blocked_task_escalation`` rows (M9) are EXEMPT: the ladder files
+        exactly one per task EVER, guarded by an eternal
+        ``blocked_human_notices`` claim, so age-reaping the row would
+        silently evaporate the stuck task's sole human surface while the
+        claim guarantees it is never re-filed. Those rows are cleared
+        instead by ``resolve``/``resolve_for_task`` when the task leaves
+        ``blocked`` (C5) — never by age.
+        """
         cutoff = time.time() - max_age_sec
         with self._conn() as conn:
             cur = conn.execute(
-                "DELETE FROM help_requests WHERE created_at < ?", (cutoff,),
+                "DELETE FROM help_requests "
+                "WHERE created_at < ? AND kind != 'blocked_task_escalation'",
+                (cutoff,),
             )
             return cur.rowcount
+
+    def open_escalation_task_ids(self) -> set[str]:
+        """Task ids (``name`` column) of open ``blocked_task_escalation`` rows.
+
+        The ladder reconcile (C5) uses this to clear Needs-you rows for
+        tasks that have since left ``blocked``.
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT name FROM help_requests "
+                "WHERE kind = 'blocked_task_escalation' AND status = 'open' "
+                "AND name IS NOT NULL",
+            ).fetchall()
+        return {r[0] for r in rows}
+
+    def resolve_for_task(self, task_id: str) -> int:
+        """Delete the open ``blocked_task_escalation`` row(s) for a task (C5).
+
+        Called when the task leaves ``blocked``/completes so the
+        authoritative Needs-you feed stops asserting "human action
+        required". The once-ever ``blocked_human_notices`` claim is
+        DELIBERATELY left intact (ratified: one human escalation per task
+        ever, surviving re-blocks) — only the open row is cleared. Returns
+        the number of rows removed.
+        """
+        if not task_id:
+            return 0
+        with self._conn() as conn:
+            cur = conn.execute(
+                "DELETE FROM help_requests "
+                "WHERE kind = 'blocked_task_escalation' AND name = ?",
+                (task_id,),
+            )
+            return cur.rowcount or 0
 
     def _safe_reap(self) -> None:
         try:
