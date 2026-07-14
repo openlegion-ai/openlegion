@@ -488,6 +488,51 @@ class TestHeartbeat:
         call_msg = dispatch.call_args[0][1]
         assert "Probe Alerts" in call_msg
 
+    @pytest.mark.asyncio
+    async def test_heartbeat_stamps_activity_before_dispatch(self):
+        """M7: the idle-sweep activity clock is stamped BEFORE the
+        (multi-second) heartbeat LLM dispatch, not only after — so the sweep
+        can't hibernate the agent mid-heartbeat (which sees the pre-turn
+        ``last_activity`` and thinks the agent is idle)."""
+        stamps: list[str] = []
+        stamps_when_dispatch_ran: list[int] = []
+
+        async def dispatch(agent, message):
+            # How many activity stamps had ALREADY fired when the dispatch
+            # began — proves the pre-stamp lands before the turn.
+            stamps_when_dispatch_ran.append(len(stamps))
+            return "did the work"
+
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            pending_tasks_fn=lambda agent: 1,   # actionable plate → dispatches
+            activity_fn=lambda agent: stamps.append(agent),
+        )
+        job = sched.add_job(agent="test", schedule="every 15m", message="heartbeat", heartbeat=True)
+        await sched._execute_job(job)
+        assert stamps_when_dispatch_ran and stamps_when_dispatch_ran[0] >= 1, "pre-dispatch stamp missing"
+        assert len(stamps) >= 2, "must stamp both before AND after the dispatch"
+
+    @pytest.mark.asyncio
+    async def test_empty_heartbeat_tick_does_not_stamp_activity(self):
+        """Negative control for the pre-stamp: a gated/empty heartbeat that
+        never dispatches must NOT stamp activity — otherwise every cheap tick
+        would reset the idle clock and hibernation could never trigger."""
+        stamps: list[str] = []
+        dispatch = AsyncMock(return_value="x")
+        mock_bb = MagicMock()
+        mock_bb.list_by_prefix.return_value = []
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch, blackboard=mock_bb,
+            activity_fn=lambda agent: stamps.append(agent),
+        )
+        job = sched.add_job(agent="test", schedule="every 15m", message="heartbeat", heartbeat=True)
+        with patch.object(sched, "_run_heartbeat_probes", return_value=[]):
+            result = await sched._execute_job(job)
+        dispatch.assert_not_called()
+        assert result is None
+        assert stamps == []
+
     def test_find_heartbeat_job(self):
         sched = CronScheduler(config_path=self.config_path)
         sched.add_job(agent="researcher", schedule="every 30m", message="check", heartbeat=False)

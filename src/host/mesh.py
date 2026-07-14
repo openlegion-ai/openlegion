@@ -14,7 +14,7 @@ import sqlite3
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -830,6 +830,38 @@ class MessageRouter:
         self._client_lock: asyncio.Lock | None = None
         self._client_lock_loop: asyncio.AbstractEventLoop | None = None
         self._trace_store = trace_store
+        # Cold-wake seam (plan §8 #24, M6): the SAME injectable
+        # ``ensure_agent_running`` the ``HttpTransport`` wires — a hibernated
+        # recipient of a ``send_message`` / ``/mesh/message`` must be woken
+        # here too (the router POSTs directly to ``{url}/message``, bypassing
+        # the transport, so without this seam a hibernated teammate is never
+        # auto-woken on demand). None (standalone tests) disables it.
+        self._ensure_running_fn: Callable[[str], Awaitable[bool]] | None = None
+
+    def set_ensure_running_fn(
+        self, fn: Callable[[str], Awaitable[bool]] | None,
+    ) -> None:
+        """Wire the cold-wake seam after construction (mirrors
+        ``HttpTransport.set_ensure_running_fn``). ``fn(agent_id) -> bool``
+        is a cheap no-op for a running agent and a cold-wake-then-wait for a
+        hibernated one. Called at the top of ``route`` before target
+        resolution; pass ``None`` to disable (the default)."""
+        self._ensure_running_fn = fn
+
+    async def _ensure_running(self, agent_id: str) -> None:
+        """Best-effort cold-wake before delivering a routed message.
+
+        Never raises and never blocks the caller on a wake failure — a
+        hibernated agent that fails to wake just stays unreachable, which
+        ``_resolve_target`` / the delivery retry below already surface.
+        """
+        fn = self._ensure_running_fn
+        if fn is None or not agent_id:
+            return
+        try:
+            await fn(agent_id)
+        except Exception as e:
+            logger.warning("router ensure_running_fn failed for '%s': %s", agent_id, e)
 
     def _get_client_lock(self) -> asyncio.Lock:
         loop = asyncio.get_running_loop()
@@ -873,6 +905,13 @@ class MessageRouter:
         if not self.permissions.can_message(message.from_agent, message.to):
             logger.warning(f"Permission denied: {message.from_agent} -> {message.to}")
             return {"error": f"{message.from_agent} cannot message {message.to}"}
+
+        # Cold-wake a hibernated recipient BEFORE resolving its target (M6):
+        # the wake re-registers the restarted container's FRESH url in the
+        # registry, so a same-session stale-url delivery failure and a
+        # post-restart "No agent found" both become a wake-then-deliver. A
+        # no-op for a running agent; never raises.
+        await self._ensure_running(message.to)
 
         target_url = self._resolve_target(message.to)
         if not target_url:

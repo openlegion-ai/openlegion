@@ -1415,16 +1415,26 @@ class RuntimeContext:
         if self.health_monitor is not None:
             self.health_monitor.set_queue_depth_fn(self.lane_manager.get_queue_depth)
 
-        # Idle-sweep activity stamp for the direct-bypass chat paths (plan
-        # §8 #24) — ``chat_done`` covers the dashboard idle/busy stream +
-        # non-stream chat + every lane-mediated ``_direct_dispatch`` turn;
-        # ``message_sent`` additionally covers the CLI REPL streaming path
-        # (which never emits ``chat_done``). Lane-internal activity
-        # (worker finally / steer injection) is already stamped directly
-        # inside ``lanes.py`` — this listener only needs to reach the
-        # paths that bypass the lane entirely.
+        # Idle-sweep activity stamp for the direct-bypass turn paths (plan
+        # §8 #24, M7) — activity is stamped at turn START *and* END so a
+        # LIVE turn on a non-lane path is never invisible to the idle sweep
+        # (the pre-fix set only stamped at turn end, so a multi-second
+        # direct turn showed ``last_activity`` from the PREVIOUS turn and
+        # could be hibernated mid-turn):
+        #   START: ``chat_user_message`` (dashboard idle/busy chat stream +
+        #     non-stream chat + steer) and ``message_received`` (the CLI
+        #     REPL streaming path and the channel — Telegram/Discord/Slack —
+        #     streaming turns, both of which bypass the lane entirely).
+        #   END:   ``chat_done`` (dashboard streams + non-stream chat + every
+        #     lane-mediated ``_direct_dispatch`` turn) and ``message_sent``.
+        # Lane-internal activity (worker finally / steer injection) is
+        # already stamped directly inside ``lanes.py``; the cron ``/heartbeat``
+        # path stamps before+after via ``activity_fn``. Over-stamping only
+        # ever DELAYS hibernation (safe); under-stamping is the mid-turn bug.
         def _activity_event_listener(evt: dict) -> None:
-            if evt.get("type") not in ("chat_done", "message_sent"):
+            if evt.get("type") not in (
+                "chat_user_message", "message_received", "chat_done", "message_sent",
+            ):
                 return
             agent = evt.get("agent")
             if not agent or self.lane_manager is None:
@@ -2008,6 +2018,16 @@ class RuntimeContext:
 
         if isinstance(self.transport, HttpTransport):
             self.transport.set_ensure_running_fn(
+                getattr(app, "ensure_agent_running", None),
+            )
+        # Same seam for the MessageRouter (M6): a ``send_message`` /
+        # ``/mesh/message`` to a hibernated recipient POSTs directly to the
+        # container URL and bypasses the transport, so the router needs its
+        # own cold-wake-before-deliver hook — otherwise a hibernated teammate
+        # is never auto-woken on this delivery path (violates §8 #24's
+        # "auto-wakes on demand").
+        if self.router is not None:
+            self.router.set_ensure_running_fn(
                 getattr(app, "ensure_agent_running", None),
             )
         # Idle-agent hibernation sweep (plan §8 #24) — built inside
@@ -2742,50 +2762,47 @@ class RuntimeContext:
             from src.host.chain_watcher import BlockedTaskLadder, ChainWatcher
             from src.shared.utils import dumps_safe
 
-            def _log_ladder_send(fut) -> None:
+            def _ladder_enqueue_nudge(agent: str, message: str) -> bool:
+                # Shared rung-1/2 delivery: enqueue a system-composed followup
+                # turn on the target agent. System-note flagged (no human typed
+                # it) so it lands in the transcript as role=system, never
+                # impersonating the user or feeding ``looks_like_correction``.
+                # Bills the nudged agent's normal WORK ledger.
+                #
+                # C4: returns True ONLY when the nudge was durably ACCEPTED by
+                # the lane (enqueue succeeded), False when it could not be
+                # delivered (no lane/loop, or the enqueue raised). The ladder
+                # advances the rung only on True, so a failed dispatch
+                # (loop/container down) re-drives the SAME rung next sweep
+                # instead of climbing past it. We wait only for the ENQUEUE (a
+                # fast lane-queue put) — NEVER the agent turn — so the sweep
+                # still never blocks on an agent's work.
+                if self.lane_manager is None or self._dispatch_loop is None:
+                    return False
                 try:
-                    fut.result()
+                    fut = asyncio.run_coroutine_threadsafe(
+                        self.lane_manager.enqueue(
+                            agent, message, mode="followup", system_note=True,
+                        ),
+                        self._dispatch_loop,
+                    )
                 except Exception as e:
-                    logger.warning("ladder nudge dispatch failed: %s", e)
+                    logger.warning("ladder nudge dispatch failed to schedule for %s: %s", agent, e)
+                    return False
+                try:
+                    fut.result(timeout=10)
+                except Exception as e:
+                    logger.warning("ladder nudge enqueue failed for %s: %s", agent, e)
+                    return False
+                return True
 
-            def _ladder_send_assignee(agent: str, message: str) -> None:
-                # Rung 1 — a followup turn on the assignee. System-composed
-                # (no human typed it), so it MUST carry the system-note flag
-                # exactly like rung 2 below: without it the nudge lands in the
-                # assignee's transcript as a role=user message (indistinguishable
-                # from a real operator message) and runs through
-                # ``looks_like_correction`` — a host-authored escalation must
-                # never be able to write itself into the agent's corrections
-                # learnings. (Phase-5 review finding: the prior ``deliver_chat``
-                # path had no ``system_note`` parameter to thread the flag
-                # through, so the busy→steer fork silently bypassed the marker;
-                # a queued followup is the correct posture for a not-time-
-                # critical blocked-task nudge anyway.) Fire-and-forget onto the
-                # dispatch loop so the sweep never blocks; bills the nudged
-                # agent's normal WORK ledger.
-                if self.lane_manager is None or self._dispatch_loop is None:
-                    return
-                fut = asyncio.run_coroutine_threadsafe(
-                    self.lane_manager.enqueue(
-                        agent, message, mode="followup", system_note=True,
-                    ),
-                    self._dispatch_loop,
-                )
-                fut.add_done_callback(_log_ladder_send)
+            def _ladder_send_assignee(agent: str, message: str) -> bool:
+                # Rung 1 — a followup turn on the assignee.
+                return _ladder_enqueue_nudge(agent, message)
 
-            def _ladder_send_creator(agent: str, message: str) -> None:
-                # Rung 2 — a followup turn on the task creator. System-
-                # composed (no human typed it), same fire-and-forget +
-                # work-ledger posture as rung 1.
-                if self.lane_manager is None or self._dispatch_loop is None:
-                    return
-                fut = asyncio.run_coroutine_threadsafe(
-                    self.lane_manager.enqueue(
-                        agent, message, mode="followup", system_note=True,
-                    ),
-                    self._dispatch_loop,
-                )
-                fut.add_done_callback(_log_ladder_send)
+            def _ladder_send_creator(agent: str, message: str) -> bool:
+                # Rung 2 — a followup turn on the task creator.
+                return _ladder_enqueue_nudge(agent, message)
 
             def _ladder_lead_of(team_id: str | None) -> str | None:
                 store = getattr(self, "teams_store", None)

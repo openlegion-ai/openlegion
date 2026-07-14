@@ -103,12 +103,20 @@ class BlockedTaskLadder:
     verbs. State (rung + last climb) is durable in the tasks store and
     resets when a task leaves ``blocked`` (cleared by the sweep; a flip
     faster than one sweep interval keeps its prior rung — bounded, benign).
-    Every climb is CAS-claimed (``ladder_climb``) so racing sweeps or a
-    restart replay can't double-send, and writes one audit row via
-    ``audit_fn`` (``action="blocked_task_escalation"`` at the wiring site).
+    Each rung DELIVERS first, then advances only on a SUCCESSFUL (or
+    legitimately-skipped) delivery (C4): a failed rung-1/2 dispatch
+    (loop/container down, reported ``False`` by the seam) leaves the rung
+    un-advanced so the next sweep re-drives the SAME assignee/creator
+    rather than climbing past it toward the human — honouring the
+    indefinite-retry-of-rungs-1-3 requirement. The advance is CAS-claimed
+    (``ladder_climb``) so racing sweeps or a restart replay can't
+    double-send, and writes one audit row via ``audit_fn``
+    (``action="blocked_task_escalation"`` at the wiring site).
 
     Delivery seams may be sync (the runtime passes fire-and-forget
-    wrappers so a sweep never blocks on an agent turn) or async (tests).
+    wrappers so a sweep never blocks on an agent TURN — they still report
+    enqueue acceptance so a failed dispatch un-advances the rung) or async
+    (tests). A seam returns falsey/raises to signal a delivery failure.
     """
 
     def __init__(
@@ -239,11 +247,17 @@ class BlockedTaskLadder:
         if now - last_climb < interval_s:
             return
         target = rung + 1
-        if not self._tasks.ladder_climb(task_id, rung, target, now=now):
-            return  # lost the claim to a concurrent sweep — it sends, we don't
+        # C4: DELIVER FIRST, then advance the rung ONLY on a successful (or
+        # legitimately-skipped) delivery. The pre-fix order CAS-advanced the
+        # rung BEFORE the fire-and-forget send, so a failed rung-1/2 dispatch
+        # (loop/container down) silently climbed toward creator/lead without
+        # ever re-driving the assignee — contradicting §8 #22's
+        # indefinite-retry-of-rungs-1-3 requirement. A failed delivery now
+        # leaves the rung un-advanced; the next sweep re-drives the SAME rung.
         detail: dict = {}
+        delivered = True
         if target == 1:
-            await self._send(
+            delivered = await self._send(
                 self._deliver_assignee, task.get("assignee") or "",
                 self._rung1_message(task, task_id, note), "assignee", task_id,
             )
@@ -255,7 +269,7 @@ class BlockedTaskLadder:
             elif creator == self._operator_id:
                 detail["skipped"] = "creator_is_operator"
             else:
-                await self._send(
+                delivered = await self._send(
                     self._deliver_creator, creator,
                     self._rung2_message(task, task_id, note), "creator", task_id,
                 )
@@ -264,6 +278,12 @@ class BlockedTaskLadder:
             lead = self._lead_of(task.get("team_id"))
             if not lead:
                 detail["skipped"] = "no_lead"
+        if not delivered:
+            # Rung-1/2 dispatch FAILED — do NOT advance. The next sweep
+            # re-drives the same rung (indefinite retry of rungs 1-3).
+            return
+        if not self._tasks.ladder_climb(task_id, rung, target, now=now):
+            return  # lost the claim to a concurrent sweep — it sends, we don't
         self._audit(task_id, target, detail)
 
     # ── rung mechanics ───────────────────────────────────────────
@@ -271,15 +291,23 @@ class BlockedTaskLadder:
     async def _send(
         self, fn: Callable | None, agent: str, message: str,
         label: str, task_id: str,
-    ) -> None:
+    ) -> bool:
+        """Deliver one nudge. Returns True when it was accepted (or there is
+        nothing to deliver — no seam wired / no target agent), False ONLY
+        when a WIRED delivery seam RAISED or reported failure (``False``).
+        The caller advances the rung only on True, so a genuine delivery
+        failure (loop/container down) leaves the rung un-advanced for the
+        next sweep to re-drive the SAME rung (C4)."""
         if fn is None or not agent:
-            return
+            return True  # nothing to deliver here — the rung legitimately climbs
         try:
             result = fn(agent, message)
             if asyncio.iscoroutine(result):
-                await result
+                result = await result
+            return result is not False
         except Exception as e:
             logger.warning("ladder: %s nudge for task %s failed: %s", label, task_id, e)
+            return False
 
     def _lead_of(self, team_id: str | None) -> str | None:
         if self._lead_of_fn is None or not team_id:

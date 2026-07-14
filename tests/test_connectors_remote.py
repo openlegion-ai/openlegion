@@ -328,6 +328,43 @@ class TestConnectorCallPolicyGate:
         assert kwargs.get("mode") == "followup"
         assert kwargs.get("system_note") is True
 
+    def test_hold_confirm_result_delivery_failure_not_clean_success(self, mesh_env_hold):
+        """C7: the state-changing connector call SUCCEEDS, but the follow-up
+        lane enqueue (result delivery) FAILS. The confirm must NOT report a
+        clean ``delivered: true`` — that would invite the agent to retry and
+        duplicate the external side effect. It returns ``delivered: false``
+        with the executed result + a 'result delivery failed' status, the
+        result is persisted to the audit log, and the side effect ran EXACTLY
+        ONCE (never re-executed).
+
+        Negative control is the sibling
+        ``test_hold_confirm_executes_and_delivers_followup_note``: identical
+        flow with a WORKING enqueue returns ``delivered: true``.
+        """
+        client, _store, _gateway, bb, lane_manager = mesh_env_hold
+        lane_manager.enqueue = AsyncMock(side_effect=RuntimeError("lane down"))
+
+        propose = self._call(client, "alpha")
+        nonce = propose.json()["change_id"]
+        digest = propose.json()["payload_digest"]
+        confirm = client.post(
+            "/mesh/config/confirm",
+            json={"change_id": nonce, "payload_digest": digest},
+            headers=_human_headers("operator"),
+        )
+        assert confirm.status_code == 200, confirm.text
+        body = confirm.json()
+        assert body["delivered"] is False               # NOT a clean success
+        assert body["result_delivery"] == "failed"
+        assert body["side_effect"] == "done"
+        assert body["result"] == {"result": "done"}     # the executed result is preserved
+        assert "not be delivered" in body["error"]
+        # The connector side effect executed exactly ONCE — never re-run.
+        assert len(FakeSession.instances) == 1
+        # The result is persisted durably so it isn't lost.
+        undelivered = bb.get_audit_log(action="connector_call_result_undelivered")["entries"]
+        assert len(undelivered) == 1
+
     def test_hold_confirm_single_use(self, mesh_env_hold):
         client, *_ = mesh_env_hold
         propose = self._call(client, "alpha")

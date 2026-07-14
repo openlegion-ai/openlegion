@@ -631,6 +631,20 @@ class CronScheduler:
                 )
                 continue
 
+    def _stamp_activity(self, agent: str) -> None:
+        """Stamp the idle-sweep's last-activity clock for ``agent`` (plan
+        §8 #24, M7). Called BEFORE a heartbeat/message LLM dispatch (so a
+        multi-second turn isn't hibernated mid-flight — the sweep would
+        otherwise see ``last_activity`` from the previous turn) and AFTER a
+        real non-suppressed dispatch. Best-effort; a missing/failed stamp
+        never affects the dispatch."""
+        if self.activity_fn is None:
+            return
+        try:
+            self.activity_fn(agent)
+        except Exception as e:
+            logger.debug("activity_fn failed for '%s': %s", agent, e)
+
     async def _execute_job(self, job: CronJob, manual: bool = False) -> str | None:
         lock = self._job_locks[job.id]
         if lock.locked():
@@ -876,6 +890,17 @@ class CronScheduler:
 
                         message = "\n\n".join(sections)
 
+                        # Idle-sweep pre-stamp (plan §8 #24, M7): this
+                        # branch is the ACTIONABLE plate — an LLM turn WILL
+                        # dispatch below, and it can run for several seconds.
+                        # Stamp NOW (turn start) so the idle sweep can't
+                        # hibernate the agent mid-heartbeat; the post-dispatch
+                        # stamp below refreshes it on completion. (Only fires
+                        # on the actionable path — a gated/empty plate never
+                        # reaches here, so hibernation still triggers when the
+                        # agent is genuinely idle.)
+                        self._stamp_activity(job.agent)
+
                         # Use dedicated heartbeat endpoint when available.
                         if self.heartbeat_dispatch_fn:
                             hb_result = await self.heartbeat_dispatch_fn(
@@ -923,14 +948,9 @@ class CronScheduler:
                     # (non-suppressed) dispatch means the agent is NOT
                     # idle right now — covers cron paths that bypass the
                     # lane entirely (tool-invoke jobs, ``/heartbeat``),
-                    # which the lane worker's own stamp never sees.
-                    if self.activity_fn is not None:
-                        try:
-                            self.activity_fn(job.agent)
-                        except Exception as e:
-                            logger.debug(
-                                "activity_fn failed for '%s': %s", job.agent, e,
-                            )
+                    # which the lane worker's own stamp never sees. The
+                    # heartbeat path also stamps BEFORE the dispatch (M7).
+                    self._stamp_activity(job.agent)
 
                     # Host-published channel post (§8 #14): a standup (or
                     # any message job the host tagged) publishes its

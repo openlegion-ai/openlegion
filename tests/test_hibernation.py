@@ -441,6 +441,79 @@ class TestWake:
         bb.close()
 
 
+# ── M8: cold-wake single-flight cancellation-safety ──────────────────
+
+
+class _SlowContainerManager(_FakeContainerManager):
+    """Gates ``wait_for_agent`` on an event so a wake can be cancelled
+    mid-flight. ``wait_result`` decides success/failure after release."""
+
+    def __init__(self):
+        super().__init__()
+        self.gate = asyncio.Event()
+        self.wait_result = False
+
+    async def wait_for_agent(self, agent_id, timeout=30):
+        await self.gate.wait()
+        return self.wait_result
+
+
+class TestWakeCancellationSafety:
+    async def test_negative_control_unresolved_future_hangs_waiters(self):
+        """Documents the M8 bug the fix prevents: the pre-fix single-flight
+        popped the shared ``concurrent.futures.Future`` on claimer
+        cancellation WITHOUT resolving it, so every waiter joined via
+        ``asyncio.wrap_future`` awaited forever. This reproduces that raw
+        mechanism — an unresolved future never wakes its waiter."""
+        import concurrent.futures
+        import contextlib
+
+        fut: concurrent.futures.Future = concurrent.futures.Future()
+        waiter = asyncio.ensure_future(asyncio.wrap_future(fut))
+        # Never resolved (the old `finally: _wake_futures.pop(...)` with no
+        # set_result/set_exception) → the waiter hangs.
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(asyncio.shield(waiter), timeout=0.3)
+        waiter.cancel()
+        with contextlib.suppress(BaseException):
+            await waiter
+
+    async def test_cancelled_claimer_resolves_waiters_and_runs_teardown(self, tmp_path, monkeypatch):
+        """M8: cancel the claimer mid-wake — the waiter still RESOLVES (does
+        not hang) and ``_wake_teardown`` still fires. The wake runs as its
+        own task, so the claimer's cancellation detaches only itself."""
+        cm = _SlowContainerManager()  # wait_for_agent blocks, then fails
+        app, bb, _cm, tr, hm, eb, cfg = _build_app(
+            tmp_path, monkeypatch, agent_status="hibernated", container_manager=cm,
+        )
+
+        claimer = asyncio.create_task(app.ensure_agent_running("scout"))
+        await asyncio.sleep(0.05)                 # claimer reaches wait_for_agent
+        waiter = asyncio.create_task(app.ensure_agent_running("scout"))
+        await asyncio.sleep(0.02)                 # waiter joins the in-flight future
+        assert cm.started, "the wake task started the container before cancellation"
+
+        claimer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await claimer
+
+        # Release the wake — it completes (fails) on its independent task.
+        cm.gate.set()
+        result = await asyncio.wait_for(waiter, timeout=2.0)
+        assert result is False                    # waiter resolved, NOT hung
+
+        # Teardown ran even though the claimer was cancelled: the container
+        # is stopped WITHOUT data removal and health is deregistered, and
+        # status is never falsely flipped to active.
+        assert ("scout", False) in cm.stopped
+        assert not any(remove for _a, remove in cm.stopped), cm.stopped
+        hm.unregister.assert_called_with("scout")
+        assert cfg["agents"]["scout"]["status"] == "hibernated"
+        # The single-flight entry was cleaned up — a later wake can reclaim.
+        assert await app.ensure_agent_running("scout") in (True, False)
+        bb.close()
+
+
 # ── Boot + heartbeat-reconcile asymmetry ─────────────────────────────
 
 
@@ -723,6 +796,30 @@ class TestCronHibernatedTicks:
 # ── Idle sweep ────────────────────────────────────────────────────────
 
 
+class _MidTickLane:
+    """Lane-manager stub whose ``get_status``/``last_activity`` return one
+    value on the tick snapshot and a DIFFERENT value on the sweep's fresh
+    re-check (M7) — so a turn that starts mid-tick can be simulated
+    deterministically (no ``await`` point exists between the two reads to
+    mutate a real lane from the test)."""
+
+    def __init__(self, *, first_status, recheck_status, first_activity, recheck_activity):
+        self._status_seq = [first_status, recheck_status]
+        self._activity_seq = [first_activity, recheck_activity]
+        self._status_calls = 0
+        self._activity_calls = 0
+
+    def get_status(self):
+        idx = min(self._status_calls, 1)
+        self._status_calls += 1
+        return self._status_seq[idx]
+
+    def last_activity(self, agent):
+        idx = min(self._activity_calls, 1)
+        self._activity_calls += 1
+        return self._activity_seq[idx]
+
+
 def _sweeper(tmp_path, *, agents_cfg, lane_manager=None, tasks_store=None,
              ask_broker=None, wake_available_fn=None):
     hibernate_calls: list[tuple[str, str]] = []
@@ -858,6 +955,62 @@ class TestHibernationSweeper:
         lm._activity["scout"] = time.time() - 999 * 60
         sweeper, calls = _sweeper(
             tmp_path, agents_cfg={"scout": {"status": "archived"}}, lane_manager=lm,
+        )
+        await sweeper._tick()
+        assert calls == []
+
+    # ── M7: re-check freshly immediately before the stop ─────────────
+
+    async def test_negative_control_stale_idle_agent_is_hibernated(self, tmp_path, monkeypatch):
+        """Negative control for the M7 re-check: an agent that is idle on
+        BOTH the tick snapshot AND the fresh re-check (no turn started
+        mid-tick) IS hibernated — proving the re-check doesn't block a
+        genuinely-idle stop."""
+        monkeypatch.setenv("OPENLEGION_HIBERNATE_IDLE_MINUTES", "10")
+        old = time.time() - 20 * 60
+        lane = _MidTickLane(
+            first_status={"scout": {"busy": False, "queued": 0}},
+            recheck_status={"scout": {"busy": False, "queued": 0}},
+            first_activity=old, recheck_activity=old,
+        )
+        sweeper, calls = _sweeper(
+            tmp_path, agents_cfg={"scout": {"status": "active"}}, lane_manager=lane,
+        )
+        await sweeper._tick()
+        assert calls == [("scout", "sweep")]
+
+    async def test_turn_becoming_busy_mid_tick_aborts_the_stop(self, tmp_path, monkeypatch):
+        """M7: the per-tick snapshot showed the agent idle, but by the time
+        the sweep reaches the stop a lane turn has started — the FRESH
+        re-check catches ``busy`` and aborts (the pre-fix sweep hibernated
+        off the stale snapshot)."""
+        monkeypatch.setenv("OPENLEGION_HIBERNATE_IDLE_MINUTES", "10")
+        old = time.time() - 20 * 60
+        lane = _MidTickLane(
+            first_status={"scout": {"busy": False, "queued": 0}},
+            recheck_status={"scout": {"busy": True, "queued": 0}},   # turn started mid-tick
+            first_activity=old, recheck_activity=old,
+        )
+        sweeper, calls = _sweeper(
+            tmp_path, agents_cfg={"scout": {"status": "active"}}, lane_manager=lane,
+        )
+        await sweeper._tick()
+        assert calls == []
+
+    async def test_direct_turn_activity_stamp_mid_tick_aborts_the_stop(self, tmp_path, monkeypatch):
+        """M7: a direct-bypass turn (dashboard/CLI/channel stream, cron
+        heartbeat) stamps ``last_activity`` at turn START but never sets a
+        lane ``busy`` flag. The fresh re-check on the activity clock catches
+        the mid-tick stamp and aborts the stop."""
+        monkeypatch.setenv("OPENLEGION_HIBERNATE_IDLE_MINUTES", "10")
+        lane = _MidTickLane(
+            first_status={"scout": {"busy": False, "queued": 0}},
+            recheck_status={"scout": {"busy": False, "queued": 0}},  # direct turn = never lane-busy
+            first_activity=time.time() - 20 * 60,                    # idle at snapshot
+            recheck_activity=time.time(),                            # turn stamped activity mid-tick
+        )
+        sweeper, calls = _sweeper(
+            tmp_path, agents_cfg={"scout": {"status": "active"}}, lane_manager=lane,
         )
         await sweeper._tick()
         assert calls == []
