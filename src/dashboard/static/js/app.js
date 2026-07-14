@@ -11923,13 +11923,20 @@ function dashboard() {
       return idx === -1 ? '' : key.substring(0, idx + 1);
     },
 
+    // Blackboard is signals-only (Phase-2 unit 4): output/* and artifacts/*
+    // payload flows moved to the Team Drive, so they no longer appear here.
+    // Recognized coordination namespaces — the canonical set (status/tasks/
+    // context/signals) plus the common template ones (reviews/drafts/leads/
+    // research/alerts). Anything else falls through to the 'default' badge.
     _bbNsMap: {
       'status/': 'status',
       'tasks/': 'tasks',
-      'output/': 'output',
-      'research/': 'research',
+      'context/': 'context',
+      'signals/': 'signals',
+      'reviews/': 'reviews',
       'drafts/': 'drafts',
-      'artifacts/': 'artifacts',
+      'leads/': 'leads',
+      'research/': 'research',
       'alerts/': 'alerts',
     },
 

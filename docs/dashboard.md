@@ -149,7 +149,7 @@ Three sub-views toggled via the `activityView` state var:
 
 **Live Events** — Real-time event feed streamed via WebSocket. Events include LLM calls, tool executions, text streaming deltas, messages sent/received, blackboard writes/deletes, agent state changes, and health changes. Filter by event type using chip toggles. Events are capped at 500 in the browser. Click any row to expand a type-specific detail panel. Note: per-token `text_delta` events are delivered via the direct streaming chat endpoint (not the WebSocket event bus) to avoid flooding the buffer.
 
-**Blackboard** — Browse, search, write, and delete shared state entries. Entries display as expandable card rows with agent avatars, color-coded namespace badges (tasks / context / signals / goals / artifacts / history), value summary, and relative timestamps. Filter by key prefix or by writing agent. New entries are highlighted with a flash animation. History namespace entries (`history/*`) cannot be deleted.
+**Blackboard** — Browse, search, write, and delete shared coordination-signal entries. The blackboard is signals-only (Phase-2 unit 4): deliverable payloads (`output/*`, `artifacts/*`) live in the Team Drive, surfaced under the Team Hub's **Files** tab, not here. Entries display as expandable card rows with agent avatars, color-coded namespace badges (status / tasks / context / signals / reviews / drafts / leads / …), value summary, and relative timestamps. Quick-filter shortcuts cover the canonical coordination namespaces (`status/`, `tasks/`, `context/`, `signals/`, `reviews/`, `drafts/`); filter by any key prefix or by writing agent. New entries are highlighted with a flash animation. History namespace entries (`history/*`) cannot be deleted.
 
 ### Operator Sub-tab
 
