@@ -52,12 +52,17 @@ def _write_yaml(path, text: str) -> None:
 
 
 def _store_with_accepted(agent_id: str, n: int, *, rater_kind: str = "human") -> TrackRecordStore:
-    """A TrackRecordStore (``:memory:``) seeded with N 'accepted'
-    ``task_outcome`` events for ``agent_id`` at the given rater kind."""
+    """A TrackRecordStore (``:memory:``) seeded with N accepted DISTINCT
+    ``task_outcome`` deliverables for ``agent_id`` at the given rater kind.
+
+    Probation counts distinct deliverables (M5), so each event gets its
+    OWN ``ref_id`` — N events == N deliverables. (A single shared ref_id
+    would collapse to one deliverable, which is precisely the re-rate
+    miscount the M5 regression tests exercise separately.)"""
     store = TrackRecordStore(db_path=":memory:")
-    for _ in range(n):
+    for i in range(n):
         store.record(
-            source="task_outcome", ref_id="t", outcome="accepted",
+            source="task_outcome", ref_id=f"t{i}", outcome="accepted",
             rater_kind=rater_kind, agent_id=agent_id,
         )
     return store
@@ -449,19 +454,56 @@ class TestProbationEscalation:
         cfg = tmp_path / "policy.yaml"
         _write_yaml(cfg, "version: 1\nprobation:\n  enabled: true\n  min_accepted: 5\n")
         store = TrackRecordStore(db_path=":memory:")
-        for _ in range(3):
+        for i in range(3):
             store.record(
-                source="task_outcome", ref_id="t", outcome="accepted",
+                source="task_outcome", ref_id=f"t{i}", outcome="accepted",
                 rater_kind="human", agent_id="scout",
             )
-        for _ in range(3):
+        for i in range(3):
             store.record(
-                source="summary_rating", ref_id="s", outcome="accepted",
+                source="summary_rating", ref_id=f"s{i}", outcome="accepted",
                 rater_kind="human", agent_id="scout",
             )
-        # 3 + 3 = 6 >= 5 -- clears probation, default resolves.
+        # 3 + 3 = 6 distinct accepted deliverables >= 5 -- clears probation.
         engine = _engine(tmp_path, config_path=str(cfg), track_record_store=store)
         assert engine.evaluate("scout", "notify_user", summary="x").decision == "allow_audit"
+
+    def test_re_rating_one_task_does_not_release_probation(self, tmp_path):
+        """M5 regression (negative control — releases probation on pre-fix
+        code): re-rating the SAME task ``accepted`` five times is ONE
+        deliverable, so ``min_accepted=5`` must stay held. Pre-fix summed
+        the raw append-only rows (5) and released."""
+        cfg = tmp_path / "policy.yaml"
+        _write_yaml(cfg, "version: 1\nprobation:\n  enabled: true\n  min_accepted: 5\n")
+        store = TrackRecordStore(db_path=":memory:")
+        for _ in range(5):
+            store.record(
+                source="task_outcome", ref_id="the-one-task", outcome="accepted",
+                rater_kind="human", agent_id="scout",
+            )
+        engine = _engine(tmp_path, config_path=str(cfg), track_record_store=store)
+        assert engine.evaluate("scout", "notify_user", summary="x").decision == "hold"
+        assert engine.evaluate("scout", "wallet_transfer", summary="x").decision == "hold"
+
+    def test_retracted_acceptance_stops_counting(self, tmp_path):
+        """M5 regression (negative control): an ``accepted`` then later
+        ``rejected`` correction on the same task must NOT count — the
+        latest event per deliverable wins. Pre-fix left the accepted row
+        counted (append-only) and released a ``min_accepted=1`` gate."""
+        cfg = tmp_path / "policy.yaml"
+        _write_yaml(cfg, "version: 1\nprobation:\n  enabled: true\n  min_accepted: 1\n")
+        store = TrackRecordStore(db_path=":memory:")
+        store.record(
+            source="task_outcome", ref_id="task-x", outcome="accepted",
+            rater_kind="human", agent_id="scout",
+        )
+        store.record(
+            source="task_outcome", ref_id="task-x", outcome="rejected",
+            rater_kind="human", agent_id="scout",
+        )
+        engine = _engine(tmp_path, config_path=str(cfg), track_record_store=store)
+        # 0 net accepted deliverables < 1 -- still on probation.
+        assert engine.evaluate("scout", "notify_user", summary="x").decision == "hold"
 
     def test_operator_agent_rated_outcomes_never_count(self, tmp_path):
         """Rating-trust rule: operator-agent ratings are excluded from
@@ -583,7 +625,7 @@ class TestProbationFailsToSafety:
         cfg = tmp_path / "policy.yaml"
         _write_yaml(cfg, "version: 1\nprobation:\n  enabled: true\n  min_accepted: 1\n")
         broken_store = MagicMock()
-        broken_store.counts_for_agent.side_effect = RuntimeError("db is gone")
+        broken_store.distinct_accepted_count.side_effect = RuntimeError("db is gone")
         engine = _engine(tmp_path, config_path=str(cfg), track_record_store=broken_store)
         d = engine.evaluate("scout", "notify_user", summary="x")
         assert d.decision == "hold"

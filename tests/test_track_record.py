@@ -173,6 +173,49 @@ def test_counts_for_agent_unknown_agent_is_empty(store):
 
 
 # =============================================================================
+# distinct_accepted_count (probation release gate — M5)
+# =============================================================================
+
+
+def test_distinct_accepted_counts_deliverables_not_rows(store):
+    """M5: re-rating ONE task ``accepted`` N times is ONE deliverable —
+    the raw ledger sees N rows, the distinct count sees 1."""
+    for _ in range(5):
+        store.record(source="task_outcome", ref_id="t", outcome="accepted", rater_kind="human", agent_id="a")
+    assert store.counts_for_agent("a")["task_outcome"]["accepted"] == 5
+    assert store.distinct_accepted_count("a") == 1
+
+
+def test_distinct_accepted_latest_event_wins(store):
+    """An ``accepted`` then later ``rejected`` correction on the same ref
+    drops out (latest event per deliverable decides its state)."""
+    store.record(source="task_outcome", ref_id="t", outcome="accepted", rater_kind="human", agent_id="a")
+    store.record(source="task_outcome", ref_id="t", outcome="rejected", rater_kind="human", agent_id="a")
+    assert store.distinct_accepted_count("a") == 0
+
+
+def test_distinct_accepted_counts_across_sources(store):
+    """Distinct deliverables span sources — ``(source, ref_id)`` is the
+    key, so a task and a summary sharing a ref_id are two deliverables."""
+    store.record(source="task_outcome", ref_id="x", outcome="accepted", rater_kind="human", agent_id="a")
+    store.record(source="summary_rating", ref_id="x", outcome="accepted", rater_kind="human", agent_id="a")
+    assert store.distinct_accepted_count("a") == 2
+
+
+def test_distinct_accepted_respects_rater_kind_filter(store):
+    """Only autonomy-safe rater kinds count by default — an operator-agent
+    re-rate neither inflates the count nor retracts a human acceptance."""
+    store.record(source="task_outcome", ref_id="t1", outcome="accepted", rater_kind="human", agent_id="a")
+    store.record(source="task_outcome", ref_id="t2", outcome="accepted", rater_kind="operator_agent", agent_id="a")
+    assert store.distinct_accepted_count("a") == 1  # operator_agent excluded (default AUTONOMY_RATER_KINDS)
+    assert store.distinct_accepted_count("a", rater_kinds=("human", "operator_agent")) == 2
+
+
+def test_distinct_accepted_unknown_agent_is_zero(store):
+    assert store.distinct_accepted_count("nobody") == 0
+
+
+# =============================================================================
 # recent_events
 # =============================================================================
 

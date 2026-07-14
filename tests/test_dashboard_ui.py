@@ -2928,6 +2928,14 @@ class TestLeadRecommendationUI:
         assert 'x-show="msg.lead_recommendation"' in _INDEX_HTML
         assert "'Lead recommends: ' + msg.lead_recommendation" in _INDEX_HTML
 
+    def test_both_pending_card_templates_render_the_recommendation(self):
+        """M18 parity: the recommendation binding must appear on BOTH
+        ``pending_action_card`` render sites — the Chat-tab operator panel
+        AND the messenger view (the messenger card omitted it pre-fix, so a
+        lead's advisory recommendation was invisible there)."""
+        assert _INDEX_HTML.count('x-show="msg.lead_recommendation"') == 2
+        assert _INDEX_HTML.count("'Lead recommends: ' + msg.lead_recommendation") == 2
+
     def test_inject_pending_action_card_carries_recommendation_fields(self):
         m = re.search(
             r"_injectPendingActionCard\(data\)\s*\{(.*?)\n    \},",

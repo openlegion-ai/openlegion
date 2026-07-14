@@ -1073,8 +1073,17 @@ class AgentLoop:
         (exactly-once delivery, answered right after the heartbeat). Plain
         2-tuple entries (wakes/asks — answered via tools, not turn text) keep
         the by-design agenda-prompt injection.
+
+        M17: if the reply future is ALREADY done (the caller's
+        ``asyncio.wait_for`` timed out and cancelled it, so it got
+        ``(True, None)`` and will NOT dispatch a followup), the entry is
+        REQUEUED instead of consumed — otherwise its message text is lost
+        entirely. Its done future is never folded, so the next real turn's
+        catch-all drain delivers the text without any cross-turn answer
+        bleed.
         """
         messages: list[tuple[str, bool]] = []
+        requeue: list[tuple] = []
         while not self._steer_queue.empty():
             try:
                 entry = self._steer_queue.get_nowait()
@@ -1082,16 +1091,23 @@ class AgentLoop:
                 break
             reply_future = entry[2] if len(entry) > 2 else None
             if heartbeat and reply_future is not None:
-                # Wait-reply chat steer drained by an agenda turn: consume it
-                # without injecting its text or folding its future. Resolving
-                # the live future None routes the caller to a dedicated
-                # followup turn instead of the agenda prompt.
-                if not reply_future.done():
+                if reply_future.done():
+                    # Caller already timed out (future cancelled) — requeue so
+                    # the next real turn delivers the text (M17). Collected and
+                    # re-put AFTER the drain loop so we don't spin forever.
+                    requeue.append(entry)
+                else:
+                    # Wait-reply chat steer drained by an agenda turn while the
+                    # caller is still waiting: consume it without injecting its
+                    # text or folding its future. Resolving the live future
+                    # None routes the caller to a dedicated followup turn.
                     reply_future.set_result(None)
                 continue
             messages.append((entry[0], entry[1]))
             if reply_future is not None and not reply_future.done():
                 self._turn_steer_futures.append(reply_future)
+        for entry in requeue:
+            self._steer_queue.put_nowait(entry)
         return messages
 
     def _sweep_heartbeat_steer_futures(self) -> None:
@@ -1108,10 +1124,15 @@ class AgentLoop:
         to ``idle``, so no chat can interleave the queue between here and the
         lock release.
 
-        Live reply futures resolve to ``None`` (caller falls back to a fresh
+        LIVE reply futures resolve to ``None`` (caller falls back to a fresh
         followup turn — ``(False, None)``) and their entries are consumed;
-        plain 2-tuple entries (wakes/asks/REPL) are left on the queue for the
-        normal next-turn catch-all drain — never dropped, never mis-answered.
+        a future that is ALREADY done (the caller's ``asyncio.wait_for``
+        timed out and cancelled it, so it got ``(True, None)`` and will NOT
+        dispatch a followup) has its entry REQUEUED so the next real turn's
+        catch-all drain delivers the text — otherwise the message is lost
+        (M17). Plain 2-tuple entries (wakes/asks/REPL) are left on the queue
+        for the normal next-turn catch-all drain — never dropped, never
+        mis-answered.
         """
         # Defensive: a heartbeat drain never folds, but never let a stray
         # future ride into an unrelated later turn's resolve.
@@ -1132,8 +1153,15 @@ class AgentLoop:
             reply_future = entry[2] if len(entry) > 2 else None
             if reply_future is not None:
                 if not reply_future.done():
+                    # Live caller still waiting — resolve None, consume (it
+                    # falls back to its own followup turn).
                     reply_future.set_result(None)
-                # Consumed — a chat message is never answered by an agenda turn.
+                else:
+                    # Caller already timed out (future cancelled) and won't
+                    # dispatch a followup — requeue so the next real turn's
+                    # catch-all drain delivers the text (M17). The done future
+                    # is never folded, so no cross-turn answer bleed.
+                    self._steer_queue.put_nowait(entry)
             else:
                 self._steer_queue.put_nowait(entry)
 
