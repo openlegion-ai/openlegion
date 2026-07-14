@@ -2087,7 +2087,7 @@
                   </button>
                 </div>
                 <div class="flex gap-1.5 flex-wrap mb-3">
-                  <template x-for="ns in ['status/', 'tasks/', 'research/', 'drafts/', 'artifacts/', 'alerts/']" :key="ns">
+                  <template x-for="ns in ['status/', 'tasks/', 'context/', 'signals/', 'reviews/', 'drafts/']" :key="ns">
                     <button @click="bbPrefix = (bbPrefix === ns ? '' : ns); fetchBlackboard()"
                       class="text-[11px] px-1.5 py-0.5 rounded-md border transition-all"
                       :class="bbPrefix === ns ? 'border-cyan-500/60 bg-cyan-900/20 text-cyan-300' : 'border-gray-800 text-gray-500 hover:text-gray-400'">
@@ -2262,7 +2262,7 @@
               <!-- ── MEMBERS ── -->
               <div x-show="teamHubTab === 'members'" x-cloak class="px-4 py-3">
                 <div class="flex items-start justify-between gap-3 mb-3">
-                  <p class="text-xs text-gray-500">Agents assigned to this team. Members share context and can communicate through the team blackboard.</p>
+                  <p class="text-xs text-gray-500">Agents assigned to this team. Members share the team's Drive, threads, and coordination board.</p>
                   <button @click="hireForTeam(activeTeam)"
                     class="text-xs px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors flex-shrink-0 inline-flex items-center gap-1.5"
                     title="Ask the operator to review this team's goals and members, draft job descriptions, and propose hires">
