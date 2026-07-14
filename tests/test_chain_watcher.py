@@ -882,25 +882,70 @@ async def test_interval_zero_disables_whole_ladder():
 
 
 @pytest.mark.asyncio
-async def test_ladder_send_failure_does_not_stall_the_climb():
-    """A raising delivery seam is logged and isolated — the rung climb
-    (already claimed) stands and later rungs still fire."""
+async def test_ladder_failed_delivery_does_not_advance_rung():
+    """C4: a rung-1 dispatch that FAILS (loop/container down) must NOT
+    advance the rung — the next sweep re-drives the SAME assignee until it
+    lands, honouring §8 #22's indefinite-retry-of-rungs-1-3 requirement. A
+    raising seam is still logged + isolated (the sweep never crashes).
+
+    Negative control is the contrast within the test: a FAILING delivery
+    leaves rung==0 (the pre-fix code CAS-advanced BEFORE the send, so it
+    climbed to 1 regardless — the exact C4 bug); once the SAME seam starts
+    succeeding, the rung finally advances to 1.
+    """
     s = _store()
     task = _blocked_task(s)
     clk = [0.0]
 
-    def _boom(agent, message):
-        raise RuntimeError("transport down")
+    down = {"broken": True}
 
-    creator = _Sender()
-    lad = _ladder(s, clk, deliver_assignee=_boom, deliver_creator=creator)
+    def _flaky_assignee(agent, message):
+        if down["broken"]:
+            raise RuntimeError("transport down")  # loop/container down
+        return None  # delivered
+
+    lad = _ladder(s, clk, deliver_assignee=_flaky_assignee)
+    await lad.sweep_once()                     # observe → rung 0
+    assert s.ladder_state(task["id"])["rung"] == 0
+
+    clk[0] += INTERVAL
+    await lad.sweep_once()                     # rung-1 send RAISES — isolated
+    assert s.ladder_state(task["id"])["rung"] == 0, "a failed delivery must NOT advance the rung (C4)"
+
+    clk[0] += INTERVAL
+    await lad.sweep_once()                     # still down → still re-driving rung 1
+    assert s.ladder_state(task["id"])["rung"] == 0, "a persistently-failing rung must keep retrying, never climb past"
+
+    # The seam recovers — now the SAME rung finally lands and advances.
+    down["broken"] = False
+    clk[0] += INTERVAL
+    await lad.sweep_once()
+    assert s.ladder_state(task["id"])["rung"] == 1
+
+
+@pytest.mark.asyncio
+async def test_ladder_seam_reporting_false_does_not_advance_rung():
+    """C4: a delivery seam that RETURNS ``False`` (couldn't enqueue — the
+    runtime wrapper's no-lane/failed-enqueue signal) is a delivery failure
+    too — the rung stays put; a truthy/None return advances it."""
+    s = _store()
+    task = _blocked_task(s)
+    clk = [0.0]
+    outcome = {"ok": False}
+
+    def _reports(agent, message):
+        return outcome["ok"]  # False = not delivered
+
+    lad = _ladder(s, clk, deliver_assignee=_reports)
     await lad.sweep_once()
     clk[0] += INTERVAL
-    await lad.sweep_once()          # rung 1 send raises — isolated
-    assert s.ladder_state(task["id"])["rung"] == 1
+    await lad.sweep_once()
+    assert s.ladder_state(task["id"])["rung"] == 0  # False return → no advance
+
+    outcome["ok"] = True
     clk[0] += INTERVAL
-    await lad.sweep_once()          # rung 2 proceeds normally
-    assert [a for a, _ in creator.calls] == ["ops"]
+    await lad.sweep_once()
+    assert s.ladder_state(task["id"])["rung"] == 1  # truthy return → advance
 
 
 # ── Ladder: chain-watcher piggyback ──────────────────────────────
