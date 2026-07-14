@@ -1464,6 +1464,7 @@ class REPLSession:
 
     def _cmd_remove(self, arg: str) -> None:
         """Remove an agent from config and stop its container."""
+        from src.cli.config import _OPERATOR_AGENT_ID
         from src.host.transport import HttpTransport
 
         if not self.ctx.agents:
@@ -1472,8 +1473,13 @@ class REPLSession:
 
         name = arg.strip() or None
         if name is None:
-            # Interactive picker
-            names = sorted(self.ctx.agents.keys())
+            # Interactive picker — the operator agent (the human's front
+            # door) is never a removal candidate, matching the mesh (403/
+            # 400) and dashboard ("system agent") delete guards.
+            names = [n for n in sorted(self.ctx.agents.keys()) if n != _OPERATOR_AGENT_ID]
+            if not names:
+                click.echo("No removable agents (the operator agent cannot be removed).")
+                return
             if len(names) == 1:
                 name = names[0]
             else:
@@ -1485,6 +1491,12 @@ class REPLSession:
 
         if name not in self.ctx.agents:
             click.echo(f"Agent '{name}' not found.")
+            return
+
+        # Operator guard (M12) — parity with the mesh + dashboard delete
+        # surfaces, which both refuse to destroy the operator agent.
+        if name == _OPERATOR_AGENT_ID:
+            click.echo("The operator agent cannot be removed.")
             return
 
         if not click.confirm(f"Remove agent '{name}'?"):
@@ -1559,6 +1571,25 @@ class REPLSession:
         from src.cli.config import _remove_agent
 
         _remove_agent(name)
+
+        # Per-agent store teardown (M11) — parity with the mesh + dashboard
+        # delete paths. ``cleanup_agent`` (the mesh app's helper, wired onto
+        # the runtime context in ``_start_mesh_server``) clears the stores
+        # the ad-hoc block above misses — vault, private blackboard
+        # namespace, cost/trace rows, wallet — and runs ``permissions.reload()``
+        # (called AFTER ``_remove_agent`` dropped the id from permissions.json,
+        # so the reload actually takes). Without it a same-name recreated
+        # agent silently inherits the deleted agent's wallet + private
+        # namespace. Overlapping calls (pubsub/cron/lane/connector) are
+        # idempotent. The seam is ``None`` only when the mesh app is not
+        # wired (not a live REPL); the ad-hoc block already ran the partial
+        # cleanup in that degraded case.
+        cleanup_agent = getattr(self.ctx, "cleanup_agent", None)
+        if cleanup_agent is not None:
+            try:
+                cleanup_agent(name)
+            except Exception as e:
+                click.echo(f"  Warning: per-agent cleanup failed: {e}")
 
         click.echo(f"Removed agent '{name}'.")
         if self.ctx.event_bus:

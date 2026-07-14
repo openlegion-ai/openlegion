@@ -6794,6 +6794,36 @@ def create_mesh_app(
 
     app._schedule_onboarding_wake = _schedule_onboarding_wake  # exposed for the dashboard
 
+    def _purge_departed_team_signals(agent_id: str, old_team: str) -> None:
+        """Cross-team event-leak fix (M13, security).
+
+        A member leaving ``old_team`` (remove / move / team delete) has its
+        blackboard ACL rewired, but ``publish`` and the blackboard watcher
+        fan-out both read the STORED subscriber/watcher lists with NO
+        current-ACL recheck — so the departed agent keeps receiving the old
+        team's ``teams/{old_team}/`` published signals and watched-key
+        notifications after it has left, crossing the team wall enforced
+        everywhere else. Purge those subscriptions/watches, scoped by
+        prefix so the agent's own retained self-scope (``teams/{agent_id}/``)
+        is untouched. Best-effort — never raise into the membership endpoint.
+        """
+        prefix = f"teams/{old_team}/"
+        if pubsub is not None:
+            try:
+                pubsub.unsubscribe_agent_prefix(agent_id, prefix)
+            except Exception as e:
+                logger.warning(
+                    "pubsub prefix purge for %s leaving %s failed: %s",
+                    agent_id, old_team, e,
+                )
+        try:
+            blackboard.remove_agent_watches_prefix(agent_id, prefix)
+        except Exception as e:
+            logger.warning(
+                "watch prefix purge for %s leaving %s failed: %s",
+                agent_id, old_team, e,
+            )
+
     @app.post("/mesh/teams/{team_name}/members")
     async def mesh_add_team_member(team_name: str, request: Request) -> dict:
         """Add an agent to a team (mesh-authed proxy)."""
@@ -6809,12 +6839,33 @@ def create_mesh_app(
         agent = body.get("agent", "").strip()
         if not agent:
             raise HTTPException(400, "agent is required")
+        # M10 — an unknown agent id (a typo, a deleted agent) must not
+        # silently create a ghost ``team_members`` row that the Phase-4
+        # lead/standup machinery then treats as real (ghost lead, ghost
+        # standup cron, ghost plate row). ``teams_store.add_member`` has no
+        # FK, so the guard lives here. "Known agent" = any authoritative
+        # record of the id — the config (agents.yaml, the create-path
+        # source of truth), the live router registry, or the ACL matrix;
+        # a ghost id has none of these. The operator is refused outright
+        # (a system agent, never team data — mirrors the create path).
+        from src.cli.config import _load_config
+
+        if agent == "operator":
+            raise HTTPException(
+                400, "Operator is a system agent and cannot be assigned to teams"
+            )
+        known_agents = set(_load_config().get("agents", {}).keys())
+        known_agents |= set(router.agent_registry.keys())
+        known_agents |= {a for a in permissions.permissions if a not in ("default", "mesh")}
+        if agent not in known_agents:
+            raise HTTPException(400, f"Unknown agent: {agent}")
         try:
             old = teams_store.add_member(team_name, agent)
         except (TeamNotFound, ValueError) as e:
             raise HTTPException(400, str(e))
         if old and old != team_name:
             _remove_team_blackboard_permissions(agent, old)
+            _purge_departed_team_signals(agent, old)
         _add_team_blackboard_permissions(agent, team_name)
         permissions.reload()
         _schedule_onboarding_wake(agent, team_name)
@@ -6832,6 +6883,7 @@ def create_mesh_app(
             raise HTTPException(400, f"Team '{team_name}' not found")
         teams_store.remove_member(team_name, agent)
         _remove_team_blackboard_permissions(agent, team_name)
+        _purge_departed_team_signals(agent, team_name)
         permissions.reload()
         return {"removed": True, "team_id": team_name, "team_name": team_name, "agent": agent}
 
@@ -6849,6 +6901,7 @@ def create_mesh_app(
             raise HTTPException(404, str(e))
         for agent in former_members:
             _remove_team_blackboard_permissions(agent, team_name)
+            _purge_departed_team_signals(agent, team_name)
         if former_members:
             permissions.reload()
         # Archive (never delete — audit trail) the team's threads. The
@@ -7613,30 +7666,46 @@ def create_mesh_app(
         except ValueError as e:
             raise HTTPException(400, f"invalid artifact name: {e}")
         repo = await _drive_repo(team_id)
-        # Quota guard — same posture as receive-pack (pre-checked; one
-        # commit may overshoot, then the endpoint blocks).
-        quota = limits_mod.resolve("drive_quota_mb") * _MB
-        size = await _drive_size(repo)
-        if size > quota:
-            raise HTTPException(
-                413,
-                f"Team Drive quota exceeded ({size // _MB} MB used, quota {quota // _MB} MB).",
-            )
         message = f"{kind} artifact {name} by {caller}"
+        # M4: serialize the quota-check → commit_file (a read-tree/update-ref
+        # CAS to main) → cache-invalidate window under the per-repo drive lock
+        # — the SAME lock the review-merge path holds. Without it, two same-team
+        # agents doing a `hand_off` `data` payload concurrently (or a hand-off
+        # landing during an auto-merge / offboard commit) lose the CAS →
+        # `RefMoved` → the `drive_write_failed` envelope, which by Constraint #10
+        # tells the agent NOT to retry — the payload is silently dropped. Holding
+        # the lock also bounds N concurrent commits to a single quota overshoot.
+        # A `RefMoved` from a writer outside the lock is retried ×3 (commit_file
+        # re-reads main's tip each attempt) before surfacing as a 409.
+        quota = limits_mod.resolve("drive_quota_mb") * _MB
+        commit: str | None = None
         try:
-            commit = await team_drive.commit_file(
-                repo,
-                path,
-                content_bytes,
-                message=message,
-                author_name=caller,
-                author_email=f"{caller}@agents.local",
-            )
-        except team_drive.RefMoved as e:
-            raise HTTPException(409, str(e))
+            async with _drive_repo_lock(team_id):
+                size = await _drive_size(repo)
+                if size > quota:
+                    raise HTTPException(
+                        413,
+                        f"Team Drive quota exceeded ({size // _MB} MB used, quota {quota // _MB} MB).",
+                    )
+                last_ref_moved: team_drive.RefMoved | None = None
+                for _ in range(3):
+                    try:
+                        commit = await team_drive.commit_file(
+                            repo,
+                            path,
+                            content_bytes,
+                            message=message,
+                            author_name=caller,
+                            author_email=f"{caller}@agents.local",
+                        )
+                        break
+                    except team_drive.RefMoved as e:
+                        last_ref_moved = e
+                else:
+                    raise HTTPException(409, str(last_ref_moved))
+                _drive_size_cache.pop(str(repo), None)
         except team_drive.DriveError as e:
             raise HTTPException(500, f"artifact commit failed: {e}")
-        _drive_size_cache.pop(str(repo), None)
         short_sha = commit[:10]
         ref = f"drive://{team_id}/{path}@{short_sha}"
         blackboard.log_audit(
@@ -10508,10 +10577,15 @@ def create_mesh_app(
                     # Retry up to 3 attempts before letting the loss surface as
                     # a manifest error, so a racing commit during the offboard
                     # window can't silently drop the departing agent's record.
+                    # M4: each attempt takes the per-repo drive lock so the
+                    # offboard commit serializes against the artifact endpoint
+                    # and the review-merge path; the retry still absorbs a
+                    # RefMoved from any writer outside the lock.
                     last: BaseException | None = None
                     for _ in range(3):
                         try:
-                            return await team_drive.commit_file(*args, **kwargs)
+                            async with _drive_repo_lock(team_id):
+                                return await team_drive.commit_file(*args, **kwargs)
                         except team_drive.RefMoved as e:
                             last = e
                     raise last  # type: ignore[misc]

@@ -513,12 +513,19 @@ class ActionPolicyEngine:
         return PolicyDecision(decision=decision, tier=tier, action_kind=action_kind)
 
     def _accepted_count(self, agent_id: str) -> int:
-        """The probation preset's "after N accepted deliverables" count
-        (plan §6/§8 #19): ``task_outcome`` + ``summary_rating`` events
-        with ``outcome == "accepted"``, restricted to
+        """The probation preset's "after N accepted DELIVERABLES" count
+        (plan §6/§8 #19): the number of DISTINCT ``(source, ref_id)``
+        deliverables whose LATEST outcome is ``accepted``, restricted to
         :data:`AUTONOMY_RATER_KINDS` (the rating-trust rule -- an
         operator-agent's own rating never counts toward probation
         release, same as every other autonomy score).
+
+        Reads :meth:`TrackRecordStore.distinct_accepted_count`, NOT the
+        raw append-only ``counts_for_agent`` ledger: probation must count
+        deliverables, not rating rows, so re-rating one task N times can't
+        release probation (M5) and a retracted acceptance (accept-then-
+        reject on the same ref) stops counting (latest event wins). The
+        raw ledger stays the display/learning surface.
 
         No store wired, or a read failure, is treated as zero accepted
         outcomes -- fail TOWARD safety (keeps the action on hold) rather
@@ -530,7 +537,7 @@ class ActionPolicyEngine:
         if store is None:
             return 0
         try:
-            counts = store.counts_for_agent(agent_id, rater_kinds=AUTONOMY_RATER_KINDS)
+            return store.distinct_accepted_count(agent_id, rater_kinds=AUTONOMY_RATER_KINDS)
         except Exception as e:
             logger.warning(
                 "probation: track record read failed for agent %r; treating "
@@ -538,10 +545,6 @@ class ActionPolicyEngine:
                 agent_id, e,
             )
             return 0
-        return (
-            counts.get("task_outcome", {}).get("accepted", 0)
-            + counts.get("summary_rating", {}).get("accepted", 0)
-        )
 
     def _write_audit(
         self,

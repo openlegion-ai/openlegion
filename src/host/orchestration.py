@@ -716,6 +716,22 @@ class Tasks:
             )
             return cur.rowcount == 1
 
+    def blocked_human_notice_claimed(self, task_id: str) -> bool:
+        """Read-only peek: has the once-ever rung-4 human claim been taken?
+
+        Lets the ladder file the durable Needs-you row BEFORE consuming the
+        claim (C6) while still preserving at-most-once-per-task-ever: a
+        transient ``help_requests.db`` failure must not burn the forever-
+        claim with no row filed (which would permanently deny the task its
+        sole human escalation across every future re-block).
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM blocked_human_notices WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return row is not None
+
     def escalated_blocked_for_team(
         self, team_id: str, *, min_rung: int = 3, sample_limit: int = 3,
     ) -> tuple[int, list[str]]:

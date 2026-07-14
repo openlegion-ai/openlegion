@@ -232,16 +232,22 @@ class TestAskBroker:
         assert broker.get(rec.ask_id) is None
 
     async def test_thread_store_optional_and_posted(self):
+        # ``ensure_dm_thread`` returns the thread ROW (a dict) — the real
+        # ThreadStore contract; the id lives under ``id``. ``post_message``
+        # takes ``body`` keyword-only. (The old mock returned a bare string
+        # and asserted ``body`` positional, which masked the M3 seam bug.)
         store = MagicMock()
-        store.ensure_dm_thread.return_value = "th_1"
+        store.ensure_dm_thread.return_value = {"id": "th_1"}
         broker = AskBroker(thread_store=store)
         rec = broker.create("a", "b", "why?", 30, scope_id="alpha")
         store.ensure_dm_thread.assert_called_once_with("alpha", "a", "b")
         assert broker.resolve(rec.ask_id, "because", by="b")["ok"]
         assert store.post_message.call_count == 2
         q_call, a_call = store.post_message.call_args_list
-        assert q_call.args[:3] == ("th_1", "a", "why?")
-        assert a_call.args[:3] == ("th_1", "b", "because")
+        assert q_call.args[:2] == ("th_1", "a")
+        assert q_call.kwargs["body"] == "why?"
+        assert a_call.args[:2] == ("th_1", "b")
+        assert a_call.kwargs["body"] == "because"
         assert a_call.kwargs["payload"] == {"ask_id": rec.ask_id}
 
     async def test_thread_store_error_is_nonfatal(self):

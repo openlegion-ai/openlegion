@@ -167,6 +167,13 @@ class BlockedTaskLadder:
         except Exception as e:
             logger.warning("ladder: listing blocked tasks failed: %s", e)
             return
+        # C5: clear stale Needs-you rows for tasks that have left `blocked`.
+        # ``ladder_reset_unblocked`` above drops the per-episode ladder
+        # state, but the durable rung-4 ``help_requests`` row (M9-exempt
+        # from age reap) would otherwise keep the authoritative Needs-you
+        # feed asserting "human action required" long after the task
+        # unblocked/completed. The once-ever claim is deliberately kept.
+        self._reconcile_resolved_escalations(blocked)
         for task in blocked:
             task_id = task.get("id")
             if not task_id:
@@ -177,6 +184,27 @@ class BlockedTaskLadder:
                 await self._process_blocked(task, task_id, now, interval_s, fallback_s)
             except Exception as e:
                 logger.warning("ladder: escalating task %s failed: %s", task_id, e)
+
+    def _reconcile_resolved_escalations(self, blocked: list[dict]) -> None:
+        """Resolve open rung-4 Needs-you rows whose task is no longer blocked (C5)."""
+        if self._help_requests is None:
+            return
+        try:
+            open_ids = self._help_requests.open_escalation_task_ids()
+        except Exception as e:
+            logger.debug("ladder: reading open escalations failed: %s", e)
+            return
+        if not open_ids:
+            return
+        blocked_ids = {t.get("id") for t in blocked if t.get("id")}
+        for task_id in open_ids - blocked_ids:
+            try:
+                self._help_requests.resolve_for_task(task_id)
+            except Exception as e:
+                logger.debug(
+                    "ladder: resolving stale escalation for task %s failed: %s",
+                    task_id, e,
+                )
 
     async def _process_blocked(
         self, task: dict, task_id: str, now: float,
@@ -265,15 +293,17 @@ class BlockedTaskLadder:
     def _escalate_human(self, task: dict, task_id: str, note: str, reason: str) -> bool:
         """File the ONE durable Needs-you entry for this task (claim-gated).
 
-        Claim-then-deliver, same at-most-once posture as the stall nudge:
-        the claim is only consumed when a registry is wired, and a record
-        failure after the claim is logged (never retried — the operator's
-        recourse is the audit row + the task list, both durable).
+        RECORD-then-claim (C6): the once-ever ``blocked_human_notices``
+        claim is consumed only AFTER the durable Needs-you row is filed, so
+        a transient ``help_requests.db`` failure leaves the forever-claim
+        intact and a future re-block can still surface the task (instead of
+        the claim being permanently burned with no row). A read-only peek
+        preserves at-most-once-per-task-ever without consuming the claim.
         """
         if self._help_requests is None:
             return False
-        if not self._tasks.claim_blocked_human_notice(task_id):
-            return False  # already surfaced once for this task — never re-file
+        if self._tasks.blocked_human_notice_claimed(task_id):
+            return False  # already surfaced once for this task ever — never re-file
         title = sanitize_for_prompt(task.get("title") or "")[:120]
         description = (
             f"Task '{title}' ({task_id}) is blocked and the escalation "
@@ -292,10 +322,14 @@ class BlockedTaskLadder:
                     "team_id": task.get("team_id"),
                 },
             )
-            return True
         except Exception as e:
+            # Claim NOT consumed — a later re-block re-enters this path and
+            # retries the durable file (the escalation is never lost).
             logger.warning("ladder: human escalation for task %s failed: %s", task_id, e)
             return False
+        # Durable row landed — now consume the forever-claim.
+        self._tasks.claim_blocked_human_notice(task_id)
+        return True
 
     def _audit(self, task_id: str, rung: int, detail: dict) -> None:
         if self._audit_fn is None:

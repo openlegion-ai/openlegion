@@ -320,6 +320,15 @@ _BUSY_CHAT_STATUS_NOTE = (
     # paragraph. This is content, not the SSE frame terminator.
 )
 
+# M15b: the busy /chat/stream path awaits ``deliver_chat`` for the running
+# turn's own final text, which can take up to the steer reply timeout
+# (~150s) — well past the SPA's 120s no-data abort. While that await is
+# pending the generator emits a ``: keepalive`` SSE comment every this-many
+# seconds (mirrors the idle branch's upstream-keepalive forwarding) so the
+# browser's idle-abort timer resets and a delivered reply isn't dropped
+# client-side. Module-level so tests can shrink it.
+_BUSY_KEEPALIVE_INTERVAL_SECONDS = 30
+
 
 def _is_ip_literal_domain(domain: str) -> bool:
     """True when ``domain`` is a literal IPv4 or IPv6 address."""
@@ -3900,12 +3909,36 @@ def create_dashboard_router(
         if _is_busy and lane_manager is not None:
 
             async def busy_event_generator():
+                import asyncio
+
                 final_response = ""
                 try:
                     yield f"data: {dumps_safe({'type': 'text_delta', 'content': _BUSY_CHAT_STATUS_NOTE})}\n\n"
-                    final_response = await lane_manager.deliver_chat(
-                        agent_id, message, trace_id=_trace_id_val, origin=_origin,
+                    # M15b: the steered reply is the running turn's own final
+                    # text and can take up to the steer reply timeout (~150s)
+                    # to resolve — past the SPA's 120s no-data abort. Keepalive
+                    # comments (SSE ``:`` lines, no UI state) reset the browser's
+                    # idle-abort timer while the await is pending, matching the
+                    # idle branch's keepalive contract.
+                    _deliver = asyncio.ensure_future(
+                        lane_manager.deliver_chat(
+                            agent_id, message, trace_id=_trace_id_val, origin=_origin,
+                        )
                     )
+                    while True:
+                        done, _pending = await asyncio.wait(
+                            {_deliver}, timeout=_BUSY_KEEPALIVE_INTERVAL_SECONDS,
+                        )
+                        if done:
+                            break
+                        yield ": keepalive\n\n"
+                    final_response = _deliver.result()
+                    # M15a: gate the lane sentinels (``__SILENT__`` / "(no
+                    # response)" / ``dispatch_error:``) exactly as the sibling
+                    # non-streaming ``/chat`` does, so a stopped/unreachable
+                    # agent's internal token never renders as the agent's reply.
+                    if not usable_agent_reply(final_response):
+                        final_response = "The agent did not produce a reply."
                     # Single chunk — the turn's own final text arrives all at
                     # once (there is no token stream to relay), then `done`.
                     yield f"data: {dumps_safe({'type': 'text_delta', 'content': final_response})}\n\n"
@@ -4020,7 +4053,12 @@ def create_dashboard_router(
                 response = await lane_manager.deliver_chat(
                     aid, message, trace_id=bc_trace_id, origin=bc_origin,
                 )
-                return aid, response or "(no response)"
+                # M15a: gate lane sentinels (``__SILENT__`` / "(no response)" /
+                # ``dispatch_error:``) so a stopped/unreachable recipient's
+                # internal token never renders as its reply (matches /chat).
+                if not usable_agent_reply(response):
+                    response = "The agent did not produce a reply."
+                return aid, response
             except Exception as e:
                 return aid, f"Error: {e}"
 

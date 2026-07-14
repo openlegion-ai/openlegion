@@ -94,8 +94,8 @@ class AskBroker:
         # skips thread posting silently. Wired post-construction via
         # ``set_thread_store`` — never imported statically so this module
         # stays green without threads.py in the tree. Agreed unit-2 API:
-        #   ensure_dm_thread(scope_id, agent_a, agent_b) -> thread_id
-        #   post_message(thread_id, sender, body, kind="message",
+        #   ensure_dm_thread(scope_id, agent_a, agent_b) -> {"id": ...}
+        #   post_message(thread_id, sender, *, body=None, kind="message",
         #                recipient=None, payload=None)
         self._thread_store = thread_store
         # ``None`` → resolve ``limits.ask_bill_cap_usd()`` per accrual so
@@ -370,9 +370,9 @@ class AskBroker:
             if record.thread_id is None:
                 record.thread_id = store.ensure_dm_thread(
                     record.scope_id, record.asker, record.recipient,
-                )
+                )["id"]
             store.post_message(
-                record.thread_id, sender, body,
+                record.thread_id, sender, body=body,
                 kind="message", recipient=recipient,
                 payload={"ask_id": record.ask_id},
             )

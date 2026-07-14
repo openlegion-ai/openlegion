@@ -859,28 +859,79 @@ class TeamStore:
         """Transition a ``merging`` review to ``merged`` once main is
         integrated. Raises ValueError if the row is no longer ``merging``
         — but the merge commit is already on main, so the caller must
-        surface the divergence rather than silently swallow it."""
+        surface the divergence rather than silently swallow it.
+
+        M14: also supersedes any OPEN same-branch review pinned to the SAME
+        ``head_sha`` just merged. A same-sha resubmit that raced the claim
+        window (``create_review`` only supersedes ``open`` rows, so it
+        missed the ``merging`` one and inserted its own open row) would
+        otherwise later re-merge already-integrated content — a redundant
+        merge commit that also burns an auto-merge daily-cap slot and mints
+        a duplicate track-record event. Dropping it here closes that race."""
+        now = _now()
         with self._txn() as conn:
-            row = conn.execute("SELECT status FROM drive_reviews WHERE id = ?", (review_id,)).fetchone()
+            row = conn.execute(
+                "SELECT status, team_id, branch, head_sha FROM drive_reviews WHERE id = ?",
+                (review_id,),
+            ).fetchone()
             if row is None:
                 raise ValueError(f"Review '{review_id}' not found")
             if row[0] != "merging":
                 raise ValueError(f"Review '{review_id}' is {row[0]}, expected merging")
+            team_id, branch, head_sha = row[1], row[2], row[3]
             conn.execute(
                 "UPDATE drive_reviews SET status = 'merged', reviewer = ?, merge_commit = ?, resolved_at = ? "
                 "WHERE id = ?",
-                (reviewer, merge_commit, _now(), review_id),
+                (reviewer, merge_commit, now, review_id),
             )
+            if head_sha is not None:
+                # NULL head_sha never matches (SQL NULL comparison), and
+                # superseding all NULL-sha opens would be wrong — so guard.
+                conn.execute(
+                    "UPDATE drive_reviews SET status = 'superseded', resolved_at = ? "
+                    "WHERE team_id = ? AND branch = ? AND status = 'open' "
+                    "AND head_sha = ? AND id != ?",
+                    (now, team_id, branch, head_sha, review_id),
+                )
         return self.get_review(review_id)  # type: ignore[return-value]
 
     def revert_merge_claim(self, review_id: str) -> None:
-        """Roll a ``merging`` review back to ``open`` after a failed git
-        merge (nothing reached main). No-op if the row already moved."""
+        """Roll a ``merging`` review back after a failed git merge (nothing
+        reached main). Normally returns it to ``open`` so it can be
+        re-merged.
+
+        M14: but ``create_review`` only supersedes ``open`` rows, so a
+        same-branch resubmit that raced this merge-claim window inserted a
+        NEW ``open`` review and left this ``merging`` one alone. Blindly
+        flipping back to ``open`` would then leave TWO live open reviews for
+        one branch (breaking the one-live-review-per-branch invariant). So
+        when a newer open row already owns ``(team, branch)``, this reverted
+        row is marked ``superseded`` instead — the resubmit is the live
+        review now. No-op if the row already moved off ``merging``."""
+        now = _now()
         with self._txn() as conn:
-            conn.execute(
-                "UPDATE drive_reviews SET status = 'open' WHERE id = ? AND status = 'merging'",
+            row = conn.execute(
+                "SELECT team_id, branch FROM drive_reviews WHERE id = ? AND status = 'merging'",
                 (review_id,),
-            )
+            ).fetchone()
+            if row is None:
+                return
+            team_id, branch = row[0], row[1]
+            newer_open = conn.execute(
+                "SELECT 1 FROM drive_reviews "
+                "WHERE team_id = ? AND branch = ? AND status = 'open' AND id != ? LIMIT 1",
+                (team_id, branch, review_id),
+            ).fetchone()
+            if newer_open is not None:
+                conn.execute(
+                    "UPDATE drive_reviews SET status = 'superseded', resolved_at = ? WHERE id = ?",
+                    (now, review_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE drive_reviews SET status = 'open' WHERE id = ?",
+                    (review_id,),
+                )
 
     # ── files ────────────────────────────────────────────────────
 

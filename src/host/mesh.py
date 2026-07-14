@@ -552,6 +552,34 @@ class Blackboard:
         """Remove all watches for an agent (cleanup on deregister)."""
         self.remove_watch(agent_id)
 
+    def remove_agent_watches_prefix(self, agent_id: str, key_prefix: str) -> int:
+        """Drop an agent's watch patterns that target ``key_prefix``.
+
+        Companion to ``PubSub.unsubscribe_agent_prefix`` for the M13
+        cross-team leak: ``get_watchers_for_key`` matches the stored
+        pattern list with no current-ACL recheck, so a watch on the OLD
+        team's ``teams/{old}/`` keys keeps notifying a departed agent.
+        Scoped by prefix so the agent's retained self-scope watches survive.
+        Returns the number of patterns removed.
+        """
+        with self._write_lock:
+            patterns = list(self._watchers.get(agent_id, []))
+            stale = [p for p in patterns if p.startswith(key_prefix)]
+            if not stale:
+                return 0
+            kept = [p for p in patterns if not p.startswith(key_prefix)]
+            if kept:
+                self._watchers[agent_id] = kept
+            else:
+                self._watchers.pop(agent_id, None)
+            for pattern in stale:
+                self.db.execute(
+                    "DELETE FROM watchers WHERE agent_id = ? AND pattern = ?",
+                    (agent_id, pattern),
+                )
+            self.db.commit()
+            return len(stale)
+
     def cleanup_agent_data(self, agent_id: str) -> int:
         """Remove all data written by an agent: entries, event log, and watches."""
         self.remove_agent_watches(agent_id)
@@ -693,6 +721,38 @@ class PubSub:
             if self._db is not None:
                 self._db.execute("DELETE FROM subscriptions WHERE agent_id = ?", (agent_id,))
                 self._db.commit()
+
+    def unsubscribe_agent_prefix(self, agent_id: str, topic_prefix: str) -> int:
+        """Drop an agent's subscriptions whose topic starts with ``topic_prefix``.
+
+        Membership rewiring (leave/move/team-delete) must purge the
+        departing agent's subscriptions to its OLD team's ``teams/{old}/``
+        topics — ``publish`` delivers to the stored subscriber list with no
+        current-ACL recheck, so a stale subscription is a live cross-team
+        event leak, not inert state (M13). Scoped by prefix so the agent's
+        own retained subscriptions (its solo ``teams/{agent_id}/`` scope)
+        are untouched. Returns the number of subscriptions removed.
+        """
+        removed = 0
+        with self._lock:
+            for topic in list(self.subscriptions):
+                if not topic.startswith(topic_prefix):
+                    continue
+                if agent_id in self.subscriptions[topic]:
+                    self.subscriptions[topic] = [
+                        a for a in self.subscriptions[topic] if a != agent_id
+                    ]
+                    removed += 1
+                    if not self.subscriptions[topic]:
+                        del self.subscriptions[topic]
+                    if self._db is not None:
+                        self._db.execute(
+                            "DELETE FROM subscriptions WHERE topic = ? AND agent_id = ?",
+                            (topic, agent_id),
+                        )
+            if removed and self._db is not None:
+                self._db.commit()
+        return removed
 
     def get_subscribers(self, topic: str) -> list[str]:
         with self._lock:
