@@ -297,6 +297,122 @@ class TestDailyCap:
         assert statuses == {"merged", "open"}, statuses
 
 
+class TestCancellationSafety:
+    """C1: a cancelled auto-merge consumer must never strand a `merging`
+    row or land an unrecorded commit."""
+
+    @_requires_merge_tree
+    async def test_cancel_mid_merge_still_finalizes_and_records(self, repo_env):
+        """Cancel the consumer while the git merge is in flight — the
+        shielded merge/finalize unit still runs to completion, so the review
+        finalizes and the auto_merge is recorded (never a stranded `merging`
+        row, never an unrecorded landed commit)."""
+        store, track = repo_env["store"], repo_env["track"]
+        _seed_events(track, submitter="member1", lead="member2", outcome="merged", count=5)
+        review = _make_review(repo_env, "feat-cancel", "c.md", "hi\n")
+
+        gate = asyncio.Event()
+
+        async def _slow_merge(repo, sha, *, message):
+            await gate.wait()  # block mid `update-ref` so we can cancel
+            return await drive_mod.merge_branch(repo, sha, message=message)
+
+        def _stub_head(repo, branch):
+            return review["head_sha"]
+
+        consumer = asyncio.ensure_future(
+            _run(repo_env, review, merge_branch_fn=_slow_merge, branch_head_sha_fn=_stub_head),
+        )
+        await asyncio.sleep(0.05)  # claim + cap-reserve done; blocked in the merge
+        assert store.get_review(review["id"])["status"] == "merging"
+
+        consumer.cancel()
+        gate.set()  # release the merge so the shielded unit can finish
+        with pytest.raises(asyncio.CancelledError):
+            await consumer
+
+        resolved = store.get_review(review["id"])
+        assert resolved["status"] == "merged", "no stranded `merging` row after cancellation"
+        assert resolved["merge_commit"]
+        events = [e for e in track.recent_events("member1") if e["outcome"] == "auto_merged"]
+        assert len(events) == 1, "the auto_merge was recorded despite the cancellation"
+
+    async def test_negative_control_bare_await_cancel_strands_merging_row(self, repo_env):
+        """Documents the C1 bug the shielded unit prevents: awaiting the
+        merge DIRECTLY (no cancellation-atomic section) and cancelling
+        mid-merge leaves the review stranded `merging` with the commit
+        never finalized — the exact pre-fix failure."""
+        store = repo_env["store"]
+        review = _make_review(repo_env, "feat-strand")
+        store.claim_review_for_merge(review["id"])  # row -> merging
+        assert store.get_review(review["id"])["status"] == "merging"
+
+        gate = asyncio.Event()
+
+        async def _bare_consumer():
+            await gate.wait()  # "mid update-ref"
+            store.finalize_merge(review["id"], "deadbeef" * 5, reviewer="x")
+
+        t = asyncio.ensure_future(_bare_consumer())
+        await asyncio.sleep(0.02)
+        t.cancel()  # cancelled mid-merge, NO shielded section
+        with pytest.raises(asyncio.CancelledError):
+            await t
+        # finalize never ran → the row is STRANDED `merging` (the bug).
+        assert store.get_review(review["id"])["status"] == "merging"
+
+
+class TestCapRecordDurability:
+    """C2: the daily cap must never be silently bypassed by a track-record
+    append failure — recording the cap slot is a REQUIRED, fail-closed step
+    BEFORE the irreversible merge."""
+
+    async def test_cap_record_failure_fails_closed_no_merge(self, repo_env, monkeypatch):
+        store, track = repo_env["store"], repo_env["track"]
+        _seed_events(track, submitter="member1", lead="member2", outcome="merged", count=5)
+        review = _make_review(repo_env, "feat-capfail")
+
+        merged = {"called": False}
+
+        async def _should_not_merge(repo, sha, *, message):
+            merged["called"] = True
+            return "nope" * 10
+
+        def _stub_head(repo, branch):
+            return review["head_sha"]
+
+        def _boom_record(**kw):
+            raise RuntimeError("track_record.db read-only")
+
+        monkeypatch.setattr(track, "record", _boom_record)
+
+        await _run(repo_env, review, merge_branch_fn=_should_not_merge, branch_head_sha_fn=_stub_head)
+
+        assert merged["called"] is False, "the merge must NOT run when the cap slot can't be recorded"
+        assert store.get_review(review["id"])["status"] == "open", "claim reverted, not merged"
+
+    async def test_negative_control_cap_record_success_allows_merge(self, repo_env):
+        """Negative control: with the cap record succeeding, the SAME setup
+        DOES auto-merge — proving the fail-closed only triggers on a record
+        failure, and that the cap slot is recorded before the merge."""
+        store, track = repo_env["store"], repo_env["track"]
+        _seed_events(track, submitter="member1", lead="member2", outcome="merged", count=5)
+        review = _make_review(repo_env, "feat-capok")
+
+        async def _ok_merge(repo, sha, *, message):
+            return "abc123" * 6  # fake landed commit (no real git needed)
+
+        def _stub_head(repo, branch):
+            return review["head_sha"]
+
+        await _run(repo_env, review, merge_branch_fn=_ok_merge, branch_head_sha_fn=_stub_head)
+
+        assert store.get_review(review["id"])["status"] == "merged"
+        assert track.count_events(
+            source="drive_review", outcome="auto_merged", rater_kind="system",
+        ) == 1
+
+
 class TestConcurrencyAndSampling:
     @_requires_merge_tree
     async def test_concurrent_human_merge_loses_claim_harmlessly(self, repo_env):
@@ -754,3 +870,57 @@ class TestFlagAndRevertEndpoints:
                 headers=_headers("operator"),
             )
         assert resp.status_code == 409
+
+    # ── C3: the trust-decay write is ENFORCED (no false success) ─────
+
+    @_requires_merge_tree
+    @pytest.mark.asyncio
+    async def test_flag_500_when_decay_write_fails(self, app_env, monkeypatch):
+        """C3: if the decay track-record write fails, flag-auto-merge returns
+        an ERROR (not a false ``flagged: true``) so the operator knows the
+        pair's auto-merge eligibility was NOT changed. Negative control: the
+        sibling ``test_flag_auto_merge_operator_only`` returns 200 +
+        ``flagged == 1`` when the SAME write succeeds."""
+        review = await self._auto_merged_review(app_env)
+        app = app_env["app"]
+
+        def _boom(**kw):
+            raise RuntimeError("track_record.db read-only")
+
+        monkeypatch.setattr(app.track_record_store, "record", _boom)
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            resp = await c.post(
+                f"/mesh/teams/team-x/drive/reviews/{review['id']}/flag-auto-merge",
+                headers=_headers("operator"),
+            )
+        assert resp.status_code == 500, resp.text
+        assert resp.json()["detail"]["error"] == "trust_decay_not_recorded"
+        # The decay did NOT take effect — the pair is still un-flagged.
+        assert app.track_record_store.pair_trust("member2", "member1")["flagged"] == 0
+
+    @_requires_merge_tree
+    @pytest.mark.asyncio
+    async def test_revert_500_when_decay_write_fails_surfaces_revert_commit(self, app_env, monkeypatch):
+        """C3: revert-merge's git revert lands, but if the decay write fails
+        the endpoint 500s (not a silent success) and surfaces the landed
+        ``revert_commit`` so the operator doesn't blindly re-run the revert."""
+        review = await self._auto_merged_review(app_env)
+        app = app_env["app"]
+
+        def _boom(**kw):
+            raise RuntimeError("track_record.db read-only")
+
+        monkeypatch.setattr(app.track_record_store, "record", _boom)
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            resp = await c.post(
+                f"/mesh/teams/team-x/drive/reviews/{review['id']}/revert-merge",
+                headers=_headers("operator"),
+            )
+        assert resp.status_code == 500, resp.text
+        detail = resp.json()["detail"]
+        assert detail["error"] == "trust_decay_not_recorded"
+        assert detail["revert_commit"], "the git revert landed — surface it so the operator doesn't re-run"
+        assert detail["side_effect"] == "revert_landed"
+        assert app.track_record_store.pair_trust("member2", "member1")["flagged"] == 0
