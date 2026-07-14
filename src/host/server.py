@@ -7666,30 +7666,46 @@ def create_mesh_app(
         except ValueError as e:
             raise HTTPException(400, f"invalid artifact name: {e}")
         repo = await _drive_repo(team_id)
-        # Quota guard — same posture as receive-pack (pre-checked; one
-        # commit may overshoot, then the endpoint blocks).
-        quota = limits_mod.resolve("drive_quota_mb") * _MB
-        size = await _drive_size(repo)
-        if size > quota:
-            raise HTTPException(
-                413,
-                f"Team Drive quota exceeded ({size // _MB} MB used, quota {quota // _MB} MB).",
-            )
         message = f"{kind} artifact {name} by {caller}"
+        # M4: serialize the quota-check → commit_file (a read-tree/update-ref
+        # CAS to main) → cache-invalidate window under the per-repo drive lock
+        # — the SAME lock the review-merge path holds. Without it, two same-team
+        # agents doing a `hand_off` `data` payload concurrently (or a hand-off
+        # landing during an auto-merge / offboard commit) lose the CAS →
+        # `RefMoved` → the `drive_write_failed` envelope, which by Constraint #10
+        # tells the agent NOT to retry — the payload is silently dropped. Holding
+        # the lock also bounds N concurrent commits to a single quota overshoot.
+        # A `RefMoved` from a writer outside the lock is retried ×3 (commit_file
+        # re-reads main's tip each attempt) before surfacing as a 409.
+        quota = limits_mod.resolve("drive_quota_mb") * _MB
+        commit: str | None = None
         try:
-            commit = await team_drive.commit_file(
-                repo,
-                path,
-                content_bytes,
-                message=message,
-                author_name=caller,
-                author_email=f"{caller}@agents.local",
-            )
-        except team_drive.RefMoved as e:
-            raise HTTPException(409, str(e))
+            async with _drive_repo_lock(team_id):
+                size = await _drive_size(repo)
+                if size > quota:
+                    raise HTTPException(
+                        413,
+                        f"Team Drive quota exceeded ({size // _MB} MB used, quota {quota // _MB} MB).",
+                    )
+                last_ref_moved: team_drive.RefMoved | None = None
+                for _ in range(3):
+                    try:
+                        commit = await team_drive.commit_file(
+                            repo,
+                            path,
+                            content_bytes,
+                            message=message,
+                            author_name=caller,
+                            author_email=f"{caller}@agents.local",
+                        )
+                        break
+                    except team_drive.RefMoved as e:
+                        last_ref_moved = e
+                else:
+                    raise HTTPException(409, str(last_ref_moved))
+                _drive_size_cache.pop(str(repo), None)
         except team_drive.DriveError as e:
             raise HTTPException(500, f"artifact commit failed: {e}")
-        _drive_size_cache.pop(str(repo), None)
         short_sha = commit[:10]
         ref = f"drive://{team_id}/{path}@{short_sha}"
         blackboard.log_audit(
@@ -10561,10 +10577,15 @@ def create_mesh_app(
                     # Retry up to 3 attempts before letting the loss surface as
                     # a manifest error, so a racing commit during the offboard
                     # window can't silently drop the departing agent's record.
+                    # M4: each attempt takes the per-repo drive lock so the
+                    # offboard commit serializes against the artifact endpoint
+                    # and the review-merge path; the retry still absorbs a
+                    # RefMoved from any writer outside the lock.
                     last: BaseException | None = None
                     for _ in range(3):
                         try:
-                            return await team_drive.commit_file(*args, **kwargs)
+                            async with _drive_repo_lock(team_id):
+                                return await team_drive.commit_file(*args, **kwargs)
                         except team_drive.RefMoved as e:
                             last = e
                     raise last  # type: ignore[misc]

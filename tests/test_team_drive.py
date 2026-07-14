@@ -822,6 +822,70 @@ class TestDriveArtifactEndpoints:
         assert _b64.b64decode(read.json()["content"]) == raw
 
     @pytest.mark.asyncio
+    async def test_commit_retries_transient_ref_moved(self, drive_env, monkeypatch):
+        """M4: a lost CAS (RefMoved) from a racing main-ref writer is retried
+        — commit_file re-reads main's tip each attempt — instead of hard-failing
+        the hand_off with the no-retry ``drive_write_failed`` envelope
+        (Constraint #10), which silently drops the payload."""
+        app = drive_env["app"]
+        real_commit = drive_mod.commit_file
+        calls = {"n": 0}
+
+        async def flaky_commit(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise drive_mod.RefMoved("main moved (test)")
+            return await real_commit(*args, **kwargs)
+
+        monkeypatch.setattr(drive_mod, "commit_file", flaky_commit)
+        resp = await self._commit(
+            app, "team-x", "member1",
+            {"kind": "artifact", "name": "retry.md", "content": "# ok"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["committed"] is True
+        assert calls["n"] == 2  # first attempt lost the CAS, second won
+
+    @pytest.mark.asyncio
+    async def test_commit_holds_repo_lock_during_write(self, drive_env, monkeypatch):
+        """M4: the quota→commit→invalidate window runs under the per-repo
+        drive lock — the SAME lock the review-merge path holds — so a
+        concurrent artifact commit / auto-merge / offboard can't interleave
+        and lose the CAS."""
+        app = drive_env["app"]
+        real_commit = drive_mod.commit_file
+        observed = {"locked": None}
+
+        async def observing_commit(*args, **kwargs):
+            lock = app.state.drive_repo_locks.get("team-x")
+            observed["locked"] = bool(lock and lock.locked())
+            return await real_commit(*args, **kwargs)
+
+        monkeypatch.setattr(drive_mod, "commit_file", observing_commit)
+        resp = await self._commit(
+            app, "team-x", "member1",
+            {"kind": "artifact", "name": "locked.md", "content": "# ok"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert observed["locked"] is True
+
+    @pytest.mark.asyncio
+    async def test_commit_ref_moved_exhausted_returns_409(self, drive_env, monkeypatch):
+        """M4: a RefMoved that persists past the retry budget surfaces as a
+        409 (resubmit) — never a silent success."""
+        app = drive_env["app"]
+
+        async def always_ref_moved(*args, **kwargs):
+            raise drive_mod.RefMoved("main keeps moving (test)")
+
+        monkeypatch.setattr(drive_mod, "commit_file", always_ref_moved)
+        resp = await self._commit(
+            app, "team-x", "member1",
+            {"kind": "artifact", "name": "nope.md", "content": "x"},
+        )
+        assert resp.status_code == 409, resp.text
+
+    @pytest.mark.asyncio
     async def test_commit_cross_team_403(self, drive_env):
         resp = await self._commit(
             drive_env["app"], "team-x", "outsider",
