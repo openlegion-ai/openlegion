@@ -4083,18 +4083,60 @@ class CredentialVault:
             _bare_model(requested_model) == _bare_model(_utility_model)
         )
 
+        # Phase 2 unit 3 (ask_teammate) asker-billing on the STREAMING path
+        # (M2). Resolve the bill-to identity ONCE per call, keyed on the
+        # VERIFIED caller, exactly like ``execute_api_call`` (1453-1461):
+        # while an ask window is open, preflight, the team envelope, usage
+        # rows and the per-ask cap accrual all target the ASKER. Skipped
+        # for coordination (B2 precedence: the recipient's own coordination
+        # ledger absorbs utility-model churn, preserving the asker's cap).
+        # Without this, an ask delivered to an IDLE recipient runs as a
+        # streaming followup-lane work turn and the RECIPIENT silently pays.
+        bill_agent = agent_id
+        if (
+            agent_id
+            and request.service == "llm"
+            and not _is_coordination
+            and self._bill_resolver is not None
+        ):
+            try:
+                _asker = self._bill_resolver.active_billing_for(agent_id)
+            except Exception as _bill_err:  # pragma: no cover - defensive
+                logger.warning("ask bill resolver failed: %s", _bill_err)
+                _asker = None
+            if _asker:
+                bill_agent = _asker
+
         if self.cost_tracker and agent_id and request.service == "llm":
             if _is_coordination:
                 c_pre = self.cost_tracker.coordination_preflight_check(
-                    agent_id, requested_model,
+                    bill_agent, requested_model,
                 )
                 if not c_pre["allowed"]:
                     yield f"data: {json.dumps({'error': 'Coordination budget exceeded'})}\n\n"
                     return
             else:
-                preflight = self.cost_tracker.preflight_check(agent_id, requested_model)
+                preflight = self.cost_tracker.preflight_check(bill_agent, requested_model)
                 if not preflight["allowed"]:
                     yield f"data: {json.dumps({'error': 'Budget exceeded'})}\n\n"
+                    return
+                # Team envelope (plan B4 / §8 #11) — the DEFAULT production
+                # work transport STREAMS, so the envelope must be enforced
+                # here too (M1), not only on the sync ``execute_api_call``
+                # fork. Unset/0 envelope = unlimited (B4). Same message
+                # shape the sync fork yields at 1546-1562.
+                envelope = self.cost_tracker.team_envelope_check(bill_agent, requested_model)
+                if not envelope["allowed"]:
+                    _d = envelope.get("daily_limit")
+                    _m = envelope.get("monthly_limit")
+                    _msg = (
+                        f"Team budget exceeded for team '{envelope['team']}': "
+                        f"${envelope['daily_used']:.2f}"
+                        f"/{f'${_d:.2f}' if _d else 'unlimited'} daily, "
+                        f"${envelope['monthly_used']:.2f}"
+                        f"/{f'${_m:.2f}' if _m else 'unlimited'} monthly"
+                    )
+                    yield f"data: {json.dumps({'error': _msg})}\n\n"
                     return
 
         models_to_try = self._failover_chain.get_models_to_try(requested_model)
@@ -4412,10 +4454,27 @@ class CredentialVault:
             if self.cost_tracker and agent_id and tokens_used:
                 pt = prompt_tokens or int(tokens_used * 0.7)
                 ct = completion_tokens or (tokens_used - pt)
-                self.cost_tracker.track(
-                    agent_id, used_model, pt, ct,
+                tracked = self.cost_tracker.track(
+                    bill_agent, used_model, pt, ct,
                     kind="coordination" if _is_coordination else "work",
                 )
+                # Ask-window accrual (M2): key by the RECIPIENT (the
+                # verified caller) so the broker can close the window at
+                # the per-ask cap — only when the bill was actually
+                # redirected to an asker. Mirrors execute_api_call:1599.
+                if (
+                    bill_agent != agent_id
+                    and self._bill_resolver is not None
+                    and isinstance(tracked, dict)
+                ):
+                    try:
+                        self._bill_resolver.note_billed_cost(
+                            agent_id, tracked.get("cost", 0.0),
+                        )
+                    except Exception as _acc_err:  # pragma: no cover
+                        logger.warning(
+                            "ask billed-cost accrual failed: %s", _acc_err,
+                        )
 
         except Exception as e:
             logger.error(f"Streaming LLM call failed: {e}")

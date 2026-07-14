@@ -377,6 +377,111 @@ class TestStreamingPath:
         assert [r[1] for r in _usage_rows(tracker, "worker")] == ["work"]
         tracker.close()
 
+    @pytest.mark.asyncio
+    async def test_stream_work_blocked_by_exhausted_team_envelope(self, tmp_path, monkeypatch):
+        """M1: the team envelope is enforced on the STREAMING work fork —
+        the default production transport (``llm.chat_collect`` streams).
+        Regression: the envelope lived only on ``execute_api_call`` so real
+        (streaming) traffic silently ignored it."""
+        store = TeamStore(db_path=":memory:")
+        store.create_team("alpha")
+        store.add_member("alpha", "worker")
+        store.add_member("alpha", "burner")
+        store.set_budget("alpha", 0.001, None)
+        vault, tracker = _vault_and_tracker(tmp_path, monkeypatch, team_store=store)
+        tracker.track("burner", WORK_MODEL, 100_000, 50_000)
+
+        # Streaming WORK call is blocked by the exhausted envelope, and never
+        # opens a stream (no usage row lands).
+        events = []
+        async for event in vault.stream_llm(_chat_request(WORK_MODEL), agent_id="worker"):
+            events.append(event)
+        assert any("Team budget exceeded" in e for e in events)
+        assert _usage_rows(tracker, "worker") == []
+
+        # Negative control: coordination is exempt from the envelope even on
+        # the streaming fork (B2 precedence preserved).
+        async def mock_stream_acompletion(model, messages, api_key, stream=False, **kwargs):
+            return _MockStream()
+
+        with patch("litellm.acompletion", side_effect=mock_stream_acompletion):
+            events = []
+            async for event in vault.stream_llm(_chat_request(UTILITY_MODEL), agent_id="worker"):
+                events.append(event)
+        assert any("done" in e for e in events)
+        tracker.close()
+
+    @pytest.mark.asyncio
+    async def test_stream_unset_team_envelope_does_not_block(self, tmp_path, monkeypatch):
+        """M1 pin: an UNSET team envelope is UNLIMITED (B4) — the streaming
+        envelope check must not over-block a team that hasn't been given a
+        budget. Mirrors the sync ``test_zero_envelope_does_not_block``."""
+        store = TeamStore(db_path=":memory:")
+        store.create_team("alpha")
+        store.add_member("alpha", "worker")
+        # Deliberately NO set_budget — unset envelope == unlimited.
+        vault, tracker = _vault_and_tracker(tmp_path, monkeypatch, team_store=store)
+
+        async def mock_stream_acompletion(model, messages, api_key, stream=False, **kwargs):
+            return _MockStream()
+
+        with patch("litellm.acompletion", side_effect=mock_stream_acompletion):
+            events = []
+            async for event in vault.stream_llm(_chat_request(WORK_MODEL), agent_id="worker"):
+                events.append(event)
+        assert any("done" in e for e in events)
+        assert [r[1] for r in _usage_rows(tracker, "worker")] == ["work"]
+        tracker.close()
+
+
+class TestStreamingAskBilling:
+    """M2: the ask_teammate asker-billing window applies on the STREAMING
+    path too — an ask delivered to an IDLE recipient runs as a streaming
+    followup-lane work turn. Mirrors ``TestAskWindowPrecedence`` (sync)."""
+
+    @pytest.mark.asyncio
+    async def test_stream_work_redirects_billing_to_asker(self, tmp_path, monkeypatch):
+        vault, tracker = _vault_and_tracker(tmp_path, monkeypatch)
+        broker = _FakeBroker()
+        vault.set_bill_resolver(broker)
+
+        async def mock_stream_acompletion(model, messages, api_key, stream=False, **kwargs):
+            return _MockStream()
+
+        with patch("litellm.acompletion", side_effect=mock_stream_acompletion):
+            events = []
+            async for event in vault.stream_llm(_chat_request(WORK_MODEL), agent_id="worker"):
+                events.append(event)
+        assert any("done" in e for e in events)
+        # The ASKER pays for the ask turn; the recipient's ledger is untouched.
+        assert [r[1] for r in _usage_rows(tracker, "asker")] == ["work"]
+        assert _usage_rows(tracker, "worker") == []
+        # Ask-cap accrual is noted, keyed by the RECIPIENT (verified caller).
+        assert len(broker.noted) == 1
+        assert broker.noted[0][0] == "worker"
+        tracker.close()
+
+    @pytest.mark.asyncio
+    async def test_stream_coordination_bills_caller_not_asker(self, tmp_path, monkeypatch):
+        """Coordination classification WINS over an open ask window on the
+        streaming fork too — the redirect is skipped, the caller pays."""
+        vault, tracker = _vault_and_tracker(tmp_path, monkeypatch)
+        broker = _FakeBroker()
+        vault.set_bill_resolver(broker)
+
+        async def mock_stream_acompletion(model, messages, api_key, stream=False, **kwargs):
+            return _MockStream()
+
+        with patch("litellm.acompletion", side_effect=mock_stream_acompletion):
+            events = []
+            async for event in vault.stream_llm(_chat_request(UTILITY_MODEL), agent_id="worker"):
+                events.append(event)
+        assert any("done" in e for e in events)
+        assert [r[1] for r in _usage_rows(tracker, "worker")] == ["coordination"]
+        assert _usage_rows(tracker, "asker") == []
+        assert broker.noted == []
+        tracker.close()
+
 
 class TestReportingInclusive:
     """Reporting surfaces keep including coordination rows (money is money)."""
