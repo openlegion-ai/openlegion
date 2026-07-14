@@ -2658,3 +2658,61 @@ def test_rekey_never_reruns_on_canonical_v1_db(tmp_path):
         assert bb.get_agent_watches("agent1") == ["projects/*"]
     finally:
         bb.close()
+
+
+# === M6: MessageRouter cold-wake seam (send_message wakes a hibernated recipient) ===
+
+
+@pytest.mark.asyncio
+async def test_route_cold_wakes_hibernated_recipient_before_resolve():
+    """M6: routing to a hibernated recipient calls the injected wake seam
+    BEFORE target resolution — the wake re-registers the restarted
+    container's fresh URL, so a recipient absent from the registry
+    (post-restart) is woken-then-delivered instead of failing 'No agent
+    found'. Mirrors the ``HttpTransport`` cold-wake seam for the direct
+    ``/mesh/message`` router path."""
+    from src.shared.types import AgentMessage
+
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {
+        "alice": AgentPermissions(agent_id="alice", can_message=["*"]),
+        "bob": AgentPermissions(agent_id="bob", can_message=["*"]),
+    }
+    # bob is NOT in the registry (its hibernated container's url was dropped).
+    router = MessageRouter(permissions=perms, agent_registry={"alice": "http://a:8400"})
+    router._get_client = _make_async_returner(_FakeDeliveryClient())
+
+    waked: list[str] = []
+
+    async def _wake(agent_id: str) -> bool:
+        waked.append(agent_id)
+        router.register_agent(agent_id, "http://bob-fresh:8400")  # cold-wake re-registers
+        return True
+
+    router.set_ensure_running_fn(_wake)
+
+    result = await router.route(
+        AgentMessage(from_agent="alice", to="bob", type="query", payload={}),
+    )
+    assert waked == ["bob"]        # the recipient was woken…
+    assert result == {"ok": True}  # …BEFORE resolve → delivery succeeded
+
+
+@pytest.mark.asyncio
+async def test_negative_control_no_wake_seam_never_wakes_recipient():
+    """Negative control: the pre-fix router (no wake seam wired) never wakes
+    a hibernated recipient — one absent from the registry just fails
+    'No agent found', the exact M6 bug the seam fixes."""
+    from src.shared.types import AgentMessage
+
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {
+        "alice": AgentPermissions(agent_id="alice", can_message=["*"]),
+        "bob": AgentPermissions(agent_id="bob", can_message=["*"]),
+    }
+    router = MessageRouter(permissions=perms, agent_registry={"alice": "http://a:8400"})
+    # No set_ensure_running_fn — bob stays unregistered, never woken.
+    result = await router.route(
+        AgentMessage(from_agent="alice", to="bob", type="query", payload={}),
+    )
+    assert result == {"error": "No agent found for target: bob"}
