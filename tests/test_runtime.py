@@ -3024,13 +3024,16 @@ class TestSystemNoteCallSites:
 
     def test_runtime_sites_flagged(self):
         src = self._src("src/cli/runtime.py")
-        # cron_dispatch + verification wake + the blocked-task ladder's
-        # rung-1 assignee followup AND rung-2 creator followup
-        # (``_ladder_send_assignee`` / ``_ladder_send_creator``, plan §8 #22
-        # — both mesh-composed, no human typed them; rung 1 was corrected
-        # from a ``deliver_chat`` call that could not carry the flag,
-        # Phase-5 review finding).
-        assert src.count("system_note=True") == 4
+        # Three literal sites: cron_dispatch + verification wake + the
+        # blocked-task ladder's shared rung-1/rung-2 delivery helper
+        # (``_ladder_enqueue_nudge``, plan §8 #22 — mesh-composed, no human
+        # typed it; both ``_ladder_send_assignee`` and
+        # ``_ladder_send_creator`` route through it, so the single flagged
+        # enqueue covers both rungs. C4 consolidated the two prior sites
+        # into this one helper — the flag guarantee is unchanged).
+        assert src.count("system_note=True") == 3
+        # Pin that both ladder rungs route through the flagged helper.
+        assert src.count("_ladder_enqueue_nudge(") >= 3  # def + 2 call sites
         # Rung 1 must NOT regress to the flag-less deliver_chat path.
         assert "self.lane_manager.deliver_chat(agent, message)" not in src
 

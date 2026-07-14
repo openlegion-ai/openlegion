@@ -769,6 +769,31 @@ class HibernationSweeper:
     def stop(self) -> None:
         self._running = False
 
+    def _busy_or_working(self, agent_id: str, lane_status: dict) -> bool:
+        """True if the agent is doing (or queued to do) work right now, so
+        it must NOT be hibernated. Fails CLOSED — an uncertain read returns
+        True (never hibernate on a doubtful signal). ``lane_status`` is a
+        caller-supplied ``get_status()`` snapshot so this can be re-run
+        against a FRESH snapshot immediately before the stop (M7)."""
+        st = lane_status.get(agent_id, {})
+        if st.get("busy") or st.get("queued", 0) > 0:
+            return True
+        if self._tasks_store is not None:
+            try:
+                if self._tasks_store.has_working_task(agent_id):
+                    return True
+            except Exception as e:
+                logger.debug("hibernation sweep: task check failed for %s: %s", agent_id, e)
+                return True  # fail CLOSED — never hibernate on an uncertain read
+        if self._ask_broker is not None:
+            try:
+                if self._ask_broker.has_open_asks(agent_id):
+                    return True
+            except Exception as e:
+                logger.debug("hibernation sweep: ask check failed for %s: %s", agent_id, e)
+                return True
+        return False
+
     async def _tick(self) -> None:
         idle_minutes = shared_limits.resolve("hibernate_idle_minutes")
         if idle_minutes <= 0:
@@ -792,30 +817,28 @@ class HibernationSweeper:
             status = (agent_cfg or {}).get("status", "active") or "active"
             if status != "active":
                 continue  # already hibernated/archived — not a candidate
-            st = lane_status.get(agent_id, {})
-            if st.get("busy") or st.get("queued", 0) > 0:
+            if self._busy_or_working(agent_id, lane_status):
                 continue
-            if self._tasks_store is not None:
-                try:
-                    if self._tasks_store.has_working_task(agent_id):
-                        continue
-                except Exception as e:
-                    logger.debug(
-                        "hibernation sweep: task check failed for %s: %s", agent_id, e,
-                    )
-                    continue  # fail CLOSED — never hibernate on an uncertain read
-            if self._ask_broker is not None:
-                try:
-                    if self._ask_broker.has_open_asks(agent_id):
-                        continue
-                except Exception as e:
-                    logger.debug(
-                        "hibernation sweep: ask check failed for %s: %s", agent_id, e,
-                    )
-                    continue
             last_activity = self._lane_manager.last_activity(agent_id)
             if (now - last_activity) < idle_seconds:
                 continue
+            # M7: re-check against a FRESH read immediately before the stop.
+            # The per-tick ``lane_status``/``now`` snapshot above was taken
+            # once and can be tens of seconds stale by the time this loop
+            # reaches a later agent (it awaits multi-second hibernate ops
+            # between agents). A turn that STARTED mid-tick — including a
+            # direct-bypass turn (dashboard/CLI/channel stream, cron
+            # heartbeat), which stamps ``last_activity`` at turn start (M7)
+            # but never sets a lane ``busy`` flag — must abort the stop.
+            try:
+                fresh_status = self._lane_manager.get_status()
+            except Exception as e:
+                logger.debug("hibernation sweep: fresh status read failed for %s: %s", agent_id, e)
+                continue  # fail CLOSED
+            if self._busy_or_working(agent_id, fresh_status):
+                continue
+            if (time.time() - self._lane_manager.last_activity(agent_id)) < idle_seconds:
+                continue  # a direct-path turn stamped activity mid-tick
             try:
                 await self._hibernate_fn(agent_id, caller="sweep")
                 logger.info(
@@ -3281,6 +3304,8 @@ def create_mesh_app(
         tool = str(payload.get("tool", ""))
         arguments = payload.get("arguments") or {}
         result = await _execute_connector_call(caller, connector, tool, arguments)
+        delivered = False
+        delivery_error: str | None = None
         if lane_manager is not None and caller:
             try:
                 note = (
@@ -3288,11 +3313,52 @@ def create_mesh_app(
                     f"executed. Result: {dumps_safe(result)[:1500]}"
                 )
                 await lane_manager.enqueue(caller, note, mode="followup", system_note=True)
+                delivered = True
             except Exception as e:
+                delivery_error = str(e)
                 logger.warning(
                     "delivering held connector_call result to %s failed: %s", caller, e,
                 )
-        return {"delivered": True, "change_id": record["nonce"], "result": result}
+        else:
+            delivery_error = "no delivery channel (lane manager or caller unavailable)"
+
+        if delivered:
+            return {"delivered": True, "change_id": record["nonce"], "result": result}
+
+        # C7: the state-changing connector call SUCCEEDED but its result could
+        # not be delivered back to the proposing agent (the original HTTP
+        # caller is long gone; the consumed hold can't be replayed). Do NOT
+        # re-execute — a retry would duplicate the external side effect — and
+        # do NOT report a clean ``delivered: true`` (which would invite exactly
+        # that retry). Persist the result durably so it isn't lost, and return
+        # a split status the confirm response surfaces honestly.
+        try:
+            blackboard.log_audit(
+                action="connector_call_result_undelivered",
+                target=f"{connector}:{tool}",
+                field=caller,
+                after_value=dumps_safe({
+                    "nonce": record.get("nonce"),
+                    "result": result,
+                    "delivery_error": delivery_error,
+                })[:2000],
+                actor="mesh",
+                provenance="system",
+            )
+        except Exception as e:
+            logger.warning("persisting undelivered connector_call result failed: %s", e)
+        return {
+            "delivered": False,
+            "side_effect": "done",
+            "result_delivery": "failed",
+            "change_id": record["nonce"],
+            "result": result,
+            "error": (
+                f"connector call {connector}:{tool} executed successfully but its result could "
+                f"not be delivered to '{caller}': {delivery_error}. The side effect was NOT "
+                "retried — do not re-run the call; the result is persisted in the mesh audit log."
+            ),
+        }
 
     app.pending_executors["connector_call"] = _execute_held_connector_call
 
@@ -7256,6 +7322,54 @@ def create_mesh_app(
             },
         )
 
+    def _record_decay_or_error(
+        review_id: str,
+        *,
+        outcome: str,
+        author: str | None,
+        team_id: str,
+        rated_by: str,
+        details: dict,
+        extra_error_detail: dict | None = None,
+    ) -> None:
+        """Enforce an auto-merge trust-decay write (plan §8 #20 steps 6/7, C3).
+
+        Unlike ``record_best_effort``, a failure here MUST surface: if the
+        ``auto_merge_flagged`` / ``auto_merge_reverted`` decay event can't be
+        durably written, ``pair_trust`` sees no decay and the NEXT
+        lead-approved review for the pair would auto-merge despite the
+        operator's explicit flag/revert. So the endpoint returns an error
+        instead of a false success — the operator learns the decay did NOT
+        take effect (and can retry) rather than trusting a silent no-op.
+        """
+        if track_record_store is None:
+            raise HTTPException(
+                503, "track record store not configured — auto-merge trust decay cannot be recorded",
+            )
+        try:
+            track_record_store.record(
+                source="drive_review",
+                ref_id=review_id,
+                outcome=outcome,
+                rater_kind="human",
+                agent_id=author,
+                team_id=team_id,
+                rated_by=rated_by,
+                details=details,
+            )
+        except Exception as e:
+            logger.error("auto-merge trust-decay write failed for review %s: %s", review_id, e)
+            err = {
+                "error": "trust_decay_not_recorded",
+                "message": (
+                    f"trust decay for review {review_id} could NOT be recorded — the pair's "
+                    "auto-merge eligibility is UNCHANGED; retry so the flag/revert takes effect"
+                ),
+            }
+            if extra_error_detail:
+                err.update(extra_error_detail)
+            raise HTTPException(500, err) from e
+
     @app.post("/mesh/teams/{team_id}/drive/reviews/{review_id}/merge")
     async def drive_merge_review(team_id: str, review_id: str, request: Request) -> dict:
         """Integrate a reviewed branch into main (operator-or-internal).
@@ -7530,13 +7644,13 @@ def create_mesh_app(
         review = _drive_auto_merged_review_or_error(team_id, review_id)
         team = teams_store.get_team(team_id) or {}
         lead = review.get("lead_verdict_by") or team.get("lead_agent_id")
-        record_best_effort(
-            track_record_store,
-            source="drive_review",
-            ref_id=review_id,
+        # C3: enforce the decay write — a failure 500s instead of returning a
+        # false ``flagged: true`` (which would let the next lead-approved
+        # review for the pair auto-merge despite this explicit flag).
+        _record_decay_or_error(
+            review_id,
             outcome="auto_merge_flagged",
-            rater_kind="human",
-            agent_id=review.get("author"),
+            author=review.get("author"),
             team_id=team_id,
             rated_by=caller,
             details={
@@ -7589,13 +7703,15 @@ def create_mesh_app(
                 _drive_size_cache.pop(str(repo), None)
         team = teams_store.get_team(team_id) or {}
         lead = review.get("lead_verdict_by") or team.get("lead_agent_id")
-        record_best_effort(
-            track_record_store,
-            source="drive_review",
-            ref_id=review_id,
+        # C3: enforce the decay write. The git revert commit has already
+        # landed on main; if the decay record fails we 500 (so the operator
+        # knows the pair's trust was NOT decayed and can retry) but surface
+        # the landed ``revert_commit`` in the error so they don't blindly
+        # re-run the revert. Do NOT silently return success.
+        _record_decay_or_error(
+            review_id,
             outcome="auto_merge_reverted",
-            rater_kind="human",
-            agent_id=review.get("author"),
+            author=review.get("author"),
             team_id=team_id,
             rated_by=caller,
             details={
@@ -7604,6 +7720,7 @@ def create_mesh_app(
                 "resolution": "auto_merge_reverted",
                 "revert_commit": revert_sha,
             },
+            extra_error_detail={"revert_commit": revert_sha, "side_effect": "revert_landed"},
         )
         blackboard.log_audit(
             action="drive_review_auto_merge_reverted",
@@ -10903,6 +11020,61 @@ def create_mesh_app(
                 logger.debug("agent_woken emit failed: %s", e)
         return True
 
+    def _launch_wake(agent_id: str, *, trigger: str, shared_fut: "concurrent.futures.Future") -> None:
+        """Run ``_wake_agent_core`` as its OWN task on a stable loop, then
+        resolve ``shared_fut`` for the claimer + every joined waiter (M8).
+
+        The wake MUST outlive the coroutine that claimed it: if the
+        claiming trigger — e.g. a disconnecting/timing-out SSE request —
+        is cancelled mid-wake, the container restart still runs to
+        completion (``_wake_teardown`` still fires on failure) and the
+        shared future is still resolved, so no waiter is left awaiting a
+        never-resolved future (which would wedge a cron-heartbeat waiter
+        holding its per-job lock forever). The task detaches ONLY the
+        cancelled caller; the wake itself is never interrupted.
+
+        ``dispatch_loop`` (the long-lived lane loop) is preferred so the
+        wake survives even a transient trigger loop (e.g. ``request_sync``
+        driving its own ``asyncio.run``); without one wired (tests /
+        minimal boots) an independent task on the current running loop is
+        still detached from the claiming coroutine's cancellation.
+        """
+
+        async def _run_wake() -> None:
+            try:
+                result = await _wake_agent_core(agent_id, trigger=trigger)
+            except BaseException as e:  # noqa: BLE001 - the future MUST resolve on ANY exit (incl. CancelledError) or joined waiters hang forever
+                cancelled = isinstance(e, (asyncio.CancelledError, KeyboardInterrupt, SystemExit))
+                with _wake_claim_lock:
+                    if _wake_futures.get(agent_id) is shared_fut:
+                        _wake_futures.pop(agent_id, None)
+                if not shared_fut.done():
+                    try:
+                        # On cancellation resolve to a clean False ("still
+                        # unreachable") so waiters get a bool, not a
+                        # CancelledError propagated across the shared future.
+                        shared_fut.set_result(False) if cancelled else shared_fut.set_exception(e)
+                    except Exception:
+                        pass
+                if cancelled:
+                    raise
+                logger.error("wake_agent: unhandled error for '%s': %s", agent_id, e)
+                return
+            with _wake_claim_lock:
+                if _wake_futures.get(agent_id) is shared_fut:
+                    _wake_futures.pop(agent_id, None)
+            if not shared_fut.done():
+                try:
+                    shared_fut.set_result(result)
+                except Exception:
+                    pass
+
+        loop = dispatch_loop if (dispatch_loop is not None and dispatch_loop.is_running()) else None
+        if loop is not None:
+            asyncio.run_coroutine_threadsafe(_run_wake(), loop)
+        else:
+            asyncio.ensure_future(_run_wake())
+
     async def ensure_agent_running(agent_id: str, *, trigger: str = "dispatch") -> bool:
         """Cold-wake seam (plan §8 #24 leg 3) — the injectable
         ``ensure_running_fn`` wired into ``HttpTransport`` in
@@ -10924,6 +11096,12 @@ def create_mesh_app(
         cron loop) — wake the container exactly once; every waiter after
         the first joins the SAME in-flight wake via
         ``asyncio.wrap_future`` and no-ops once it resolves.
+
+        Cancellation-safe (M8): the actual wake runs as an independent
+        task (``_launch_wake``), so a cancelled claimer/waiter detaches
+        only itself — the shared future is always resolved by the wake
+        task and the future is locked RUNNING at claim time so a
+        cancelled awaiter can never cancel it out from under the others.
         """
         status = _status_overrides.get(agent_id, "active")
         if status == "active":
@@ -10936,26 +11114,26 @@ def create_mesh_app(
             is_claimer = fut is None
             if is_claimer:
                 fut = concurrent.futures.Future()
+                # Lock the shared future RUNNING before anyone can attach:
+                # ``asyncio.wrap_future`` forwards a waiter's cancellation to
+                # ``fut.cancel()``, a no-op once RUNNING — so one cancelled
+                # awaiter can never cancel the shared wake for the rest.
+                fut.set_running_or_notify_cancel()
                 _wake_futures[agent_id] = fut
 
-        if not is_claimer:
-            try:
-                return await asyncio.wrap_future(fut)
-            except Exception:
-                return False
+        if is_claimer:
+            _launch_wake(agent_id, trigger=trigger, shared_fut=fut)
 
         try:
-            result = await _wake_agent_core(agent_id, trigger=trigger)
-        except Exception as e:
-            logger.error("wake_agent: unhandled error for '%s': %s", agent_id, e)
-            result = False
-            fut.set_exception(e)
-        else:
-            fut.set_result(result)
-        finally:
-            with _wake_claim_lock:
-                _wake_futures.pop(agent_id, None)
-        return result
+            return await asyncio.wrap_future(fut)
+        except Exception:
+            # The wake task set an exception on the shared future (an
+            # unexpected error in ``_wake_agent_core``). Degrade to "still
+            # unreachable" rather than propagating into the caller. A
+            # CancelledError (BaseException) is NOT caught here — it
+            # propagates so the cancelled trigger unwinds cleanly, detaching
+            # only itself while the wake task runs on to completion.
+            return False
 
     app.ensure_agent_running = ensure_agent_running  # exposed for the transport seam
     app.get_agent_status = lambda agent_id: _status_overrides.get(agent_id, "active")
