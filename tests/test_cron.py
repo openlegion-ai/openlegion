@@ -2364,3 +2364,144 @@ class TestGoalCoverageGapHelper:
         teams, tasks = self._stores()
         assert self._gap(None, tasks) is None
         assert self._gap(teams, None) is None
+
+
+class TestUnseenEventsProbe:
+    """Team signal ledger (Item 1): the heartbeat BACKSTOP probe. NOT
+    lead-gated — a non-None ``unseen_events_fn`` summary makes the plate
+    actionable for EVERY agent, and the summary rides the plate directive.
+    """
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.config_path = f"{self._tmpdir}/cron.json"
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_absent_when_unwired(self):
+        sched = CronScheduler(config_path=self.config_path)
+        results = sched._run_heartbeat_probes("worker")
+        assert not any(r.name == "unseen_events" for r in results)
+
+    def test_none_summary_gives_no_probe(self):
+        sched = CronScheduler(
+            config_path=self.config_path, unseen_events_fn=lambda agent: None,
+        )
+        results = sched._run_heartbeat_probes("worker")
+        assert not any(r.name == "unseen_events" for r in results)
+
+    def test_summary_triggers_probe_for_any_agent(self):
+        sched = CronScheduler(
+            config_path=self.config_path,
+            unseen_events_fn=lambda agent: {"count": 3, "summary": "3 unseen: check_inbox"},
+        )
+        # A plain worker (not a lead) still gets the triggered probe.
+        results = sched._run_heartbeat_probes("worker")
+        probe = next(r for r in results if r.name == "unseen_events")
+        assert probe.triggered is True
+        assert "3 unseen" in probe.detail
+
+    def test_probe_failure_degrades_quietly(self):
+        def _boom(agent):
+            raise RuntimeError("thread store unavailable")
+
+        sched = CronScheduler(config_path=self.config_path, unseen_events_fn=_boom)
+        results = sched._run_heartbeat_probes("worker")  # must not raise
+        assert not any(r.name == "unseen_events" for r in results)
+
+    @pytest.mark.asyncio
+    async def test_probe_escalates_empty_plate_and_snapshots(self):
+        """The backstop probe alone escalates an otherwise-empty plate for a
+        NON-lead worker, and the plate snapshot records ``unseen_events`` in
+        ``triggered_probes``."""
+        dispatch = AsyncMock(return_value="acting on inbox")
+        mock_bb = MagicMock()
+        mock_bb.list_by_prefix.return_value = []
+        ctx = AsyncMock(return_value={
+            "heartbeat_rules": "", "daily_logs": "",
+            "is_default_heartbeat": True, "has_recent_activity": False,
+        })
+        sched = CronScheduler(
+            config_path=self.config_path, dispatch_fn=dispatch,
+            blackboard=mock_bb, context_fn=ctx,
+            goals_fn=lambda agent: None, utility_model_fn=lambda: "",
+            unseen_events_fn=lambda agent: {"count": 2, "summary": "2 unseen actionable events"},
+        )
+        job = sched.add_job(agent="worker", schedule="every 15m", message="heartbeat", heartbeat=True)
+        with patch(
+            "src.host.cron.shutil.disk_usage",
+            return_value=MagicMock(used=0, total=100, free=100),
+        ):
+            result = await sched._execute_job(job)
+        assert result == "acting on inbox"
+        dispatch.assert_called_once()
+        call_msg = dispatch.call_args[0][1]
+        assert "Probe Alerts" in call_msg
+        assert "2 unseen actionable events" in call_msg
+        snap = sched.get_last_plate("worker")
+        assert snap is not None
+        assert snap["actionable"] is True
+        assert "unseen_events" in snap["triggered_probes"]
+
+
+class TestUnseenEventsClosure:
+    """The ``unseen_events`` closure wired by ``_create_cron_scheduler`` reads
+    the mesh-side ThreadStore cursor and marks-on-surface (the storm guard)."""
+
+    def _ctx(self):
+        from src.cli.runtime import RuntimeContext
+
+        ctx = RuntimeContext.__new__(RuntimeContext)
+        ctx.async_dispatch = AsyncMock(return_value="ok")
+        ctx.transport = MagicMock()
+        ctx.blackboard = None
+        ctx.trace_store = None
+        ctx.event_bus = None
+        ctx.cfg = {}
+        ctx.health_monitor = None
+        ctx.lane_manager = None
+        return ctx
+
+    def test_closure_reads_marks_and_prevents_retrigger(self):
+        from src.host.threads import ThreadStore
+
+        store = ThreadStore(":memory:")
+        th = store.ensure_task_thread("scout", "t1")
+        store.post_message(th["id"], "mesh", recipient="scout", kind="event",
+                           payload={"kind": "task_failed", "task_id": "t1"})
+        th2 = store.ensure_task_thread("scout", "t2")
+        store.post_message(th2["id"], "mesh", recipient="scout", kind="event",
+                           payload={"kind": "task_blocked", "task_id": "t2"})
+
+        ctx = self._ctx()
+        ctx.thread_store = store
+        ctx._create_cron_scheduler()
+        fn = ctx.cron_scheduler.unseen_events_fn
+
+        summary = fn("scout")
+        assert summary is not None
+        assert summary["count"] == 2
+        assert "task_failed" in summary["summary"] or "task_blocked" in summary["summary"]
+        # Mark-on-surface: a second call returns None (events already seen).
+        assert fn("scout") is None
+        store.close()
+
+    def test_closure_no_store_returns_none(self):
+        ctx = self._ctx()
+        # No thread_store attribute at all.
+        ctx._create_cron_scheduler()
+        assert ctx.cron_scheduler.unseen_events_fn("scout") is None
+
+    def test_closure_informational_only_returns_none(self):
+        from src.host.threads import ThreadStore
+
+        store = ThreadStore(":memory:")
+        th = store.ensure_task_thread("scout", "t1")
+        store.post_message(th["id"], "mesh", recipient="scout", kind="event",
+                           payload={"kind": "task_completed", "task_id": "t1"})
+        ctx = self._ctx()
+        ctx.thread_store = store
+        ctx._create_cron_scheduler()
+        assert ctx.cron_scheduler.unseen_events_fn("scout") is None
+        store.close()

@@ -11407,6 +11407,17 @@ def create_mesh_app(
                 )
             raise HTTPException(404, f"Agent '{agent_id}' not found")
         events = thread_store.list_events_for(agent_id)
+        # Team signal ledger (Item 1): a proactive check_inbox clears the
+        # unseen flag — advance the durable read cursor past everything just
+        # surfaced so the heartbeat backstop doesn't re-fire for events the
+        # agent has already seen. Best-effort; a cursor hiccup must never
+        # sink the read the agent asked for.
+        if events:
+            try:
+                max_id = max(int(e.get("id") or 0) for e in events)
+                thread_store.mark_events_seen(agent_id, max_id)
+            except Exception as e:
+                logger.debug("mark_events_seen failed for '%s': %s", agent_id, e)
         return {"agent_id": agent_id, "events": events, "count": len(events)}
 
     @app.post("/mesh/teams/{team_name}/propose-delete")

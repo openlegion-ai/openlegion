@@ -2434,6 +2434,65 @@ class RuntimeContext:
             if self.lane_manager is not None:
                 self.lane_manager.mark_activity(agent)
 
+        def unseen_events(agent: str) -> dict | None:
+            """Unseen-actionable-events probe input (team signal ledger,
+            Item 1): mesh-side ThreadStore cursor read only, never the
+            container. Returns None fast when the agent has no UNSEEN
+            actionable back-edge / review events; otherwise builds a bounded
+            summary AND marks those events seen and returns
+            ``{"count", "summary"}``.
+
+            Mark-on-surface is the storm guard: cron guarantees an actionable
+            plate always dispatches, so this probe returning a summary IS the
+            presentation point — marking here means the same events never
+            re-trigger the heartbeat on the next tick. Lazy ``self.thread_store``
+            ref (mirrors the sibling seams); a missing store or any read
+            failure degrades to "no probe" (None)."""
+            store = getattr(self, "thread_store", None)
+            if store is None:
+                return None
+            try:
+                count = store.count_unseen_actionable(agent)
+            except Exception as e:
+                logger.debug("unseen_events count failed for '%s': %s", agent, e)
+                return None
+            if not count:
+                return None
+            try:
+                events = store.unseen_actionable_events(agent)
+            except Exception as e:
+                logger.debug("unseen_events fetch failed for '%s': %s", agent, e)
+                return None
+            if not events:
+                return None
+            # Bounded, plain-language summary of the unseen actionable events.
+            kinds: dict[str, int] = {}
+            samples: list[str] = []
+            for ev in events:
+                k = str(ev.get("kind") or "event")
+                kinds[k] = kinds.get(k, 0) + 1
+                if len(samples) < 3:
+                    ref = ev.get("task_id") or ev.get("review_id") or ""
+                    samples.append(f"{k}{(' ' + str(ref)) if ref else ''}")
+            breakdown = ", ".join(f"{n}x {k}" for k, n in sorted(kinds.items()))
+            sample_txt = f" (e.g. {', '.join(samples)})" if samples else ""
+            summary = (
+                f"{count} unseen actionable event(s): {breakdown}{sample_txt}. "
+                "Call check_inbox to act on them -- failed/blocked tasks you "
+                "own or your Team Drive reviews that were rejected / failed to "
+                "merge."
+            )
+            # Mark-on-surface: advance the cursor past everything surfaced.
+            # Use max(...) (not events[0]) — the list is created_at-ordered,
+            # so a backdated row can carry a higher id, and the cursor must
+            # clear ALL surfaced rows to prevent a re-trigger.
+            try:
+                max_id = max(int(ev.get("id") or 0) for ev in events)
+                store.mark_events_seen(agent, max_id)
+            except Exception as e:
+                logger.debug("mark_events_seen failed for '%s': %s", agent, e)
+            return {"count": count, "summary": summary}
+
         self.cron_scheduler = CronScheduler(
             dispatch_fn=cron_dispatch,
             invoke_fn=invoke_tool,
@@ -2477,6 +2536,12 @@ class RuntimeContext:
             goal_coverage_fn=goal_coverage,
             agent_status_fn=agent_status,
             activity_fn=agent_activity,
+            # Team signal ledger (Item 1): the heartbeat backstop probe.
+            # NOT lead-gated — every agent's unseen actionable back-edge /
+            # review events force an actionable plate, with mark-on-surface
+            # as the storm guard. Lazy ``self.thread_store`` inside the
+            # closure, like the sibling mesh-side probes above.
+            unseen_events_fn=unseen_events,
         )
         self._cron_job_count = len(self.cron_scheduler.jobs)
 
