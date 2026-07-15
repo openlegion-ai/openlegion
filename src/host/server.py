@@ -7235,6 +7235,21 @@ def create_mesh_app(
         head_sha = await loop.run_in_executor(None, team_drive.branch_head_sha, repo, branch)
         if not head_sha:
             raise HTTPException(400, f"branch '{branch}' does not exist on the Team Drive — push it first")
+        # Item 2: capture the live review this submit will supersede
+        # (``create_review`` marks the prior OPEN same-(team,branch) review
+        # ``superseded`` in the same txn) so we can close the loop to ITS
+        # author. Read BEFORE the write; best-effort — a prelook failure
+        # never blocks the submit.
+        superseded_prior: list[dict] = []
+        try:
+            superseded_prior = [
+                r for r in teams_store.list_reviews(team_id, status="open")
+                if r.get("branch") == branch
+            ]
+        except Exception as e:
+            logger.debug(
+                "supersede prelook failed for team %s branch %s: %s", team_id, branch, e,
+            )
         # Pin the reviewed tip so the merge integrates this EXACT commit even
         # if the worker advances the branch after approval (TOCTOU guard).
         review = teams_store.create_review(team_id, branch, caller, title, summary, head_sha=head_sha)
@@ -7246,6 +7261,13 @@ def create_mesh_app(
             after_value=review["id"],
             provenance="agent",
         )
+        for prior in superseded_prior:
+            prior_author = prior.get("author")
+            # Skip a self-resubmit (the author already knows) and the
+            # brand-new row itself (defensive).
+            if not prior_author or prior_author == caller or prior.get("id") == review.get("id"):
+                continue
+            _signal_review_author(team_id, prior, "review_superseded", resolved_by=caller)
         return {"submitted": True, "review": review}
 
     @app.get("/mesh/teams/{team_id}/drive/reviews")
@@ -7414,6 +7436,10 @@ def create_mesh_app(
             commit = await team_drive.merge_branch(repo, recorded_sha or live_sha, message=message)
         except team_drive.MergeConflict as e:
             teams_store.revert_merge_claim(review_id)
+            _signal_review_author(
+                team_id, review, "review_merge_failed",
+                note=f"merge conflict: {str(e)[:400]}", resolved_by=caller,
+            )
             raise HTTPException(
                 409,
                 {
@@ -7428,12 +7454,25 @@ def create_mesh_app(
             )
         except team_drive.RefMoved as e:
             teams_store.revert_merge_claim(review_id)
+            _signal_review_author(
+                team_id, review, "review_merge_failed",
+                note=str(e)[:400], resolved_by=caller,
+            )
             raise HTTPException(409, str(e))
         except team_drive.DriveError as e:
             teams_store.revert_merge_claim(review_id)
             raise HTTPException(500, f"merge failed: {e}")
-        except HTTPException:
+        except HTTPException as e:
             teams_store.revert_merge_claim(review_id)
+            # Merge-preflight 409s (branch deleted / branch changed since
+            # review) — signal the author to resolve and resubmit (Item 2).
+            # A non-409 (defensive) is re-raised untouched with no signal.
+            if e.status_code == 409:
+                detail = e.detail if isinstance(e.detail, str) else "branch changed — resubmit"
+                _signal_review_author(
+                    team_id, review, "review_merge_failed",
+                    note=detail[:400], resolved_by=caller,
+                )
             raise
         # The merge landed on main; finalize merging → merged.
         try:
@@ -7454,6 +7493,8 @@ def create_mesh_app(
             provenance="user",
         )
         _record_drive_review_outcome(team_id, review_id, resolved, "merged", caller)
+        # Item 2: close the review loop to the author (informational).
+        _signal_review_author(team_id, resolved, "review_merged", resolved_by=caller)
         return {"merged": True, "review": resolved, "merge_commit": commit}
 
     @app.post("/mesh/teams/{team_id}/drive/reviews/{review_id}/reject")
@@ -7478,6 +7519,8 @@ def create_mesh_app(
             provenance="user",
         )
         _record_drive_review_outcome(team_id, review_id, resolved, "rejected", caller)
+        # Item 2: close the review loop to the author (actionable — rework).
+        _signal_review_author(team_id, resolved, "review_rejected", resolved_by=caller)
         return {"rejected": True, "review": resolved}
 
     async def _post_auto_merge_note(
@@ -7492,6 +7535,13 @@ def create_mesh_app(
         callers already wrap this in a try/except (a note failure must
         never affect the merge that already landed).
         """
+        # Item 2: close the review loop to the AUTHOR — the kernel merged
+        # their branch (informational). This lives here (NOT in the
+        # transport-agnostic ``auto_merge`` module) where ``thread_store`` +
+        # the wake helper are in scope. It fires BEFORE the operator-note
+        # early-returns below so the author is signalled even in deployments
+        # with no operator container. ``resolved_by`` = the approving lead.
+        _signal_review_author(team_id, review, "review_merged", resolved_by=lead_verdict_by)
         if transport is None:
             return
         from src.cli.config import _OPERATOR_AGENT_ID
@@ -7606,6 +7656,14 @@ def create_mesh_app(
             provenance="agent",
         )
         if verdict == "approve":
+            # Item 2: close the review loop to the author (informational —
+            # the lead approved). A lead REJECT verdict is deliberately NOT
+            # signalled: it is advisory only, the review stays OPEN, and the
+            # operator's eventual reject/merge is the terminal author signal
+            # (mirrors the task's enumeration of "approve-verdict").
+            _signal_review_author(
+                team_id, resolved, "review_approved", note=note, resolved_by=caller,
+            )
             task = asyncio.create_task(_run_auto_merge_consumer(team_id, resolved, caller))
             _auto_merge_tasks.add(task)
             task.add_done_callback(_auto_merge_tasks.discard)
@@ -8286,6 +8344,125 @@ def create_mesh_app(
             kind="event",
             payload=payload,
         )
+
+    # Review outcome signals (team signal ledger, Item 2). The review
+    # AUTHOR (``review["author"]`` — stored, non-forgeable) is the party
+    # who must act on a rejection / merge-failure and wants to know about a
+    # merge / approval / supersede; today they only learn by polling
+    # ``list_reviews``. Mirror the task back-edge: a host-side event row on
+    # the team CHANNEL thread (reviews have no per-task thread) + a direct
+    # low-priority author wake. Coalesced per review id so a burst (e.g. a
+    # merge-preflight 409 retry) can't spam.
+    _REVIEW_WAKE_WINDOW_SECONDS = 60.0
+    _review_wake_state: dict[str, float] = {}
+
+    def _record_review_event(team_id: str, recipient: str, payload: dict) -> None:
+        """Write a review-outcome event row on the team's CHANNEL thread.
+
+        The review analogue of ``_record_task_event`` (reviews have no
+        per-task thread): ``ensure_channel`` + a host-side ``kind='event'``
+        ``post_message`` addressed to ``recipient``. Host-side write only —
+        no agent-facing endpoint posts these (thread-writer invariant).
+        Raises on failure so the caller can log-and-continue.
+        """
+        th = thread_store.ensure_channel(team_id)
+        thread_store.post_message(
+            th["id"],
+            "mesh",
+            recipient=recipient,
+            kind="event",
+            payload=payload,
+        )
+
+    def _signal_review_author(
+        team_id: str,
+        review: dict,
+        kind: str,
+        *,
+        note: str | None = None,
+        resolved_by: str | None = None,
+    ) -> None:
+        """Close the review feedback loop to the AUTHOR (Item 2).
+
+        Records a ``kind`` event addressed to ``review["author"]`` on the
+        team channel thread, then wakes the author via the SAME lane helper
+        the task back-edge uses. The actionable outcomes (``review_rejected``
+        / ``review_merge_failed``) are in ``ACTIONABLE_EVENT_KINDS`` so
+        Item 1's heartbeat backstop force-surfaces them if the direct wake is
+        ever missed; the informational outcomes (``review_merged`` /
+        ``review_approved`` / ``review_superseded``) ride only the coalesced
+        low-priority wake.
+
+        The recipient is ALWAYS the author — never the operator / lead /
+        merger (unless they authored the review), which is the negative
+        control the task calls for. The wake is skipped when the author
+        resolved their own review (no self-notify) or isn't a registered
+        agent, and coalesced per review id. Best-effort — a signal failure
+        never destabilizes the resolution that already committed.
+        """
+        author = review.get("author")
+        review_id = review.get("id")
+        if not author:
+            return
+        payload = {
+            "kind": kind,
+            "review_id": review_id,
+            "branch": review.get("branch"),
+            "title": review.get("title"),
+            "note": note,
+            "resolved_by": resolved_by,
+            "team_id": team_id,
+            "ts": int(time.time()),
+        }
+        try:
+            _record_review_event(team_id, str(author), payload)
+        except Exception as e:
+            logger.warning(
+                "Review event write failed for review %s: %s", review_id, e,
+            )
+            return
+        if resolved_by is not None and author == resolved_by:
+            return  # no self-notify when the author resolved their own review
+        if author not in router.agent_registry:
+            return
+        if lane_manager is None or dispatch_loop is None:
+            return
+        now = time.time()
+        wake_key = str(review_id or f"{team_id}:{review.get('branch')}")
+        if now - _review_wake_state.get(wake_key, 0.0) < _REVIEW_WAKE_WINDOW_SECONDS:
+            return
+        _review_wake_state[wake_key] = now
+        verb = {
+            "review_merged": "was MERGED into main",
+            "review_rejected": "was REJECTED — rework the branch and resubmit",
+            "review_approved": "was APPROVED by the lead",
+            "review_superseded": "was SUPERSEDED by a newer submission for the same branch",
+            "review_merge_failed": (
+                "could NOT be merged (branch changed / deleted / conflict) — "
+                "resolve against main and resubmit"
+            ),
+        }.get(kind, f"reached {kind}")
+        branch = review.get("branch") or "(branch)"
+        wake_msg = (
+            f"Your Team Drive review {review_id} (branch {branch}) {verb}. "
+            "Call check_inbox to see the details."
+        )
+        _try_wake_agent(
+            str(author),
+            wake_msg,
+            None,
+            auto_notify=False,
+            on_fail=lambda e: logger.warning(
+                "Review author wake for %s on review %s failed: %s",
+                author, review_id, e,
+            ),
+        )
+
+    # Expose the review-author signal so tests can exercise every outcome
+    # kind directly (mirrors the ``app._write_task_event_back_edge``
+    # exposure above). Not consumed by any production caller — the review
+    # endpoints call the closure directly.
+    app._signal_review_author = _signal_review_author
 
     def _wake_operator_for_human_chain(
         task_record: dict,
