@@ -8305,6 +8305,22 @@ def create_mesh_app(
     _OPERATOR_RECOVERY_WAKE_WINDOW_S = 600.0
     _operator_recovery_wake_times: deque[float] = deque()
 
+    # Creator back-edge (team signal ledger, Item 3): the IMMEDIATE
+    # ``creator`` of a task — the parent agent that created this child task
+    # and is waiting to synthesize its result (fan-in / join) — is, for a
+    # multi-hop chain, a DIFFERENT agent from the root ``origin_user`` the
+    # block below serves; a human-origin chain short-circuits that block
+    # entirely, so the parent got NOTHING. Waking the creator is justified
+    # by STORED task ownership (``task_record["creator"]`` is stamped at
+    # task-creation time, non-forgeable) — a DIFFERENT justification from
+    # the origin path's forgeable-origin guard, which is left untouched.
+    # ``task_completed`` joins the wake kinds here (unlike the origin path):
+    # a fan-in parent must learn a child FINISHED, not just failed/blocked.
+    # Separate rate-limit state from ``_back_edge_wake_state`` so a creator
+    # wake never coalesces-away the operator/origin wake for the same task.
+    _CREATOR_WAKE_KINDS = frozenset({"task_completed", "task_failed", "task_blocked"})
+    _creator_wake_state: dict[str, float] = {}
+
     def _task_thread_scope(task_record: dict) -> str:
         """Effective team scope for a task's thread (Team Threads).
 
@@ -8575,6 +8591,122 @@ def create_mesh_app(
                 e,
             )
 
+    def _write_creator_back_edge(
+        task_record: dict,
+        *,
+        event_kind: str,
+        payload_extras: dict | None,
+        origin_user: str | None,
+    ) -> None:
+        """Deliver a task transition to the IMMEDIATE ``creator`` (Item 3).
+
+        Runs ALONGSIDE — and independently of — the ``origin_user`` block in
+        :func:`_write_task_event_back_edge`, so a fan-in parent learns its
+        child finished even when the root origin points at a distant
+        chain-root (or is a human, which short-circuits the origin block
+        entirely). Eligibility:
+
+          * ``creator`` is a real, registered agent (a genuine parent, not a
+            channel / human / absent creator);
+          * ``creator != assignee`` — no self-notify on a self-handoff;
+          * ``creator != origin_user`` — DEDUP: when they are the same agent
+            the origin block already records the event (and, for actionable
+            kinds, wakes it under its own guard), so this path must not
+            double up.
+
+        The wake is gated by STORED ownership, not origin, so it is safe for
+        ALL of ``_CREATOR_WAKE_KINDS`` (incl. ``task_completed``). It does
+        NOT thread ``task_id`` into the lane: the parent's turn is a
+        synthesis turn ABOUT the child (reasoning over its result), not an
+        execution of the already-terminal child task — same rationale as the
+        operator recovery wake. Best-effort throughout; the transition has
+        already committed.
+        """
+        creator = task_record.get("creator")
+        assignee = task_record.get("assignee")
+        task_id = task_record.get("id")
+        if not creator or not task_id:
+            return
+        if creator == assignee:
+            return
+        if origin_user is not None and creator == origin_user:
+            return
+        if creator == "operator":
+            # The operator has dedicated signal channels — the A2 recovery
+            # wake for human chains, the origin path for its own agent-origin
+            # tasks, and check_inbox on every heartbeat — so a generic creator
+            # signal here would only DOUBLE-wake it (notably alongside the A2
+            # recovery wake on a human-origin failure it created). Skip it to
+            # honour the no-double-signal / no-cost-storm invariants; nothing
+            # is lost (a human-origin completion it created was heartbeat-
+            # picked-up pre-Item-3 too). Matches the ``assignee != "operator"``
+            # literal the A2 guard above uses.
+            return
+        if creator not in router.agent_registry:
+            return
+        payload: dict = {
+            "kind": event_kind,
+            "task_id": task_id,
+            "recipient": assignee,
+            "title": task_record.get("title"),
+            "status": task_record.get("status"),
+            "ts": int(time.time()),
+        }
+        if payload_extras:
+            # Sentinel keys above take precedence — extras can't shadow the
+            # canonical schema fields (mirrors the origin path).
+            for k, v in payload_extras.items():
+                if k not in payload:
+                    payload[k] = v
+        try:
+            _record_task_event(task_record, str(creator), payload)
+        except Exception as e:
+            logger.warning(
+                "Creator back-edge write failed for task %s: %s", task_id, e,
+            )
+            return
+        if event_kind not in _CREATOR_WAKE_KINDS:
+            return
+        if lane_manager is None or dispatch_loop is None:
+            return
+        now = time.time()
+        if now - _creator_wake_state.get(task_id, 0.0) < _BACK_EDGE_WAKE_WINDOW_SECONDS:
+            return
+        _creator_wake_state[task_id] = now
+        origin_dict = task_record.get("origin") or {}
+        try:
+            wake_origin = MessageOrigin(
+                kind="agent",
+                channel=str(origin_dict.get("channel") or ""),
+                user=str(creator),
+            )
+            title = task_record.get("title") or "(no title)"
+            wake_msg = (
+                f"Child task {task_id} ({title}) you created reached "
+                f"{event_kind}. Call check_inbox to see the event payload "
+                "and continue — synthesize or unblock as needed."
+            )
+            _try_wake_agent(
+                str(creator),
+                wake_msg,
+                wake_origin,
+                auto_notify=False,
+                # Continue the child's session so the parent's synthesis work
+                # stays on the same trace (this fires from update_task_status,
+                # which doesn't seed the contextvar — pass it explicitly, like
+                # the origin path).
+                trace_id=task_record.get("trace_id"),
+                on_fail=lambda e: logger.warning(
+                    "Creator back-edge wake for %s on task %s failed: %s",
+                    creator, task_id, e,
+                ),
+            )
+        except Exception as e:
+            logger.warning(
+                "Creator back-edge wake for %s on task %s failed: %s",
+                creator, task_id, e,
+            )
+
     def _write_task_event_back_edge(
         task_record: dict,
         *,
@@ -8608,6 +8740,20 @@ def create_mesh_app(
             assignee = task_record.get("assignee")
             creator = task_record.get("creator")
             task_id = task_record.get("id")
+
+            # Item 3 — deliver to the IMMEDIATE creator (fan-in / join)
+            # FIRST, before the origin-based early-returns below. The
+            # creator path is independently justified by stored ownership,
+            # so it must run for EVERY origin shape (agent, operator, and —
+            # unlike the origin block — human-origin chains, which return
+            # early). Its own guards (real agent, ``!= assignee``, ``!=
+            # origin_user`` dedup) keep it from doubling the origin path.
+            _write_creator_back_edge(
+                task_record,
+                event_kind=event_kind,
+                payload_extras=payload_extras,
+                origin_user=str(origin_user) if origin_user else None,
+            )
 
             # Eligibility — only cross-agent agent/operator handoffs.
             # Self-handoffs (sender == recipient) suppress so an

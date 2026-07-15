@@ -736,8 +736,10 @@ async def test_back_edge_tolerates_non_dict_result(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_terminal_transition_skips_back_edge_for_human_origin(tmp_path):
-    """origin_kind=='human' must NOT write a back-edge (humans use lane forward path)."""
+async def test_terminal_transition_skips_origin_back_edge_for_human_origin(tmp_path):
+    """origin_kind=='human' writes NO origin-path back-edge (humans use the
+    lane forward path). The IMMEDIATE creator ``alpha`` DOES get one now,
+    though — Item 3, fan-in — so it is excluded from the negative check."""
     from httpx import ASGITransport, AsyncClient
 
     app, bb, tasks_store, _ = _setup_mesh_app(tmp_path)
@@ -761,10 +763,13 @@ async def test_terminal_transition_skips_back_edge_for_human_origin(tmp_path):
             )
         assert resp.status_code == 200, resp.text
 
-        # No back-edge for any plausible origin_user variant.
-        for candidate in ("u_42", "telegram", "alpha", "beta"):
+        # No origin-path back-edge for the human / channel / assignee.
+        for candidate in ("u_42", "telegram", "beta"):
             events = app.thread_store.list_events_for(candidate)
             assert not any(e.get("task_id") == task_id for e in events)
+        # The immediate creator (alpha) DOES get the completion (Item 3).
+        creator_events = app.thread_store.list_events_for("alpha")
+        assert any(e.get("task_id") == task_id for e in creator_events)
     finally:
         _teardown_mesh(bb, tasks_store)
 
