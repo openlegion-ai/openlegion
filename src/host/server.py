@@ -7235,6 +7235,21 @@ def create_mesh_app(
         head_sha = await loop.run_in_executor(None, team_drive.branch_head_sha, repo, branch)
         if not head_sha:
             raise HTTPException(400, f"branch '{branch}' does not exist on the Team Drive — push it first")
+        # Item 2: capture the live review this submit will supersede
+        # (``create_review`` marks the prior OPEN same-(team,branch) review
+        # ``superseded`` in the same txn) so we can close the loop to ITS
+        # author. Read BEFORE the write; best-effort — a prelook failure
+        # never blocks the submit.
+        superseded_prior: list[dict] = []
+        try:
+            superseded_prior = [
+                r for r in teams_store.list_reviews(team_id, status="open")
+                if r.get("branch") == branch
+            ]
+        except Exception as e:
+            logger.debug(
+                "supersede prelook failed for team %s branch %s: %s", team_id, branch, e,
+            )
         # Pin the reviewed tip so the merge integrates this EXACT commit even
         # if the worker advances the branch after approval (TOCTOU guard).
         review = teams_store.create_review(team_id, branch, caller, title, summary, head_sha=head_sha)
@@ -7246,6 +7261,13 @@ def create_mesh_app(
             after_value=review["id"],
             provenance="agent",
         )
+        for prior in superseded_prior:
+            prior_author = prior.get("author")
+            # Skip a self-resubmit (the author already knows) and the
+            # brand-new row itself (defensive).
+            if not prior_author or prior_author == caller or prior.get("id") == review.get("id"):
+                continue
+            _signal_review_author(team_id, prior, "review_superseded", resolved_by=caller)
         return {"submitted": True, "review": review}
 
     @app.get("/mesh/teams/{team_id}/drive/reviews")
@@ -7414,6 +7436,10 @@ def create_mesh_app(
             commit = await team_drive.merge_branch(repo, recorded_sha or live_sha, message=message)
         except team_drive.MergeConflict as e:
             teams_store.revert_merge_claim(review_id)
+            _signal_review_author(
+                team_id, review, "review_merge_failed",
+                note=f"merge conflict: {str(e)[:400]}", resolved_by=caller,
+            )
             raise HTTPException(
                 409,
                 {
@@ -7428,12 +7454,25 @@ def create_mesh_app(
             )
         except team_drive.RefMoved as e:
             teams_store.revert_merge_claim(review_id)
+            _signal_review_author(
+                team_id, review, "review_merge_failed",
+                note=str(e)[:400], resolved_by=caller,
+            )
             raise HTTPException(409, str(e))
         except team_drive.DriveError as e:
             teams_store.revert_merge_claim(review_id)
             raise HTTPException(500, f"merge failed: {e}")
-        except HTTPException:
+        except HTTPException as e:
             teams_store.revert_merge_claim(review_id)
+            # Merge-preflight 409s (branch deleted / branch changed since
+            # review) — signal the author to resolve and resubmit (Item 2).
+            # A non-409 (defensive) is re-raised untouched with no signal.
+            if e.status_code == 409:
+                detail = e.detail if isinstance(e.detail, str) else "branch changed — resubmit"
+                _signal_review_author(
+                    team_id, review, "review_merge_failed",
+                    note=detail[:400], resolved_by=caller,
+                )
             raise
         # The merge landed on main; finalize merging → merged.
         try:
@@ -7454,6 +7493,8 @@ def create_mesh_app(
             provenance="user",
         )
         _record_drive_review_outcome(team_id, review_id, resolved, "merged", caller)
+        # Item 2: close the review loop to the author (informational).
+        _signal_review_author(team_id, resolved, "review_merged", resolved_by=caller)
         return {"merged": True, "review": resolved, "merge_commit": commit}
 
     @app.post("/mesh/teams/{team_id}/drive/reviews/{review_id}/reject")
@@ -7478,6 +7519,8 @@ def create_mesh_app(
             provenance="user",
         )
         _record_drive_review_outcome(team_id, review_id, resolved, "rejected", caller)
+        # Item 2: close the review loop to the author (actionable — rework).
+        _signal_review_author(team_id, resolved, "review_rejected", resolved_by=caller)
         return {"rejected": True, "review": resolved}
 
     async def _post_auto_merge_note(
@@ -7492,6 +7535,13 @@ def create_mesh_app(
         callers already wrap this in a try/except (a note failure must
         never affect the merge that already landed).
         """
+        # Item 2: close the review loop to the AUTHOR — the kernel merged
+        # their branch (informational). This lives here (NOT in the
+        # transport-agnostic ``auto_merge`` module) where ``thread_store`` +
+        # the wake helper are in scope. It fires BEFORE the operator-note
+        # early-returns below so the author is signalled even in deployments
+        # with no operator container. ``resolved_by`` = the approving lead.
+        _signal_review_author(team_id, review, "review_merged", resolved_by=lead_verdict_by)
         if transport is None:
             return
         from src.cli.config import _OPERATOR_AGENT_ID
@@ -7606,6 +7656,14 @@ def create_mesh_app(
             provenance="agent",
         )
         if verdict == "approve":
+            # Item 2: close the review loop to the author (informational —
+            # the lead approved). A lead REJECT verdict is deliberately NOT
+            # signalled: it is advisory only, the review stays OPEN, and the
+            # operator's eventual reject/merge is the terminal author signal
+            # (mirrors the task's enumeration of "approve-verdict").
+            _signal_review_author(
+                team_id, resolved, "review_approved", note=note, resolved_by=caller,
+            )
             task = asyncio.create_task(_run_auto_merge_consumer(team_id, resolved, caller))
             _auto_merge_tasks.add(task)
             task.add_done_callback(_auto_merge_tasks.discard)
@@ -8247,6 +8305,22 @@ def create_mesh_app(
     _OPERATOR_RECOVERY_WAKE_WINDOW_S = 600.0
     _operator_recovery_wake_times: deque[float] = deque()
 
+    # Creator back-edge (team signal ledger, Item 3): the IMMEDIATE
+    # ``creator`` of a task — the parent agent that created this child task
+    # and is waiting to synthesize its result (fan-in / join) — is, for a
+    # multi-hop chain, a DIFFERENT agent from the root ``origin_user`` the
+    # block below serves; a human-origin chain short-circuits that block
+    # entirely, so the parent got NOTHING. Waking the creator is justified
+    # by STORED task ownership (``task_record["creator"]`` is stamped at
+    # task-creation time, non-forgeable) — a DIFFERENT justification from
+    # the origin path's forgeable-origin guard, which is left untouched.
+    # ``task_completed`` joins the wake kinds here (unlike the origin path):
+    # a fan-in parent must learn a child FINISHED, not just failed/blocked.
+    # Separate rate-limit state from ``_back_edge_wake_state`` so a creator
+    # wake never coalesces-away the operator/origin wake for the same task.
+    _CREATOR_WAKE_KINDS = frozenset({"task_completed", "task_failed", "task_blocked"})
+    _creator_wake_state: dict[str, float] = {}
+
     def _task_thread_scope(task_record: dict) -> str:
         """Effective team scope for a task's thread (Team Threads).
 
@@ -8286,6 +8360,125 @@ def create_mesh_app(
             kind="event",
             payload=payload,
         )
+
+    # Review outcome signals (team signal ledger, Item 2). The review
+    # AUTHOR (``review["author"]`` — stored, non-forgeable) is the party
+    # who must act on a rejection / merge-failure and wants to know about a
+    # merge / approval / supersede; today they only learn by polling
+    # ``list_reviews``. Mirror the task back-edge: a host-side event row on
+    # the team CHANNEL thread (reviews have no per-task thread) + a direct
+    # low-priority author wake. Coalesced per review id so a burst (e.g. a
+    # merge-preflight 409 retry) can't spam.
+    _REVIEW_WAKE_WINDOW_SECONDS = 60.0
+    _review_wake_state: dict[str, float] = {}
+
+    def _record_review_event(team_id: str, recipient: str, payload: dict) -> None:
+        """Write a review-outcome event row on the team's CHANNEL thread.
+
+        The review analogue of ``_record_task_event`` (reviews have no
+        per-task thread): ``ensure_channel`` + a host-side ``kind='event'``
+        ``post_message`` addressed to ``recipient``. Host-side write only —
+        no agent-facing endpoint posts these (thread-writer invariant).
+        Raises on failure so the caller can log-and-continue.
+        """
+        th = thread_store.ensure_channel(team_id)
+        thread_store.post_message(
+            th["id"],
+            "mesh",
+            recipient=recipient,
+            kind="event",
+            payload=payload,
+        )
+
+    def _signal_review_author(
+        team_id: str,
+        review: dict,
+        kind: str,
+        *,
+        note: str | None = None,
+        resolved_by: str | None = None,
+    ) -> None:
+        """Close the review feedback loop to the AUTHOR (Item 2).
+
+        Records a ``kind`` event addressed to ``review["author"]`` on the
+        team channel thread, then wakes the author via the SAME lane helper
+        the task back-edge uses. The actionable outcomes (``review_rejected``
+        / ``review_merge_failed``) are in ``ACTIONABLE_EVENT_KINDS`` so
+        Item 1's heartbeat backstop force-surfaces them if the direct wake is
+        ever missed; the informational outcomes (``review_merged`` /
+        ``review_approved`` / ``review_superseded``) ride only the coalesced
+        low-priority wake.
+
+        The recipient is ALWAYS the author — never the operator / lead /
+        merger (unless they authored the review), which is the negative
+        control the task calls for. The wake is skipped when the author
+        resolved their own review (no self-notify) or isn't a registered
+        agent, and coalesced per review id. Best-effort — a signal failure
+        never destabilizes the resolution that already committed.
+        """
+        author = review.get("author")
+        review_id = review.get("id")
+        if not author:
+            return
+        payload = {
+            "kind": kind,
+            "review_id": review_id,
+            "branch": review.get("branch"),
+            "title": review.get("title"),
+            "note": note,
+            "resolved_by": resolved_by,
+            "team_id": team_id,
+            "ts": int(time.time()),
+        }
+        try:
+            _record_review_event(team_id, str(author), payload)
+        except Exception as e:
+            logger.warning(
+                "Review event write failed for review %s: %s", review_id, e,
+            )
+            return
+        if resolved_by is not None and author == resolved_by:
+            return  # no self-notify when the author resolved their own review
+        if author not in router.agent_registry:
+            return
+        if lane_manager is None or dispatch_loop is None:
+            return
+        now = time.time()
+        wake_key = str(review_id or f"{team_id}:{review.get('branch')}")
+        if now - _review_wake_state.get(wake_key, 0.0) < _REVIEW_WAKE_WINDOW_SECONDS:
+            return
+        _review_wake_state[wake_key] = now
+        verb = {
+            "review_merged": "was MERGED into main",
+            "review_rejected": "was REJECTED — rework the branch and resubmit",
+            "review_approved": "was APPROVED by the lead",
+            "review_superseded": "was SUPERSEDED by a newer submission for the same branch",
+            "review_merge_failed": (
+                "could NOT be merged (branch changed / deleted / conflict) — "
+                "resolve against main and resubmit"
+            ),
+        }.get(kind, f"reached {kind}")
+        branch = review.get("branch") or "(branch)"
+        wake_msg = (
+            f"Your Team Drive review {review_id} (branch {branch}) {verb}. "
+            "Call check_inbox to see the details."
+        )
+        _try_wake_agent(
+            str(author),
+            wake_msg,
+            None,
+            auto_notify=False,
+            on_fail=lambda e: logger.warning(
+                "Review author wake for %s on review %s failed: %s",
+                author, review_id, e,
+            ),
+        )
+
+    # Expose the review-author signal so tests can exercise every outcome
+    # kind directly (mirrors the ``app._write_task_event_back_edge``
+    # exposure above). Not consumed by any production caller — the review
+    # endpoints call the closure directly.
+    app._signal_review_author = _signal_review_author
 
     def _wake_operator_for_human_chain(
         task_record: dict,
@@ -8398,6 +8591,122 @@ def create_mesh_app(
                 e,
             )
 
+    def _write_creator_back_edge(
+        task_record: dict,
+        *,
+        event_kind: str,
+        payload_extras: dict | None,
+        origin_user: str | None,
+    ) -> None:
+        """Deliver a task transition to the IMMEDIATE ``creator`` (Item 3).
+
+        Runs ALONGSIDE — and independently of — the ``origin_user`` block in
+        :func:`_write_task_event_back_edge`, so a fan-in parent learns its
+        child finished even when the root origin points at a distant
+        chain-root (or is a human, which short-circuits the origin block
+        entirely). Eligibility:
+
+          * ``creator`` is a real, registered agent (a genuine parent, not a
+            channel / human / absent creator);
+          * ``creator != assignee`` — no self-notify on a self-handoff;
+          * ``creator != origin_user`` — DEDUP: when they are the same agent
+            the origin block already records the event (and, for actionable
+            kinds, wakes it under its own guard), so this path must not
+            double up.
+
+        The wake is gated by STORED ownership, not origin, so it is safe for
+        ALL of ``_CREATOR_WAKE_KINDS`` (incl. ``task_completed``). It does
+        NOT thread ``task_id`` into the lane: the parent's turn is a
+        synthesis turn ABOUT the child (reasoning over its result), not an
+        execution of the already-terminal child task — same rationale as the
+        operator recovery wake. Best-effort throughout; the transition has
+        already committed.
+        """
+        creator = task_record.get("creator")
+        assignee = task_record.get("assignee")
+        task_id = task_record.get("id")
+        if not creator or not task_id:
+            return
+        if creator == assignee:
+            return
+        if origin_user is not None and creator == origin_user:
+            return
+        if creator == "operator":
+            # The operator has dedicated signal channels — the A2 recovery
+            # wake for human chains, the origin path for its own agent-origin
+            # tasks, and check_inbox on every heartbeat — so a generic creator
+            # signal here would only DOUBLE-wake it (notably alongside the A2
+            # recovery wake on a human-origin failure it created). Skip it to
+            # honour the no-double-signal / no-cost-storm invariants; nothing
+            # is lost (a human-origin completion it created was heartbeat-
+            # picked-up pre-Item-3 too). Matches the ``assignee != "operator"``
+            # literal the A2 guard above uses.
+            return
+        if creator not in router.agent_registry:
+            return
+        payload: dict = {
+            "kind": event_kind,
+            "task_id": task_id,
+            "recipient": assignee,
+            "title": task_record.get("title"),
+            "status": task_record.get("status"),
+            "ts": int(time.time()),
+        }
+        if payload_extras:
+            # Sentinel keys above take precedence — extras can't shadow the
+            # canonical schema fields (mirrors the origin path).
+            for k, v in payload_extras.items():
+                if k not in payload:
+                    payload[k] = v
+        try:
+            _record_task_event(task_record, str(creator), payload)
+        except Exception as e:
+            logger.warning(
+                "Creator back-edge write failed for task %s: %s", task_id, e,
+            )
+            return
+        if event_kind not in _CREATOR_WAKE_KINDS:
+            return
+        if lane_manager is None or dispatch_loop is None:
+            return
+        now = time.time()
+        if now - _creator_wake_state.get(task_id, 0.0) < _BACK_EDGE_WAKE_WINDOW_SECONDS:
+            return
+        _creator_wake_state[task_id] = now
+        origin_dict = task_record.get("origin") or {}
+        try:
+            wake_origin = MessageOrigin(
+                kind="agent",
+                channel=str(origin_dict.get("channel") or ""),
+                user=str(creator),
+            )
+            title = task_record.get("title") or "(no title)"
+            wake_msg = (
+                f"Child task {task_id} ({title}) you created reached "
+                f"{event_kind}. Call check_inbox to see the event payload "
+                "and continue — synthesize or unblock as needed."
+            )
+            _try_wake_agent(
+                str(creator),
+                wake_msg,
+                wake_origin,
+                auto_notify=False,
+                # Continue the child's session so the parent's synthesis work
+                # stays on the same trace (this fires from update_task_status,
+                # which doesn't seed the contextvar — pass it explicitly, like
+                # the origin path).
+                trace_id=task_record.get("trace_id"),
+                on_fail=lambda e: logger.warning(
+                    "Creator back-edge wake for %s on task %s failed: %s",
+                    creator, task_id, e,
+                ),
+            )
+        except Exception as e:
+            logger.warning(
+                "Creator back-edge wake for %s on task %s failed: %s",
+                creator, task_id, e,
+            )
+
     def _write_task_event_back_edge(
         task_record: dict,
         *,
@@ -8431,6 +8740,20 @@ def create_mesh_app(
             assignee = task_record.get("assignee")
             creator = task_record.get("creator")
             task_id = task_record.get("id")
+
+            # Item 3 — deliver to the IMMEDIATE creator (fan-in / join)
+            # FIRST, before the origin-based early-returns below. The
+            # creator path is independently justified by stored ownership,
+            # so it must run for EVERY origin shape (agent, operator, and —
+            # unlike the origin block — human-origin chains, which return
+            # early). Its own guards (real agent, ``!= assignee``, ``!=
+            # origin_user`` dedup) keep it from doubling the origin path.
+            _write_creator_back_edge(
+                task_record,
+                event_kind=event_kind,
+                payload_extras=payload_extras,
+                origin_user=str(origin_user) if origin_user else None,
+            )
 
             # Eligibility — only cross-agent agent/operator handoffs.
             # Self-handoffs (sender == recipient) suppress so an
@@ -11407,6 +11730,17 @@ def create_mesh_app(
                 )
             raise HTTPException(404, f"Agent '{agent_id}' not found")
         events = thread_store.list_events_for(agent_id)
+        # Team signal ledger (Item 1): a proactive check_inbox clears the
+        # unseen flag — advance the durable read cursor past everything just
+        # surfaced so the heartbeat backstop doesn't re-fire for events the
+        # agent has already seen. Best-effort; a cursor hiccup must never
+        # sink the read the agent asked for.
+        if events:
+            try:
+                max_id = max(int(e.get("id") or 0) for e in events)
+                thread_store.mark_events_seen(agent_id, max_id)
+            except Exception as e:
+                logger.debug("mark_events_seen failed for '%s': %s", agent_id, e)
         return {"agent_id": agent_id, "events": events, "count": len(events)}
 
     @app.post("/mesh/teams/{team_name}/propose-delete")

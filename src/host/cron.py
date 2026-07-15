@@ -125,6 +125,7 @@ class CronScheduler:
         goal_coverage_fn: Callable | None = None,
         agent_status_fn: Callable | None = None,
         activity_fn: Callable | None = None,
+        unseen_events_fn: Callable | None = None,
     ):
         self.config_path = Path(config_path)
         self.jobs: dict[str, CronJob] = {}
@@ -200,6 +201,20 @@ class CronScheduler:
         # paths that bypass the lane (tool-invoke jobs, ``/heartbeat``).
         self.agent_status_fn = agent_status_fn
         self.activity_fn = activity_fn
+        # Unseen-actionable-events probe input (team signal ledger, Item 1):
+        # ``unseen_events_fn(agent) -> {"count", "summary"} | None`` reads
+        # the mesh-side ThreadStore cursor ONLY (never a container). Unlike
+        # ``lead_reviews_fn`` this is NOT lead-gated — it applies to EVERY
+        # agent: a non-None summary means the agent has UNSEEN actionable
+        # back-edge/review events, so the plate is ACTIONABLE and the summary
+        # rides the plate directive (see the probe below). This is the
+        # heartbeat BACKSTOP that guarantees an actionable event surfaces
+        # even if its direct wake was missed. The closure marks the events
+        # seen as it builds the summary (mark-on-surface) — cron guarantees
+        # an actionable plate always dispatches, so surfacing == presentation
+        # — which is the storm guard: a surfaced event never re-triggers.
+        # A read failure degrades to "no probe" (None), like the lead probes.
+        self.unseen_events_fn = unseen_events_fn
         # Host-published channel post (§8 #14): wired so ``_execute_job``
         # can post a standup (or any ``post_to_channel``-tagged) job's
         # dispatch response into the team's channel thread. None in
@@ -1245,6 +1260,35 @@ class CronScheduler:
                         f"Team goals are set but only {count} open task(s) advance "
                         f"them for team {team_id} -- review the goals, decompose "
                         "under-covered ones into tasks, and hand them off to the team."
+                    ),
+                ))
+
+        # Probe 8: unseen actionable events (team signal ledger, Item 1) —
+        # the heartbeat BACKSTOP. Applies to EVERY agent (NOT lead-gated):
+        # a non-None summary means the agent has unseen actionable back-edge
+        # / review events, so the plate is ACTIONABLE and the summary rides
+        # the directive (surfaced in the "Probe Alerts" section like every
+        # other triggered probe). Mesh-side ThreadStore read only — never a
+        # container call, so it never cold-wakes a hibernated agent; a read
+        # failure degrades to "no probe". The closure marks the events seen
+        # as it builds the summary (mark-on-surface) — this probe running is
+        # the presentation point, since cron always dispatches an actionable
+        # plate — so a surfaced event never re-triggers the heartbeat.
+        if self.unseen_events_fn is not None:
+            try:
+                unseen = self.unseen_events_fn(agent)
+            except Exception as e:
+                logger.debug("unseen_events_fn failed for '%s': %s", agent, e)
+                unseen = None
+            if unseen:
+                count = unseen.get("count", 0)
+                summary = unseen.get("summary", "")
+                results.append(HeartbeatProbeResult(
+                    name="unseen_events",
+                    triggered=True,
+                    detail=(
+                        summary
+                        or f"{count} unseen actionable event(s) -- call check_inbox to act on them."
                     ),
                 ))
 

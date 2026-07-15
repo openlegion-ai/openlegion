@@ -230,14 +230,16 @@ class TestBackEdgeHelperEligibility:
         )
         assert lane.calls == []
 
-    def test_origin_user_mismatch_writes_event_but_does_not_wake(
+    def test_origin_user_mismatch_writes_event_but_does_not_wake_origin(
         self, mesh_app_with_back_edge,
     ):
-        """L9 binding: when ``origin.user`` is not the task ``creator``
-        (forged origin, or a multi-hop chain whose origin points at a
-        distant root), the back-edge EVENT is still recorded so the
-        originator's check_inbox/heartbeat sees it — but the privileged
-        wake is skipped so no arbitrary agent is interrupted."""
+        """L9 binding (origin path) is unchanged: when ``origin.user`` is not
+        the task ``creator`` (forged origin, or a multi-hop chain whose origin
+        points at a distant root), the back-edge EVENT is still recorded for
+        the origin — but the ORIGIN-path forgeable-origin wake guard skips
+        waking it. (The separate, stored-ownership creator path DOES wake the
+        real creator — see ``TestCreatorBackEdge``; this test asserts the
+        origin guard itself is untouched.)"""
         app, thread_store, lane, _loop = mesh_app_with_back_edge
         # origin.user="analyst" (claimed) but creator="scout" (real).
         rec = _record(
@@ -253,12 +255,15 @@ class TestBackEdgeHelperEligibility:
         _settle()
 
         # Event IS recorded for the claimed origin (delivery intact).
-        events = _events_for(thread_store, "analyst")
         assert any(
-            e.get("task_id") == "task_mismatch_1" for e in events
+            e.get("task_id") == "task_mismatch_1"
+            for e in _events_for(thread_store, "analyst")
         )
-        # But NO wake — origin_user != creator.
-        assert lane.calls == []
+        # The origin path did NOT wake the (forgeable) origin_user.
+        assert not any(c["args"][0] == "analyst" for c in lane.calls), (
+            "forgeable origin_user must never get an ownership-based wake "
+            "via the origin path"
+        )
 
     def test_origin_user_matches_creator_wakes(self, mesh_app_with_back_edge):
         """L9 binding: the legit case (origin.user == creator) still
@@ -302,26 +307,31 @@ class TestBackEdgeHelperEligibility:
         assert not any(
             e.get("task_id") == "task_human_1" for e in events
         )
-        # ...but the operator gets the event + a recovery wake.
+        # ...but the operator gets the event + a recovery wake. (The
+        # immediate creator ``scout`` also gets its own creator-path wake now
+        # — Item 3 — so filter for the operator wake specifically.)
         op_events = _events_for(thread_store, "operator")
         assert any(
             e.get("task_id") == "task_human_1" for e in op_events
         )
-        assert len(lane.calls) == 1
-        assert lane.calls[0]["args"][0] == "operator"
-        wake_msg = lane.calls[0]["args"][1]
+        op_wakes = [c for c in lane.calls if c["args"][0] == "operator"]
+        assert len(op_wakes) == 1
+        wake_msg = op_wakes[0]["args"][1]
         assert "task_human_1" in wake_msg
         assert "already informed" in wake_msg
         # No task_id threading — the operator's turn is ABOUT the task,
         # not an execution of it; auto-close must not touch the row.
-        assert lane.calls[0]["kwargs"].get("task_id") is None
-        assert lane.calls[0]["kwargs"].get("auto_notify") is False
+        assert op_wakes[0]["kwargs"].get("task_id") is None
+        assert op_wakes[0]["kwargs"].get("auto_notify") is False
 
     def test_human_origin_completion_does_not_wake_operator(
         self, mesh_app_with_back_edge,
     ):
-        """Successful human-origin chains stay quiet — recovery wakes are
-        for failed/blocked only."""
+        """Successful human-origin chains stay quiet FOR THE OPERATOR —
+        operator recovery wakes are for failed/blocked only. (The immediate
+        creator ``scout`` still learns of the completion via its own creator
+        path — Item 3, fan-in — so assert only that the OPERATOR isn't woken
+        and gets no event.)"""
         app, thread_store, lane, _loop = mesh_app_with_back_edge
         rec = _record(
             "task_human_2", status="done",
@@ -338,15 +348,19 @@ class TestBackEdgeHelperEligibility:
         assert not any(
             e.get("task_id") == "task_human_2" for e in op_events
         )
-        assert lane.calls == []
+        assert not any(c["args"][0] == "operator" for c in lane.calls)
 
     def test_human_origin_operator_assignee_not_self_woken(
         self, mesh_app_with_back_edge,
     ):
-        """The operator's own failed tasks don't trigger a self-wake."""
+        """The operator's own failed tasks don't trigger a self-wake.
+
+        ``creator`` is the operator here too: the A2 guard skips (assignee ==
+        operator) and the Item 3 creator path skips (creator == operator has
+        its own dedicated channels), so nothing fires."""
         app, _thread_store, lane, _loop = mesh_app_with_back_edge
         rec = _record(
-            "task_human_3", assignee="operator",
+            "task_human_3", assignee="operator", creator="operator",
             origin={"kind": "human", "channel": "web", "user": "u1"},
         )
 
@@ -362,7 +376,9 @@ class TestBackEdgeHelperEligibility:
         self, mesh_app_with_back_edge,
     ):
         """Burst coalescing: lane timeout + sweep retry on the same task
-        produce ONE operator wake inside the 60s window."""
+        produce ONE operator wake inside the 60s window. (The creator ``scout``
+        is also woken once — Item 3 — under its own per-task window; filter for
+        the operator wake to assert the A2 coalescing specifically.)"""
         app, _thread_store, lane, _loop = mesh_app_with_back_edge
         rec = _record(
             "task_human_4",
@@ -377,7 +393,8 @@ class TestBackEdgeHelperEligibility:
         )
         _settle()
 
-        assert len(lane.calls) == 1
+        op_wakes = [c for c in lane.calls if c["args"][0] == "operator"]
+        assert len(op_wakes) == 1
 
 
 class TestBackEdgeTracePropagation:
@@ -608,3 +625,199 @@ class TestOperatorRecoveryWakeGlobalThrottle:
             c for c in lane.calls if c["args"][0] == "operator"
         ]
         assert len(operator_wakes) == 5  # _OPERATOR_RECOVERY_WAKE_MAX
+
+
+class TestCreatorBackEdge:
+    """Team signal ledger (Item 3): the IMMEDIATE ``creator`` (a fan-in /
+    join parent) is delivered the transition + woken by STORED ownership,
+    independently of the forgeable-origin path. Registered agents in the
+    fixture: operator, scout, analyst, writer.
+    """
+
+    def test_creator_receives_event_and_wakes_on_completed(
+        self, mesh_app_with_back_edge,
+    ):
+        """A child created by analyst (root origin points at scout) delivers
+        the COMPLETION to analyst AND wakes analyst — fan-in needs to know a
+        child finished (the origin path never wakes on completion)."""
+        app, thread_store, lane, _loop = mesh_app_with_back_edge
+        rec = _record(
+            "fanin_done", status="done", creator="analyst", assignee="writer",
+            origin={"kind": "agent", "channel": "", "user": "scout"},
+        )
+        app._write_task_event_back_edge(
+            rec, event_kind="task_completed", payload_extras={"summary": "child done"},
+        )
+        _settle()
+
+        # Creator analyst got the event + a wake.
+        analyst_ev = next(
+            e for e in _events_for(thread_store, "analyst")
+            if e.get("task_id") == "fanin_done"
+        )
+        assert analyst_ev["kind"] == "task_completed"
+        analyst_wakes = [c for c in lane.calls if c["args"][0] == "analyst"]
+        assert len(analyst_wakes) == 1
+        # Root origin scout still gets its informational event (no wake).
+        assert any(
+            e.get("task_id") == "fanin_done" for e in _events_for(thread_store, "scout")
+        )
+        assert not any(c["args"][0] == "scout" for c in lane.calls)
+
+    def test_creator_receives_event_and_wakes_on_failed(
+        self, mesh_app_with_back_edge,
+    ):
+        app, thread_store, lane, _loop = mesh_app_with_back_edge
+        rec = _record(
+            "fanin_fail", status="failed", creator="analyst", assignee="writer",
+            origin={"kind": "agent", "channel": "", "user": "scout"},
+        )
+        app._write_task_event_back_edge(
+            rec, event_kind="task_failed", payload_extras={"error": "boom"},
+        )
+        _settle()
+
+        assert any(
+            e.get("task_id") == "fanin_fail" for e in _events_for(thread_store, "analyst")
+        )
+        analyst_wakes = [c for c in lane.calls if c["args"][0] == "analyst"]
+        assert len(analyst_wakes) == 1
+        # Origin scout: event recorded, but NOT woken (origin_user != creator).
+        assert not any(c["args"][0] == "scout" for c in lane.calls)
+
+    def test_creator_wake_omits_task_id(self, mesh_app_with_back_edge):
+        """The parent's turn is a SYNTHESIS turn ABOUT the child, not an
+        execution of the already-terminal child task — so no task_id is
+        threaded (auto-close must not touch the row), like the operator
+        recovery wake."""
+        app, _thread_store, lane, _loop = mesh_app_with_back_edge
+        rec = _record(
+            "fanin_notaskid", status="done", creator="analyst", assignee="writer",
+            origin={"kind": "agent", "channel": "", "user": "scout"},
+        )
+        app._write_task_event_back_edge(
+            rec, event_kind="task_completed", payload_extras={"summary": "ok"},
+        )
+        _settle()
+
+        analyst_wake = next(c for c in lane.calls if c["args"][0] == "analyst")
+        assert analyst_wake["kwargs"].get("task_id") is None
+        assert analyst_wake["kwargs"].get("auto_notify") is False
+
+    def test_creator_dedup_when_equals_origin_user(self, mesh_app_with_back_edge):
+        """Single-hop (creator == origin_user == scout): the creator path
+        dedups and only the origin path acts — exactly ONE wake, no double."""
+        app, thread_store, lane, _loop = mesh_app_with_back_edge
+        rec = _record(
+            "single_hop", status="failed", creator="scout", assignee="writer",
+            origin={"kind": "agent", "channel": "", "user": "scout"},
+        )
+        app._write_task_event_back_edge(
+            rec, event_kind="task_failed", payload_extras={"error": "x"},
+        )
+        _settle()
+
+        scout_events = [
+            e for e in _events_for(thread_store, "scout") if e.get("task_id") == "single_hop"
+        ]
+        assert len(scout_events) == 1  # not doubled
+        assert len(lane.calls) == 1
+        assert lane.calls[0]["args"][0] == "scout"
+
+    def test_creator_equals_assignee_not_self_notified(self, mesh_app_with_back_edge):
+        """creator == assignee (self-handoff on the child) → no creator
+        signal to writer; the origin path still serves scout."""
+        app, thread_store, lane, _loop = mesh_app_with_back_edge
+        rec = _record(
+            "self_child", status="failed", creator="writer", assignee="writer",
+            origin={"kind": "agent", "channel": "", "user": "scout"},
+        )
+        app._write_task_event_back_edge(
+            rec, event_kind="task_failed", payload_extras={"error": "x"},
+        )
+        _settle()
+
+        # writer (creator==assignee) got nothing; no writer wake.
+        assert not any(
+            e.get("task_id") == "self_child" for e in _events_for(thread_store, "writer")
+        )
+        assert not any(c["args"][0] == "writer" for c in lane.calls)
+        # scout (origin) still gets its event.
+        assert any(
+            e.get("task_id") == "self_child" for e in _events_for(thread_store, "scout")
+        )
+
+    def test_unregistered_creator_gets_no_event(self, mesh_app_with_back_edge):
+        app, thread_store, lane, _loop = mesh_app_with_back_edge
+        rec = _record(
+            "ghost_child", status="failed", creator="ghost", assignee="writer",
+            origin={"kind": "agent", "channel": "", "user": "scout"},
+        )
+        app._write_task_event_back_edge(
+            rec, event_kind="task_failed", payload_extras={"error": "x"},
+        )
+        _settle()
+
+        assert not any(
+            e.get("task_id") == "ghost_child" for e in _events_for(thread_store, "ghost")
+        )
+        assert not any(c["args"][0] == "ghost" for c in lane.calls)
+
+    def test_creator_path_fires_for_human_origin_fanin(self, mesh_app_with_back_edge):
+        """The origin block short-circuits for a human root, but the creator
+        path (which runs first) still delivers to the immediate agent parent."""
+        app, thread_store, lane, _loop = mesh_app_with_back_edge
+        rec = _record(
+            "human_fanin", status="done", creator="analyst", assignee="writer",
+            origin={"kind": "human", "channel": "telegram", "user": "9999"},
+        )
+        app._write_task_event_back_edge(
+            rec, event_kind="task_completed", payload_extras={"summary": "ok"},
+        )
+        _settle()
+
+        assert any(
+            e.get("task_id") == "human_fanin" for e in _events_for(thread_store, "analyst")
+        )
+        assert [c for c in lane.calls if c["args"][0] == "analyst"]
+        # The human origin gets no mesh event; no operator wake (completion).
+        assert not any(
+            e.get("task_id") == "human_fanin" for e in _events_for(thread_store, "9999")
+        )
+        assert not any(c["args"][0] == "operator" for c in lane.calls)
+
+    def test_operator_creator_is_skipped(self, mesh_app_with_back_edge):
+        """creator == operator is skipped by the creator path (the operator
+        has its own channels) — no double-signal."""
+        app, thread_store, lane, _loop = mesh_app_with_back_edge
+        rec = _record(
+            "op_creator", status="failed", creator="operator", assignee="writer",
+            origin={"kind": "agent", "channel": "", "user": "scout"},
+        )
+        app._write_task_event_back_edge(
+            rec, event_kind="task_failed", payload_extras={"error": "x"},
+        )
+        _settle()
+
+        assert not any(
+            e.get("task_id") == "op_creator" for e in _events_for(thread_store, "operator")
+        )
+        assert not any(c["args"][0] == "operator" for c in lane.calls)
+
+    def test_creator_wake_rate_limited_per_task(self, mesh_app_with_back_edge):
+        """A burst on the same child coalesces to ONE creator wake."""
+        app, _thread_store, lane, _loop = mesh_app_with_back_edge
+        rec = _record(
+            "fanin_burst", status="failed", creator="analyst", assignee="writer",
+            origin={"kind": "agent", "channel": "", "user": "scout"},
+        )
+        app._write_task_event_back_edge(
+            rec, event_kind="task_failed", payload_extras={"error": "1"},
+        )
+        app._write_task_event_back_edge(
+            rec, event_kind="task_failed", payload_extras={"error": "2"},
+        )
+        _settle()
+
+        analyst_wakes = [c for c in lane.calls if c["args"][0] == "analyst"]
+        assert len(analyst_wakes) == 1

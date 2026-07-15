@@ -57,7 +57,18 @@ VALID_MESSAGE_KINDS: frozenset[str] = frozenset({"message", "event"})
 # Back-edge event kinds the recipient must act on. Mirrors the mesh's
 # ``_BACK_EDGE_WAKE_KINDS`` — these get the long (7-day) serving window
 # in ``list_events_for`` so an originator can recover after a gap.
-ACTIONABLE_EVENT_KINDS: frozenset[str] = frozenset({"task_failed", "task_blocked"})
+#
+# Team signal ledger (Item 2): the two review outcomes that require the
+# review AUTHOR to act — a rejection (rework the branch) and a
+# merge-preflight failure (branch changed/deleted/conflicted, resubmit)
+# — join the actionable set so Item 1's heartbeat backstop force-surfaces
+# them if the direct author wake was ever missed. The other review
+# outcomes (``review_merged`` / ``review_approved`` / ``review_superseded``)
+# stay INFORMATIONAL on purpose: promptness for those rides the direct
+# low-priority wake, not a forced heartbeat plate.
+ACTIONABLE_EVENT_KINDS: frozenset[str] = frozenset(
+    {"task_failed", "task_blocked", "review_rejected", "review_merge_failed"}
+)
 
 # Query windows for ``list_events_for``. These replace the old
 # blackboard TTLs byte-for-byte in effect: actionable events surface
@@ -180,6 +191,20 @@ class ThreadStore:
                     ON thread_messages(thread_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_thread_messages_recipient
                     ON thread_messages(recipient, kind, created_at);
+
+                -- Durable per-recipient read cursor (team signal ledger,
+                -- Item 1). ``last_seen_id`` is a monotonic high-water mark
+                -- over ``thread_messages.id``: everything at or below it has
+                -- already been surfaced to the recipient (via the heartbeat
+                -- backstop or a proactive check_inbox), so the "does this
+                -- agent have UNSEEN actionable events?" probe can answer
+                -- cheaply without re-firing an LLM turn for the same events
+                -- on every heartbeat. Canonical v1 — created here, no ALTER.
+                CREATE TABLE IF NOT EXISTS event_cursors (
+                    recipient    TEXT PRIMARY KEY,
+                    last_seen_id INTEGER NOT NULL DEFAULT 0,
+                    updated_at   REAL
+                );
 
                 PRAGMA user_version = 1;
                 """
@@ -522,6 +547,131 @@ class ThreadStore:
             envelope["created_at"] = msg["created_at"]
             events.append(envelope)
         return events[:EVENT_QUERY_LIMIT]
+
+    # ── unseen-actionable cursor (team signal ledger, Item 1) ────
+    #
+    # ``list_events_for`` above is a WINDOW read (7d/24h) with no memory of
+    # what a recipient has already seen — so the heartbeat backstop can't
+    # cheaply ask "does this agent have UNSEEN actionable events?" without
+    # re-firing an LLM turn for the same events every interval. The
+    # ``event_cursors`` table adds that memory: ``count_unseen_actionable``
+    # /``unseen_actionable_events`` read strictly ABOVE the cursor, and
+    # ``mark_events_seen`` advances it (mark-on-surface). The window read
+    # stays cursor-free — a proactive ``check_inbox`` still sees every event
+    # in its serving window regardless of the cursor; only the heartbeat
+    # re-trigger is gated.
+
+    def _event_cursor(self, conn: sqlite3.Connection, recipient: str) -> int:
+        row = conn.execute(
+            "SELECT last_seen_id FROM event_cursors WHERE recipient = ?",
+            (recipient,),
+        ).fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+
+    def _scan_unseen_actionable(self, recipient: str) -> list[dict]:
+        """Deduped, actionable, UNSEEN event message rows for ``recipient``.
+
+        The single shared pass behind ``count_unseen_actionable`` and
+        ``unseen_actionable_events`` so the two agree exactly (count ==
+        number of returned envelopes, up to the hard bound). Applies, in
+        order: the cursor filter (``id > last_seen_id`` — the "unseen"
+        clause), the 7-day actionable serving window, the SAME newest-per-
+        task overwrite dedupe as ``list_events_for`` (a later
+        ``task_completed`` shadows an earlier ``task_blocked`` for the same
+        task, so a resolved blocker never nags), and finally the
+        actionable-kind filter. Newest-first (by ``created_at``), bounded
+        by :data:`EVENT_QUERY_LIMIT`. Mesh-side DB read only — never a
+        container call, so it never cold-wakes a hibernated agent.
+        """
+        now = time.time()
+        cutoff = now - EVENT_ACTIONABLE_WINDOW_SECONDS
+        with self._conn() as conn:
+            cursor = self._event_cursor(conn, recipient)
+            rows = conn.execute(
+                f"SELECT {self._MESSAGE_COLS} FROM thread_messages "
+                "WHERE recipient = ? AND kind = 'event' AND id > ? AND created_at >= ? "
+                "ORDER BY created_at DESC, id DESC LIMIT ?",
+                (recipient, cursor, cutoff, EVENT_QUERY_LIMIT),
+            ).fetchall()
+        survivors: list[dict] = []
+        seen: set[str] = set()
+        for r in rows:  # newest-first — the first row per task key wins
+            msg = self._row_to_message(r)
+            thread_id = str(msg["thread_id"] or "")
+            key = thread_id if thread_id.startswith("task:") else f"msg:{msg['id']}"
+            if key in seen:
+                continue
+            # Mark BEFORE the actionable check (same as ``list_events_for``):
+            # an informational newest row must still shadow the task's older
+            # actionable transitions rather than let a stale one resurface.
+            seen.add(key)
+            payload = msg["payload"] if isinstance(msg["payload"], dict) else {}
+            if payload.get("kind") not in ACTIONABLE_EVENT_KINDS:
+                continue
+            survivors.append(msg)
+        return survivors
+
+    def count_unseen_actionable(self, recipient: str) -> int:
+        """Cheap count of UNSEEN actionable events for ``recipient``.
+
+        The backstop probe's short-circuit: 0 means the heartbeat need not
+        escalate on this account, so a non-lead/idle agent pays only for
+        this bounded, indexed read. Consistent with
+        :meth:`unseen_actionable_events` by construction (both share
+        :meth:`_scan_unseen_actionable`), so ``count > 0`` iff that method
+        returns a non-empty list.
+        """
+        return len(self._scan_unseen_actionable(recipient))
+
+    def unseen_actionable_events(
+        self, recipient: str, *, limit: int = EVENT_QUERY_LIMIT,
+    ) -> list[dict]:
+        """UNSEEN actionable event envelopes for ``recipient``, newest-first.
+
+        Same envelope shape as :meth:`list_events_for` (stored payload +
+        ``id`` / ``thread_id`` / ``created_at``). The caller learns the max
+        id to mark as seen via ``max(e["id"] for e in <result>)`` — the
+        list is ordered by ``created_at`` (not id), so use ``max`` rather
+        than the first element: a backdated row can carry a higher id than a
+        newer-timestamped one, and the cursor must jump past ALL surfaced
+        rows to prevent a re-trigger.
+        """
+        limit = max(1, min(int(limit), EVENT_QUERY_LIMIT))
+        events: list[dict] = []
+        for msg in self._scan_unseen_actionable(recipient)[:limit]:
+            payload = msg["payload"] if isinstance(msg["payload"], dict) else {}
+            envelope = dict(payload)
+            envelope["id"] = msg["id"]
+            envelope["thread_id"] = msg["thread_id"]
+            envelope["created_at"] = msg["created_at"]
+            events.append(envelope)
+        return events
+
+    def mark_events_seen(self, recipient: str, up_to_id: int) -> None:
+        """Advance ``recipient``'s read cursor to ``max(existing, up_to_id)``.
+
+        Monotonic UPSERT — an out-of-order or stale mark can never regress
+        the high-water mark. A non-positive ``up_to_id`` is a no-op (nothing
+        to advance past). This is the storm guard: once events are surfaced
+        (heartbeat backstop or proactive ``check_inbox``), they don't
+        re-trigger.
+        """
+        try:
+            up_to = int(up_to_id)
+        except (TypeError, ValueError):
+            return
+        if up_to <= 0:
+            return
+        now = time.time()
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO event_cursors (recipient, last_seen_id, updated_at) "
+                "VALUES (?, ?, ?) "
+                "ON CONFLICT(recipient) DO UPDATE SET "
+                "last_seen_id = MAX(last_seen_id, excluded.last_seen_id), "
+                "updated_at = excluded.updated_at",
+                (recipient, up_to, now),
+            )
 
     # ── reaper ───────────────────────────────────────────────────
 

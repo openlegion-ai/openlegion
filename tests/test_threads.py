@@ -721,3 +721,126 @@ class TestCheckInboxMultiplicity:
             blackboard.close()
             thread_store.close()
             importlib.reload(server_module)
+
+
+class TestUnseenActionableCursor:
+    """Durable per-recipient read cursor (team signal ledger, Item 1).
+
+    ``count_unseen_actionable`` / ``unseen_actionable_events`` answer "does
+    this agent have UNSEEN actionable events?" strictly ABOVE the cursor;
+    ``mark_events_seen`` advances it (mark-on-surface) so a surfaced event
+    never re-triggers the heartbeat backstop.
+    """
+
+    def _post(self, store, task_id, kind, recipient="scout", age=0.0):
+        th = store.ensure_task_thread("scout", task_id)
+        m = store.post_message(
+            th["id"], "mesh", recipient=recipient, kind="event",
+            payload={"kind": kind, "task_id": task_id},
+        )
+        if age:
+            _age_message(store, m["id"], age)
+        return m
+
+    def _post_review(self, store, team, kind, review_id, recipient="author1"):
+        ch = store.ensure_channel(team)
+        return store.post_message(
+            ch["id"], "mesh", recipient=recipient, kind="event",
+            payload={"kind": kind, "review_id": review_id},
+        )
+
+    def test_count_reflects_new_actionable_events(self, store):
+        self._post(store, "t1", "task_failed")
+        self._post(store, "t2", "task_blocked")
+        self._post(store, "t3", "task_completed")  # informational
+        assert store.count_unseen_actionable("scout") == 2
+        assert {e["kind"] for e in store.unseen_actionable_events("scout")} == {
+            "task_failed", "task_blocked",
+        }
+
+    def test_informational_only_is_not_actionable(self, store):
+        """The plate must NOT go actionable on informational-only events."""
+        self._post(store, "t1", "task_completed")
+        self._post(store, "t2", "task_cancelled")
+        self._post_review(store, "team", "review_merged", "r1")
+        self._post_review(store, "team", "review_approved", "r2")
+        self._post_review(store, "team", "review_superseded", "r3")
+        assert store.count_unseen_actionable("scout") == 0
+        assert store.count_unseen_actionable("author1") == 0
+        assert store.unseen_actionable_events("author1") == []
+
+    def test_review_outcomes_are_actionable_and_not_deduped(self, store):
+        """Rejected + merge-failed are actionable; channel-thread events are
+        NOT collapsed (each is its own message)."""
+        self._post_review(store, "team", "review_rejected", "r1")
+        self._post_review(store, "team", "review_merge_failed", "r2")
+        self._post_review(store, "team", "review_merged", "r3")  # info
+        assert store.count_unseen_actionable("author1") == 2
+        assert {e["kind"] for e in store.unseen_actionable_events("author1")} == {
+            "review_rejected", "review_merge_failed",
+        }
+
+    def test_mark_prevents_retrigger(self, store):
+        self._post(store, "t1", "task_failed")
+        self._post(store, "t2", "task_blocked")
+        events = store.unseen_actionable_events("scout")
+        # Negative control: WITHOUT the mark, the probe keeps returning them.
+        assert store.count_unseen_actionable("scout") == 2
+        assert store.count_unseen_actionable("scout") == 2
+        # Mark-on-surface: once surfaced, they don't re-trigger.
+        store.mark_events_seen("scout", max(e["id"] for e in events))
+        assert store.count_unseen_actionable("scout") == 0
+        assert store.unseen_actionable_events("scout") == []
+
+    def test_new_event_after_mark_trips_again(self, store):
+        m = self._post(store, "t1", "task_failed")
+        store.mark_events_seen("scout", m["id"])
+        assert store.count_unseen_actionable("scout") == 0
+        self._post(store, "t2", "task_failed")
+        assert store.count_unseen_actionable("scout") == 1
+
+    def test_overwrite_resolved_blocker_not_actionable(self, store):
+        """A later informational transition (task_completed after
+        task_blocked) shadows the stale actionable one — same overwrite
+        semantics as list_events_for."""
+        self._post(store, "t1", "task_blocked", age=3600)
+        self._post(store, "t1", "task_completed")
+        assert store.count_unseen_actionable("scout") == 0
+        assert store.unseen_actionable_events("scout") == []
+
+    def test_cursor_is_per_recipient(self, store):
+        self._post(store, "t1", "task_failed", recipient="scout")
+        self._post(store, "t2", "task_failed", recipient="analyst")
+        store.mark_events_seen("scout", 10_000)
+        assert store.count_unseen_actionable("scout") == 0
+        # analyst's cursor is untouched.
+        assert store.count_unseen_actionable("analyst") == 1
+
+    def test_mark_is_monotonic(self, store):
+        m = self._post(store, "t1", "task_failed")
+        store.mark_events_seen("scout", m["id"] + 50)
+        store.mark_events_seen("scout", m["id"])  # cannot regress
+        with store._conn() as conn:
+            row = conn.execute(
+                "SELECT last_seen_id FROM event_cursors WHERE recipient = ?", ("scout",),
+            ).fetchone()
+        assert row[0] == m["id"] + 50
+
+    def test_mark_nonpositive_is_noop(self, store):
+        self._post(store, "t1", "task_failed")
+        store.mark_events_seen("scout", 0)
+        store.mark_events_seen("scout", -5)
+        assert store.count_unseen_actionable("scout") == 1
+
+    def test_actionable_window_bounds_count(self, store):
+        """Actionable events aged past the 7-day serving window drop out of
+        the unseen count (same window as list_events_for)."""
+        self._post(store, "t_old", "task_failed", age=604_800 + 120)
+        self._post(store, "t_new", "task_blocked")
+        assert store.count_unseen_actionable("scout") == 1
+        assert [e["task_id"] for e in store.unseen_actionable_events("scout")] == ["t_new"]
+
+    def test_cursor_table_is_canonical_v1(self, store):
+        with store._conn() as conn:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(event_cursors)").fetchall()}
+        assert cols == {"recipient", "last_seen_id", "updated_at"}
