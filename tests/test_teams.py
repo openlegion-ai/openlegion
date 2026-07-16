@@ -457,6 +457,88 @@ class TestMeshTeamEndpoints:
         assert r.status_code == 400
 
     @pytest.mark.asyncio
+    async def test_remove_lead_reappoints_first_remaining_member(self, team_app):
+        """Lead-orphan seam (docs/plans/2026-07-16-autonomous-team-delivery.md
+        §1/§3), mirror of the ADD-side auto-appoint: removing the LEAD from a
+        >=3-member team re-appoints the first remaining real member so
+        stewardship never goes dormant until the next reboot's backfill."""
+        app, store, _, _ = team_app
+        store.create_team("proj1")
+        store.add_member("proj1", "agent1")
+        store.add_member("proj1", "agent2")
+        store.add_member("proj1", "agent3")
+        store.set_lead("proj1", "agent1")
+        r = await _delete(app, "/mesh/teams/proj1/members/agent1")
+        assert r.status_code == 200
+        assert store.members("proj1") == ["agent2", "agent3"]
+        # First remaining real member (by join order) is re-appointed.
+        assert store.get_team("proj1")["lead_agent_id"] == "agent2"
+
+    @pytest.mark.asyncio
+    async def test_remove_non_lead_leaves_lead_unchanged(self, team_app):
+        """Never re-appoint over a surviving lead: removing a NON-lead member
+        leaves the existing lead intact."""
+        app, store, _, _ = team_app
+        store.create_team("proj1")
+        store.add_member("proj1", "agent1")
+        store.add_member("proj1", "agent2")
+        store.add_member("proj1", "agent3")
+        store.set_lead("proj1", "agent2")  # lead is agent2
+        r = await _delete(app, "/mesh/teams/proj1/members/agent3")  # remove non-lead
+        assert r.status_code == 200
+        assert store.get_team("proj1")["lead_agent_id"] == "agent2"
+
+    @pytest.mark.asyncio
+    async def test_remove_lead_down_to_one_leaves_no_lead(self, team_app):
+        """Dropping below two real members appoints nobody — the solo
+        remainder self-leads (no lead row)."""
+        app, store, _, _ = team_app
+        store.create_team("proj1")
+        store.add_member("proj1", "agent1")
+        store.add_member("proj1", "agent2")
+        store.set_lead("proj1", "agent1")
+        r = await _delete(app, "/mesh/teams/proj1/members/agent1")
+        assert r.status_code == 200
+        assert store.members("proj1") == ["agent2"]
+        assert store.get_team("proj1")["lead_agent_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_remove_lead_reappoint_failure_does_not_fail_remove(self, team_app):
+        """Best-effort: a ``set_lead`` failure during re-appoint must not fail
+        the remove response — the member is still removed, the lead stays
+        cleared, and the boot backfill catches the drift."""
+        app, store, _, _ = team_app
+        store.create_team("proj1")
+        store.add_member("proj1", "agent1")
+        store.add_member("proj1", "agent2")
+        store.add_member("proj1", "agent3")
+        store.set_lead("proj1", "agent1")
+        with patch.object(store, "set_lead", side_effect=ValueError("boom")):
+            r = await _delete(app, "/mesh/teams/proj1/members/agent1")
+        assert r.status_code == 200
+        assert store.team_of("agent1") is None
+        assert store.get_team("proj1")["lead_agent_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_move_lead_reappoints_old_team(self, team_app):
+        """Move departure side: moving a team's LEAD to another team orphans
+        the old team's lead (``add_member`` eviction clears it) — the add
+        endpoint re-appoints a remaining old-team member."""
+        app, store, _, _ = team_app
+        store.create_team("proj1")
+        store.create_team("proj2")
+        store.add_member("proj1", "agent1")
+        store.add_member("proj1", "agent2")
+        store.add_member("proj1", "agent3")
+        store.set_lead("proj1", "agent1")  # agent1 leads proj1
+        r = await _post(app, "/mesh/teams/proj2/members", {"agent": "agent1"})
+        assert r.status_code == 200
+        assert store.team_of("agent1") == "proj2"
+        # proj1 lost its lead on the move → first remaining member re-appointed.
+        assert store.members("proj1") == ["agent2", "agent3"]
+        assert store.get_team("proj1")["lead_agent_id"] == "agent2"
+
+    @pytest.mark.asyncio
     async def test_delete_team_strips_all_member_permissions(self, team_app):
         app, store, perms_file, tmp_path = team_app
         await _post(
