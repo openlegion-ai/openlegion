@@ -6612,6 +6612,13 @@ def create_mesh_app(
         the archive state when ``include_archived`` is set. The ``name``
         / ``team_name`` keys both ride on each row so callers tracking
         either field keep working.
+
+        Phase-1 (design doc §1 finding 4): the goal + budget columns
+        (``north_star`` / ``success_criteria`` / ``budget_daily_usd`` /
+        ``budget_monthly_usd``) now ride each row too — previously they
+        were stripped here, so the operator's ``inspect_teams`` could not
+        read back the very goal/budget it had just set. Additive fields;
+        older callers ignore the new keys.
         """
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
@@ -6628,6 +6635,10 @@ def create_mesh_app(
                     "created_at": pdata.get("created_at", ""),
                     "status": pdata.get("status", "active") or "active",
                     "lead_agent_id": pdata.get("lead_agent_id"),
+                    "north_star": pdata.get("north_star"),
+                    "success_criteria": pdata.get("success_criteria"),
+                    "budget_daily_usd": pdata.get("budget_daily_usd"),
+                    "budget_monthly_usd": pdata.get("budget_monthly_usd"),
                 }
             )
         return {"teams": result}
@@ -8163,6 +8174,41 @@ def create_mesh_app(
             teams_store.set_goal(team_name, north_star, success_criteria)
         except TeamNotFound:
             raise HTTPException(404, f"Team '{team_name}' not found")
+
+        # Phase-1 (design doc §1 finding 4): set_goal previously only
+        # persisted + emitted an event, so a goal never reached RUNNING
+        # members — redirecting a busy team was inert to in-flight work.
+        # Mirror the goal into a reserved ``## Goal`` section of the team's
+        # shared TEAM.md and live-push it to running members, REUSING the
+        # brief writer's section-scoped write + concurrent push
+        # (``replace_markdown_section`` + ``_push_team_md``). Best-effort:
+        # a TEAM.md/push hiccup must NEVER fail the goal write itself
+        # (the persisted row above is the source of truth), and a team
+        # with no shared TEAM.md (pure-DB store / solo team-of-one with no
+        # scaffold) no-ops cleanly.
+        try:
+            team_md_path = teams_store.team_md_path(team_name)
+            if team_md_path is not None:
+                goal_lines: list[str] = []
+                if north_star:
+                    goal_lines.append(north_star)
+                if success_criteria:
+                    if goal_lines:
+                        goal_lines.append("")
+                    goal_lines.append("Success criteria:")
+                    goal_lines.extend(f"- {sc}" for sc in success_criteria)
+                goal_md = "\n".join(goal_lines) or "_No goal set._"
+                team_md_path.parent.mkdir(parents=True, exist_ok=True)
+                existing = (
+                    team_md_path.read_text(errors="replace")
+                    if team_md_path.exists()
+                    else f"# {team_name}\n"
+                )
+                updated = replace_markdown_section(existing, "Goal", goal_md)
+                team_md_path.write_text(updated)
+                await _push_team_md(team_name, updated)
+        except Exception as e:  # noqa: BLE001 — best-effort mirror, never fail the write
+            logger.warning("goal mirror/push for team %s failed: %s", team_name, e)
 
         _emit_team_event(
             event_bus,
