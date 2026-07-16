@@ -2908,6 +2908,80 @@ class TestTeamRoomSubTab:
         assert "'POST'" not in block and '"POST"' not in block
 
 
+class TestTeamRoomGoalAndBlockedVisibility:
+    """Phase-1 (plan §1, docs/plans/2026-07-16-autonomous-team-delivery.md)
+    dashboard-only visibility fixes: the room payload already carried
+    ``success_criteria`` and per-agent ``blocked_task`` data the panel
+    never rendered, and the plate line showed a bare probe count."""
+
+    def test_success_criteria_rendered_in_goal_box(self):
+        idx = _INDEX_HTML.index('data-testid="team-room-goal"')
+        block = _INDEX_HTML[idx:idx + 900]
+        assert "team-room-success-criteria" in block
+        assert "teamRoom?.team?.success_criteria" in block
+        assert "teamRoom?.team?.north_star" in block
+
+    def test_plate_line_renders_probe_names_not_just_count(self):
+        idx = _INDEX_HTML.index('data-testid="team-room-plate-line"')
+        block = _INDEX_HTML[idx:idx + 1200]
+        assert "team-room-plate-probes" in block
+        assert "triggered_probes" in block
+        assert "probeLabel(p)" in block
+
+    def test_probe_label_helper_defined(self):
+        assert "probeLabel(name)" in _APP_JS_TEXT
+
+    def test_member_card_renders_blocked_state_not_idle(self):
+        """A blocked agent must stop reading as idle: the busy/idle dot
+        and its tooltip must both branch on ``m.blocked_task``, and a
+        dedicated read-only "Blocked: ..." line must render."""
+        idx = _INDEX_HTML.index('data-testid="team-room-member-card"')
+        block = _INDEX_HTML[idx:idx + 4200]
+        assert "m.blocked_task ? 'bg-red-400'" in block
+        assert "m.blocked_task ? 'Blocked'" in block
+        assert 'data-testid="team-room-member-blocked"' in block
+        assert "'Blocked: ' + (m.blocked_task?.title" in block
+        assert "_humanizeBlocker(m.blocked_task?.blocker_note).label" in block
+        # No fake resolve button on this read-only card.
+        assert "resolveBlocked" not in block
+        assert "<button" not in block[block.index('data-testid="team-room-member-blocked"'):]
+
+    def test_no_active_task_excludes_blocked_members(self):
+        idx = _INDEX_HTML.index('data-testid="team-room-member-card"')
+        block = _INDEX_HTML[idx:idx + 4200]
+        assert 'x-show="!m.current_task && !m.blocked_task"' in block
+
+
+class TestWorkplaceBlockedTasksPanel:
+    """Phase-1 fix: ``workplaceBlockers`` (loaded by
+    ``loadWorkplaceBlockers`` from ``/api/workplace/blockers``) was
+    fetched but never rendered anywhere in the Work tab. The new panel
+    is deliberately read-only — free-form blocked tasks are operator-
+    handled, not user-resolvable, so there is no resolve/unblock CTA."""
+
+    def test_panel_present_and_bound_to_workplace_blockers(self):
+        assert 'data-testid="board-blocked-tasks"' in _INDEX_HTML
+        assert 'data-testid="board-blocked-task-row"' in _INDEX_HTML
+        idx = _INDEX_HTML.index('data-testid="board-blocked-tasks"')
+        block = _INDEX_HTML[idx:idx + 1800]
+        assert "workplaceBlockers" in block
+        assert "_humanizeBlocker(b.blocker_note).label" in block
+
+    def test_panel_is_read_only_no_resolve_button(self):
+        idx = _INDEX_HTML.index('data-testid="board-blocked-tasks"')
+        end = _INDEX_HTML.index("</section>", idx)
+        block = _INDEX_HTML[idx:end]
+        assert "<button" not in block or "openTaskDrillIn" in block
+        assert "Cancel</button>" not in block
+        assert "Restart agent</button>" not in block
+
+    def test_error_banner_uses_existing_retry_helper(self):
+        assert 'data-testid="workplace-blockers-error"' in _INDEX_HTML
+        idx = _INDEX_HTML.index('data-testid="workplace-blockers-error"')
+        block = _INDEX_HTML[max(0, idx - 300):idx + 300]
+        assert "retryWorkplaceSection('blockers')" in block
+
+
 # ── Phase-5 U5: lead advisory recommendations + autonomy log (§8 #19) ──
 
 

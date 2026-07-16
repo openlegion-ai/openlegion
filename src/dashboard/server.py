@@ -6185,18 +6185,27 @@ def create_dashboard_router(
             health_map = {h["agent"]: h.get("status") for h in health_monitor.get_status()}
 
         # Current task per member: the (at most one, by design — B1
-        # single-lane) "working" task. One team-scoped query, not one
-        # per member.
+        # single-lane) "working" task, plus any "blocked" task. Without
+        # the blocked bucket a blocked agent has no working task, so it
+        # rendered identically to an idle one — the room's whole point
+        # is a glance at who's doing what, and "stopped, waiting on
+        # something" is not the same as "nothing to do". One team-scoped
+        # query per status bucket, not one per member.
         current_task_by_agent: dict[str, dict] = {}
+        blocked_task_by_agent: dict[str, dict] = {}
         if tasks_store is not None:
             try:
-                for row in tasks_store.list_team(team_name, statuses=["working"]):
+                for row in tasks_store.list_team(team_name, statuses=["working", "blocked"]):
                     assignee = row.get("assignee")
-                    if assignee and assignee not in current_task_by_agent:
-                        current_task_by_agent[assignee] = {
+                    if not assignee:
+                        continue
+                    bucket = current_task_by_agent if row.get("status") == "working" else blocked_task_by_agent
+                    if assignee not in bucket:
+                        bucket[assignee] = {
                             "id": row.get("id"),
                             "title": row.get("title"),
                             "status": row.get("status"),
+                            "blocker_note": row.get("blocker_note"),
                         }
             except Exception as e:
                 logger.warning("Team Room %s: tasks lookup failed: %s", team_name, e)
@@ -6211,6 +6220,7 @@ def create_dashboard_router(
                 "busy": bool(status.get("busy", False)),
                 "queued": status.get("queued", 0),
                 "current_task": current_task_by_agent.get(agent_id),
+                "blocked_task": blocked_task_by_agent.get(agent_id),
                 "plate": plate,
                 "health": health_map.get(agent_id),
             })

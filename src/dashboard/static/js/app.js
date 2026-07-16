@@ -2829,6 +2829,15 @@ function dashboard() {
       return `${Math.round(s / 86400)}d`;
     },
 
+    // Plain-English label for a heartbeat probe name (Team Room plate
+    // line). The room payload only carries the raw snake_case probe
+    // name (e.g. "goal_coverage", "lead_blocked_tasks") — this just
+    // makes it readable without a lookup table to keep in sync with
+    // ``cron.py``'s probe names.
+    probeLabel(name) {
+      return String(name || '').replace(/_/g, ' ');
+    },
+
     // One-line "what's happening now" for the collapsed pipeline card:
     // the first non-terminal stage and what it's doing. Plain text.
     pipelineCurrentLabel(p) {
