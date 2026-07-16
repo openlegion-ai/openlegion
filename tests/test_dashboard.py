@@ -3535,7 +3535,7 @@ class TestTeamRoomEndpoint:
         teams_store.add_member("team", "alpha")
         teams_store.add_member("team", "beta")
         teams_store.set_lead("team", "alpha")
-        teams_store.set_goal("team", "Ship it")
+        teams_store.set_goal("team", "Ship it", ["Well is dug", "Water tested safe"])
 
         # alpha: busy + queued, working a task
         self.components["lane_manager"].get_status.return_value = {
@@ -3573,6 +3573,7 @@ class TestTeamRoomEndpoint:
         assert data["team"]["name"] == "team"
         assert data["team"]["description"] == "desc"
         assert data["team"]["north_star"] == "Ship it"
+        assert data["team"]["success_criteria"] == ["Well is dug", "Water tested safe"]
         assert data["team"]["lead_agent_id"] == "alpha"
 
         members = {m["agent_id"]: m for m in data["members"]}
@@ -3585,15 +3586,47 @@ class TestTeamRoomEndpoint:
         assert alpha["current_task"]["title"] == "Dig the well"
         assert alpha["current_task"]["status"] == "working"
         assert alpha["plate"] == plate
+        assert alpha["blocked_task"] is None
 
         beta = members["beta"]
         assert beta["is_lead"] is False
         assert beta["busy"] is False
         assert beta["current_task"] is None
         assert beta["plate"] is None
+        assert beta["blocked_task"] is None
 
         assert len(data["threads"]) == 1
         assert data["threads"][0]["id"] == ch["id"]
+
+    def test_blocked_task_surfaced_separately_from_current_task(self):
+        """A BLOCKED task must not disappear from the room payload just
+        because the composer's ``current_task`` query is scoped to
+        ``working`` — otherwise a blocked agent has no current_task and
+        renders identically to an idle one. ``blocked_task`` carries the
+        title + blocker_note so the Team Room can show why an agent
+        looks stopped instead of just idle."""
+        teams_store = self.components["teams_store"]
+        teams_store.create_team("team")
+        teams_store.add_member("team", "alpha")
+
+        rec = self.tasks_store.create(
+            creator="operator", assignee="alpha", title="Fetch the API key", team_id="team",
+        )
+        self.tasks_store.update_status(rec["id"], "working", actor="alpha")
+        self.tasks_store.update_status(
+            rec["id"], "blocked", actor="alpha", blocker_note="cred:stripe_api_key",
+        )
+
+        resp = self.client.get("/dashboard/api/teams/team/room")
+        assert resp.status_code == 200
+        member = resp.json()["members"][0]
+
+        # No "working" task, so current_task stays None...
+        assert member["current_task"] is None
+        # ...but blocked_task surfaces the same underlying task.
+        assert member["blocked_task"]["title"] == "Fetch the API key"
+        assert member["blocked_task"]["status"] == "blocked"
+        assert member["blocked_task"]["blocker_note"] == "cred:stripe_api_key"
 
     def test_member_with_no_lane_status_defaults_idle(self):
         """A member absent from lane_manager.get_status() still appears,

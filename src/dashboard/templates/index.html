@@ -1774,10 +1774,21 @@
                    plate per agent. Composed read-only view; the operator's
                    default landing when opening a team.) ── -->
               <div x-show="teamHubTab === 'room'" x-cloak class="px-4 py-3" data-testid="team-room-panel">
-                <!-- Team goal header -->
-                <div x-show="teamRoom?.team?.north_star" class="mb-3 px-3 py-2 rounded-lg bg-indigo-900/10 border border-indigo-800/30" data-testid="team-room-goal">
+                <!-- Team goal header — north_star + its success_criteria
+                     checklist (the room payload already carries both;
+                     only north_star rendered before, so the criteria a
+                     lead/agent is actually working toward were invisible). -->
+                <div x-show="teamRoom?.team?.north_star || (teamRoom?.team?.success_criteria || []).length" class="mb-3 px-3 py-2 rounded-lg bg-indigo-900/10 border border-indigo-800/30" data-testid="team-room-goal">
                   <div class="text-[11px] uppercase tracking-wide text-indigo-400/80 mb-0.5">Team goal</div>
-                  <div class="text-xs text-gray-300" x-text="teamRoom?.team?.north_star"></div>
+                  <div class="text-xs text-gray-300" x-show="teamRoom?.team?.north_star" x-text="teamRoom?.team?.north_star"></div>
+                  <ul x-show="(teamRoom?.team?.success_criteria || []).length" class="mt-1.5 space-y-0.5" data-testid="team-room-success-criteria">
+                    <template x-for="(c, ci) in (teamRoom?.team?.success_criteria || [])" :key="'crit-' + ci">
+                      <li class="text-[11px] text-gray-400 flex items-start gap-1.5">
+                        <span class="text-indigo-400/70">✓</span>
+                        <span x-text="c"></span>
+                      </li>
+                    </template>
+                  </ul>
                 </div>
 
                 <!-- first-load spinner -->
@@ -1798,8 +1809,8 @@
                               <img :src="agentAvatarUrl(m.agent_id)" :alt="m.agent_id">
                             </div>
                             <span class="w-2 h-2 rounded-full flex-shrink-0"
-                              :class="m.busy ? 'bg-amber-400' : 'bg-emerald-400'"
-                              :title="m.busy ? 'Busy' : 'Idle'"></span>
+                              :class="m.blocked_task ? 'bg-red-400' : (m.busy ? 'bg-amber-400' : 'bg-emerald-400')"
+                              :title="m.blocked_task ? 'Blocked' : (m.busy ? 'Busy' : 'Idle')"></span>
                             <span class="text-xs text-gray-300 truncate" x-text="m.agent_id"></span>
                             <span x-show="m.is_lead"
                               class="text-[11px] px-1.5 py-0.5 rounded bg-amber-900/30 text-amber-400 border border-amber-800/40 flex-shrink-0"
@@ -1810,14 +1821,32 @@
                           </div>
                           <div class="text-[11px] text-gray-400 mt-1.5 truncate" x-show="m.current_task"
                             :title="m.current_task?.title" x-text="'Working: ' + (m.current_task?.title || '')"></div>
-                          <div class="text-[11px] text-gray-500 mt-1" x-show="!m.current_task">No active task.</div>
+                          <div class="text-[11px] text-gray-500 mt-1" x-show="!m.current_task && !m.blocked_task">No active task.</div>
                           <div class="text-[11px] text-gray-500 mt-1" data-testid="team-room-plate-line">
-                            <template x-if="m.plate">
-                              <span x-text="(m.plate.triggered_probes?.length || 0) + ' items on plate · last checked ' + relativeTime(m.plate.checked_at)"></span>
-                            </template>
                             <template x-if="!m.plate">
                               <span>plate unknown</span>
                             </template>
+                            <template x-if="m.plate">
+                              <span x-text="(m.plate.triggered_probes?.length || 0) + ' items on plate · last checked ' + relativeTime(m.plate.checked_at)"></span>
+                            </template>
+                            <!-- Probe names, not just a count — "3 items on
+                                 plate" alone doesn't distinguish goal-coverage
+                                 from a blocked-task escalation from a lead
+                                 review. -->
+                            <div x-show="m.plate && (m.plate.triggered_probes || []).length" class="flex flex-wrap gap-1 mt-1" data-testid="team-room-plate-probes">
+                              <template x-for="p in (m.plate?.triggered_probes || [])" :key="p">
+                                <span class="text-[10px] px-1.5 py-0.5 rounded bg-gray-700/50 text-gray-400 border border-gray-700/60" :title="p" x-text="probeLabel(p)"></span>
+                              </template>
+                            </div>
+                          </div>
+                          <!-- Blocked state — read-only: free-form blocked
+                               tasks are operator-handled, no resolve action
+                               here. Without this, a blocked agent had no
+                               "working" task and rendered as idle. -->
+                          <div class="text-[11px] text-red-300 mt-1.5" x-show="m.blocked_task" data-testid="team-room-member-blocked">
+                            <div class="truncate" :title="m.blocked_task?.title" x-text="'Blocked: ' + (m.blocked_task?.title || '')"></div>
+                            <div class="text-red-400/70 truncate" x-show="m.blocked_task?.blocker_note"
+                              :title="m.blocked_task?.blocker_note" x-text="_humanizeBlocker(m.blocked_task?.blocker_note).label"></div>
                           </div>
                         </div>
                       </template>
@@ -4632,6 +4661,55 @@
           </section>
         </template>
 
+        <!-- Blocked tasks panel — fleet-wide status='blocked' list. The
+             dashboard already fetched this into ``workplaceBlockers``
+             (loadWorkplaceBlockers) but nothing rendered it, so a blocked
+             task was invisible fleet-wide. Deliberately read-only: no
+             Cancel/Restart row actions — free-form blocked tasks are
+             operator-handled, not user-resolvable from here (see
+             docs/plans/2026-07-16-autonomous-team-delivery.md). Rows
+             still open the drill-in modal for detail, same as Stuck tasks. -->
+        <template x-if="workplaceErrors.blockers">
+          <div class="bg-red-900/20 border border-red-800/40 rounded-lg p-3 mb-3 flex flex-wrap items-center gap-2"
+               role="alert" data-testid="workplace-blockers-error">
+            <span class="text-xs text-red-200 flex-1" x-text="workplaceErrors.blockers"></span>
+            <button type="button" @click="retryWorkplaceSection('blockers')"
+              class="text-[11px] font-medium px-2.5 py-1 rounded bg-red-800/40 hover:bg-red-700/50 text-red-100 transition-colors">Retry</button>
+          </div>
+        </template>
+        <template x-if="workplaceEnabled && workplaceBlockers.length">
+          <section class="bg-red-950/30 border border-red-800/50 rounded-xl p-3 mb-3"
+            data-testid="board-blocked-tasks"
+            aria-label="Blocked tasks">
+            <div class="flex items-center justify-between mb-2">
+              <div class="flex items-center gap-2">
+                <span class="text-[11px] uppercase tracking-wide text-red-300 font-semibold">Blocked tasks</span>
+                <span class="font-mono px-1.5 rounded bg-red-700/40 text-red-100 text-[11px]"
+                  x-text="workplaceBlockers.length"></span>
+              </div>
+              <span class="text-[11px] text-red-300/70">Read-only — blocked work is operator-handled</span>
+            </div>
+            <div class="space-y-1.5">
+              <template x-for="b in workplaceBlockers" :key="'blocked-' + b.id">
+                <button type="button" class="w-full flex items-center gap-2 bg-gray-900/40 border border-red-800/30 rounded-md px-2.5 py-1.5 text-left"
+                  data-testid="board-blocked-task-row"
+                  @click="openTaskDrillIn(b.id)">
+                  <div class="min-w-0 flex-1">
+                    <div class="text-xs text-gray-100 truncate"
+                      :title="b.title"
+                      x-text="truncateTitle(b.title, 80)"></div>
+                    <div class="text-[11px] text-red-200/80 mt-0.5">
+                      <span x-text="b.assignee || '(unassigned)'"></span>
+                      <span x-show="b.team_id" class="text-gray-400"
+                        x-text="'· ' + (b.team_id || '')"></span>
+                      <span class="ml-1 text-red-300" x-text="'· ' + _humanizeBlocker(b.blocker_note).label"></span>
+                    </div>
+                  </div>
+                </button>
+              </template>
+            </div>
+          </section>
+        </template>
 
         <!-- Phase 4 — task cancel confirmation modal. Opens via
              ``confirmCancelTask`` from the stuck-tasks [Cancel] button
