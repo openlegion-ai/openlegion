@@ -6970,6 +6970,35 @@ def create_mesh_app(
             _purge_departed_team_signals(agent, old)
         _add_team_blackboard_permissions(agent, team_name)
         permissions.reload()
+        # Phase-1 leadership loop (docs/plans/2026-07-16-autonomous-team-
+        # delivery.md §1/§3): the operator's documented team-build order is
+        # create-empty-team → create-agents → ``add_agents_to_team``, so the
+        # add-members path — NOT just ``mesh_create_team`` — is where a team
+        # first crosses out of solo territory. Without mirroring the create-
+        # path auto-appoint here, a by-the-book team sits LEADERLESS until the
+        # next mesh reboot's backfill, leaving the lead-gated stewardship
+        # machinery (standup, goal-coverage probe, blocked-task escalation,
+        # drive-review verdicts) dormant. Appoint the first real member as
+        # lead once the roster reaches >=2 real members — but NEVER re-appoint
+        # over an existing lead, and NEVER the operator (already excluded from
+        # membership; ``set_lead`` re-checks real membership + refuses the
+        # operator). A solo/one-member team self-leads (no lead row). Best-
+        # effort: a failure here must not fail the add-members response; the
+        # boot backfill catches any drift.
+        try:
+            _team = teams_store.get_team(team_name) or {}
+            _real_members = [m for m in _team.get("members", []) if m != "operator"]
+            if len(_real_members) >= 2 and not (_team.get("lead_agent_id") or "").strip():
+                try:
+                    teams_store.set_lead(team_name, _real_members[0])
+                    # Wire the new lead's standup cron immediately (same helper
+                    # the dedicated lead endpoint uses) so stewardship starts
+                    # now, not at the next mesh restart.
+                    _sync_standup_job_on_lead_change(team_name, _real_members[0])
+                except (TeamNotFound, ValueError) as e:
+                    logger.warning("auto-appoint lead for team %s failed: %s", team_name, e)
+        except Exception as e:
+            logger.warning("auto-appoint lead check for team %s failed: %s", team_name, e)
         _schedule_onboarding_wake(agent, team_name)
         return {"added": True, "team_id": team_name, "team_name": team_name, "agent": agent}
 

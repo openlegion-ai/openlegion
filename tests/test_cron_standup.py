@@ -418,6 +418,96 @@ class TestPostToChannelNotAgentSettable:
             importlib.reload(server_module)
 
 
+class TestAddMemberAutoAppointWiresStandup:
+    """Phase-1 leadership loop (docs/plans/2026-07-16-autonomous-team-
+    delivery.md §1/§3): the ``POST /mesh/teams/{name}/members`` endpoint
+    (what ``add_agents_to_team`` calls) must wire the auto-appointed lead's
+    standup cron LIVE — not defer it to the next mesh reboot's reconcile."""
+
+    @pytest.mark.asyncio
+    async def test_add_member_crossing_to_two_wires_standup_job(self, tmp_path, monkeypatch):
+        import importlib
+        import json as _json
+
+        import yaml as _yaml
+        from httpx import ASGITransport, AsyncClient
+
+        monkeypatch.chdir(tmp_path)
+        import src.cli.config as cli_cfg
+
+        perms_file = tmp_path / "permissions.json"
+        perms_file.write_text(
+            _json.dumps(
+                {
+                    "permissions": {
+                        "agent1": {"blackboard_read": [], "blackboard_write": []},
+                        "agent2": {"blackboard_read": [], "blackboard_write": []},
+                    }
+                }
+            )
+        )
+        monkeypatch.setattr(cli_cfg, "PERMISSIONS_FILE", perms_file)
+        agents_file = tmp_path / "agents.yaml"
+        agents_file.write_text(
+            _yaml.dump(
+                {
+                    "agents": {
+                        "agent1": {"role": "a"},
+                        "agent2": {"role": "b"},
+                        "operator": {"role": "operator"},
+                    }
+                }
+            )
+        )
+        monkeypatch.setattr(cli_cfg, "AGENTS_FILE", agents_file)
+
+        import src.host.server as server_module
+
+        importlib.reload(server_module)
+        from src.host.cron import CronScheduler
+        from src.host.mesh import Blackboard, MessageRouter, PubSub
+        from src.host.permissions import PermissionMatrix
+        from src.host.teams import TeamStore
+
+        permissions = PermissionMatrix()
+        router = MessageRouter(
+            permissions,
+            {"operator": "http://op:8400", "agent1": "http://a1:8400", "agent2": "http://a2:8400"},
+        )
+        blackboard = Blackboard(str(tmp_path / "bb.db"))
+        cron_scheduler = CronScheduler(config_path=str(tmp_path / "cron.json"))
+        teams_store = TeamStore(db_path=str(tmp_path / "teams.db"), teams_dir=tmp_path / "teams")
+        teams_store.create_team("squad")
+        app = server_module.create_mesh_app(
+            blackboard=blackboard,
+            pubsub=PubSub(),
+            router=router,
+            permissions=permissions,
+            teams_store=teams_store,
+            cron_scheduler=cron_scheduler,
+            auth_tokens={"operator": "op-token"},
+        )
+        hdr = {"Authorization": "Bearer op-token", "X-Agent-ID": "operator"}
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+                r1 = await c.post("/mesh/teams/squad/members", json={"agent": "agent1"}, headers=hdr)
+                assert r1.status_code == 200, r1.text
+                # Solo so far: no lead, no standup job yet.
+                assert teams_store.get_team("squad")["lead_agent_id"] is None
+                assert cron_scheduler.find_standup_job("squad") is None
+                r2 = await c.post("/mesh/teams/squad/members", json={"agent": "agent2"}, headers=hdr)
+                assert r2.status_code == 200, r2.text
+            # Crossed to two members: first member auto-appointed + standup wired live.
+            assert teams_store.get_team("squad")["lead_agent_id"] == "agent1"
+            job = cron_scheduler.find_standup_job("squad")
+            assert job is not None
+            assert job.agent == "agent1"
+            assert job.post_to_channel == "squad"
+        finally:
+            blackboard.close()
+            importlib.reload(server_module)
+
+
 # ── Boot reconcile (cli/runtime.RuntimeContext._reconcile_standup_jobs) ──
 
 

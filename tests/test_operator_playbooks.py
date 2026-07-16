@@ -206,6 +206,12 @@ class TestPlaybookConstants:
         assert "north star" in _PLAYBOOK_TEAM_BUILD.lower()
         assert "request_credential" in _PLAYBOOK_TEAM_BUILD
         assert "request_browser_login" in _PLAYBOOK_TEAM_BUILD
+        # Phase-1 leadership loop (docs/plans/2026-07-16-autonomous-team-
+        # delivery.md §1/§3): the team-build playbook must steer the
+        # operator to ensure a lead and set a spend envelope.
+        assert "set_team_lead" in _PLAYBOOK_TEAM_BUILD
+        assert "set_budget" in _PLAYBOOK_TEAM_BUILD
+        assert "UNLIMITED" in _PLAYBOOK_TEAM_BUILD
 
         assert "edit_agent" in _PLAYBOOK_EDIT
         # New guidance for the act-and-undo posture must be present.
@@ -218,6 +224,17 @@ class TestPlaybookConstants:
         assert "check_inbox" in _PLAYBOOK_MONITOR
         assert "get_system_status" in _PLAYBOOK_MONITOR
         assert "inspect_agents" in _PLAYBOOK_MONITOR
+        # Phase-1 improvement levers (docs/plans/2026-07-16-autonomous-team-
+        # delivery.md §1/§3): the monitor playbook must advertise the
+        # behavior-changing levers, not just observation tools.
+        for lever in (
+            "rate_delivery",
+            "set_agent_goals",
+            "manage_task",
+            "inspect_team_spend",
+            "inspect_teams",
+        ):
+            assert lever in _PLAYBOOK_MONITOR, f"monitor playbook missing lever {lever}"
 
         assert "request_credential" in _PLAYBOOK_CREDENTIALS
         assert "request_browser_login" in _PLAYBOOK_CREDENTIALS
