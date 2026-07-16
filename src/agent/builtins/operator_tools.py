@@ -2089,6 +2089,47 @@ async def update_team_context(
 
 
 @tool(
+    name="set_team_lead",
+    operator_only=True,
+    description=(
+        "Appoint an existing team member as the team's LEAD — the "
+        "accountability owner who receives standup duty, goal-coverage "
+        "and blocked-task escalation alerts, and advisory review verdicts. "
+        "The agent must already be a member of the team; the operator "
+        "cannot be a lead, and a solo/one-member team needs none (it "
+        "self-leads). This is team data, not a permission tier — it grants "
+        "the lead zero permission elevation."
+    ),
+    parameters={
+        "team_name": {"type": "string", "description": "Team name"},
+        "agent_name": {
+            "type": "string",
+            "description": "The team member to appoint as lead",
+        },
+    },
+)
+async def set_team_lead(
+    team_name: str = "",
+    agent_name: str = "",
+    *,
+    mesh_client=None,
+    _messages=None,
+    **_kw,
+) -> dict:
+    """Appoint a team member as lead (activates the stewardship loop)."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if not team_name or not agent_name:
+        return {"error": "team_name and agent_name are required"}
+    try:
+        return await mesh_client.set_team_lead(team_name, agent_name)
+    except Exception as e:
+        return {"error": f"Failed to set team lead: {e}"}
+
+
+@tool(
     name="update_team_brief",
     operator_only=True,
     description=(

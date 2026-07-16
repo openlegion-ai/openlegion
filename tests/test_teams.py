@@ -196,6 +196,40 @@ class TestMeshTeamEndpoints:
             assert sorted(perms["permissions"][agent]["blackboard_write"]) == expected
 
     @pytest.mark.asyncio
+    async def test_create_multi_member_auto_appoints_lead(self, team_app):
+        """Phase-1 leadership loop: a non-solo team must never commit
+        leaderless — the first non-operator member is appointed lead so the
+        lead-gated stewardship machinery activates for operator-built teams."""
+        app, store, _, _ = team_app
+        r = await _post(
+            app,
+            "/mesh/teams",
+            {"name": "squad", "members": ["agent1", "agent2"]},
+        )
+        assert r.status_code == 200, r.text
+        assert store.get_team("squad")["lead_agent_id"] == "agent1"
+
+    @pytest.mark.asyncio
+    async def test_create_solo_member_gets_no_lead(self, team_app):
+        """A one-member team self-leads — no lead row is written."""
+        app, store, _, _ = team_app
+        r = await _post(
+            app,
+            "/mesh/teams",
+            {"name": "lonely", "members": ["agent1"]},
+        )
+        assert r.status_code == 200, r.text
+        assert store.get_team("lonely")["lead_agent_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_create_no_members_gets_no_lead(self, team_app):
+        """An empty team has no member to lead — lead stays NULL."""
+        app, store, _, _ = team_app
+        r = await _post(app, "/mesh/teams", {"name": "empty"})
+        assert r.status_code == 200, r.text
+        assert store.get_team("empty")["lead_agent_id"] is None
+
+    @pytest.mark.asyncio
     async def test_create_with_member_from_other_team_strips_old_acl(self, team_app):
         """Creating a team whose initial members include an agent already
         on another team must evict the membership AND swap the blackboard

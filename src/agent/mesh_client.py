@@ -1360,6 +1360,23 @@ class MeshClient:
         _raise_with_body(response)
         return response.json()
 
+    async def set_team_lead(self, team_name: str, agent_id: str) -> dict:
+        """Appoint a team's lead via mesh proxy (``PUT /mesh/teams/{name}/lead``).
+
+        Mirrors ``update_team_context``'s PUT shape. The endpoint is
+        operator-or-internal; the store re-validates real membership
+        (rejecting the operator and non-members) so a bad appointment
+        surfaces as an HTTP 400 raised here.
+        """
+        client = await self._get_client()
+        response = await client.put(
+            f"{self.mesh_url}/mesh/teams/{team_name}/lead",
+            json={"agent_id": agent_id},
+            headers=self._trace_headers(),
+        )
+        _raise_with_body(response)
+        return response.json()
+
     async def set_task_outcome(
         self,
         task_id: str,

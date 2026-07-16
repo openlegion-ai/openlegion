@@ -642,3 +642,101 @@ class TestReconcileStandupJobs:
         )
         RuntimeContext._reconcile_standup_jobs(_Stub())
         assert scheduler.find_standup_job("alpha") is None
+
+
+# ── Boot lead backfill (cli/runtime.RuntimeContext._backfill_team_leads) ──
+
+
+def _seed_team(store, name: str, members: list[str], *, status: str = "active"):
+    """Create a team with ``members`` and NO lead (pre-Phase-1 shape)."""
+    store.create_team(name)
+    for m in members:
+        store.add_member(name, m)
+    if status != "active":
+        store.set_status(name, status)
+
+
+class TestBackfillTeamLeads:
+    """``_backfill_team_leads`` (Phase-1 autonomous-team-delivery): appoint
+    the first non-operator member as lead for every active NON-SOLO team
+    that predates auto-appointment and has a NULL lead. Solo/team-of-one
+    self-leads (no lead row); existing leads and archived teams untouched."""
+
+    def _stub(self, store):
+        class _Stub:
+            teams_store = store
+        return _Stub()
+
+    def test_backfill_appoints_first_member_for_leaderless_team(self, tmp_path):
+        store = _team_store(tmp_path)
+        _seed_team(store, "alpha", ["ada", "bob"])
+        assert store.get_team("alpha")["lead_agent_id"] is None
+
+        from src.cli.runtime import RuntimeContext
+        RuntimeContext._backfill_team_leads(self._stub(store))
+
+        assert store.get_team("alpha")["lead_agent_id"] == "ada"
+
+    def test_backfill_skips_solo_team_of_one(self, tmp_path):
+        store = _team_store(tmp_path)
+        _seed_team(store, "solo", ["ada"])  # one member = self-leads
+
+        from src.cli.runtime import RuntimeContext
+        RuntimeContext._backfill_team_leads(self._stub(store))
+
+        assert store.get_team("solo")["lead_agent_id"] is None
+
+    def test_backfill_skips_empty_team(self, tmp_path):
+        store = _team_store(tmp_path)
+        _seed_team(store, "ghost", [])
+
+        from src.cli.runtime import RuntimeContext
+        RuntimeContext._backfill_team_leads(self._stub(store))
+
+        assert store.get_team("ghost")["lead_agent_id"] is None
+
+    def test_backfill_is_idempotent_and_keeps_existing_lead(self, tmp_path):
+        store = _team_store(tmp_path)
+        _seed_team(store, "alpha", ["ada", "bob"])
+        store.set_lead("alpha", "bob")  # already led
+
+        from src.cli.runtime import RuntimeContext
+        RuntimeContext._backfill_team_leads(self._stub(store))
+        # Existing lead preserved, not overwritten with the first member.
+        assert store.get_team("alpha")["lead_agent_id"] == "bob"
+        # Second run is a no-op.
+        RuntimeContext._backfill_team_leads(self._stub(store))
+        assert store.get_team("alpha")["lead_agent_id"] == "bob"
+
+    def test_backfill_skips_archived_team(self, tmp_path):
+        store = _team_store(tmp_path)
+        _seed_team(store, "old", ["ada", "bob"], status="archived")
+
+        from src.cli.runtime import RuntimeContext
+        RuntimeContext._backfill_team_leads(self._stub(store))
+
+        assert store.get_team("old")["lead_agent_id"] is None
+
+    def test_backfill_then_standup_reconcile_creates_job(self, tmp_path):
+        """End-to-end: a leaderless multi-member team gets a lead at boot,
+        and the standup reconcile (run after) then wires its standup job."""
+        store = _team_store(tmp_path)
+        _seed_team(store, "alpha", ["ada", "bob"])
+
+        from src.host.cron import CronScheduler
+        scheduler = CronScheduler(config_path=str(tmp_path / "cron.json"))
+
+        class _Stub:
+            cron_scheduler = scheduler
+            teams_store = store
+
+        from src.cli.runtime import RuntimeContext
+        stub = _Stub()
+        # Boot order: backfill BEFORE the standup reconcile.
+        RuntimeContext._backfill_team_leads(stub)
+        RuntimeContext._reconcile_standup_jobs(stub)
+
+        assert store.get_team("alpha")["lead_agent_id"] == "ada"
+        job = scheduler.find_standup_job("alpha")
+        assert job is not None
+        assert job.agent == "ada"

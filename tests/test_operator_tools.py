@@ -1796,3 +1796,82 @@ async def test_set_agent_goals_requires_operator(monkeypatch):
     result = await set_agent_goals("researcher", ["Goal."], mesh_client=mc)
     assert "error" in result
     mc.set_agent_goals.assert_not_awaited()
+
+
+# ── set_team_lead (Phase-1 autonomous-team-delivery) ───────────────────
+
+
+@pytest.mark.asyncio
+async def test_set_team_lead_appoints_valid_member():
+    from src.agent.builtins.operator_tools import set_team_lead
+
+    mc = MagicMock()
+    mc.set_team_lead = AsyncMock(return_value={
+        "success": True, "team_name": "squad", "lead_agent_id": "ada",
+    })
+    result = await set_team_lead("squad", "ada", mesh_client=mc)
+    mc.set_team_lead.assert_awaited_once_with("squad", "ada")
+    assert result["lead_agent_id"] == "ada"
+
+
+@pytest.mark.asyncio
+async def test_set_team_lead_surfaces_operator_rejection():
+    """The store rejects the operator (HTTP 400); the tool surfaces it."""
+    from src.agent.builtins.operator_tools import set_team_lead
+
+    mc = MagicMock()
+    mc.set_team_lead = AsyncMock(side_effect=Exception(
+        "Client error '400 Bad Request': Operator is a system agent and "
+        "cannot be a team lead",
+    ))
+    result = await set_team_lead("squad", "operator", mesh_client=mc)
+    assert "error" in result
+    assert "system agent" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_set_team_lead_surfaces_non_member_rejection():
+    """A non-member appointment surfaces as an error envelope."""
+    from src.agent.builtins.operator_tools import set_team_lead
+
+    mc = MagicMock()
+    mc.set_team_lead = AsyncMock(side_effect=Exception(
+        "Client error '400 Bad Request': Agent 'ghost' is not a member of "
+        "team 'squad' — the lead must be a real team member.",
+    ))
+    result = await set_team_lead("squad", "ghost", mesh_client=mc)
+    assert "error" in result
+    assert "not a member" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_set_team_lead_requires_both_args():
+    from src.agent.builtins.operator_tools import set_team_lead
+
+    mc = MagicMock()
+    mc.set_team_lead = AsyncMock()
+    result = await set_team_lead("squad", "", mesh_client=mc)
+    assert "error" in result
+    mc.set_team_lead.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_set_team_lead_no_mesh_client():
+    from src.agent.builtins.operator_tools import set_team_lead
+
+    result = await set_team_lead("squad", "ada", mesh_client=None)
+    assert "error" in result
+    assert "mesh_client" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_set_team_lead_blocked_for_non_operator(monkeypatch):
+    """Defence-in-depth: non-operator env (no ALLOWED_TOOLS) is refused."""
+    from src.agent.builtins.operator_tools import set_team_lead
+
+    monkeypatch.delenv("ALLOWED_TOOLS", raising=False)
+    mc = MagicMock()
+    mc.set_team_lead = AsyncMock()
+    result = await set_team_lead("squad", "ada", mesh_client=mc)
+    assert "error" in result
+    mc.set_team_lead.assert_not_awaited()
