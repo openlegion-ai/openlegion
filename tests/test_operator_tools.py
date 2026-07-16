@@ -346,6 +346,66 @@ async def test_inspect_agents_metrics_failure_falls_back_to_full_fanout():
     assert mc.get_agent_stale_tasks.await_count == 2
 
 
+# ── inspect_teams read-back (goal + budget) tests ────────────
+
+
+@pytest.mark.asyncio
+async def test_inspect_teams_no_mesh_client():
+    from src.agent.builtins.operator_tools import inspect_teams
+
+    result = await inspect_teams()
+    assert "error" in result
+    assert "mesh_client" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_inspect_teams_full_list_surfaces_goal_and_budget():
+    """Phase-1 read-back: inspect_teams passes the mesh row through, so the
+    goal (north_star/success_criteria) + budget envelope are readable."""
+    from src.agent.builtins.operator_tools import inspect_teams
+
+    mc = MagicMock()
+    mc.list_teams = AsyncMock(return_value={"teams": [
+        {
+            "name": "growth",
+            "north_star": "Ship $10k MRR",
+            "success_criteria": ["100 visits/day"],
+            "budget_daily_usd": 5.0,
+            "budget_monthly_usd": 100.0,
+        },
+    ]})
+    result = await inspect_teams(mesh_client=mc)
+    row = result["teams"][0]
+    assert row["north_star"] == "Ship $10k MRR"
+    assert row["success_criteria"] == ["100 visits/day"]
+    assert row["budget_daily_usd"] == 5.0
+    assert row["budget_monthly_usd"] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_inspect_teams_single_team_returns_goal_and_budget():
+    """Setting team_name returns the full row (goal + budget) for one team."""
+    from src.agent.builtins.operator_tools import inspect_teams
+
+    mc = MagicMock()
+    mc.list_teams = AsyncMock(return_value={"teams": [
+        {
+            "name": "growth",
+            "north_star": "Ship it",
+            "success_criteria": ["done"],
+            "budget_daily_usd": 2.0,
+            "budget_monthly_usd": 40.0,
+        },
+        {"name": "other", "north_star": None},
+    ]})
+    result = await inspect_teams(team_name="growth", mesh_client=mc)
+    assert result["name"] == "growth"
+    assert result["north_star"] == "Ship it"
+    assert result["success_criteria"] == ["done"]
+    assert result["budget_daily_usd"] == 2.0
+    assert result["budget_monthly_usd"] == 40.0
+
+
 # ── create_agent tests ──────────────────────────��───────────
 
 

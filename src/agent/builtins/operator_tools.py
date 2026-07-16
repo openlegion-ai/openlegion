@@ -1893,7 +1893,11 @@ async def archive_audit_before(
     description=(
         "Read team info. detail='names' lists name+description; "
         "detail='status' adds task-count rollups (requires v2). "
-        "Setting team_name returns full detail for that team."
+        "Setting team_name returns full detail for that team, "
+        "including its north_star / success_criteria goal and its "
+        "daily/monthly budget envelope (budget_daily_usd / "
+        "budget_monthly_usd) — use this to read back a goal or budget "
+        "you set."
     ),
     parameters={
         "detail": {

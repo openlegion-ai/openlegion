@@ -326,3 +326,220 @@ async def test_endpoint_set_goal_clears_when_empty(goal_app):
     body = r.json()
     assert body["north_star"] is None
     assert body["success_criteria"] is None
+
+
+# ── Read-back: GET /mesh/teams surfaces goal + budget ────────────────
+
+
+@pytest.mark.asyncio
+async def test_endpoint_list_teams_returns_goal_and_budget(goal_app):
+    """Phase-1 read-back: the row carries north_star / success_criteria /
+    budget so the operator's inspect_teams can read back what it set
+    (previously these were stripped from the mesh_list_teams row)."""
+    app, teams_store = goal_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/teams/growth/goal",
+            json={
+                "north_star": "Ship $10k MRR",
+                "success_criteria": ["100 visits/day"],
+            },
+            headers={"X-Agent-ID": "operator"},
+        )
+        assert r.status_code == 200
+        # Budget rides the same row — set it directly on the store.
+        teams_store.set_budget("growth", 5.0, 100.0)
+        listing = await c.get("/mesh/teams", headers={"X-Agent-ID": "operator"})
+    assert listing.status_code == 200, listing.text
+    rows = {t["name"]: t for t in listing.json()["teams"]}
+    growth = rows["growth"]
+    assert growth["north_star"] == "Ship $10k MRR"
+    assert growth["success_criteria"] == ["100 visits/day"]
+    assert growth["budget_daily_usd"] == 5.0
+    assert growth["budget_monthly_usd"] == 100.0
+    # Additive/back-compat: the legacy keys still ride the row.
+    assert growth["name"] == "growth"
+    assert growth["status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_endpoint_list_teams_goal_defaults_none(goal_app):
+    """A team with no goal set reads back null goal/budget fields (the
+    keys are always present — additive, back-compat)."""
+    app, _ = goal_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        listing = await c.get("/mesh/teams", headers={"X-Agent-ID": "operator"})
+    row = {t["name"]: t for t in listing.json()["teams"]}["growth"]
+    assert row["north_star"] is None
+    assert row["success_criteria"] is None
+    assert row["budget_daily_usd"] is None
+    assert row["budget_monthly_usd"] is None
+
+
+# ── Goal propagation: mirror into TEAM.md + push to running members ──
+
+
+class _FakeGoalTransport:
+    """Records ``PUT /team`` pushes so the propagation tests can assert the
+    goal content reached running members. ``fail=True`` makes every push
+    raise, exercising the best-effort guarantee (the goal write must still
+    succeed)."""
+
+    def __init__(self, fail: bool = False):
+        self.calls: list[dict] = []
+        self.fail = fail
+
+    async def request(self, agent_id, method, path, json=None, timeout=120, headers=None):
+        self.calls.append({
+            "agent_id": agent_id, "method": method, "path": path, "json": json,
+        })
+        if self.fail:
+            raise RuntimeError("member unreachable")
+        return {"updated": True}
+
+
+@pytest.fixture
+def goal_push_app(tmp_path, monkeypatch, request):
+    """Disk-backed TeamStore (real team.md scaffold) + fake transport so
+    the goal endpoint's TEAM.md mirror + running-member push are
+    observable. ``indirect`` param toggles a transport that raises on
+    every push."""
+    from src.host.teams import TeamStore
+
+    fail_push = getattr(request, "param", False)
+    monkeypatch.chdir(tmp_path)
+    server_module = _reload_server(monkeypatch)
+
+    permissions = PermissionMatrix()
+    for aid, perms in {
+        "operator": {"can_route_tasks": True, "can_manage_teams": True},
+        "writer": {"can_route_tasks": False},
+    }.items():
+        permissions.permissions[aid] = AgentPermissions(agent_id=aid, **perms)
+
+    # writer is RUNNING (in the registry); editor is a member but stopped
+    # (absent from the registry) → only writer should be pushed to.
+    router = MessageRouter(permissions, {
+        "operator": "http://op:8400",
+        "writer": "http://writer:8400",
+    })
+    blackboard = Blackboard(str(tmp_path / "bb.db"))
+    teams_store = TeamStore(
+        db_path=str(tmp_path / "teams.db"),
+        teams_dir=tmp_path / "teams",
+    )
+    transport = _FakeGoalTransport(fail=fail_push)
+    app = server_module.create_mesh_app(
+        blackboard=blackboard,
+        pubsub=PubSub(),
+        router=router,
+        permissions=permissions,
+        teams_store=teams_store,
+        transport=transport,  # type: ignore[arg-type]
+    )
+    teams_store.create_team("growth", description="growth project")
+    teams_store.add_member("growth", "writer")
+    teams_store.add_member("growth", "editor")
+    team_md = tmp_path / "teams" / "growth" / "team.md"
+    yield app, teams_store, transport, team_md
+    blackboard.close()
+    importlib.reload(server_module)
+
+
+@pytest.mark.asyncio
+async def test_endpoint_set_goal_mirrors_into_team_md_and_pushes(goal_push_app):
+    """set_goal mirrors the north_star + success criteria into a reserved
+    ``## Goal`` section of TEAM.md and pushes it to running members —
+    closing the design-doc §1-finding-4 'ghost goal' gap."""
+    app, teams_store, transport, team_md = goal_push_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/teams/growth/goal",
+            json={
+                "north_star": "Ship $10k MRR landing page",
+                "success_criteria": ["100 visits/day", "5 demos/wk"],
+            },
+            headers={"X-Agent-ID": "operator"},
+        )
+    assert r.status_code == 200, r.text
+
+    on_disk = team_md.read_text()
+    assert "## Goal" in on_disk
+    assert "Ship $10k MRR landing page" in on_disk
+    assert "- 100 visits/day" in on_disk
+    assert "- 5 demos/wk" in on_disk
+    # Section-scoped: original scaffold context is preserved.
+    assert "growth project" in on_disk
+
+    # Pushed to the RUNNING member only (writer), never the stopped one.
+    assert len(transport.calls) == 1
+    call = transport.calls[0]
+    assert call["agent_id"] == "writer"
+    assert call["path"] == "/team"
+    # The pushed content is exactly the updated TEAM.md (carries the goal).
+    assert call["json"]["content"] == on_disk
+    assert "Ship $10k MRR landing page" in call["json"]["content"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("goal_push_app", [True], indirect=True)
+async def test_endpoint_set_goal_survives_push_failure(goal_push_app):
+    """A push that raises must NOT fail the goal write (best-effort): the
+    persisted row is the source of truth and the mirror still happens."""
+    app, teams_store, transport, team_md = goal_push_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/teams/growth/goal",
+            json={"north_star": "keep going", "success_criteria": ["ship"]},
+            headers={"X-Agent-ID": "operator"},
+        )
+    assert r.status_code == 200, r.text
+    assert r.json()["north_star"] == "keep going"
+    # Goal still persisted despite the failing push.
+    assert teams_store.get_team("growth")["north_star"] == "keep going"
+    # TEAM.md mirror still written (the write precedes the push).
+    assert "## Goal" in team_md.read_text()
+    assert "keep going" in team_md.read_text()
+    # The push WAS attempted against the running member (and raised).
+    assert transport.calls and transport.calls[0]["agent_id"] == "writer"
+
+
+@pytest.mark.asyncio
+async def test_endpoint_set_goal_survives_mirror_failure(goal_push_app, monkeypatch):
+    """A TEAM.md write/format hiccup must NOT fail the goal write; the
+    mirror aborts cleanly before any push is attempted."""
+    import src.host.server as server_module
+
+    app, teams_store, transport, _team_md = goal_push_app
+    monkeypatch.setattr(
+        server_module,
+        "replace_markdown_section",
+        MagicMock(side_effect=RuntimeError("disk full")),
+    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/teams/growth/goal",
+            json={"north_star": "resilient", "success_criteria": ["x"]},
+            headers={"X-Agent-ID": "operator"},
+        )
+    assert r.status_code == 200, r.text
+    assert teams_store.get_team("growth")["north_star"] == "resilient"
+    # Mirror aborted before reaching the push.
+    assert transport.calls == []
+
+
+@pytest.mark.asyncio
+async def test_endpoint_set_goal_no_team_md_is_noop(goal_app):
+    """Solo/teamless team with no shared TEAM.md (pure-DB store): the goal
+    persists and the mirror no-ops cleanly (no crash, no push)."""
+    app, teams_store = goal_app
+    # goal_app's store is :memory: (teams_dir=None) → no TEAM.md path.
+    assert teams_store.team_md_path("growth") is None
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        r = await c.post(
+            "/mesh/teams/growth/goal",
+            json={"north_star": "solo goal"},
+            headers={"X-Agent-ID": "operator"},
+        )
+    assert r.status_code == 200, r.text
+    assert teams_store.get_team("growth")["north_star"] == "solo goal"
