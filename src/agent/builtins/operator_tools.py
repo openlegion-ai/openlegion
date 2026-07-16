@@ -2297,7 +2297,12 @@ async def update_team_brief(
 @tool(
     name="set_team_goal",
     operator_only=True,
-    description="Set a team's north star + success criteria.",
+    description=(
+        "Set a team's north star + success criteria. Mirrors into TEAM.md "
+        "and live-pushes to running members, but takes effect on each "
+        "member's next turn — an in-flight task finishes under its current "
+        "context, not mid-run."
+    ),
     parameters={
         "team_name": {"type": "string", "description": "Team name"},
         "north_star": {
@@ -2367,7 +2372,13 @@ async def set_team_goal(
 @tool(
     name="summarize_team_progress",
     operator_only=True,
-    description="Synthesised progress summary for a team.",
+    description=(
+        "Raw task-count rollup for a team (active/blocked/done tallies + "
+        "narrative status_text). Not operator-callable — for a real "
+        "goal-vs-evidence judgement (met / on_track / at_risk / no_evidence "
+        "/ needs_external_metric per success criterion), use "
+        "assess_team_progress instead."
+    ),
     parameters={
         "team_id": {"type": "string", "description": "Team id"},
     },
@@ -2378,7 +2389,13 @@ async def summarize_team_progress(
     mesh_client=None,
     **_kw,
 ) -> dict:
-    """Synthesized progress summary for a team."""
+    """Synthesized task-count progress summary for a team.
+
+    Kept registered (directly callable in Python, e.g. by tests) but
+    removed from the operator's callable surface (``_OPERATOR_ALLOWED_TOOLS``
+    in ``src/cli/config.py``) — ``assess_team_progress`` supersedes it for
+    the operator's actual goal-vs-evidence judgement.
+    """
     if not _is_operator():
         return {"error": "This tool is only available to the operator agent."}
     if mesh_client is None:

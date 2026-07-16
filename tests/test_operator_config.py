@@ -430,7 +430,6 @@ class TestOperatorConstants:
         for tool in (
             "inspect_teams", "inspect_agents",
             "list_agent_queue", "get_team_outputs",
-            "summarize_team_progress",
             "manage_team", "manage_agent", "manage_task",
             # PR 5 — north-star setter is no-confirmation meta-config.
             "set_team_goal",
@@ -456,6 +455,12 @@ class TestOperatorConstants:
             "create_project", "add_agents_to_project",
             "remove_agents_from_project", "update_project_context",
             "set_project_goal", "manage_project",
+            # Consolidation cleanup: ``summarize_team_progress`` (thin
+            # task-count wrapper) is a confusingly-named near-duplicate of
+            # ``assess_team_progress`` (goal-vs-evidence judgement). It
+            # remains registered (directly callable in Python / tests) but
+            # is no longer on the operator's callable surface.
+            "summarize_team_progress",
         ):
             assert tool not in _OPERATOR_ALLOWED_TOOLS
 
