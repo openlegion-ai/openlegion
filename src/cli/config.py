@@ -1748,7 +1748,11 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "inspect_team_spend",
     "list_agent_queue",
     "get_team_outputs",
-    "summarize_team_progress",
+    # NOTE: ``summarize_team_progress`` (raw task-count rollup) is
+    # deliberately NOT on this allowlist — it's a thin, easily-confused
+    # near-duplicate of ``assess_team_progress`` below (goal-vs-evidence
+    # judgement). The tool stays registered (directly callable in
+    # Python / tests) but is no longer offered to the operator LLM.
     # Goal-progress assessment (Tier-3) — composes the team's north_star +
     # success_criteria with real completed-work evidence + task counts +
     # blockers so the operator can judge each criterion (met / on_track /
