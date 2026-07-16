@@ -6716,6 +6716,31 @@ def create_mesh_app(
                 # new members' team patterns apply to the very next
                 # blackboard/pubsub call (not at the next mesh restart).
                 permissions.reload()
+        # Phase-1 leadership loop (docs/plans/2026-07-16-autonomous-team-
+        # delivery.md §1/§3): a non-solo team must never commit leaderless,
+        # or the lead-gated stewardship machinery (goal-coverage probe,
+        # standup job, blocked-task rung-3 escalation, drive-review verdicts)
+        # stays dormant for operator-built teams. Appoint the first real
+        # member as lead — a deliberate stepping stone (a follow-up upgrades
+        # to a purpose-built coordinator agent + an operator fallback for the
+        # monitoring signals). The operator is already rejected from
+        # ``members`` above, and ``set_lead`` re-checks real membership +
+        # refuses the operator. A solo/one-member team self-leads — no lead
+        # row (nobody to coordinate). Best-effort: a failure here must not
+        # fail team creation; the boot backfill catches any drift.
+        lead_id: str | None = None
+        _real_members = [m for m in members if m != "operator"]
+        if len(_real_members) >= 2:
+            try:
+                teams_store.set_lead(name, _real_members[0])
+                lead_id = _real_members[0]
+            except (TeamNotFound, ValueError) as e:
+                logger.warning("auto-appoint lead for team %s failed: %s", name, e)
+        if lead_id is not None:
+            # Wire the new lead's standup cron immediately (same helper the
+            # dedicated lead endpoint uses) so stewardship starts now, not at
+            # the next mesh restart. No-op when cron_scheduler is unwired.
+            _sync_standup_job_on_lead_change(name, lead_id)
         # Team channel thread (Phase-2 Team Threads): create the durable
         # channel and point the team row at it. Best-effort — a thread
         # hiccup must not fail team creation; the boot backfill catches

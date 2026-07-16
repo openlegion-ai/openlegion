@@ -68,7 +68,7 @@ TOOL_GROUPS: tuple[ToolGroup, ...] = (
             "create_agent", "create_team", "apply_template", "list_templates",
             "add_agents_to_team", "remove_agents_from_team", "manage_team",
             "manage_agent", "edit_agent", "read_agent_config",
-            "update_team_context",
+            "update_team_context", "set_team_lead",
         ),
         operator_only=True,
     ),

@@ -1810,6 +1810,11 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "add_agents_to_team",
     "remove_agents_from_team",
     "update_team_context",
+    # Lead appointment (Phase-1 autonomous-team-delivery) — installs the
+    # accountability owner that activates the lead-gated stewardship
+    # machinery (standup, goal-coverage, blocked-task escalation, review
+    # verdicts). Lead is team data, not a permission tier.
+    "set_team_lead",
     # P2 — section-scoped TEAM.md updates (fleet-wide knowledge
     # propagation; canonical use: '## User Preferences').
     "update_team_brief",

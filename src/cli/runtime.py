@@ -2783,9 +2783,51 @@ class RuntimeContext:
                         e,
                     )
 
+    def _backfill_team_leads(self) -> None:
+        """Appoint a lead for each active non-solo team that has none.
+
+        Phase-1 of the autonomous-team-delivery plan (docs/plans/
+        2026-07-16-autonomous-team-delivery.md §1/§3): the lead-gated
+        stewardship machinery (goal-coverage probe, standup, blocked-task
+        rung-3 escalation, drive-review verdicts) is dormant for any team
+        with a NULL lead. ``create_team`` now auto-appoints for NEW teams;
+        this backfill covers teams that predate that change (and any team
+        left leaderless by a live lead-clear path). Appoints the first
+        non-operator member — a deliberate stepping stone (a follow-up
+        upgrades to a purpose-built coordinator agent). Solo / team-of-one
+        self-leads (no lead row — nobody to coordinate).
+
+        Runs BEFORE ``_reconcile_standup_jobs`` so the standup reconcile
+        (which reads ``lead_agent_id`` fresh) picks up the appointments.
+        Idempotent, cheap, best-effort — a failure here must never crash
+        boot; ``set_lead`` re-validates membership and refuses the operator.
+        """
+        try:
+            teams = self.teams_store.list_teams(include_archived=False)
+        except Exception as e:
+            logger.warning("team-lead backfill failed to load teams: %s", e)
+            return
+        for name, meta in teams.items():
+            if (meta.get("status") or "active") == "archived":
+                continue
+            if meta.get("lead_agent_id"):
+                continue
+            members = [m for m in (meta.get("members") or []) if m != "operator"]
+            if len(members) < 2:
+                # Solo / team-of-one self-leads — no lead row.
+                continue
+            try:
+                self.teams_store.set_lead(name, members[0])
+                logger.info(
+                    "backfilled lead %s for leaderless team %s", members[0], name
+                )
+            except Exception as e:
+                logger.warning("team-lead backfill for team %s failed: %s", name, e)
+
     def _start_background(self) -> None:
         self._reconcile_heartbeats()
         self._reconcile_work_summary_jobs()
+        self._backfill_team_leads()
         self._reconcile_standup_jobs()
 
         # Start cron
