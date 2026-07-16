@@ -2390,6 +2390,181 @@ async def summarize_team_progress(
         return {"error": f"Failed to summarize {target}: {e}"}
 
 
+# Instruction the OPERATOR (its own LLM turn) follows to turn the composed
+# evidence bundle into a per-criterion goal-progress judgement. The tool does
+# NOT make an LLM/utility-model call — it only gathers criteria + real evidence
+# and hands the judging to the operator, which is why the verdict rubric lives
+# here (and mirrored in the tool description) rather than being computed in code.
+_ASSESS_GUIDANCE = (
+    "Judge THIS turn whether the team is actually achieving its goal — do not "
+    "defer. For EACH success criterion below, decide ONE status and cite the "
+    "specific completed_work / blocked evidence that supports it:\n"
+    "  - met — the evidence clearly satisfies the criterion.\n"
+    "  - on_track — partial evidence, credibly trending toward met.\n"
+    "  - at_risk — thin/contradictory evidence, or blockers threaten it.\n"
+    "  - no_evidence — nothing in the completed work speaks to this criterion.\n"
+    "  - needs_external_metric — the criterion is MEASURABLE (a count, "
+    "percentage, revenue, ranking, signups, traffic figure). You CANNOT "
+    "confirm the real number from this bundle; do NOT invent or estimate a "
+    "figure. Mark it needs_external_metric and verify the actual value against "
+    "the external platform (analytics, the store/dashboard, the repo, the ad "
+    "account) before ever claiming it is met.\n"
+    "completed_work is EVIDENCE, not proof; task_counts alone never establish "
+    "that a goal was met. For any criterion that comes out at_risk or "
+    "no_evidence, ACT rather than just reporting: decompose the gap into a "
+    "concrete task via hand_off, re-brief the team (update_team_brief / "
+    "set_team_goal), or ask the team what is blocking (ask_teammate)."
+)
+
+
+@tool(
+    name="assess_team_progress",
+    operator_only=True,
+    description=(
+        "Judge whether a team is ACHIEVING its goal — not just how many "
+        "tasks it has closed. This is the goal-progress read: it composes the "
+        "team's north_star + success_criteria with the REAL evidence "
+        "(recent completed work + result summaries + artifact refs, the task-"
+        "count rollup, and current blockers) into one bundle so you can rate "
+        "each criterion. It does NOT decide for you — YOU produce, per "
+        "criterion, a status in {met | on_track | at_risk | no_evidence | "
+        "needs_external_metric} with the supporting evidence. Treat any "
+        "MEASURABLE criterion (a count, %, revenue, ranking, traffic) as "
+        "needs_external_metric and verify the true number against the external "
+        "platform — never hallucinate a figure. For at_risk / no_evidence "
+        "criteria, ACT: decompose the gap via hand_off, re-brief the team, or "
+        "ask the team what's blocking. Read the returned assessment_guidance. "
+        "Returns {team, north_star, criteria, completed_work, task_counts, "
+        "blocked, window, assessment_guidance} (+ notes on any degraded read)."
+    ),
+    parameters={
+        "team_name": {
+            "type": "string",
+            "description": "Team name to assess",
+        },
+        "since": {
+            "type": "string",
+            "description": (
+                "Evidence window for completed work — ISO timestamp or "
+                "duration string ('7d', '30d'). Default '14d'. Widen it to "
+                "cover a longer-running goal."
+            ),
+            "default": "14d",
+        },
+    },
+)
+async def assess_team_progress(
+    team_name: str = "",
+    since: str = "14d",
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Compose a goal-vs-evidence bundle for the operator to judge.
+
+    DATA-COMPOSITION only — no LLM/utility-model call here. Reuses three
+    existing operator reads: ``list_teams`` (north_star + success_criteria),
+    ``team_outputs`` (completed-work evidence: title + result_summary +
+    artifact_refs) and ``team_summary`` (task-count rollup + current
+    blockers). Each sub-read is independently guarded — a failure degrades
+    to a partial bundle plus a ``notes`` entry and NEVER raises, so a single
+    flaky endpoint can't sink the whole assessment. Untrusted worker text
+    (titles, result summaries, blocker notes, the goal strings) is passed
+    through :func:`sanitize_for_prompt` at this boundary before it enters the
+    operator's LLM context. The per-criterion verdict rubric is NOT computed
+    here — it rides ``assessment_guidance`` + the tool description for the
+    operator to apply.
+    """
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    if not isinstance(team_name, str) or not team_name.strip():
+        return {"error": "team_name is required"}
+    target = team_name.strip()
+    window = since if isinstance(since, str) and since.strip() else "14d"
+
+    notes: list[str] = []
+
+    # 1) Goal: north_star + success_criteria via the same list_teams read
+    #    inspect_teams uses. A read failure degrades (note) rather than
+    #    raising; an unknown team (read OK, name absent) is a hard error.
+    north_star = None
+    criteria: list[str] = []
+    try:
+        teams = await mesh_client.list_teams()
+        rows = teams.get("teams", []) if isinstance(teams, dict) else []
+        match = next((p for p in rows if p.get("name") == target), None)
+        if match is None:
+            return {"error": f"Team '{target}' not found"}
+        raw_ns = match.get("north_star")
+        if raw_ns:
+            north_star = sanitize_for_prompt(str(raw_ns))
+        raw_criteria = match.get("success_criteria") or []
+        if isinstance(raw_criteria, list):
+            criteria = [
+                sanitize_for_prompt(str(c))
+                for c in raw_criteria
+                if str(c).strip()
+            ]
+    except Exception as e:
+        notes.append(f"goal_read_failed: {str(e)[:200]}")
+
+    # 2) Completed-work evidence via team_outputs (over the window).
+    completed_work: list[dict] = []
+    try:
+        outputs = await mesh_client.team_outputs(target, since=window)
+        raw_outputs = outputs.get("outputs", []) if isinstance(outputs, dict) else []
+        for o in raw_outputs:
+            completed_work.append(
+                {
+                    "title": sanitize_for_prompt(str(o.get("title") or "")),
+                    "result_summary": sanitize_for_prompt(
+                        str(o.get("result_summary") or "")
+                    ),
+                    "artifact_refs": o.get("artifact_refs", []) or [],
+                }
+            )
+    except Exception as e:
+        notes.append(f"completed_work_read_failed: {str(e)[:200]}")
+
+    # 3) Task-count rollup + current blockers via team_summary (one read
+    #    covers both — blockers ride ``top_blockers`` so no extra call).
+    task_counts: dict = {}
+    blocked: list[dict] = []
+    try:
+        summary = await mesh_client.team_summary(target)
+        if isinstance(summary, dict):
+            task_counts = summary.get("counts", {}) or {}
+            for b in summary.get("top_blockers", []) or []:
+                blocked.append(
+                    {
+                        "id": b.get("id"),
+                        "assignee": b.get("assignee"),
+                        "title": sanitize_for_prompt(str(b.get("title") or "")),
+                        "blocker_note": sanitize_for_prompt(
+                            str(b.get("blocker_note") or "")
+                        ),
+                    }
+                )
+    except Exception as e:
+        notes.append(f"task_counts_read_failed: {str(e)[:200]}")
+
+    bundle = {
+        "team": target,
+        "north_star": north_star,
+        "criteria": criteria,
+        "completed_work": completed_work,
+        "task_counts": task_counts,
+        "blocked": blocked,
+        "window": window,
+        "assessment_guidance": _ASSESS_GUIDANCE,
+    }
+    if notes:
+        bundle["notes"] = notes
+    return bundle
+
+
 @tool(
     name="compose_work_summary",
     operator_only=True,

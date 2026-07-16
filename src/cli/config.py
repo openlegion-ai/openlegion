@@ -1749,6 +1749,11 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "list_agent_queue",
     "get_team_outputs",
     "summarize_team_progress",
+    # Goal-progress assessment (Tier-3) — composes the team's north_star +
+    # success_criteria with real completed-work evidence + task counts +
+    # blockers so the operator can judge each criterion (met / on_track /
+    # at_risk / no_evidence / needs_external_metric). Pure read — no LLM call.
+    "assess_team_progress",
     # Composes and persists a work summary card for the Work tab.
     # Backed by ``WorkSummariesStore``; the daily cron invokes this
     # tool directly (no LLM cost per fire). User rates via dashboard.

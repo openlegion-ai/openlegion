@@ -96,6 +96,7 @@ TOOL_GROUPS: tuple[ToolGroup, ...] = (
         intent="set or review team goals and rate deliveries",
         tools=(
             "set_team_goal", "manage_goals", "rate_delivery",
+            "assess_team_progress",
         ),
         operator_only=True,
     ),
