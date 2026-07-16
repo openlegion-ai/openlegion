@@ -110,13 +110,35 @@ class TestRequestCredentialTool:
         assert result["requested"] is True
 
     @pytest.mark.asyncio
-    async def test_mesh_request_failure_still_returns_result(self):
-        """If the mesh call fails, tool should still return requested=True."""
+    async def test_mesh_request_failure_returns_honest_failure(self):
+        """If delivery to the user fails, the tool MUST NOT claim success.
+
+        In an unattended/autonomous run the mesh event is the only
+        delivery mechanism (dashboard "needs-you" + steer-on-save); a
+        swallowed failure here used to make the agent believe the
+        request reached the user when it never did, parking it forever.
+        """
         from src.agent.builtins.vault_tool import request_credential
 
         mock_client = AsyncMock()
         mock_client.vault_list.return_value = []
         mock_client.request_credential_from_user.side_effect = Exception("Network error")
+
+        result = await request_credential(
+            name="key", description="desc", mesh_client=mock_client,
+        )
+        assert result["requested"] is not True
+        assert "error" in result
+        assert "recovery_hint" in result
+
+    @pytest.mark.asyncio
+    async def test_mesh_request_success_still_returns_requested_true(self):
+        """Negative control: the happy path is unaffected by the failure fix."""
+        from src.agent.builtins.vault_tool import request_credential
+
+        mock_client = AsyncMock()
+        mock_client.vault_list.return_value = []
+        mock_client.request_credential_from_user.return_value = {"requested": True, "name": "key"}
 
         result = await request_credential(
             name="key", description="desc", mesh_client=mock_client,
