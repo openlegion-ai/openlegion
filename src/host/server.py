@@ -8114,16 +8114,35 @@ def create_mesh_app(
         except TeamNotFound:
             raise HTTPException(404, f"Team '{team_name}' not found")
 
-        # Update team.md in place (store teams_dir first — see the brief
-        # endpoint's path note; mkdir covers a failed create scaffold).
+        # Section-scoped update of the shared TEAM.md's reserved ``##
+        # Context`` block (store teams_dir first — see the brief endpoint's
+        # path note; mkdir covers a failed create scaffold). This writer
+        # used to FULL-OVERWRITE the file (``# {team}\n\n{context}\n``),
+        # which silently wiped every OTHER section other tools now own — the
+        # ``## Goal`` block (set_team_goal, #1268) and ``## User
+        # Preferences`` / other brief blocks (update_team_brief). Read the
+        # existing file (seed ``# {team}\n`` when absent) and replace ONLY
+        # the ``## Context`` section, reusing the SAME section-scoped write
+        # (``replace_markdown_section``) + concurrent live-push
+        # (``_push_team_md``) the goal mirror and brief endpoint use, so
+        # goal/context/brief compose without clobbering each other (design
+        # doc ``docs/plans/2026-07-16-autonomous-team-delivery.md`` — closes
+        # the sibling of the §1-finding-4 goal seam).
         team_md_path = teams_store.team_md_path(team_name) or (TEAMS_DIR / team_name / "team.md")
         team_md_path.parent.mkdir(parents=True, exist_ok=True)
-        new_content = f"# {team_name}\n\n{context}\n"
+        existing = (
+            team_md_path.read_text(errors="replace")
+            if team_md_path.exists()
+            else f"# {team_name}\n"
+        )
+        new_content = replace_markdown_section(existing, "Context", context)
         team_md_path.write_text(new_content)
         # P2 gap fix: this writer previously never pushed to running
         # members (only the dashboard's PUT /api/team did), so an
-        # operator-tool context update was invisible to agents until
-        # their next restart.
+        # operator-tool context update was invisible to agents until their
+        # next restart. Best-effort — ``_push_team_md`` swallows per-target
+        # failures, so a push hiccup never fails the context write, and a
+        # solo/memberless team pushes to nobody (clean no-op).
         pushed = await _push_team_md(team_name, new_content)
 
         _emit_team_event(
