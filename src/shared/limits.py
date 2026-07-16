@@ -270,6 +270,43 @@ def coordination_daily_cap_usd() -> float:
     return clamped
 
 
+# Team-budget envelope posture on a STORE READ ERROR (Phase-0 safety
+# substrate, docs/plans/2026-07-16-autonomous-team-delivery.md §0). The
+# envelope (``CostTracker.team_envelope_check``) is a financial governor;
+# historically a TeamStore read hiccup made it fail OPEN — silently skip the
+# check — so a storage blip could never take down the LLM path. Under
+# unattended autonomy that silently disables a spend governor, so this knob
+# lets an operator make the SAME read-error path fail CLOSED (block the call)
+# instead. Bool-valued, so it lives outside the int-only ``LIMIT_SPECS``
+# table with the same env-override contract as the float caps above.
+#
+# DEFAULTS TO FALSE (fail open = the historical behavior) — a naive
+# always-closed would halt the fleet on a benign partial-boot read error.
+# The default flip is deferred to Phase-0 exit; the resolver honors the
+# default constant when the env is unset, so flipping it later needs no
+# call-site change. This governs the READ-ERROR path ONLY — the legitimate
+# "no envelope" cases (no team, no store, unset/0 = unlimited) are
+# unaffected either way.
+TEAM_ENVELOPE_FAIL_CLOSED_DEFAULT = False
+_TRUE_ENV_VALUES = ("1", "true", "yes", "on")
+
+
+def team_envelope_fail_closed() -> bool:
+    """Resolve the team-envelope store-read-error posture (env override).
+
+    ``True`` → a ``team_envelope_check`` store read error BLOCKS the call
+    (fail closed); ``False`` (default) → the check is skipped (fail open,
+    the historical behavior). Reads ``OPENLEGION_TEAM_ENVELOPE_FAIL_CLOSED``;
+    an unset value keeps ``TEAM_ENVELOPE_FAIL_CLOSED_DEFAULT`` (so the
+    deferred default flip needs no call-site change), and any unrecognized
+    value reads as False.
+    """
+    raw = os.environ.get("OPENLEGION_TEAM_ENVELOPE_FAIL_CLOSED")
+    if raw is None:
+        return TEAM_ENVELOPE_FAIL_CLOSED_DEFAULT
+    return raw.strip().lower() in _TRUE_ENV_VALUES
+
+
 # Kernel-executed auto-merge sampling (plan §8 #20). Fraction of a
 # trust-cleared pair's auto-merges flagged for human post-review — high
 # at first, decaying once the pair has accumulated

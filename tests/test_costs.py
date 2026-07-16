@@ -496,9 +496,12 @@ class TestTeamEnvelopeCheck:
         check = self.tracker.team_envelope_check("alice", "openai/gpt-4o")
         assert check["allowed"] is True
 
-    def test_store_error_fails_open(self):
-        """The envelope is an additional governor — a store hiccup must
-        not take down the LLM path (the per-agent budget still applies)."""
+    def test_store_error_fails_open_by_default(self, monkeypatch):
+        """DEFAULT posture: the envelope is an additional governor — a store
+        hiccup must not take down the LLM path (the per-agent budget still
+        applies). The fail-closed knob defaults False, so with no env
+        override a store read error stays fail-open."""
+        monkeypatch.delenv("OPENLEGION_TEAM_ENVELOPE_FAIL_CLOSED", raising=False)
 
         class _Boom:
             def team_of(self, agent):
@@ -507,6 +510,83 @@ class TestTeamEnvelopeCheck:
         self.tracker.set_team_store(_Boom())
         check = self.tracker.team_envelope_check("alice", "openai/gpt-4o")
         assert check["allowed"] is True
+
+    def test_store_error_fails_closed_when_flag_set(self, monkeypatch):
+        """Phase-0 safety knob: with OPENLEGION_TEAM_ENVELOPE_FAIL_CLOSED
+        on, a team_of read error BLOCKS the call instead of silently
+        disabling the governor."""
+        monkeypatch.setenv("OPENLEGION_TEAM_ENVELOPE_FAIL_CLOSED", "true")
+
+        class _Boom:
+            def team_of(self, agent):
+                raise RuntimeError("db locked")
+
+        self.tracker.set_team_store(_Boom())
+        check = self.tracker.team_envelope_check("alice", "openai/gpt-4o")
+        assert check["allowed"] is False
+        assert check["reason"] == "envelope_check_unavailable"
+
+    def test_get_team_error_fails_closed_when_flag_set(self, monkeypatch):
+        """The get_team leg of the read (not just team_of) also honors the
+        fail-closed knob."""
+        monkeypatch.setenv("OPENLEGION_TEAM_ENVELOPE_FAIL_CLOSED", "1")
+
+        class _BoomOnGet:
+            def team_of(self, agent):
+                return "teamA"
+
+            def get_team(self, team):
+                raise RuntimeError("db locked")
+
+        self.tracker.set_team_store(_BoomOnGet())
+        check = self.tracker.team_envelope_check("alice", "openai/gpt-4o")
+        assert check["allowed"] is False
+        assert check["reason"] == "envelope_check_unavailable"
+
+    def test_fail_closed_dict_is_blocked_path_shape_compatible(self, monkeypatch):
+        """The fail-closed dict carries the fields credentials.py's blocked
+        path subscripts (daily_used / monthly_used / estimated_cost / team),
+        so a real block renders cleanly instead of raising KeyError."""
+        monkeypatch.setenv("OPENLEGION_TEAM_ENVELOPE_FAIL_CLOSED", "yes")
+
+        class _Boom:
+            def team_of(self, agent):
+                raise RuntimeError("db locked")
+
+        self.tracker.set_team_store(_Boom())
+        check = self.tracker.team_envelope_check("alice", "openai/gpt-4o")
+        # Every field the credentials.py blocked branches read must exist.
+        for key in ("team", "daily_used", "monthly_used", "estimated_cost"):
+            assert key in check, f"fail-closed dict missing {key!r}"
+        # And it must render the way the caller formats it, no exception.
+        _d, _m = check.get("daily_limit"), check.get("monthly_limit")
+        rendered = (
+            f"Team budget exceeded for team '{check['team']}': "
+            f"${check['daily_used']:.2f}"
+            f"/{f'${_d:.2f}' if _d else 'unlimited'} daily, "
+            f"${check['monthly_used']:.2f}"
+            f"/{f'${_m:.2f}' if _m else 'unlimited'} monthly "
+            f"(estimated next call: ${check['estimated_cost']:.4f})"
+        )
+        assert "unlimited daily" in rendered
+
+    def test_flag_does_not_affect_normal_paths(self, monkeypatch):
+        """Negative control: the knob governs the read-ERROR path ONLY. With
+        it on, a healthy store's legitimate 'no envelope' cases (unset/0 =
+        unlimited, solo/teamless) and a real exceeded envelope are all
+        unchanged."""
+        monkeypatch.setenv("OPENLEGION_TEAM_ENVELOPE_FAIL_CLOSED", "true")
+        # Unset envelope on a healthy store still allows (B4 unlimited).
+        assert self.tracker.team_envelope_check("bob", "openai/gpt-4o")["allowed"] is True
+        # Teamless agent still allowed, team None.
+        solo = self.tracker.team_envelope_check("loner", "openai/gpt-4o")
+        assert solo["allowed"] is True and solo["team"] is None
+        # A genuinely exceeded envelope still blocks (not via the error path).
+        self.store.set_budget("teamA", 0.001, None)
+        self.tracker.track("alice", "openai/gpt-4o", 10_000, 5_000)
+        blocked = self.tracker.team_envelope_check("bob", "openai/gpt-4o")
+        assert blocked["allowed"] is False
+        assert "reason" not in blocked  # real exceed, not the unavailable path
 
 
 class TestCostTrackerCleanup:
