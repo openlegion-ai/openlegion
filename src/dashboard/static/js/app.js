@@ -11470,6 +11470,7 @@ function dashboard() {
         team_drive: 'working in the team drive',
         recommend_pending_action: 'recommending on a held action',
         allocate_member_budget: 'allocating a teammate\'s budget',
+        set_team_lead: 'appointing a team lead',
       };
       if (map[toolName]) return map[toolName];
       // Fallback: humanise the snake_case tool name.
