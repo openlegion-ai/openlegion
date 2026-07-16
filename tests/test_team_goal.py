@@ -482,6 +482,38 @@ async def test_endpoint_set_goal_mirrors_into_team_md_and_pushes(goal_push_app):
 
 
 @pytest.mark.asyncio
+async def test_context_update_preserves_goal_section(goal_push_app):
+    """Cross-writer composition against a REAL disk scaffold: setting a
+    goal then updating context leaves BOTH the ``## Goal`` and ``##
+    Context`` sections (plus the scaffold preamble) intact. The context
+    endpoint used to full-overwrite TEAM.md and wipe the goal — this is
+    the clobber seam the section-scoped write closes."""
+    app, _teams_store, transport, team_md = goal_push_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        rg = await c.post(
+            "/mesh/teams/growth/goal",
+            json={"north_star": "Reach 1k signups", "success_criteria": ["launch"]},
+            headers={"X-Agent-ID": "operator"},
+        )
+        assert rg.status_code == 200, rg.text
+        rc = await c.put(
+            "/mesh/teams/growth/context",
+            json={"context": "Focus on retention."},
+            headers={"X-Agent-ID": "operator"},
+        )
+    assert rc.status_code == 200, rc.text
+    # Context pushed to the running member only (writer, not stopped editor).
+    assert rc.json()["pushed"] == {"writer": True}
+    on_disk = team_md.read_text()
+    # Goal survived the context write (the regression).
+    assert "## Goal" in on_disk and "Reach 1k signups" in on_disk
+    # Context landed in its own reserved section.
+    assert "## Context" in on_disk and "Focus on retention." in on_disk
+    # Scaffold preamble description still present.
+    assert "growth project" in on_disk
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("goal_push_app", [True], indirect=True)
 async def test_endpoint_set_goal_survives_push_failure(goal_push_app):
     """A push that raises must NOT fail the goal write (best-effort): the

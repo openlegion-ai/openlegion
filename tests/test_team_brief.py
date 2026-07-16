@@ -356,6 +356,122 @@ async def test_add_member_no_team_md_on_disk_no_ops_cleanly(join_app):
     assert [call for call in transport.calls if call["path"] == "/team"] == []
 
 
+@pytest.mark.asyncio
+async def test_context_update_preserves_goal_and_prefs_sections(brief_app):
+    """Core regression: the context writer used to FULL-OVERWRITE TEAM.md,
+    silently wiping the ``## Goal`` (set_team_goal, #1268) and ``## User
+    Preferences`` (update_team_brief) sections. It is now section-scoped
+    into a reserved ``## Context`` block, so every sibling section
+    survives."""
+    app, transport, project_md = brief_app
+    project_md.write_text(
+        "# research\n\n"
+        "## Goal\n\nShip the launch\n\n"
+        "## User Preferences\n\n- Formal tone\n\n"
+        "## Workflow\n\nscout -> analyst\n"
+    )
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://t",
+    ) as c:
+        r = await c.put(
+            "/mesh/teams/research/context",
+            json={"context": "Team ships weekly."},
+            headers={"X-Agent-ID": "operator"},
+        )
+    assert r.status_code == 200, r.text
+    # Pushed to the running member only (scout, not the stopped analyst).
+    assert r.json()["pushed"] == {"scout": True}
+    on_disk = project_md.read_text()
+    # New Context section written into its own reserved block...
+    assert "## Context" in on_disk
+    assert "Team ships weekly." in on_disk
+    assert on_disk.count("## Context") == 1
+    # ...and every pre-existing section survived (the seam that regressed).
+    assert "## Goal" in on_disk and "Ship the launch" in on_disk
+    assert "## User Preferences" in on_disk and "- Formal tone" in on_disk
+    assert "scout -> analyst" in on_disk
+    # The push carries the full composed file.
+    assert transport.calls[0]["json"]["content"] == on_disk
+
+
+@pytest.mark.asyncio
+async def test_context_update_replaces_only_context_on_rewrite(brief_app):
+    """A second context update replaces the ``## Context`` block in place —
+    never a duplicate, never touching sibling sections."""
+    app, _transport, project_md = brief_app
+    project_md.write_text("# research\n\n## Goal\n\nkeep me\n")
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://t",
+    ) as c:
+        await c.put(
+            "/mesh/teams/research/context",
+            json={"context": "v1 context"},
+            headers={"X-Agent-ID": "operator"},
+        )
+        await c.put(
+            "/mesh/teams/research/context",
+            json={"context": "v2 context"},
+            headers={"X-Agent-ID": "operator"},
+        )
+    on_disk = project_md.read_text()
+    assert "v2 context" in on_disk
+    assert "v1 context" not in on_disk
+    assert on_disk.count("## Context") == 1
+    assert "keep me" in on_disk  # goal untouched across both writes
+
+
+@pytest.mark.asyncio
+async def test_context_update_survives_push_failure(brief_app, monkeypatch):
+    """A push that raises must NOT fail the context write (best-effort):
+    the file is still written and sibling sections preserved."""
+    app, transport, project_md = brief_app
+    project_md.write_text("# research\n\n## Goal\n\nnorth star\n")
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("member unreachable")
+
+    monkeypatch.setattr(transport, "request", _boom)
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://t",
+    ) as c:
+        r = await c.put(
+            "/mesh/teams/research/context",
+            json={"context": "resilient context"},
+            headers={"X-Agent-ID": "operator"},
+        )
+    assert r.status_code == 200, r.text
+    # Push attempted against the running member, recorded as failed.
+    assert r.json()["pushed"] == {"scout": False}
+    on_disk = project_md.read_text()
+    assert "resilient context" in on_disk and "## Context" in on_disk
+    assert "north star" in on_disk  # goal preserved despite the push failure
+
+
+@pytest.mark.asyncio
+async def test_context_update_memberless_team_no_ops_push_and_seeds_file(brief_app):
+    """A team with no running members pushes to nobody (clean no-op) and,
+    when TEAM.md is absent, seeds ``# {team}`` + the ``## Context`` block."""
+    import src.cli.config as config_module
+
+    app, transport, _ = brief_app
+    app.teams_store.create_team("solo")  # pure-DB store: no scaffold, no members
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://t",
+    ) as c:
+        r = await c.put(
+            "/mesh/teams/solo/context",
+            json={"context": "seeded context"},
+            headers={"X-Agent-ID": "operator"},
+        )
+    assert r.status_code == 200, r.text
+    assert r.json()["pushed"] == {}  # nobody to push to — clean no-op
+    assert transport.calls == []  # no push attempted at all
+    seeded = config_module.TEAMS_DIR / "solo" / "team.md"
+    text = seeded.read_text()
+    assert text.startswith("# solo")
+    assert "## Context" in text and "seeded context" in text
+
+
 # ── outcomes_window on team summary ───────────────────────────────
 
 
