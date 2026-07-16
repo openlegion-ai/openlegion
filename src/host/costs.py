@@ -472,9 +472,20 @@ class CostTracker:
 
         Returns ``{"allowed": True, "team": None}`` when the agent has no
         team, no store is wired, or the team's envelope is unset/0
-        (= unlimited). Fails OPEN on store read errors — the envelope is
-        an additional governor on top of the always-on per-agent budget,
-        and a storage hiccup must not take down the whole LLM path.
+        (= unlimited) — those are legitimate "no envelope" cases, not
+        errors, and are unaffected by the posture knob below.
+
+        On a store READ ERROR the posture is CONFIGURABLE
+        (``limits.team_envelope_fail_closed`` /
+        ``OPENLEGION_TEAM_ENVELOPE_FAIL_CLOSED``). The default (False) fails
+        OPEN — the envelope is an additional governor on top of the
+        always-on per-agent budget, and a storage hiccup must not take down
+        the whole LLM path. Set True (Phase-0 safety substrate,
+        docs/plans/2026-07-16-autonomous-team-delivery.md §0) to fail CLOSED:
+        the read error BLOCKS the call, returning an ``{"allowed": False,
+        "reason": "envelope_check_unavailable", ...}`` dict shaped like a
+        real envelope-exceeded result, so an unattended fleet cannot keep
+        spending through a governor it can no longer read.
         """
         store = self._team_store
         if store is None or not agent:
@@ -485,6 +496,23 @@ class CostTracker:
                 return {"allowed": True, "team": None}
             trow = store.get_team(team)
         except Exception as e:
+            from src.shared.limits import team_envelope_fail_closed
+
+            if team_envelope_fail_closed():
+                logger.warning("Team envelope check FAILED CLOSED (store read failed): %s", e)
+                # Shape-compatible with the real envelope-exceeded return so
+                # the credentials.py blocked path (which subscripts
+                # daily_used/monthly_used/estimated_cost) renders cleanly.
+                return {
+                    "allowed": False,
+                    "team": None,
+                    "reason": "envelope_check_unavailable",
+                    "estimated_cost": 0.0,
+                    "daily_used": 0.0,
+                    "daily_limit": None,
+                    "monthly_used": 0.0,
+                    "monthly_limit": None,
+                }
             logger.warning("Team envelope check skipped (store read failed): %s", e)
             return {"allowed": True, "team": None}
         if trow is None:
