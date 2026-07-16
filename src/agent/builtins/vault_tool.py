@@ -150,7 +150,12 @@ async def request_credential(
     except Exception:
         pass  # Vault may not be available yet; proceed with the request
 
-    # Emit credential request event to the dashboard via the mesh
+    # Emit credential request event to the dashboard via the mesh. In an
+    # unattended/autonomous run this event IS the delivery mechanism (the
+    # dashboard "needs-you" surface + steer-on-save) — unlike the vault_list
+    # check above, a failure here is NOT best-effort: if it never reaches
+    # the user, the agent must not believe the request was delivered, or
+    # it can park forever waiting on a save that will never happen.
     request_id = ""
     try:
         resp = await mesh_client.request_credential_from_user(
@@ -158,8 +163,21 @@ async def request_credential(
         )
         if isinstance(resp, dict):
             request_id = str(resp.get("request_id") or "")
-    except Exception:
-        pass  # Best effort — the tool result itself is the primary mechanism
+    except Exception as e:
+        return {
+            "requested": False,
+            "name": name,
+            "error": (
+                f"Credential request for '{name}' was NOT delivered to the "
+                f"user: {e}. You MUST NOT report this as requested — no "
+                "request reached the user, so they have nothing to save."
+            ),
+            "recovery_hint": (
+                "Retry request_credential once. If it keeps failing, tell "
+                "the user/operator directly (e.g. notify_user) instead of "
+                "silently waiting for a save that will never arrive."
+            ),
+        }
 
     result: dict = {
         "requested": True,
