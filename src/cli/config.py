@@ -1741,6 +1741,11 @@ _OPERATOR_ALLOWED_TOOLS: list[str] = [
     "notify_user",
     "inspect_agents",
     "inspect_teams",
+    # Team spend readback (Phase-1 observability) — aggregate cost +
+    # envelope + per-member breakdown for one team, backed by
+    # GET /mesh/costs/team/{team}. Sits alongside inspect_agents /
+    # inspect_teams as a monitoring read tool.
+    "inspect_team_spend",
     "list_agent_queue",
     "get_team_outputs",
     "summarize_team_progress",

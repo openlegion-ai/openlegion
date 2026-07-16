@@ -63,12 +63,15 @@ TOOL_GROUPS: tuple[ToolGroup, ...] = (
     ToolGroup(
         key="fleet_setup",
         label="Fleet setup",
-        intent="build or restructure a team (create agents/teams, apply templates)",
+        intent=(
+            "build, restructure, or check spend on a team (create agents/"
+            "teams, apply templates, read team spend)"
+        ),
         tools=(
             "create_agent", "create_team", "apply_template", "list_templates",
             "add_agents_to_team", "remove_agents_from_team", "manage_team",
             "manage_agent", "edit_agent", "read_agent_config",
-            "update_team_context", "set_team_lead",
+            "update_team_context", "set_team_lead", "inspect_team_spend",
         ),
         operator_only=True,
     ),
