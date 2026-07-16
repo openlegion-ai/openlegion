@@ -6968,6 +6968,26 @@ def create_mesh_app(
         if old and old != team_name:
             _remove_team_blackboard_permissions(agent, old)
             _purge_departed_team_signals(agent, old)
+            # Lead-orphan seam on the DEPARTURE side of a move: ``add_member``
+            # evicts the agent from ``old`` and clears ``old``'s lead pointer
+            # in-transaction when the mover WAS that team's lead — but nothing
+            # re-appoints, so the team it LEFT sits leaderless until the next
+            # reboot's backfill. Same mirror as the remove/offboard paths: if
+            # ``old`` now has no lead and still >=2 real members, appoint the
+            # first remaining real member + wire its standup. The mover is
+            # already gone from ``old``'s membership (moved to ``team_name``),
+            # so it can't be re-picked. Best-effort — must not fail the move.
+            try:
+                _old_team = teams_store.get_team(old) or {}
+                _old_real = [m for m in _old_team.get("members", []) if m != "operator"]
+                if len(_old_real) >= 2 and not (_old_team.get("lead_agent_id") or "").strip():
+                    try:
+                        teams_store.set_lead(old, _old_real[0])
+                        _sync_standup_job_on_lead_change(old, _old_real[0])
+                    except (TeamNotFound, ValueError) as e:
+                        logger.warning("move auto-appoint lead for team %s failed: %s", old, e)
+            except Exception as e:
+                logger.warning("move auto-appoint check for team %s failed: %s", old, e)
         _add_team_blackboard_permissions(agent, team_name)
         permissions.reload()
         # Phase-1 leadership loop (docs/plans/2026-07-16-autonomous-team-
@@ -6999,6 +7019,23 @@ def create_mesh_app(
                     logger.warning("auto-appoint lead for team %s failed: %s", team_name, e)
         except Exception as e:
             logger.warning("auto-appoint lead check for team %s failed: %s", team_name, e)
+        # Join-context seam (docs/plans/2026-07-16-autonomous-team-delivery.md
+        # §1): a worker container is started at create_agent BEFORE it joins,
+        # so its ``/data/workspace/TEAM.md`` is empty/stale — yet the onboarding
+        # intro tells it to "Read TEAM.md for team context." Nothing pushed the
+        # team's shared brief on JOIN (only the goal/context/brief writers push,
+        # or a container restart), so the new hire couldn't see shared context
+        # until some later edit. Push the team's CURRENT TEAM.md to running
+        # members now, reusing the same closure those writers use — the new
+        # member (if running) is included since it's now in ``members``. Best-
+        # effort: a push hiccup must not fail the add-member response; no
+        # team.md / a solo team with no running peers no-ops cleanly.
+        try:
+            _team_md_path = teams_store.team_md_path(team_name)
+            if _team_md_path is not None and _team_md_path.exists():
+                await _push_team_md(team_name, _team_md_path.read_text(errors="replace"))
+        except Exception as e:
+            logger.warning("TEAM.md push on join for team %s failed: %s", team_name, e)
         _schedule_onboarding_wake(agent, team_name)
         return {"added": True, "team_id": team_name, "team_name": team_name, "agent": agent}
 
@@ -7016,6 +7053,30 @@ def create_mesh_app(
         _remove_team_blackboard_permissions(agent, team_name)
         _purge_departed_team_signals(agent, team_name)
         permissions.reload()
+        # Lead-orphan seam (docs/plans/2026-07-16-autonomous-team-delivery.md
+        # §1/§3) — mirror of the ADD-side auto-appoint. ``remove_member``
+        # clears ``lead_agent_id`` in-transaction when the DEPARTING member was
+        # the lead, but nothing re-appoints, so a team that loses its lead sits
+        # LEADERLESS (stewardship — standup, goal-coverage probe, blocked-task
+        # escalation, drive-review verdicts — dormant) until the next mesh
+        # reboot's backfill. If the team now has NO lead AND still has >=2 real
+        # (non-operator) members, appoint the first remaining real member as
+        # lead + wire its standup cron live. Removing a NON-lead leaves the
+        # surviving lead intact (the ``lead_agent_id`` guard); dropping below 2
+        # real members appoints nobody (a solo team self-leads); NEVER the
+        # operator (``set_lead`` re-checks). Best-effort: a failure here must
+        # not fail the remove response; the boot backfill catches any drift.
+        try:
+            _team = teams_store.get_team(team_name) or {}
+            _real_members = [m for m in _team.get("members", []) if m != "operator"]
+            if len(_real_members) >= 2 and not (_team.get("lead_agent_id") or "").strip():
+                try:
+                    teams_store.set_lead(team_name, _real_members[0])
+                    _sync_standup_job_on_lead_change(team_name, _real_members[0])
+                except (TeamNotFound, ValueError) as e:
+                    logger.warning("auto-appoint lead for team %s failed: %s", team_name, e)
+        except Exception as e:
+            logger.warning("auto-appoint lead check for team %s failed: %s", team_name, e)
         return {"removed": True, "team_id": team_name, "team_name": team_name, "agent": agent}
 
     @app.delete("/mesh/teams/{team_name}")
@@ -11623,6 +11684,35 @@ def create_mesh_app(
                 logger.warning(
                     "offboard clear-lead for team %s failed: %s", led_team_id, e,
                 )
+            # Lead-orphan seam (docs/plans/2026-07-16-autonomous-team-
+            # delivery.md §1/§3) — mirror of the ADD-side auto-appoint on the
+            # OFFBOARD departure path: clearing the departing lead above leaves
+            # the team leaderless (stewardship dormant) until the next reboot's
+            # backfill. Re-appoint a remaining real member. CRUCIAL difference
+            # from the remove-member path: offboard ARCHIVES the agent but does
+            # NOT drop its ``team_members`` row, so the departing agent is still
+            # in ``members`` — it is EXCLUDED here so it can never be re-picked
+            # as its own successor. If >=2 OTHER real (non-operator) members
+            # remain and there's no lead, appoint the first + wire its standup.
+            # Best-effort; the boot backfill catches any drift.
+            try:
+                _team = teams_store.get_team(led_team_id) or {}
+                _real_members = [
+                    m for m in _team.get("members", [])
+                    if m != "operator" and m != agent_id
+                ]
+                if len(_real_members) >= 2 and not (_team.get("lead_agent_id") or "").strip():
+                    try:
+                        teams_store.set_lead(led_team_id, _real_members[0])
+                        _sync_standup_job_on_lead_change(led_team_id, _real_members[0])
+                    except (TeamNotFound, ValueError) as e:
+                        logger.warning(
+                            "offboard auto-appoint lead for team %s failed: %s", led_team_id, e,
+                        )
+            except Exception as e:
+                logger.warning(
+                    "offboard auto-appoint check for team %s failed: %s", led_team_id, e,
+                )
         archive_result = await _archive_agent_core(agent_id)
         return {"offboarded": True, "manifest": manifest, **archive_result}
 
@@ -12110,6 +12200,17 @@ def create_mesh_app(
                         target_id,
                         e,
                     )
+            # Lead-orphan seam on the DELETE departure path: capture the team
+            # this agent LEADS (if any) BEFORE ``_remove_agent`` drops its
+            # membership and clears ``lead_agent_id`` in-transaction. A deleted
+            # lead's team would otherwise sit leaderless until the next reboot's
+            # backfill (plain archive keeps the lead pointer, so a lead survives
+            # archive intact and is only orphaned here at delete time).
+            _deleted_led_team = None
+            try:
+                _deleted_led_team = teams_store.led_team(target_id)
+            except Exception as e:
+                logger.warning("delete lead lookup for %s failed: %s", target_id, e)
             try:
                 _remove_agent(target_id, stop_container=False)
             except Exception as e:
@@ -12129,6 +12230,26 @@ def create_mesh_app(
                     health_monitor.unregister(target_id)
                 except Exception:
                     pass
+            # Re-appoint a remaining real member as lead for the deleted lead's
+            # team (mirror of the remove/offboard/move paths). ``_remove_agent``
+            # already removed the deleted agent from ``team_members``, so it
+            # can't be re-picked. Best-effort — must not fail the delete.
+            if _deleted_led_team:
+                try:
+                    _team = teams_store.get_team(_deleted_led_team) or {}
+                    _real_members = [m for m in _team.get("members", []) if m != "operator"]
+                    if len(_real_members) >= 2 and not (_team.get("lead_agent_id") or "").strip():
+                        try:
+                            teams_store.set_lead(_deleted_led_team, _real_members[0])
+                            _sync_standup_job_on_lead_change(_deleted_led_team, _real_members[0])
+                        except (TeamNotFound, ValueError) as e:
+                            logger.warning(
+                                "delete auto-appoint lead for team %s failed: %s", _deleted_led_team, e,
+                            )
+                except Exception as e:
+                    logger.warning(
+                        "delete auto-appoint check for team %s failed: %s", _deleted_led_team, e,
+                    )
             blackboard.log_audit(
                 action="delete_agent",
                 target=target_id,

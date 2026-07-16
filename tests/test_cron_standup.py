@@ -508,6 +508,104 @@ class TestAddMemberAutoAppointWiresStandup:
             importlib.reload(server_module)
 
 
+class TestRemoveLeadReappointWiresStandup:
+    """Lead-orphan seam (docs/plans/2026-07-16-autonomous-team-delivery.md
+    §1/§3): removing the lead must re-appoint a remaining member AND rewire
+    ITS standup cron LIVE — the mirror of the add-side auto-appoint, so
+    stewardship isn't dormant until the next reboot's reconcile."""
+
+    @pytest.mark.asyncio
+    async def test_remove_lead_reappoints_and_rewires_standup_job(self, tmp_path, monkeypatch):
+        import importlib
+        import json as _json
+
+        import yaml as _yaml
+        from httpx import ASGITransport, AsyncClient
+
+        monkeypatch.chdir(tmp_path)
+        import src.cli.config as cli_cfg
+
+        perms_file = tmp_path / "permissions.json"
+        perms_file.write_text(
+            _json.dumps(
+                {
+                    "permissions": {
+                        "agent1": {"blackboard_read": [], "blackboard_write": []},
+                        "agent2": {"blackboard_read": [], "blackboard_write": []},
+                        "agent3": {"blackboard_read": [], "blackboard_write": []},
+                    }
+                }
+            )
+        )
+        monkeypatch.setattr(cli_cfg, "PERMISSIONS_FILE", perms_file)
+        agents_file = tmp_path / "agents.yaml"
+        agents_file.write_text(
+            _yaml.dump(
+                {
+                    "agents": {
+                        "agent1": {"role": "a"},
+                        "agent2": {"role": "b"},
+                        "agent3": {"role": "c"},
+                        "operator": {"role": "operator"},
+                    }
+                }
+            )
+        )
+        monkeypatch.setattr(cli_cfg, "AGENTS_FILE", agents_file)
+
+        import src.host.server as server_module
+
+        importlib.reload(server_module)
+        from src.host.cron import CronScheduler
+        from src.host.mesh import Blackboard, MessageRouter, PubSub
+        from src.host.permissions import PermissionMatrix
+        from src.host.teams import TeamStore
+
+        permissions = PermissionMatrix()
+        router = MessageRouter(
+            permissions,
+            {
+                "operator": "http://op:8400",
+                "agent1": "http://a1:8400",
+                "agent2": "http://a2:8400",
+                "agent3": "http://a3:8400",
+            },
+        )
+        blackboard = Blackboard(str(tmp_path / "bb.db"))
+        cron_scheduler = CronScheduler(config_path=str(tmp_path / "cron.json"))
+        teams_store = TeamStore(db_path=str(tmp_path / "teams.db"), teams_dir=tmp_path / "teams")
+        teams_store.create_team("squad")
+        app = server_module.create_mesh_app(
+            blackboard=blackboard,
+            pubsub=PubSub(),
+            router=router,
+            permissions=permissions,
+            teams_store=teams_store,
+            cron_scheduler=cron_scheduler,
+            auth_tokens={"operator": "op-token"},
+        )
+        hdr = {"Authorization": "Bearer op-token", "X-Agent-ID": "operator"}
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+                for agent in ("agent1", "agent2", "agent3"):
+                    r = await c.post("/mesh/teams/squad/members", json={"agent": agent}, headers=hdr)
+                    assert r.status_code == 200, r.text
+                # agent1 auto-appointed on crossing to two + standup wired.
+                assert teams_store.get_team("squad")["lead_agent_id"] == "agent1"
+                assert cron_scheduler.find_standup_job("squad").agent == "agent1"
+                # Remove the LEAD → first remaining member re-appointed + standup rewired.
+                r = await c.delete("/mesh/teams/squad/members/agent1", headers=hdr)
+                assert r.status_code == 200, r.text
+            assert teams_store.get_team("squad")["lead_agent_id"] == "agent2"
+            job = cron_scheduler.find_standup_job("squad")
+            assert job is not None
+            assert job.agent == "agent2"
+            assert job.post_to_channel == "squad"
+        finally:
+            blackboard.close()
+            importlib.reload(server_module)
+
+
 # ── Boot reconcile (cli/runtime.RuntimeContext._reconcile_standup_jobs) ──
 
 

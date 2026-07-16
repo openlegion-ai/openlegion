@@ -420,6 +420,151 @@ class TestOffboardEndpoint:
             bb.close()
 
 
+# ── Lead-orphan seam: departure re-appoint (offboard + delete) ──────
+#
+# Mirror of the ADD-side auto-appoint (docs/plans/2026-07-16-autonomous-
+# team-delivery.md §1/§3): a departing lead must not leave the team
+# leaderless until the next reboot's backfill.
+
+
+class TestOffboardLeadReappoint:
+    @pytest.mark.asyncio
+    async def test_offboard_lead_reappoints_remaining_and_wires_standup(self, tmp_path, monkeypatch):
+        """Offboarding the lead re-appoints the first OTHER real member and
+        rewires the standup cron. The offboarded agent is archived but still
+        in ``team_members`` — it is EXCLUDED from candidates (never re-picked
+        as its own successor)."""
+        from src.host.cron import CronScheduler
+
+        cron = CronScheduler(config_path=str(tmp_path / "cron.json"))
+        lane = _RecordingLaneManager(reply="Handover text.")
+        app, bb, store, _ = _build_app(
+            tmp_path, monkeypatch, lane_manager=lane, cron_scheduler=cron,
+            extra_agents={"analyst": {"role": "a"}, "editor": {"role": "e"}},
+        )
+        # research already has scout; add two more real members, scout leads.
+        store.add_member("research", "analyst")
+        store.add_member("research", "editor")
+        store.set_lead("research", "scout")
+        cron.ensure_standup_job("research", "scout")
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+                r = await c.post("/mesh/agents/scout/offboard", headers=_op_headers())
+            assert r.status_code == 200, r.text
+        finally:
+            bb.close()
+        # scout excluded → the first OTHER real member (analyst) re-appointed.
+        assert store.get_team("research")["lead_agent_id"] == "analyst"
+        job = cron.find_standup_job("research")
+        assert job is not None
+        assert job.agent == "analyst"
+
+    @pytest.mark.asyncio
+    async def test_offboard_lead_down_to_one_leaves_no_lead(self, tmp_path, monkeypatch):
+        """Offboarding a lead when only one OTHER real member remains leaves
+        the team leaderless (the solo remainder self-leads)."""
+        lane = _RecordingLaneManager(reply="Handover text.")
+        app, bb, store, _ = _build_app(
+            tmp_path, monkeypatch, lane_manager=lane,
+            extra_agents={"analyst": {"role": "a"}},
+        )
+        store.add_member("research", "analyst")  # research = {scout, analyst}
+        store.set_lead("research", "scout")
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+                r = await c.post("/mesh/agents/scout/offboard", headers=_op_headers())
+            assert r.status_code == 200, r.text
+        finally:
+            bb.close()
+        assert store.get_team("research")["lead_agent_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_offboard_non_lead_leaves_lead_unchanged(self, tmp_path, monkeypatch):
+        """Offboarding a NON-lead member never touches the surviving lead."""
+        lane = _RecordingLaneManager(reply="Handover text.")
+        app, bb, store, _ = _build_app(
+            tmp_path, monkeypatch, lane_manager=lane,
+            extra_agents={"analyst": {"role": "a"}, "editor": {"role": "e"}},
+        )
+        store.add_member("research", "analyst")
+        store.add_member("research", "editor")
+        store.set_lead("research", "analyst")  # analyst leads; offboard scout
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+                r = await c.post("/mesh/agents/scout/offboard", headers=_op_headers())
+            assert r.status_code == 200, r.text
+        finally:
+            bb.close()
+        assert store.get_team("research")["lead_agent_id"] == "analyst"
+
+    @pytest.mark.asyncio
+    async def test_offboard_reappoint_failure_does_not_fail_offboard(self, tmp_path, monkeypatch):
+        """Best-effort: a ``set_lead`` failure during the departure re-appoint
+        must never fail the offboard response."""
+        from unittest.mock import patch
+
+        lane = _RecordingLaneManager(reply="Handover text.")
+        app, bb, store, _ = _build_app(
+            tmp_path, monkeypatch, lane_manager=lane,
+            extra_agents={"analyst": {"role": "a"}, "editor": {"role": "e"}},
+        )
+        store.add_member("research", "analyst")
+        store.add_member("research", "editor")
+        store.set_lead("research", "scout")
+        try:
+            with patch.object(store, "set_lead", side_effect=ValueError("boom")):
+                async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+                    r = await c.post("/mesh/agents/scout/offboard", headers=_op_headers())
+            assert r.status_code == 200, r.text
+            assert r.json()["offboarded"] is True
+        finally:
+            bb.close()
+
+
+class TestDeleteLeadReappoint:
+    @pytest.mark.asyncio
+    async def test_delete_lead_reappoints_remaining_member(self, tmp_path, monkeypatch):
+        """Deleting a lead (archive → propose-delete → confirm) re-appoints
+        the first remaining real member for its former team — the delete path
+        clears the lead via ``remove_agent`` and would otherwise orphan it."""
+        # ``_remove_agent`` opens its OWN TeamStore handle via
+        # ``_open_teams_store()`` (``OPENLEGION_TEAMS_DB``); point it at the
+        # SAME file the app's store uses so the delete's membership write is
+        # visible to the endpoint's re-appoint (in production both resolve to
+        # one ``data/teams.db``).
+        monkeypatch.setenv("OPENLEGION_TEAMS_DB", str(tmp_path / "teams.db"))
+        lane = _RecordingLaneManager(reply="Handover text.")
+        container_manager = MagicMock()
+        app, bb, store, _ = _build_app(
+            tmp_path, monkeypatch, lane_manager=lane, container_manager=container_manager,
+            extra_agents={"analyst": {"role": "a"}, "editor": {"role": "e"}},
+        )
+        store.add_member("research", "analyst")
+        store.add_member("research", "editor")
+        store.set_lead("research", "scout")  # scout leads; archive keeps the pointer
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+                r = await c.post("/mesh/agents/scout/archive", headers=_op_headers())
+                assert r.status_code == 200, r.text
+                r = await c.post(
+                    "/mesh/agents/scout/propose-delete", headers=_human_origin_headers(),
+                )
+                assert r.status_code == 200, r.text
+                nonce = r.json()["change_id"]
+                digest = r.json()["payload_digest"]
+                r = await c.post(
+                    "/mesh/config/confirm",
+                    json={"change_id": nonce, "payload_digest": digest},
+                    headers=_human_origin_headers(),
+                )
+                assert r.status_code == 200, r.text
+                assert r.json()["deleted"] == "agent"
+        finally:
+            bb.close()
+        assert store.team_of("scout") is None
+        assert store.get_team("research")["lead_agent_id"] == "analyst"
+
+
 # ── ORDER PROOF: mesh delete-confirm chain ──────────────────────────
 
 

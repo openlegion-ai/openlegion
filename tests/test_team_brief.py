@@ -226,6 +226,136 @@ async def test_team_context_update_now_pushes(brief_app):
     assert "fresh shared context" in project_md.read_text()
 
 
+# ── join-context push (add-member → TEAM.md to running members) ────
+
+
+@pytest.fixture
+def join_app(tmp_path, monkeypatch):
+    """Mesh app for the JOIN-context seam: the add-member endpoint's
+    operator gate needs ``auth_tokens`` configured (dev-mode resolves the
+    caller to "" and 403s), a FakeTransport to observe the push, a team
+    with an on-disk team.md, and one RUNNING member (in the registry)."""
+    monkeypatch.setenv(
+        "OPENLEGION_ORCHESTRATION_TASKS_DB", str(tmp_path / "tasks.db"),
+    )
+    import json as _json
+
+    import yaml as _yaml
+
+    import src.cli.config as config_module
+    import src.host.server as server_module
+    from src.host.teams import TeamStore
+
+    importlib.reload(server_module)
+    agents_file = tmp_path / "agents.yaml"
+    agents_file.write_text(
+        _yaml.dump(
+            {
+                "agents": {
+                    "scout": {"role": "a"},
+                    "analyst": {"role": "b"},
+                    "operator": {"role": "operator"},
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(config_module, "AGENTS_FILE", agents_file)
+    perms_file = tmp_path / "permissions.json"
+    perms_file.write_text(
+        _json.dumps(
+            {
+                "permissions": {
+                    "scout": {"blackboard_read": [], "blackboard_write": []},
+                    "analyst": {"blackboard_read": [], "blackboard_write": []},
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(config_module, "PERMISSIONS_FILE", perms_file)
+    teams_dir = tmp_path / "teams"
+    monkeypatch.setattr(config_module, "TEAMS_DIR", teams_dir)
+
+    blackboard = Blackboard(str(tmp_path / "bb.db"))
+    permissions = PermissionMatrix()
+    router = MessageRouter(
+        permissions,
+        {
+            "scout": "http://scout:8400",  # RUNNING (in registry)
+            "operator": "http://operator:8400",
+            # analyst is a member but NOT running (absent from the registry).
+        },
+    )
+    fake_transport = _FakeTransport()
+    teams_store = TeamStore(db_path=str(tmp_path / "teams.db"), teams_dir=teams_dir)
+    app = server_module.create_mesh_app(
+        blackboard=blackboard,
+        pubsub=PubSub(),
+        router=router,
+        permissions=permissions,
+        teams_store=teams_store,
+        transport=fake_transport,  # type: ignore[arg-type]
+        auth_tokens={"operator": "op-token"},
+    )
+    teams_store.create_team("research")
+    team_md = teams_dir / "research" / "team.md"
+    team_md.write_text("# research\n\nShared mission: ship the widget.\n")
+    yield app, fake_transport, teams_store, team_md
+    blackboard.close()
+    monkeypatch.delenv("OPENLEGION_ORCHESTRATION_TASKS_DB", raising=False)
+    importlib.reload(server_module)
+
+
+def _op_bearer() -> dict:
+    return {"Authorization": "Bearer op-token", "X-Agent-ID": "operator"}
+
+
+@pytest.mark.asyncio
+async def test_add_member_pushes_current_team_md_to_running_members(join_app):
+    """Join-context seam: adding an agent pushes the team's CURRENT TEAM.md
+    to running members so a new hire's onboarding "Read TEAM.md" is not
+    stale until the next goal/context/brief edit or a container restart.
+    The newly-added RUNNING member (scout) receives the push; a non-running
+    member does not."""
+    app, transport, store, team_md = join_app
+    # A prior (non-running) member so the roster crosses to two; then add the
+    # RUNNING member (scout) via the endpoint.
+    store.add_member("research", "analyst")
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://t",
+    ) as c:
+        r = await c.post(
+            "/mesh/teams/research/members",
+            json={"agent": "scout"},
+            headers=_op_bearer(),
+        )
+    assert r.status_code == 200, r.text
+    team_pushes = [call for call in transport.calls if call["path"] == "/team"]
+    assert team_pushes, "join should have pushed TEAM.md to running members"
+    # Only the running member got the push (scout), not the non-running one.
+    assert {call["agent_id"] for call in team_pushes} == {"scout"}
+    # The pushed content is the team's CURRENT on-disk TEAM.md.
+    assert team_pushes[0]["json"]["content"] == team_md.read_text()
+
+
+@pytest.mark.asyncio
+async def test_add_member_no_team_md_on_disk_no_ops_cleanly(join_app):
+    """Best-effort: with no team.md on disk the join push is a clean no-op —
+    the add still succeeds and nothing is pushed."""
+    app, transport, store, team_md = join_app
+    team_md.unlink()  # remove the scaffolded brief
+    store.add_member("research", "analyst")
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://t",
+    ) as c:
+        r = await c.post(
+            "/mesh/teams/research/members",
+            json={"agent": "scout"},
+            headers=_op_bearer(),
+        )
+    assert r.status_code == 200, r.text
+    assert [call for call in transport.calls if call["path"] == "/team"] == []
+
+
 # ── outcomes_window on team summary ───────────────────────────────
 
 
