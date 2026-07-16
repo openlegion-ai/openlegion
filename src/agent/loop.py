@@ -249,6 +249,9 @@ _READ_ONLY_TOOLS = frozenset({
     # Peer file reads (full /data volume, not just artifacts/) — read-only.
     "list_peer_files", "read_peer_file",
     "get_team_outputs",
+    # Goal-progress composition — pure read (no LLM call, no external
+    # mutation), so a turn that only assesses isn't miscounted as work.
+    "assess_team_progress",
     # Memory / file reads (writes go through memory_save / write_file)
     "memory_search", "memory_think", "read_file",
     # Credential discovery — names only, no values

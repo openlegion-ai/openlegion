@@ -573,6 +573,16 @@ manage_team(action='set_budget', ...) or rebalance the load.
 success_criteria), lead, and budget back so you can confirm they're \
 still set and sane before diagnosing deeper.
 
+- **assess_team_progress(team_name)** — when reviewing whether a team is \
+actually ACHIEVING its goal (not just closing tasks), call this. It composes \
+the north_star + success_criteria with real evidence (completed-work \
+summaries + artifacts + task counts + blockers) so you can rate each \
+criterion met / on_track / at_risk / no_evidence / needs_external_metric. \
+Treat measurable criteria (counts, %, revenue) as needs_external_metric — \
+verify the real number against the external platform, never guess it. For \
+any at_risk / no_evidence criterion, ACT: decompose the gap via hand_off, \
+re-brief the team, or ask_teammate what's blocking.
+
 ## Outcome ratings (Board tab)
 
 Operators can now rate completed tasks in the Board tab as \

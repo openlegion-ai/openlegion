@@ -596,6 +596,187 @@ async def test_inspect_team_spend_transport_failure_surfaces_error():
     assert "connection refused" in result["error"]
 
 
+# ── assess_team_progress (Tier-3 goal-progress composition) ──────────
+
+
+def _assess_mesh(*, criteria=None, outputs=None, counts=None, blockers=None):
+    """Build a MagicMock mesh_client wired for assess_team_progress.
+
+    Defaults describe one team named 'growth' with a goal + one completed
+    task carrying a result_summary + a task-count rollup + one blocker.
+    """
+    mc = MagicMock()
+    mc.list_teams = AsyncMock(return_value={"teams": [
+        {
+            "name": "growth",
+            "north_star": "Ship $10k MRR",
+            "success_criteria": criteria if criteria is not None else [
+                "100 signups", "landing page live",
+            ],
+        },
+        {"name": "other", "north_star": "unrelated"},
+    ]})
+    mc.team_outputs = AsyncMock(return_value={
+        "team_id": "growth",
+        "outputs": outputs if outputs is not None else [
+            {
+                "id": "t1",
+                "title": "Build landing page",
+                "result_summary": "Shipped landing page at example.com",
+                "artifact_refs": ["drive://growth/landing.html@abc"],
+            },
+        ],
+    })
+    mc.team_summary = AsyncMock(return_value={
+        "counts": counts if counts is not None else {
+            "active": 2, "blocked": 1, "done": 1, "failed": 0, "cancelled": 0,
+        },
+        "top_blockers": blockers if blockers is not None else [
+            {
+                "id": "t2",
+                "assignee": "scout",
+                "title": "Wire analytics",
+                "blocker_note": "waiting on GA credential",
+            },
+        ],
+    })
+    return mc
+
+
+@pytest.mark.asyncio
+async def test_assess_team_progress_no_mesh_client():
+    from src.agent.builtins.operator_tools import assess_team_progress
+
+    result = await assess_team_progress("growth")
+    assert "error" in result
+    assert "mesh_client" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_assess_team_progress_requires_team_name():
+    from src.agent.builtins.operator_tools import assess_team_progress
+
+    mc = _assess_mesh()
+    result = await assess_team_progress("   ", mesh_client=mc)
+    assert "error" in result
+    assert "team_name" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_assess_team_progress_composes_criteria_evidence_and_counts():
+    """Happy path: goal criteria + completed-work evidence + task counts +
+    blockers + assessment guidance all land in one bundle."""
+    from src.agent.builtins.operator_tools import assess_team_progress
+
+    mc = _assess_mesh()
+    result = await assess_team_progress("growth", mesh_client=mc)
+
+    assert result["team"] == "growth"
+    assert result["north_star"] == "Ship $10k MRR"
+    # Each success criterion string is surfaced for the operator to judge.
+    assert result["criteria"] == ["100 signups", "landing page live"]
+    # Completed work is real evidence: title + result_summary + artifact refs.
+    assert len(result["completed_work"]) == 1
+    ev = result["completed_work"][0]
+    assert ev["title"] == "Build landing page"
+    assert ev["result_summary"] == "Shipped landing page at example.com"
+    assert ev["artifact_refs"] == ["drive://growth/landing.html@abc"]
+    # Task-count rollup + current blockers.
+    assert result["task_counts"]["blocked"] == 1
+    assert result["blocked"][0]["id"] == "t2"
+    assert result["blocked"][0]["blocker_note"] == "waiting on GA credential"
+    # Guidance carries the per-criterion verdict vocabulary + external-metric
+    # rule (the tool itself makes NO LLM call).
+    guidance = result["assessment_guidance"]
+    for status in (
+        "met", "on_track", "at_risk", "no_evidence", "needs_external_metric",
+    ):
+        assert status in guidance
+    assert "hand_off" in guidance
+    # Since window echoed back; no degraded-read notes on the happy path.
+    assert result["window"] == "14d"
+    assert "notes" not in result
+    # Composed from existing reads only — over the requested window.
+    mc.team_outputs.assert_awaited_once_with("growth", since="14d")
+
+
+@pytest.mark.asyncio
+async def test_assess_team_progress_since_window_forwarded():
+    from src.agent.builtins.operator_tools import assess_team_progress
+
+    mc = _assess_mesh()
+    await assess_team_progress("growth", since="30d", mesh_client=mc)
+    mc.team_outputs.assert_awaited_once_with("growth", since="30d")
+
+
+@pytest.mark.asyncio
+async def test_assess_team_progress_unknown_team():
+    """Read succeeds but the team isn't in the roster → hard not-found."""
+    from src.agent.builtins.operator_tools import assess_team_progress
+
+    mc = _assess_mesh()
+    result = await assess_team_progress("nope", mesh_client=mc)
+    assert "error" in result
+    assert "not found" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_assess_team_progress_degrades_when_outputs_read_fails():
+    """A sub-read failure yields a partial bundle + a note, never raises."""
+    from src.agent.builtins.operator_tools import assess_team_progress
+
+    mc = _assess_mesh()
+    mc.team_outputs = AsyncMock(side_effect=RuntimeError("outputs endpoint down"))
+    result = await assess_team_progress("growth", mesh_client=mc)
+
+    # Goal + counts still composed; completed_work degraded to empty.
+    assert result["north_star"] == "Ship $10k MRR"
+    assert result["completed_work"] == []
+    assert result["task_counts"]["blocked"] == 1
+    assert "notes" in result
+    assert any("completed_work_read_failed" in n for n in result["notes"])
+
+
+@pytest.mark.asyncio
+async def test_assess_team_progress_degrades_when_summary_read_fails():
+    from src.agent.builtins.operator_tools import assess_team_progress
+
+    mc = _assess_mesh()
+    mc.team_summary = AsyncMock(side_effect=RuntimeError("summary down"))
+    result = await assess_team_progress("growth", mesh_client=mc)
+
+    # Evidence still present; counts/blocked degrade gracefully.
+    assert len(result["completed_work"]) == 1
+    assert result["task_counts"] == {}
+    assert result["blocked"] == []
+    assert any("task_counts_read_failed" in n for n in result["notes"])
+
+
+@pytest.mark.asyncio
+async def test_assess_team_progress_no_criteria_still_returns_bundle():
+    """A team with a north_star but no success_criteria still composes —
+    criteria is just empty, and guidance still rides the bundle."""
+    from src.agent.builtins.operator_tools import assess_team_progress
+
+    mc = _assess_mesh(criteria=[])
+    result = await assess_team_progress("growth", mesh_client=mc)
+    assert result["criteria"] == []
+    assert result["assessment_guidance"]
+    assert "notes" not in result
+
+
+@pytest.mark.asyncio
+async def test_assess_team_progress_blocked_for_non_operator(monkeypatch):
+    """Defence-in-depth: non-operator (no ALLOWED_TOOLS) is rejected."""
+    from src.agent.builtins.operator_tools import assess_team_progress
+
+    monkeypatch.delenv("ALLOWED_TOOLS", raising=False)
+    mc = _assess_mesh()
+    result = await assess_team_progress("growth", mesh_client=mc)
+    assert "error" in result
+    assert "operator" in result["error"].lower()
+
+
 # ── create_agent tests ──────────────────────────��───────────
 
 

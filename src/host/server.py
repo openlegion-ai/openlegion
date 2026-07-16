@@ -10237,8 +10237,11 @@ def create_mesh_app(
 
         ``since`` accepts an ISO timestamp or duration string (``"24h"``,
         ``"7d"``); default is the last 7 days. Returns one entry per
-        completed task with its title, assignee, completion time, and
-        artifact refs.
+        completed task with its title, assignee, completion time,
+        ``result_summary`` (the worker's own report of what it produced —
+        the primary evidence for goal-progress assessment; may be null for
+        tasks completed without a summary) and artifact refs. Raw text —
+        the caller sanitizes at its LLM boundary.
         """
         store = tasks_store
         caller = _extract_verified_agent_id(request)
@@ -10261,6 +10264,7 @@ def create_mesh_app(
                     "title": r["title"],
                     "assignee": r["assignee"],
                     "completed_at": completed_at,
+                    "result_summary": r.get("result_summary"),
                     "artifact_refs": r.get("artifact_refs", []) or [],
                 }
             )

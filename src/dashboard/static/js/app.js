@@ -11467,6 +11467,7 @@ function dashboard() {
         inspect_team_spend: 'checking team spend',
         list_available_models: 'checking available models',
         compose_work_summary: 'composing a work summary',
+        assess_team_progress: 'assessing team progress',
         workflow_snapshot: 'mapping the workflow',
         await_task_event: 'waiting on a task',
         inspect_task_run: 'diagnosing a task run',
