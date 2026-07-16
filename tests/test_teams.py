@@ -97,6 +97,7 @@ def team_app(tmp_path, monkeypatch):
         {
             "agent1": {"blackboard_read": [], "blackboard_write": []},
             "agent2": {"blackboard_read": [], "blackboard_write": []},
+            "agent3": {"blackboard_read": [], "blackboard_write": []},
         },
     )
     import src.cli.config as cli_cfg
@@ -111,6 +112,7 @@ def team_app(tmp_path, monkeypatch):
                 "agents": {
                     "agent1": {"role": "a"},
                     "agent2": {"role": "b"},
+                    "agent3": {"role": "c"},
                     "operator": {"role": "operator"},
                 },
             }
@@ -313,6 +315,62 @@ class TestMeshTeamEndpoints:
         assert r.status_code == 400
         assert "system agent" in r.json()["detail"]
         assert store.members("proj1") == []
+
+    @pytest.mark.asyncio
+    async def test_add_member_crossing_to_two_auto_appoints_lead(self, team_app):
+        """Phase-1 leadership loop (docs/plans/2026-07-16-autonomous-team-
+        delivery.md §1/§3): the documented build order is create-empty-team
+        → create-agents → add_agents_to_team, so the add-members path must
+        mirror the create-path auto-appoint. Crossing to two real members
+        appoints the FIRST member (agent1) as lead."""
+        app, store, _, _ = team_app
+        store.create_team("proj1")
+        r1 = await _post(app, "/mesh/teams/proj1/members", {"agent": "agent1"})
+        assert r1.status_code == 200, r1.text
+        # Solo so far — self-leads, no lead row.
+        assert store.get_team("proj1")["lead_agent_id"] is None
+        r2 = await _post(app, "/mesh/teams/proj1/members", {"agent": "agent2"})
+        assert r2.status_code == 200, r2.text
+        assert store.get_team("proj1")["lead_agent_id"] == "agent1"
+
+    @pytest.mark.asyncio
+    async def test_add_single_member_appoints_no_lead(self, team_app):
+        """A one-member team self-leads — the add-members path writes no
+        lead row for a solo roster."""
+        app, store, _, _ = team_app
+        store.create_team("proj1")
+        r = await _post(app, "/mesh/teams/proj1/members", {"agent": "agent1"})
+        assert r.status_code == 200, r.text
+        assert store.get_team("proj1")["lead_agent_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_add_member_to_led_team_leaves_lead_unchanged(self, team_app):
+        """Never re-appoint over an existing lead: adding a third member to
+        a team whose lead is NOT the auto-pick must leave the lead intact."""
+        app, store, _, _ = team_app
+        store.create_team("proj1")
+        store.add_member("proj1", "agent1")
+        store.add_member("proj1", "agent2")
+        # Explicit non-default lead (agent2, not the first-by-rowid agent1).
+        store.set_lead("proj1", "agent2")
+        r = await _post(app, "/mesh/teams/proj1/members", {"agent": "agent3"})
+        assert r.status_code == 200, r.text
+        assert store.members("proj1") == ["agent1", "agent2", "agent3"]
+        assert store.get_team("proj1")["lead_agent_id"] == "agent2"
+
+    @pytest.mark.asyncio
+    async def test_add_member_appointment_failure_does_not_fail_add(self, team_app):
+        """Best-effort appointment: a set_lead failure must not fail the
+        add-members response — the member is still added, lead stays NULL,
+        and the boot backfill catches the drift."""
+        app, store, _, _ = team_app
+        store.create_team("proj1")
+        await _post(app, "/mesh/teams/proj1/members", {"agent": "agent1"})
+        with patch.object(store, "set_lead", side_effect=ValueError("boom")):
+            r = await _post(app, "/mesh/teams/proj1/members", {"agent": "agent2"})
+        assert r.status_code == 200, r.text
+        assert store.team_of("agent2") == "proj1"
+        assert store.get_team("proj1")["lead_agent_id"] is None
 
     @pytest.mark.asyncio
     async def test_move_agent_between_teams_evicts_and_rewires(self, team_app):
