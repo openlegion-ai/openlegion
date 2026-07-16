@@ -11464,6 +11464,7 @@ function dashboard() {
         create_agent: 'adding a teammate',
         apply_template: 'building a team from a template',
         inspect_agents: 'reviewing the team',
+        inspect_team_spend: 'checking team spend',
         list_available_models: 'checking available models',
         compose_work_summary: 'composing a work summary',
         workflow_snapshot: 'mapping the workflow',

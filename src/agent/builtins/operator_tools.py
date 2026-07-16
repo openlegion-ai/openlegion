@@ -1052,6 +1052,46 @@ async def get_team_outputs(
 
 
 @tool(
+    name="inspect_team_spend",
+    operator_only=True,
+    description=(
+        "Read a team's aggregate spend: total cost + tokens for the "
+        "period, its daily/monthly budget envelope (null = unlimited), "
+        "and a per-member cost/token breakdown. Use this to answer "
+        "'how much has this team spent' or 'who on the team is burning "
+        "the most budget' without fanning out inspect_agents per member."
+    ),
+    parameters={
+        "team_name": {
+            "type": "string",
+            "description": "Team name",
+        },
+        "period": {
+            "type": "string",
+            "description": "today | yesterday | week | month",
+            "default": "today",
+        },
+    },
+)
+async def inspect_team_spend(
+    team_name: str,
+    period: str = "today",
+    *,
+    mesh_client=None,
+    **_kw,
+) -> dict:
+    """Aggregate team spend + envelope + per-member breakdown."""
+    if not _is_operator():
+        return {"error": "This tool is only available to the operator agent."}
+    if mesh_client is None:
+        return {"error": "No mesh_client available"}
+    try:
+        return await mesh_client.get_team_spend(team_name, period=period)
+    except Exception as e:
+        return {"error": f"Failed to read spend for {team_name}: {e}"}
+
+
+@tool(
     name="workflow_snapshot",
     operator_only=True,
     description=(
@@ -1401,12 +1441,70 @@ async def await_task_event(
     }
 
 
+async def _fetch_budget_headroom(agent_id: str, mesh_client) -> dict:
+    """Best-effort budget headroom (today/limit + month/limit) for one agent.
+
+    Sourced from ``GET /mesh/agents/{id}/metrics`` (``mesh_client.
+    get_agent_metrics``), which already computes the same
+    ``cost_tracker.check_budget`` shape used for preflight enforcement.
+    A fetch/shape failure degrades to an error sentinel — never raises,
+    so it can't break the surrounding ``inspect_agents`` profile read.
+    """
+    try:
+        metrics = await mesh_client.get_agent_metrics(agent_id)
+    except Exception as e:
+        return {"error": f"Failed to read budget headroom for {agent_id}: {e}"}
+    budget = metrics.get("budget", {}) if isinstance(metrics, dict) else {}
+    return {
+        "today_used": budget.get("daily_used"),
+        "today_limit": budget.get("daily_limit"),
+        "month_used": budget.get("monthly_used"),
+        "month_limit": budget.get("monthly_limit"),
+    }
+
+
+def _summarize_track_record_counts(counts: dict) -> dict:
+    """Collapse ``{source: {outcome: count}}`` to accepted/rework/rejected.
+
+    Summed across every source (``task_outcome``, ``summary_rating``,
+    ``drive_review``) — each source keeps its own outcome vocabulary
+    (drive_review's accept-equivalent is ``merged``, not counted here),
+    but ``accepted``/``rework``/``rejected`` are shared enough vocabulary
+    to give a single at-a-glance summary.
+    """
+    summary = {"accepted": 0, "rework": 0, "rejected": 0}
+    for outcomes in (counts or {}).values():
+        if not isinstance(outcomes, dict):
+            continue
+        for key in summary:
+            summary[key] += int(outcomes.get(key, 0) or 0)
+    return summary
+
+
+async def _fetch_track_record_summary(agent_id: str, mesh_client) -> dict:
+    """Best-effort accepted/rework/rejected summary for one agent.
+
+    Sourced from ``GET /mesh/agents/{id}/track-record`` (``mesh_client.
+    get_agent_track_record``) — the durable outcome ledger. A
+    fetch/shape failure degrades to an error sentinel rather than
+    raising.
+    """
+    try:
+        record = await mesh_client.get_agent_track_record(agent_id)
+    except Exception as e:
+        return {"error": f"Failed to read track record for {agent_id}: {e}"}
+    counts = record.get("counts", {}) if isinstance(record, dict) else {}
+    return _summarize_track_record_counts(counts)
+
+
 @tool(
     name="inspect_agents",
     operator_only=True,
     description=(
         "Read agents. Without agent_id: roster summary. With agent_id: "
-        "depth='profile' returns role/capabilities/INTERFACE; "
+        "depth='profile' returns role/capabilities/INTERFACE plus "
+        "budget_headroom (today_used/today_limit, month_used/month_limit) "
+        "and track_record_summary (accepted/rework/rejected counts); "
         "depth='history' adds recent activity log. depth defaults to summary. "
         "Pass stale_threshold_hours=N to also annotate each agent in the "
         "roster with its stale-task count and up-to-5 oldest stale task IDs."
@@ -1541,9 +1639,22 @@ async def inspect_agents(
 
     # depth == "profile" or "summary" with an agent_id → profile call
     try:
-        return await mesh_client.get_agent_profile(agent_id)
+        profile = await mesh_client.get_agent_profile(agent_id)
     except Exception as e:
         return {"error": f"Failed to read profile for {agent_id}: {e}"}
+
+    # depth == "profile" additionally enriches with budget headroom
+    # (today/limit + month/limit) and a track-record summary
+    # (accepted/rework/rejected counts) — Phase-1 observability wiring
+    # for /mesh/agents/{id}/metrics + /mesh/agents/{id}/track-record.
+    # Each sub-fetch is independently best-effort: a failure degrades to
+    # an {"error": ...} sentinel on that one field rather than failing
+    # the whole profile read (the profile itself already succeeded).
+    if depth == "profile" and isinstance(profile, dict) and "error" not in profile:
+        profile["budget_headroom"] = await _fetch_budget_headroom(agent_id, mesh_client)
+        profile["track_record_summary"] = await _fetch_track_record_summary(agent_id, mesh_client)
+
+    return profile
 
 
 # ── Action tools ────────────────────────────────────────────

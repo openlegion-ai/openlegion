@@ -346,6 +346,121 @@ async def test_inspect_agents_metrics_failure_falls_back_to_full_fanout():
     assert mc.get_agent_stale_tasks.await_count == 2
 
 
+# ── inspect_agents(depth='profile') budget headroom + track record ──
+
+
+@pytest.mark.asyncio
+async def test_inspect_agents_profile_surfaces_budget_headroom_and_track_record():
+    """depth='profile' enriches the profile with budget headroom (today/
+    month used+limit) and a track-record accepted/rework/rejected summary,
+    sourced from get_agent_metrics / get_agent_track_record."""
+    from src.agent.builtins.operator_tools import inspect_agents
+
+    mc = MagicMock()
+    mc.get_agent_profile = AsyncMock(return_value={
+        "agent_id": "writer", "role": "writer",
+    })
+    mc.get_agent_metrics = AsyncMock(return_value={
+        "agent_id": "writer",
+        "budget": {
+            "allowed": True,
+            "daily_used": 1.5,
+            "daily_limit": 10.0,
+            "monthly_used": 20.0,
+            "monthly_limit": 200.0,
+        },
+    })
+    mc.get_agent_track_record = AsyncMock(return_value={
+        "agent_id": "writer",
+        "counts": {
+            "task_outcome": {"accepted": 4, "rework": 1},
+            "drive_review": {"merged": 2, "rejected": 1},
+        },
+        "recent": [],
+    })
+
+    result = await inspect_agents("writer", depth="profile", mesh_client=mc)
+
+    assert result["budget_headroom"] == {
+        "today_used": 1.5,
+        "today_limit": 10.0,
+        "month_used": 20.0,
+        "month_limit": 200.0,
+    }
+    assert result["track_record_summary"] == {
+        "accepted": 4, "rework": 1, "rejected": 1,
+    }
+    mc.get_agent_metrics.assert_awaited_once_with("writer")
+    mc.get_agent_track_record.assert_awaited_once_with("writer")
+
+
+@pytest.mark.asyncio
+async def test_inspect_agents_profile_degrades_when_metrics_fetch_fails():
+    """A metrics-fetch failure degrades to an error sentinel on that one
+    field — inspect_agents(depth='profile') must still return the profile."""
+    from src.agent.builtins.operator_tools import inspect_agents
+
+    mc = MagicMock()
+    mc.get_agent_profile = AsyncMock(return_value={
+        "agent_id": "writer", "role": "writer",
+    })
+    mc.get_agent_metrics = AsyncMock(side_effect=RuntimeError("mesh down"))
+    mc.get_agent_track_record = AsyncMock(return_value={
+        "agent_id": "writer",
+        "counts": {"task_outcome": {"accepted": 1}},
+    })
+
+    result = await inspect_agents("writer", depth="profile", mesh_client=mc)
+
+    assert result["agent_id"] == "writer"
+    assert "error" in result["budget_headroom"]
+    assert result["track_record_summary"] == {
+        "accepted": 1, "rework": 0, "rejected": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_inspect_agents_profile_degrades_when_track_record_fetch_fails():
+    """A track-record-fetch failure degrades to an error sentinel on that
+    one field without touching budget_headroom or the base profile."""
+    from src.agent.builtins.operator_tools import inspect_agents
+
+    mc = MagicMock()
+    mc.get_agent_profile = AsyncMock(return_value={
+        "agent_id": "writer", "role": "writer",
+    })
+    mc.get_agent_metrics = AsyncMock(return_value={
+        "budget": {
+            "daily_used": 0.0, "daily_limit": 10.0,
+            "monthly_used": 0.0, "monthly_limit": 200.0,
+        },
+    })
+    mc.get_agent_track_record = AsyncMock(side_effect=RuntimeError("mesh down"))
+
+    result = await inspect_agents("writer", depth="profile", mesh_client=mc)
+
+    assert result["agent_id"] == "writer"
+    assert result["budget_headroom"]["today_limit"] == 10.0
+    assert "error" in result["track_record_summary"]
+
+
+@pytest.mark.asyncio
+async def test_inspect_agents_summary_depth_does_not_enrich():
+    """Only depth='profile' enriches — depth='summary' with an agent_id
+    still hits get_agent_profile but stays back-compat (no extra fields)."""
+    from src.agent.builtins.operator_tools import inspect_agents
+
+    mc = MagicMock()
+    mc.get_agent_profile = AsyncMock(return_value={
+        "agent_id": "writer", "role": "writer",
+    })
+    result = await inspect_agents("writer", mesh_client=mc)
+    assert "budget_headroom" not in result
+    assert "track_record_summary" not in result
+    mc.get_agent_metrics.assert_not_called()
+    mc.get_agent_track_record.assert_not_called()
+
+
 # ── inspect_teams read-back (goal + budget) tests ────────────
 
 
@@ -404,6 +519,81 @@ async def test_inspect_teams_single_team_returns_goal_and_budget():
     assert result["success_criteria"] == ["done"]
     assert result["budget_daily_usd"] == 2.0
     assert result["budget_monthly_usd"] == 40.0
+
+
+# ── inspect_team_spend tests ─────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_inspect_team_spend_no_mesh_client():
+    from src.agent.builtins.operator_tools import inspect_team_spend
+
+    result = await inspect_team_spend("growth")
+    assert "error" in result
+    assert "mesh_client" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_inspect_team_spend_returns_aggregate_and_breakdown():
+    """Happy path: total spend, envelope, and per-member breakdown pass
+    through from mesh_client.get_team_spend unchanged."""
+    from src.agent.builtins.operator_tools import inspect_team_spend
+
+    mc = MagicMock()
+    mc.get_team_spend = AsyncMock(return_value={
+        "team": "growth",
+        "period": "today",
+        "total_cost": 3.25,
+        "total_tokens": 12000,
+        "daily_limit": 10.0,
+        "monthly_limit": 200.0,
+        "agents": [
+            {"agent": "writer", "cost": 2.0, "tokens": 8000},
+            {"agent": "scout", "cost": 1.25, "tokens": 4000},
+        ],
+    })
+    result = await inspect_team_spend("growth", mesh_client=mc)
+    assert result["team"] == "growth"
+    assert result["total_cost"] == 3.25
+    assert result["daily_limit"] == 10.0
+    assert result["monthly_limit"] == 200.0
+    assert len(result["agents"]) == 2
+    mc.get_team_spend.assert_awaited_once_with("growth", period="today")
+
+
+@pytest.mark.asyncio
+async def test_inspect_team_spend_custom_period_forwarded():
+    from src.agent.builtins.operator_tools import inspect_team_spend
+
+    mc = MagicMock()
+    mc.get_team_spend = AsyncMock(return_value={"team": "growth", "period": "month"})
+    await inspect_team_spend("growth", period="month", mesh_client=mc)
+    mc.get_team_spend.assert_awaited_once_with("growth", period="month")
+
+
+@pytest.mark.asyncio
+async def test_inspect_team_spend_unknown_team_surfaces_mesh_error():
+    """Unknown team keeps the mesh-side error-dict contract -- no exception,
+    just an 'error' key the caller can check."""
+    from src.agent.builtins.operator_tools import inspect_team_spend
+
+    mc = MagicMock()
+    mc.get_team_spend = AsyncMock(return_value={
+        "team": "ghost", "error": "Unknown team (or no team store wired)",
+    })
+    result = await inspect_team_spend("ghost", mesh_client=mc)
+    assert result["error"] == "Unknown team (or no team store wired)"
+
+
+@pytest.mark.asyncio
+async def test_inspect_team_spend_transport_failure_surfaces_error():
+    from src.agent.builtins.operator_tools import inspect_team_spend
+
+    mc = MagicMock()
+    mc.get_team_spend = AsyncMock(side_effect=RuntimeError("connection refused"))
+    result = await inspect_team_spend("growth", mesh_client=mc)
+    assert "error" in result
+    assert "connection refused" in result["error"]
 
 
 # ── create_agent tests ──────────────────────────��───────────

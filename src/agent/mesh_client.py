@@ -2134,6 +2134,34 @@ class MeshClient:
         _raise_with_body(response)
         return response.json()
 
+    async def get_agent_track_record(self, agent_id: str) -> dict:
+        """Get an agent's durable track record (accepted/rework/rejected/...).
+
+        Returns ``{"agent_id", "counts", "autonomy_counts", "recent"}``.
+        Self-or-operator-or-internal on the mesh side (see
+        ``get_agent_track_record`` in ``src/host/server.py``).
+        """
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/agents/{agent_id}/track-record",
+        )
+        _raise_with_body(response)
+        return response.json()
+
+    async def get_team_spend(self, team: str, period: str = "today") -> dict:
+        """Aggregate cost data for a team: total spend, envelope, per-member.
+
+        Unknown team (or no cost tracker wired) keeps the mesh-side
+        error-dict contract — ``{"team": team, "error": "..."}`` rather
+        than an HTTP error, so callers should check for ``"error"`` in
+        the result rather than relying on an exception.
+        """
+        response = await self._get_with_retry(
+            f"{self.mesh_url}/mesh/costs/team/{team}",
+            params={"period": period},
+        )
+        _raise_with_body(response)
+        return response.json()
+
     async def get_agent_stale_tasks(
         self, agent_id: str, threshold_hours: int = 24,
     ) -> dict:
