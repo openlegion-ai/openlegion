@@ -259,6 +259,31 @@ owns an on-disk scaffold at `config/teams/{name}/` containing
 `team.md` (shared context mounted read-only into member containers)
 and `workflows/`.
 
+### Team lead & goal propagation
+
+A team's **lead** is its accountability owner, not a router. Host-side stewardship — goal-coverage
+probes, standups, blocked-task escalation, and delivery review — is gated on `TeamStore.led_team`,
+so a leaderless team is never silently un-stewarded. The lead is realized as an ordinary member
+(no privileged agent type); it plans and stewards under the ordinary security model.
+
+- **Auto-appointment.** The mesh appoints the first non-operator member as lead the moment a team
+  reaches two or more real members — on `mesh_create_team` and on `mesh_add_team_member`.
+- **Auto re-appointment.** When the lead leaves by *any* path — `mesh_remove_team_member`,
+  `offboard_agent_endpoint`, add-member move-eviction, or `_apply_pending_delete` — the mesh
+  promotes another remaining member rather than leaving the seat empty. (All four paths live in
+  `src/host/server.py`.)
+
+**Goal propagation.** `set_team_goal` (a) persists the north star + success criteria to `TeamStore`
+and (b) mirrors the goal into a `## Goal` section of the team's `team.md` via
+`replace_markdown_section` (`src/shared/utils.py`), then best-effort pushes the file. The host
+`team.md` is bind-mounted read-only at each member's `/app/TEAM.md`, copied into the writable
+workspace as `/data/workspace/TEAM.md` at container start, and kept current by live `PUT /team`
+pushes; that workspace copy is loaded into the system prompt. So a redirect reaches a running
+worker on its **next turn** (not mid-run). The TEAM.md section
+writers — `## Goal` (`set_team_goal`), `## Context` (`update_team_context`), and named brief
+sections — are all section-scoped through `replace_markdown_section`, so one writer never clobbers
+another's section.
+
 ## Data Flow
 
 ### Task Execution
@@ -309,3 +334,4 @@ Dockerfiles live at the repo root: `Dockerfile.agent` (python:3.12-slim, non-roo
 8. **Unicode sanitization** — all untrusted text passes through `sanitize_for_prompt()` before reaching LLM context (user input, tool results, system prompt context).
 9. **Team isolation** — blackboard keys are auto-namespaced under `teams/{name}/`, agent visibility is scoped to team peers, and solo agents are scoped to their own private `teams/{agent_id}/` team-of-one namespace.
 10. **MessageOrigin propagation** — every cross-agent path that produces work reads `current_origin` once and forwards it to both `wake_agent` and `create_task` so completion notifications reach the originating channel/user.
+11. **No leaderless non-solo team** — a team of ≥2 real members always has a lead; the mesh appoints one on create/add and re-appoints on every departure path. Host stewardship is gated on `led_team`, and a team goal set via `set_team_goal` propagates to running members' `TEAM.md` (`## Goal`) for pickup on their next turn.
