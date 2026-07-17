@@ -42,6 +42,7 @@ https://github.com/user-attachments/assets/8bd3fe95-5734-474d-92f0-40616daf91ad
 - [Architecture](#architecture)
 - [Mesh Host](#mesh-host)
 - [Agent Architecture](#agent-architecture)
+- [Operator & Teams](#operator--teams)
 - [Memory System](#memory-system)
 - [Triggering & Automation](#triggering--automation)
 - [Cost Tracking & Budgets](#cost-tracking--budgets)
@@ -513,6 +514,56 @@ databases, filesystems, APIs, and more without writing custom tools.
 
 ---
 
+## Operator & Teams
+
+OpenLegion is built around one autonomous loop: **you talk to the operator, the operator builds
+teams, and the fleet carries the work toward a goal** — pulling you in for credentials, approvals,
+or genuine forks, not for routine coordination.
+
+- **Operator** — a built-in agent (`operator`; lighter caps, excluded from cost/quota math) that is
+  your entry point. It creates agents and teams, sets goals, watches progress, and reallocates
+  work. It is the only agent that can apply fleet templates, install a team lead, or confirm hard
+  config edits. It is not a message router — work still flows peer-to-peer.
+
+- **Team lead** — every non-solo team has one accountability owner. The mesh **auto-appoints** the
+  first non-operator member the moment a team reaches two or more real members (on create and on
+  add), and **re-appoints** another member automatically whenever the current lead leaves by any
+  path (removed, offboarded, evicted by a move, or deleted). The lead is an ordinary member under
+  the ordinary security model — it plans and stewards, gaining no routing privilege. Team
+  stewardship (goal-coverage probes, standups, blocked-task escalation, delivery review) is gated
+  on there being a lead, so a leaderless team is never silently left un-stewarded.
+
+- **Goals that reach the workers** — the operator sets a team's **north star** and up to ten
+  **success criteria** with `set_team_goal`. The goal is persisted, mirrored into a `## Goal`
+  section of the team's `TEAM.md`, and pushed to members — so a running worker picks it up on its
+  **next turn**, not only at onboarding. Redirecting a busy team is no longer inert.
+  `update_team_context` (writes `## Context`) and team briefs are section-scoped, so updating one
+  never clobbers the goal.
+
+- **A spend envelope per team** — teams carry daily/monthly USD budgets the operator reallocates
+  within. Enforcement can be set fail-closed (`OPENLEGION_TEAM_ENVELOPE_FAIL_CLOSED`, default
+  fail-open) so a budget-store outage stops spend instead of waving it through.
+
+- **Observe and correct, without leaving chat** — `inspect_teams` (goal, criteria, budget),
+  `inspect_team_spend` (per-team spend by period), `inspect_agents` at `profile` depth (budget
+  headroom + track record), and `assess_team_progress` (success criteria bundled with the team's
+  actual completed outputs, for an evidence-grounded verdict). The dashboard **Team Room** shows the
+  goal side at a glance: north star, success criteria, probe names, and each member's current and
+  blocked work. (Per-team spend is an `inspect_team_spend` / mesh read, not shown in the Team Room.)
+
+Honest failure is part of the loop: when a worker asks for a credential that cannot be delivered,
+`request_credential` returns an explicit failure envelope instead of reporting success — so
+autonomous work parks visibly rather than silently forever.
+
+> **Today's guardrails are spend caps + Docker/microVM isolation + SSRF egress filtering.** By
+> design the current posture does not yet gate individual outbound actions (publish / email /
+> purchase) behind a broker; that action-broker layer and an immutable human spend ceiling are
+> planned follow-ups. See
+> [`docs/plans/2026-07-16-autonomous-team-delivery.md`](docs/plans/2026-07-16-autonomous-team-delivery.md)
+> for the roadmap and current implementation status.
+
+---
+
 ## Memory System
 
 Five layers give agents persistent, self-improving memory:
@@ -786,18 +837,23 @@ The file is mounted into team member agents' containers and loaded into
 their system prompts. Solo agents (not on a team) do not receive any
 TEAM.md.
 
+The operator maintains it through **section-scoped** writers: `set_team_goal` owns the `## Goal`
+section (north star + success criteria), `update_team_context` owns `## Context`, and team briefs
+own their own named sections — so writing one never clobbers another, and a goal change reaches
+running members on their next turn (see [Operator & Teams](#operator--teams)).
+
 ```markdown
 # TEAM.md
 
-## What We're Building
-SaaS platform for automated lead qualification
+## Goal
+**North star:** Grow the newsletter to 10,000 engaged subscribers.
+**Success criteria:**
+- 10,000 confirmed opt-in subscribers
+- ≥35% average open rate sustained for 4 weeks
 
-## Current Priority
-Ship the email personalization pipeline this week
-
-## Hard Constraints
-- Budget: $50/day total across all agents
-- No cold outreach to .edu or .gov domains
+## Context
+Ship the email personalization pipeline this week. Audience: B2B SaaS founders.
+No cold outreach to .edu or .gov domains.
 ```
 
 Workspace files have per-file size caps (4–16 KB; HEARTBEAT.md uncapped). See [`docs/configuration.md`](docs/configuration.md) for the table.

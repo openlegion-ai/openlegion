@@ -1,8 +1,11 @@
 # Autonomous Team Delivery — Architecture & Roadmap
 
-**Date:** 2026-07-16
+**Date:** 2026-07-16 · **Updated:** 2026-07-17
 **Author:** bic
-**Status:** PROPOSED — awaiting sign-off. **No code has been written; this doc is the deliverable.**
+**Status:** SIGNED OFF with an **effectiveness-first amendment** — Phase 1 (leadership + goal +
+observability loop) has **shipped**; the Phase 0 safety substrate shipped **partially** (see
+§7 Implementation status below). The original proposal is preserved unedited from §0 onward as
+the design of record.
 **Surface:** the operator ↔ team goal-delivery loop across `src/host/` (teams, cron, runtime,
 costs, policy, drive, orchestration, chain_watcher), `src/agent/` (loop, builtins), and
 `src/shared/operator_playbooks.py`.
@@ -206,7 +209,56 @@ operator SPOF (sampling caps prove a single container can't supervise a large fl
    the "fail faster and more expensively" risk the second-pass review flagged).
 
 ## 6. Scope of this document
-This is a design proposal for **sign-off only**. No production code, schema, or config has been
-changed. On approval, the first implementation increment is **Phase 0** as scoped PRs (worktrees,
-`ruff check`, full-suite gate, squash-merge, committed as bic) — suggested first PR: finite
-deny-by-default budgets + immutable human ceiling + no fail-open enforcement.
+This began as a design proposal for **sign-off only**. It has since been signed off with the
+effectiveness-first amendment recorded in §7, and the first increments have shipped as scoped PRs
+(worktrees, `ruff check`, full-suite gate, squash-merge, committed as bic). Everything from §0
+through §5 is preserved as the original design of record; §7 tracks what is actually built.
+
+---
+
+## 7. Implementation status (2026-07-17)
+
+**Direction amendment — effectiveness first.** The pre-revamp system already ran agents behind two
+real-world guardrails: **per-agent/team spend caps** and **Docker/microVM isolation + SSRF egress
+filtering**. Given that floor, we chose to prioritise closing the *delivery loop* (leadership +
+goal propagation + observability) over building the full Phase-0 action broker up front. Blocking
+individual outbound actions and an immutable human ceiling remain planned; they are follow-ups, not
+prerequisites, for the current usage. This resolves §5 open questions 3 (action-broker scope —
+ship the loop first, broker later) and 4 (sequencing — leadership-loop-first).
+
+### Shipped
+
+**Phase 1 — team invariants + stewardship loop** (`#1266`–`#1276`):
+- Every non-solo team gets a lead: auto-appointed when a team reaches ≥2 non-operator members (on
+  create and on add), and **automatically re-appointed on every departure path** (remove /
+  offboard / move-eviction / delete). Operator `set_team_lead` tool added.
+- **Goal-as-propagation**: `set_team_goal` persists north star + success criteria, mirrors them
+  into a section-scoped `## Goal` block in `TEAM.md`, and pushes so running members pick up the
+  redirect on their **next turn**. `update_team_context` / brief writers are section-scoped and no
+  longer clobber the goal.
+- **Operator readback + acceptance signal**: `inspect_teams` returns goal/criteria/budget;
+  `inspect_team_spend` reports per-team spend; `inspect_agents(profile)` adds budget headroom +
+  track record; `assess_team_progress` bundles success criteria with the team's actual completed
+  outputs for an evidence-grounded verdict. Dashboard **Team Room** surfaces north star, criteria,
+  probe names, and per-member current + blocked work.
+- Runtime journey guard `test_operator_team_journey_composes_end_to_end` exercises the composed
+  loop (create → lead → goal → propagate → budget → context-update → departure → re-appoint).
+
+**Phase 0 — partial** (`#1263`, `#1264`):
+- `request_credential` returns an honest failure envelope instead of false success (`vault_tool.py`).
+- Configurable **fail-closed** posture for the team-budget envelope
+  (`OPENLEGION_TEAM_ENVELOPE_FAIL_CLOSED`, default fail-open to preserve today's behaviour).
+
+### Deferred (planned, not yet built)
+- Consequential-action broker in front of HTTP/browser/connector/wallet (Phase 0 core).
+- Immutable verified-human spend ceiling distinct from the operator-controllable working budget.
+- Global emergency pause / scoped revocation kill switch.
+- Dedicated purpose-built coordinator agent (today's lead is a promoted ordinary member).
+- Phase 2 composition/acceptance (typed result-carrying completion, dependency fan-in/join,
+  `success_criteria` evaluator) and Phases 3–4.
+
+### Verified boundary
+The loop is proven at the **mesh/integration layer** (endpoint-level journey test, hand-reviewed
+diffs, full-suite gate green on each PR). The **Docker-container + live-LLM layer** — a real worker
+reading the goal from its live prompt and acting on it — is validated by a local `openlegion start`
+run, not by the automated suite.
