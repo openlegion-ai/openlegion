@@ -3310,6 +3310,26 @@ class TestDashboardProjectCRUD:
         assert self.components["teams_store"].team_exists("myproject")
         assert os.path.isdir(os.path.join(self._tmpdir, "teams", "myproject"))
 
+    def test_create_team_with_members_appoints_lead(self):
+        """A dashboard-created non-solo team gets a lead appointed — the
+        dashboard create path used to mutate the store directly without the
+        mesh's lead logic, leaving teams leaderless until reboot (Codex #2)."""
+        from pathlib import Path
+
+        import src.cli.config as cli_cfg
+        with patch("src.cli.config.CONFIG_FILE", Path(self._config_file)), \
+             patch("src.cli.config.AGENTS_FILE", Path(self._agents_file)), \
+             patch("src.cli.config.PERMISSIONS_FILE", Path(self._tmpdir) / "perms.json"), \
+             patch.object(cli_cfg, "_agent_status", lambda a: "active"):
+            resp = self.client.post("/dashboard/api/teams", json={
+                "name": "duo",
+                "description": "two-member team",
+                "members": ["alpha", "beta"],
+            })
+        assert resp.status_code == 200, resp.text
+        team = self.components["teams_store"].get_team("duo")
+        assert team["lead_agent_id"] == "alpha"  # first active member
+
     def test_create_team_empty_name(self):
         """POST /api/projects with empty name returns 400."""
         resp = self.client.post("/dashboard/api/teams", json={
