@@ -144,14 +144,28 @@ class HelpRequests:
         now = time.time()
         payload = payload or {}
         self._safe_reap()
+        name_key = payload.get("name")
         with self._conn() as conn:
+            # Dedup (at-least-once safety): an identical OPEN request — same
+            # kind + agent + name — means a prior attempt was recorded but its
+            # HTTP response may have been lost and the caller retried. Return
+            # the existing id instead of opening a duplicate "Needs you" card.
+            if name_key is not None:
+                existing = conn.execute(
+                    "SELECT request_id FROM help_requests "
+                    "WHERE kind = ? AND agent_id = ? AND name = ? "
+                    "AND status = 'open' LIMIT 1",
+                    (kind, agent_id, name_key),
+                ).fetchone()
+                if existing is not None:
+                    return existing[0]
             conn.execute(
                 f"INSERT INTO help_requests ({self._COLS}) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')",
                 (
                     request_id, kind, agent_id,
                     payload.get("service"),
-                    payload.get("name"),
+                    name_key,
                     payload.get("description"),
                     payload.get("url"),
                     dumps_safe(payload), now,

@@ -1550,6 +1550,18 @@ class CredentialVault:
                     # reservation to close that race is a tracked follow-up.
                     envelope = self.cost_tracker.team_envelope_check(bill_agent, model)
                     if not envelope["allowed"]:
+                        if envelope.get("reason") == "envelope_check_unavailable":
+                            # Fail-closed on a budget-store outage — the block
+                            # is real but ``team``/limits are null, so the
+                            # normal render would read "team 'None' … unlimited".
+                            return APIProxyResponse(
+                                success=False,
+                                error=(
+                                    "Team budget governor temporarily "
+                                    "unavailable (budget store unreachable) — "
+                                    "spend paused until it recovers (fail-closed)."
+                                ),
+                            )
                         _d = envelope.get("daily_limit")
                         _m = envelope.get("monthly_limit")
                         return APIProxyResponse(
@@ -4132,6 +4144,14 @@ class CredentialVault:
                 # shape the sync fork yields at 1546-1562.
                 envelope = self.cost_tracker.team_envelope_check(bill_agent, requested_model)
                 if not envelope["allowed"]:
+                    if envelope.get("reason") == "envelope_check_unavailable":
+                        _un = (
+                            "Team budget governor temporarily unavailable "
+                            "(budget store unreachable) — spend paused until "
+                            "it recovers (fail-closed)."
+                        )
+                        yield f"data: {json.dumps({'error': _un})}\n\n"
+                        return
                     _d = envelope.get("daily_limit")
                     _m = envelope.get("monthly_limit")
                     _msg = (
