@@ -2508,6 +2508,39 @@ async def _post_proxy(app, *, path: str, trace_id: str | None):
 
 
 @pytest.mark.asyncio
+async def test_proxy_api_stream_rejects_non_llm_service(tmp_path):
+    """SECURITY: the streaming proxy only serves ``service="llm"``. A
+    non-llm label (e.g. ``image_gen``) would skip model-pinning and every
+    budget/envelope check (all gated on ``service == "llm"``) while
+    ``stream_llm`` still executed the chat completion off ``params["model"]``
+    and billed the agent. The endpoint must 400 before any of that runs so a
+    mislabelled request can't bypass enforcement."""
+    from httpx import ASGITransport, AsyncClient
+
+    app, tracker, cleanup = _build_proxy_trace_app(tmp_path, streaming=True)
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test",
+        ) as client:
+            resp = await client.post(
+                "/mesh/api/stream",
+                params={"agent_id": "scout"},
+                json={
+                    "service": "image_gen", "action": "generate",
+                    "params": {
+                        "model": "anthropic/claude-sonnet-4-6",
+                        "messages": [{"role": "user", "content": "hi"}],
+                    },
+                },
+            )
+        assert resp.status_code == 400, resp.text
+        # Rejected before stream_llm ran → nothing was billed.
+        assert _usage_trace_ids(tracker) == []
+    finally:
+        cleanup()
+
+
+@pytest.mark.asyncio
 async def test_proxy_api_call_stamps_usage_trace_id_from_header(tmp_path):
     """``POST /mesh/api`` with ``X-Trace-Id`` → the usage row written by the
     cost tracker inside ``execute_api_call`` carries that trace_id."""
