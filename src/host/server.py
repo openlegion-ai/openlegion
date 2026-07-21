@@ -79,6 +79,7 @@ from src.shared.types import (
     NotifyRequest,
 )
 from src.shared.utils import (
+    atomic_write_text,
     dumps_safe,
     replace_markdown_section,
     sanitize_for_prompt,
@@ -8039,6 +8040,20 @@ def create_mesh_app(
             encoding = "base64"
         return {"path": safe_path, "ref": safe_ref, "content": text, "encoding": encoding, "size": len(data)}
 
+    _team_md_locks: dict[str, asyncio.Lock] = {}
+
+    def _team_md_lock(team_name: str) -> asyncio.Lock:
+        """Per-team lock serializing read-modify-write-push of the shared
+        ``team.md``. Without it, concurrent section writers (goal / context /
+        brief) each read the same base, replace their own section, and the
+        last plain write wins — silently dropping the others; the async push
+        could also deliver an older snapshot after a newer one."""
+        lock = _team_md_locks.get(team_name)
+        if lock is None:
+            lock = asyncio.Lock()
+            _team_md_locks[team_name] = lock
+        return lock
+
     async def _push_team_md(team_name: str, content: str) -> dict[str, bool]:
         """Push updated TEAM.md content to running team members.
 
@@ -8126,10 +8141,15 @@ def create_mesh_app(
         # the source of truth for existence, not the dir).
         team_md_path = teams_store.team_md_path(team_name) or (TEAMS_DIR / team_name / "team.md")
         team_md_path.parent.mkdir(parents=True, exist_ok=True)
-        existing = team_md_path.read_text(errors="replace") if team_md_path.exists() else f"# {team_name}\n"
-        updated = replace_markdown_section(existing, section, content)
-        team_md_path.write_text(updated)
-        pushed = await _push_team_md(team_name, updated)
+        # Serialize read-modify-write-push per team so concurrent section
+        # writers (goal / context / brief) can't lost-update the shared file
+        # or deliver an older snapshot after a newer one; atomic write so a
+        # concurrent reader never sees a torn file.
+        async with _team_md_lock(team_name):
+            existing = team_md_path.read_text(errors="replace") if team_md_path.exists() else f"# {team_name}\n"
+            updated = replace_markdown_section(existing, section, content)
+            atomic_write_text(team_md_path, updated)
+            pushed = await _push_team_md(team_name, updated)
         _emit_team_event(
             event_bus,
             "team_updated",
@@ -8183,20 +8203,24 @@ def create_mesh_app(
         # the sibling of the §1-finding-4 goal seam).
         team_md_path = teams_store.team_md_path(team_name) or (TEAMS_DIR / team_name / "team.md")
         team_md_path.parent.mkdir(parents=True, exist_ok=True)
-        existing = (
-            team_md_path.read_text(errors="replace")
-            if team_md_path.exists()
-            else f"# {team_name}\n"
-        )
-        new_content = replace_markdown_section(existing, "Context", context)
-        team_md_path.write_text(new_content)
-        # P2 gap fix: this writer previously never pushed to running
-        # members (only the dashboard's PUT /api/team did), so an
-        # operator-tool context update was invisible to agents until their
-        # next restart. Best-effort — ``_push_team_md`` swallows per-target
-        # failures, so a push hiccup never fails the context write, and a
-        # solo/memberless team pushes to nobody (clean no-op).
-        pushed = await _push_team_md(team_name, new_content)
+        # Serialize + atomic (see the brief endpoint): concurrent section
+        # writers must not lost-update or deliver an older snapshot after a
+        # newer one.
+        async with _team_md_lock(team_name):
+            existing = (
+                team_md_path.read_text(errors="replace")
+                if team_md_path.exists()
+                else f"# {team_name}\n"
+            )
+            new_content = replace_markdown_section(existing, "Context", context)
+            atomic_write_text(team_md_path, new_content)
+            # P2 gap fix: this writer previously never pushed to running
+            # members (only the dashboard's PUT /api/team did), so an
+            # operator-tool context update was invisible to agents until their
+            # next restart. Best-effort — ``_push_team_md`` swallows per-target
+            # failures, so a push hiccup never fails the context write, and a
+            # solo/memberless team pushes to nobody (clean no-op).
+            pushed = await _push_team_md(team_name, new_content)
 
         _emit_team_event(
             event_bus,
@@ -8287,6 +8311,8 @@ def create_mesh_app(
         # (the persisted row above is the source of truth), and a team
         # with no shared TEAM.md (pure-DB store / solo team-of-one with no
         # scaffold) no-ops cleanly.
+        pushed: dict[str, bool] = {}
+        mirror_ok = True
         try:
             team_md_path = teams_store.team_md_path(team_name)
             if team_md_path is not None:
@@ -8304,15 +8330,20 @@ def create_mesh_app(
                 # a section when given empty content).
                 goal_md = "\n".join(goal_lines)
                 team_md_path.parent.mkdir(parents=True, exist_ok=True)
-                existing = (
-                    team_md_path.read_text(errors="replace")
-                    if team_md_path.exists()
-                    else f"# {team_name}\n"
-                )
-                updated = replace_markdown_section(existing, "Goal", goal_md)
-                team_md_path.write_text(updated)
-                await _push_team_md(team_name, updated)
+                # Serialize + atomic read-modify-write-push per team (same as
+                # the context/brief writers) so a concurrent write can't
+                # lost-update or reorder the delivered snapshot.
+                async with _team_md_lock(team_name):
+                    existing = (
+                        team_md_path.read_text(errors="replace")
+                        if team_md_path.exists()
+                        else f"# {team_name}\n"
+                    )
+                    updated = replace_markdown_section(existing, "Goal", goal_md)
+                    atomic_write_text(team_md_path, updated)
+                    pushed = await _push_team_md(team_name, updated)
         except Exception as e:  # noqa: BLE001 — best-effort mirror, never fail the write
+            mirror_ok = False
             logger.warning("goal mirror/push for team %s failed: %s", team_name, e)
 
         _emit_team_event(
@@ -8329,6 +8360,13 @@ def create_mesh_app(
             "team_id": team_name,
             "north_star": north_star,
             "success_criteria": success_criteria,
+            # Propagation status, distinct from the DB persist (the source of
+            # truth, which already succeeded). ``mirror_ok=False`` means the
+            # TEAM.md mirror/push failed and running members may not see the
+            # new goal until their next restart; ``pushed`` is the per-member
+            # delivery result.
+            "mirror_ok": mirror_ok,
+            "pushed": pushed,
         }
 
     def _active_real_members(members: list[str]) -> list[str]:

@@ -227,6 +227,10 @@ async def test_endpoint_set_goal_persists(goal_app):
     assert body["team_name"] == "growth"
     assert body["north_star"] == "Ship $10k MRR landing page in 2 weeks"
     assert body["success_criteria"] == ["100 visits/day", "5 demo bookings/wk"]
+    # Propagation status is surfaced distinctly from the DB persist so a
+    # silent mirror/push failure is visible to the operator (B-F3).
+    assert body["mirror_ok"] is True
+    assert isinstance(body["pushed"], dict)
 
     # Round-trip via the store so the dashboard would see the same.
     team = teams_store.get_team("growth")

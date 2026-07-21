@@ -252,6 +252,29 @@ async def test_brief_update_validation(brief_app):
 
 
 @pytest.mark.asyncio
+async def test_concurrent_section_writes_compose(brief_app):
+    """Context and brief writes to the same team, fired concurrently, must
+    BOTH land — neither clobbers the other and the pre-existing Workflow
+    section survives (per-team lock + atomic write)."""
+    import asyncio as _asyncio
+
+    app, _transport, project_md = brief_app
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        hdr = {"X-Agent-ID": "operator"}
+        results = await _asyncio.gather(
+            c.put("/mesh/teams/research/context",
+                  json={"context": "audience founders"}, headers=hdr),
+            c.put("/mesh/teams/research/brief",
+                  json={"section": "Rituals", "content": "daily standup"}, headers=hdr),
+        )
+    assert all(r.status_code == 200 for r in results), [r.text for r in results]
+    final = project_md.read_text()
+    assert "## Context" in final and "audience founders" in final
+    assert "## Rituals" in final and "daily standup" in final
+    assert "## Workflow" in final  # pre-existing section untouched
+
+
+@pytest.mark.asyncio
 async def test_team_context_update_now_pushes(brief_app):
     """P2 gap fix: the mesh-side context writer pushes to members."""
     app, transport, project_md = brief_app
