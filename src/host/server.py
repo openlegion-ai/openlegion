@@ -8100,6 +8100,17 @@ def create_mesh_app(
                 400,
                 "Invalid section name (letters/digits/spaces/_-/&, max 64 chars)",
             )
+        # ``## Goal`` and ``## Context`` are OWNED by set_team_goal /
+        # update_team_context and carry DB backing (north_star / description).
+        # A generic brief write to those names would silently diverge TEAM.md
+        # from the store (workers follow the brief while inspect_teams /
+        # assess_team_progress report the stale DB value). Reject them.
+        if section.strip().lower() in ("goal", "context"):
+            raise HTTPException(
+                400,
+                f"'{section}' is a reserved section — use set_team_goal / "
+                "update_team_context so the store stays in sync.",
+            )
         if not content:
             raise HTTPException(400, "content is required")
         if len(content) > 2000:
@@ -8287,7 +8298,11 @@ def create_mesh_app(
                         goal_lines.append("")
                     goal_lines.append("Success criteria:")
                     goal_lines.extend(f"- {sc}" for sc in success_criteria)
-                goal_md = "\n".join(goal_lines) or "_No goal set._"
+                # Empty goal (both cleared) → remove the ``## Goal`` section
+                # entirely rather than leave a ``_No goal set._`` placeholder
+                # riding every member's prompt (replace_markdown_section drops
+                # a section when given empty content).
+                goal_md = "\n".join(goal_lines)
                 team_md_path.parent.mkdir(parents=True, exist_ok=True)
                 existing = (
                     team_md_path.read_text(errors="replace")
