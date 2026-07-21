@@ -3549,6 +3549,28 @@ class TestTeamRoomEndpoint:
         resp = self.client.get("/dashboard/api/teams/ghost/room")
         assert resp.status_code == 404
 
+    def test_room_degrades_when_subsources_raise(self):
+        """A live-but-FAILING sub-source (lane / health / plate) must degrade
+        to empty/null fields, not 500 the whole panel (Codex #23)."""
+        from unittest.mock import MagicMock
+
+        teams_store = self.components["teams_store"]
+        teams_store.create_team("team")
+        teams_store.add_member("team", "alpha")
+        teams_store.add_member("team", "beta")
+        self.components["lane_manager"].get_status.side_effect = RuntimeError("boom")
+        self.components["cron_scheduler"].get_last_plate.side_effect = RuntimeError("boom")
+        self.components["health_monitor"].get_status = MagicMock(
+            side_effect=RuntimeError("boom"),
+        )
+        resp = self.client.get("/dashboard/api/teams/team/room")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert len(data["members"]) == 2
+        assert all(m["busy"] is False for m in data["members"])
+        assert all(m["plate"] is None for m in data["members"])
+        assert all(m["health"] is None for m in data["members"])
+
     def test_composed_payload_busy_task_plate_lead_threads(self):
         teams_store = self.components["teams_store"]
         teams_store.create_team("team", description="desc")

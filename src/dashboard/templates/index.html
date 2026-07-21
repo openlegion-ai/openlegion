@@ -1809,8 +1809,8 @@
                               <img :src="agentAvatarUrl(m.agent_id)" :alt="m.agent_id">
                             </div>
                             <span class="w-2 h-2 rounded-full flex-shrink-0"
-                              :class="m.blocked_task ? 'bg-red-400' : (m.busy ? 'bg-amber-400' : 'bg-emerald-400')"
-                              :title="m.blocked_task ? 'Blocked' : (m.busy ? 'Busy' : 'Idle')"></span>
+                              :class="m.blocked_task ? 'bg-red-400' : ((m.health && m.health !== 'healthy') ? 'bg-gray-400' : (m.busy ? 'bg-amber-400' : 'bg-emerald-400'))"
+                              :title="m.blocked_task ? 'Blocked' : ((m.health && m.health !== 'healthy') ? ('Unhealthy: ' + m.health) : (m.busy ? 'Busy' : 'Idle'))"></span>
                             <span class="text-xs text-gray-300 truncate" x-text="m.agent_id"></span>
                             <span x-show="m.is_lead"
                               class="text-[11px] px-1.5 py-0.5 rounded bg-amber-900/30 text-amber-400 border border-amber-800/40 flex-shrink-0"
