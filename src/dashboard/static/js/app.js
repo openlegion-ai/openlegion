@@ -11482,6 +11482,17 @@ function dashboard() {
         recommend_pending_action: 'recommending on a held action',
         allocate_member_budget: 'allocating a teammate\'s budget',
         set_team_lead: 'appointing a team lead',
+        create_team: 'creating a team',
+        add_agents_to_team: 'adding teammates to a team',
+        remove_agents_from_team: 'removing teammates from a team',
+        set_team_goal: 'setting the team goal',
+        update_team_context: 'updating team context',
+        inspect_teams: 'reviewing teams',
+        get_team_outputs: 'reviewing team outputs',
+        manage_team: 'managing a team',
+        manage_task: 'managing a task',
+        manage_agent: 'managing a teammate',
+        manage_goals: 'updating the goals board',
       };
       if (map[toolName]) return map[toolName];
       // Fallback: humanise the snake_case tool name.
