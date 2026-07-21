@@ -1541,8 +1541,13 @@ class CredentialVault:
                         )
                     # Team envelope on top of the per-agent budget (plan
                     # B4): unset/0 = unlimited; enforced pre-flight at the
-                    # same chokepoint so one runaway member can't drain the
-                    # whole team's allocation.
+                    # same chokepoint. NOTE: this preflight is not hard-
+                    # serialized across concurrent members — the budget lock
+                    # is per-agent, and the streaming transport records cost
+                    # only post-completion — so a burst of simultaneous
+                    # in-flight calls can overshoot before their costs land;
+                    # steady-state spend is still bounded. A team-scoped
+                    # reservation to close that race is a tracked follow-up.
                     envelope = self.cost_tracker.team_envelope_check(bill_agent, model)
                     if not envelope["allowed"]:
                         _d = envelope.get("daily_limit")

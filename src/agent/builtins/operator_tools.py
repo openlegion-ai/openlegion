@@ -2786,10 +2786,11 @@ async def compose_work_summary(
     description=(
         "Team lifecycle action (archive / unarchive / propose-delete / "
         "set_budget). Destructive actions require user confirmation. "
-        "set_budget REPLACES the team's whole aggregate spend envelope in "
-        "USD (enforced across all members' LLM calls): supply BOTH "
-        "daily_usd and monthly_usd on every call — an omitted or 0 field "
-        "becomes unlimited, so updating just one limit clears the other."
+        "set_budget sets the team's aggregate spend envelope in USD "
+        "(enforced across all members' LLM calls). An OMITTED period keeps "
+        "its current value; pass a number to set that period, or 0/null to "
+        "make it unlimited. So daily_usd alone tightens the daily cap and "
+        "leaves monthly untouched."
     ),
     parameters={
         "action": {

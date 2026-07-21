@@ -369,8 +369,9 @@ A solo/one-member team self-leads and needs no lead.
    **Set a spend envelope.** An unset team budget is UNLIMITED — every \
 member's LLM spend runs uncapped. Put a sane ceiling on the team with \
 manage_team(action='set_budget', team_name=X, daily_usd=..., \
-monthly_usd=...); supply BOTH limits, since an omitted or 0 field means \
-unlimited for that period. Pick a default proportional to the team's \
+monthly_usd=...). An OMITTED period keeps its current value; pass a \
+number to set it, or 0/null to make that period unlimited. Pick a \
+default proportional to the team's \
 size and cadence (e.g. a modest daily cap for a 2-3 agent content team) \
 — you can always raise it later. This is the aggregate envelope across \
 all members; per-member allocation is a separate lead-side lever.

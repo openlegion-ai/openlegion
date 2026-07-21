@@ -2913,6 +2913,21 @@ def create_mesh_app(
         """Streaming API proxy. Returns SSE stream for LLM completions."""
         agent_id = _resolve_agent_id(agent_id, request)
         await _check_rate_limit("api_proxy", agent_id)
+        # SECURITY: this endpoint ALWAYS runs an LLM completion via
+        # ``stream_llm`` (off ``params["model"]``), and model-pin + per-agent
+        # and team-budget enforcement all key off ``service == "llm"``. A
+        # non-llm label (e.g. ``image_gen``, which ``stream_llm`` still
+        # executes as a chat completion) would skip BOTH the model pin and
+        # every budget/envelope check while still billing the agent. Non-llm
+        # services stream nothing here — reject them so a mislabelled request
+        # can't bypass the enforcement gates below. Other services use the
+        # sync proxy (``/mesh/api/proxy``).
+        if api_request.service != "llm":
+            raise HTTPException(
+                400,
+                "The streaming proxy only serves 'llm' completions; "
+                "use the sync proxy for other services.",
+            )
         if not _caller_is_operator(agent_id, request):
             if not permissions.can_use_api(agent_id, api_request.service):
                 _record_denial(
@@ -10446,11 +10461,12 @@ def create_mesh_app(
     async def set_team_budget_endpoint(team_name: str, request: Request) -> dict:
         """Set a team's budget envelope (operator-only, plan B4).
 
-        Body ``{daily_usd, monthly_usd}`` — each a number or null.
-        SEMANTICS: null/0 = UNLIMITED (deliberately the opposite of the
-        per-agent ledger, where 0 blocks everything — see plan B4). The
-        envelope is enforced pre-flight at the LLM proxy across the sum
-        of all members' spend.
+        Body ``{daily_usd?, monthly_usd?}`` — each a number or null. An
+        OMITTED period keeps its current value; only an explicit field
+        changes a period. SEMANTICS: null/0 = UNLIMITED (deliberately the
+        opposite of the per-agent ledger, where 0 blocks everything — see
+        plan B4). The envelope is enforced pre-flight at the LLM proxy
+        across the sum of all members' spend.
         """
         caller = _extract_verified_agent_id(request)
         if not _caller_is_operator(caller, request) and not _is_internal_caller(request):
@@ -10459,10 +10475,23 @@ def create_mesh_app(
         if not isinstance(body, dict):
             raise HTTPException(400, "body must be a JSON object")
 
-        def _parse_limit(field: str, cap: float) -> float | None:
+        # An OMITTED period preserves its current value — only an explicit
+        # field (a number, or null/0 = unlimited) changes a period. Writing
+        # both columns unconditionally meant a partial update (e.g. tighten
+        # the daily cap only) silently cleared the untouched period to
+        # unlimited; the sibling lead-allocate endpoint already read-modify-
+        # writes to avoid exactly this. Read the current envelope first so an
+        # absent field round-trips unchanged.
+        existing = teams_store.get_team(team_name)
+        if existing is None:
+            raise HTTPException(404, f"Team '{team_name}' not found")
+
+        def _parse_limit(field: str, cap: float, current: float | None) -> float | None:
+            if field not in body:
+                return current  # omitted → preserve the current cap
             raw = body.get(field)
             if raw is None:
-                return None
+                return None  # explicit null = unlimited
             if isinstance(raw, bool) or not isinstance(raw, (int, float)):
                 raise HTTPException(400, f"{field} must be a number or null")
             val = float(raw)
@@ -10477,8 +10506,8 @@ def create_mesh_app(
             # Normalize 0 → NULL so "unlimited" has one stored shape.
             return val or None
 
-        daily = _parse_limit("daily_usd", 10_000.0)
-        monthly = _parse_limit("monthly_usd", 100_000.0)
+        daily = _parse_limit("daily_usd", 10_000.0, existing.get("budget_daily_usd"))
+        monthly = _parse_limit("monthly_usd", 100_000.0, existing.get("budget_monthly_usd"))
         try:
             teams_store.set_budget(team_name, daily, monthly)
         except TeamNotFound:

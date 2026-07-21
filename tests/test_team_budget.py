@@ -87,6 +87,45 @@ class TestBudgetEndpoint:
         finally:
             bb.close()
 
+    def test_partial_update_preserves_untouched_period(self, tmp_path):
+        """An OMITTED period keeps its current value — tightening the daily
+        cap alone must NOT silently clear the monthly envelope. An EXPLICIT
+        null/0 still clears that period to unlimited."""
+        store = TeamStore(db_path=":memory:")
+        store.create_team("alpha")
+        store.set_budget("alpha", 25.0, 400.0)
+        app, bb = _build_app(tmp_path, teams_store=store)
+        try:
+            client = TestClient(app)
+            # Only daily_usd — monthly must round-trip unchanged.
+            resp = client.put(
+                "/mesh/teams/alpha/budget",
+                headers=_OP,
+                json={"daily_usd": 10.0},
+            )
+            assert resp.status_code == 200, resp.text
+            assert resp.json() == {
+                "team": "alpha",
+                "budget_daily_usd": 10.0,
+                "budget_monthly_usd": 400.0,
+                "unlimited": False,
+            }
+            team = store.get_team("alpha")
+            assert team["budget_daily_usd"] == 10.0
+            assert team["budget_monthly_usd"] == 400.0
+            # An EXPLICIT null clears only that period.
+            resp2 = client.put(
+                "/mesh/teams/alpha/budget",
+                headers=_OP,
+                json={"monthly_usd": None},
+            )
+            assert resp2.status_code == 200, resp2.text
+            team2 = store.get_team("alpha")
+            assert team2["budget_daily_usd"] == 10.0  # preserved
+            assert team2["budget_monthly_usd"] is None  # explicitly cleared
+        finally:
+            bb.close()
+
     def test_worker_403(self, tmp_path):
         store = TeamStore(db_path=":memory:")
         store.create_team("alpha")
