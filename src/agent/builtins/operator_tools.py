@@ -1055,11 +1055,14 @@ async def get_team_outputs(
     name="inspect_team_spend",
     operator_only=True,
     description=(
-        "Read a team's aggregate spend: total cost + tokens for the "
-        "period, its daily/monthly budget envelope (null = unlimited), "
-        "and a per-member cost/token breakdown. Use this to answer "
-        "'how much has this team spent' or 'who on the team is burning "
-        "the most budget' without fanning out inspect_agents per member."
+        "Read a team's aggregate spend: total_cost + tokens for the period, "
+        "its daily/monthly budget envelope (null = unlimited), and a "
+        "per-member cost/token breakdown. NOTE: work_cost is the figure the "
+        "envelope actually ENFORCES (kind='work'); total_cost is inclusive "
+        "of coordination_cost (utility-model traffic, capped separately), so "
+        "compare work_cost — not total_cost — against the limits. Use this "
+        "to answer 'how much has this team spent' or 'who is burning the "
+        "most budget' without fanning out inspect_agents per member."
     ),
     parameters={
         "team_name": {
