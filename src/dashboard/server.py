@@ -6241,11 +6241,22 @@ def create_dashboard_router(
         if team is None:
             raise HTTPException(status_code=404, detail=f"Team '{team_name}' not found")
 
-        lane_status = lane_manager.get_status() if lane_manager else {}
+        # Every live sub-source is BOTH None-guarded AND exception-guarded so
+        # a failing (not just absent) source degrades to empty/null fields
+        # rather than 500-ing the whole panel — honoring the docstring above.
+        lane_status: dict = {}
+        if lane_manager is not None:
+            try:
+                lane_status = lane_manager.get_status()
+            except Exception as e:  # noqa: BLE001 - degrade, never 500
+                logger.warning("Team Room %s: lane status failed: %s", team_name, e)
 
         health_map: dict[str, str] = {}
         if health_monitor is not None:
-            health_map = {h["agent"]: h.get("status") for h in health_monitor.get_status()}
+            try:
+                health_map = {h["agent"]: h.get("status") for h in health_monitor.get_status()}
+            except Exception as e:  # noqa: BLE001 - degrade, never 500
+                logger.warning("Team Room %s: health lookup failed: %s", team_name, e)
 
         # Current task per member: the (at most one, by design — B1
         # single-lane) "working" task, plus any "blocked" task. Without
@@ -6276,7 +6287,14 @@ def create_dashboard_router(
         members = []
         for agent_id in team.get("members", []):
             status = lane_status.get(agent_id, {})
-            plate = cron_scheduler.get_last_plate(agent_id) if cron_scheduler else None
+            plate = None
+            if cron_scheduler is not None:
+                try:
+                    plate = cron_scheduler.get_last_plate(agent_id)
+                except Exception as e:  # noqa: BLE001 - degrade, never 500
+                    logger.warning(
+                        "Team Room %s: plate for %s failed: %s", team_name, agent_id, e,
+                    )
             members.append({
                 "agent_id": agent_id,
                 "is_lead": agent_id == team.get("lead_agent_id"),

@@ -2840,6 +2840,8 @@ class TestTeamRoomSubTab:
         assert "m.busy ? 'bg-amber-400' : 'bg-emerald-400'" in block
         assert "m.current_task" in block
         assert "m.plate" in block
+        # Health-aware: a failed/unhealthy member is not shown as green "Idle".
+        assert "m.health && m.health !== 'healthy'" in block
 
     def test_plate_line_shows_count_and_last_checked_or_unknown(self):
         idx = _INDEX_HTML.index('data-testid="team-room-plate-line"')
