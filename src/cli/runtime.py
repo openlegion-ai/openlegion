@@ -2807,19 +2807,44 @@ class RuntimeContext:
         except Exception as e:
             logger.warning("team-lead backfill failed to load teams: %s", e)
             return
+        # Agent status by id (same source as ``_reconcile_standup_jobs``) so
+        # an ARCHIVED member can never be appointed — or an archived
+        # dead-lead pointer left in place — as a team's lead.
+        try:
+            agent_statuses = {
+                aid: (acfg or {}).get("status", "active")
+                for aid, acfg in (_load_config().get("agents", {}) or {}).items()
+            }
+        except Exception as e:
+            logger.warning("team-lead backfill failed to load agent statuses: %s", e)
+            agent_statuses = {}
         for name, meta in teams.items():
             if (meta.get("status") or "active") == "archived":
                 continue
-            if meta.get("lead_agent_id"):
-                continue
+            current = (meta.get("lead_agent_id") or "").strip()
             members = [m for m in (meta.get("members") or []) if m != "operator"]
-            if len(members) < 2:
-                # Solo / team-of-one self-leads — no lead row.
+            active_members = [
+                m for m in members if agent_statuses.get(m, "active") == "active"
+            ]
+            # A current lead that is still active + a member is authoritative;
+            # an archived (dead) lead pointer is treated as vacant so it heals.
+            if current and current in members and agent_statuses.get(current, "active") == "active":
+                continue
+            if len(active_members) < 2:
+                # Solo / no active pair self-leads. Clear a stale dead-lead
+                # pointer so the Team Room + the standup reconcile below see no
+                # lead (which prunes the orphaned standup cron).
+                if current:
+                    try:
+                        self.teams_store.set_lead(name, None)
+                        logger.info("cleared dead lead %s for team %s", current, name)
+                    except Exception as e:
+                        logger.warning("team-lead backfill clear for %s failed: %s", name, e)
                 continue
             try:
-                self.teams_store.set_lead(name, members[0])
+                self.teams_store.set_lead(name, active_members[0])
                 logger.info(
-                    "backfilled lead %s for leaderless team %s", members[0], name
+                    "backfilled lead %s for team %s", active_members[0], name
                 )
             except Exception as e:
                 logger.warning("team-lead backfill for team %s failed: %s", name, e)
