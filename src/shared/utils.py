@@ -103,29 +103,62 @@ def format_dict(d: dict) -> str:
 
 
 def replace_markdown_section(text: str, section: str, content: str) -> str:
-    """Replace (or append) one level-2 ``## {section}`` block in markdown.
+    """Replace, append, or remove one level-2 ``## {section}`` block.
 
-    The block spans from its heading to the next ``## `` heading or EOF.
-    When the section is absent, it is appended at the end. Used for
-    section-scoped TEAM.md brief updates so an operator-written section
-    (e.g. ``## User Preferences``) never clobbers the rest of the
-    document — last-writer-wins is limited to one section.
+    Fence-aware LINE parser: lines inside ``` / ~~~ fenced code blocks are
+    NEVER treated as headings, so a ``## Goal`` example inside a fenced block
+    (or a multi-line body) can't be mistaken for the real section boundary.
+    The prior regex treated ANY ``## ``-prefixed line as a boundary and could
+    delete a section's content — and everything after it — to EOF.
+
+    The heading is matched exactly (case-insensitively on the name, trailing
+    whitespace tolerated); the FIRST matching section is replaced, spanning to
+    the next real (non-fenced) ``## `` heading or EOF. When the section is
+    absent it is appended. An empty ``content`` REMOVES the section, so
+    clearing a reserved section (Goal/Context) leaves no placeholder.
+    Content is inserted literally (no regex substitution), so backslashes in
+    the body are preserved verbatim.
     """
-    import re as _re
+    def _is_h2(line: str) -> bool:
+        return line.startswith("## ") and not line.startswith("### ")
 
-    block = f"## {section}\n\n{content.strip()}\n"
-    pattern = _re.compile(
-        rf"^## {_re.escape(section)}[ \t]*\n.*?(?=^## |\Z)",
-        _re.DOTALL | _re.MULTILINE,
-    )
-    if pattern.search(text):
-        # Function repl so backslashes in content can't act as group refs.
-        updated = pattern.sub(lambda _m: block + "\n", text, count=1)
-        return updated.rstrip("\n") + "\n"
+    lines = text.split("\n")
+    target = section.strip().lower()
+    fence: str | None = None
+    start: int | None = None
+    end = len(lines)
+    for i, line in enumerate(lines):
+        marker = line.lstrip()
+        if fence is None:
+            if marker.startswith("```") or marker.startswith("~~~"):
+                fence = marker[:3]
+                continue
+        else:
+            if marker.startswith(fence):
+                fence = None
+            continue  # inside a fence — never a heading boundary
+        if start is None:
+            if _is_h2(line) and line[3:].strip().lower() == target:
+                start = i
+        elif _is_h2(line):
+            end = i
+            break
+
+    new_body = content.strip()
+    if start is not None:
+        before = lines[:start]
+        after = lines[end:]
+        if not new_body:
+            merged = "\n".join(before + after)
+            return merged.rstrip("\n") + "\n" if merged.strip() else ""
+        rebuilt = before + [f"## {section}", "", new_body, ""] + after
+        return "\n".join(rebuilt).rstrip("\n") + "\n"
+
+    if not new_body:
+        return text  # nothing to append or remove — unchanged
     base = text.rstrip("\n")
-    if base:
-        return f"{base}\n\n{block}"
-    return block
+    block = f"## {section}\n\n{new_body}\n"
+    return f"{base}\n\n{block}" if base else block
 
 
 # ── Prompt injection sanitization ────────────────────────────

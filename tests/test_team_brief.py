@@ -61,6 +61,38 @@ class TestReplaceMarkdownSection:
         out = replace_markdown_section("", "User Preferences", "prefs")
         assert out == "## User Preferences\n\nprefs\n"
 
+    def test_fenced_heading_is_not_a_boundary(self):
+        """A ``## Goal`` inside a code fence must NOT be treated as a real
+        heading — replacing another section must not eat the fenced example
+        or the content after it (the old regex deleted to EOF)."""
+        fence = "```"
+        text = (
+            "# t\n\n## Context\n\n"
+            f"{fence}\n## Goal\nexample\n{fence}\n\nmore ctx\n\n"
+            "## Goal\n\nreal goal\n"
+        )
+        out = replace_markdown_section(text, "Goal", "NEW")
+        assert "more ctx" in out          # content after the fence survives
+        assert "## Context" in out
+        assert "NEW" in out and "real goal" not in out
+        # The fenced example heading is preserved; the real Goal is replaced.
+        assert out.count("## Goal") == 2
+
+    def test_empty_content_removes_section(self):
+        text = "# t\n\n## Goal\n\nG\n\n## Context\n\nC\n"
+        out = replace_markdown_section(text, "Goal", "")
+        assert "## Goal" not in out
+        assert "## Context" in out and "C" in out
+
+    def test_empty_content_absent_section_is_noop(self):
+        text = "# t\n\nintro\n"
+        assert replace_markdown_section(text, "Goal", "") == text
+
+    def test_heading_match_is_case_insensitive_and_trims_ws(self):
+        out = replace_markdown_section("# t\n\n## Goal   \n\nold\n", "Goal", "new")
+        assert "new" in out and "old" not in out
+        assert out.count("## Goal") == 1
+
 
 # ── mesh endpoint ─────────────────────────────────────────────────
 
@@ -193,6 +225,16 @@ async def test_brief_update_validation(brief_app):
             headers={"X-Agent-ID": "operator"},
         )
         assert r.status_code == 400
+        # Reserved section names (owned by set_team_goal /
+        # update_team_context, DB-backed) are rejected so a brief can't
+        # silently diverge TEAM.md from the store.
+        for reserved in ("Goal", "Context", "goal", " context "):
+            r = await c.put(
+                "/mesh/teams/research/brief",
+                json={"section": reserved, "content": "y"},
+                headers={"X-Agent-ID": "operator"},
+            )
+            assert r.status_code == 400, reserved
         # Oversized content.
         r = await c.put(
             "/mesh/teams/research/brief",
