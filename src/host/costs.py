@@ -579,11 +579,25 @@ class CostTracker:
             })
         daily_env = trow.get("budget_daily_usd") or 0.0
         monthly_env = trow.get("budget_monthly_usd") or 0.0
+        # ENFORCED figure: ``team_envelope_check`` counts only kind='work',
+        # but ``total_cost`` above is spend-INCLUSIVE (work + coordination).
+        # Surface ``work_cost`` — the number that actually trips the
+        # daily/monthly limit — so the operator isn't misled by a total that
+        # sits above the enforced amount.
+        try:
+            work_cost, _work_tokens = self._members_spend_totals(
+                members, _period_to_since(period),
+            )
+        except Exception as e:  # noqa: BLE001 - display degrades to the total
+            logger.warning("get_team_spend: work-total read failed: %s", e)
+            work_cost = total_cost
         return {
             "team": team,
             "period": period,
             "total_cost": round(total_cost, 4),
             "total_tokens": total_tokens,
+            "work_cost": round(work_cost, 4),
+            "coordination_cost": round(max(0.0, total_cost - work_cost), 4),
             "daily_limit": daily_env if daily_env > 0 else None,
             "monthly_limit": monthly_env if monthly_env > 0 else None,
             "agents": agent_breakdown,

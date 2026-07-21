@@ -384,6 +384,24 @@ class TestTeamCostAggregation:
         assert alice_spend["tokens"] == 1500
         assert bob_spend["tokens"] == 3000
 
+    def test_team_spend_separates_enforced_work_from_coordination(self):
+        """work_cost is the ENFORCED figure (envelope counts kind='work');
+        total_cost is inclusive of coordination — so work_cost < total_cost
+        when coordination spend exists, and the operator can compare the
+        right number against the limit (C-F3)."""
+        self.store.create_team("teamA")
+        self.store.add_member("teamA", "alice")
+        self.tracker.track("alice", "openai/gpt-4o-mini", 1000, 500, kind="work")
+        self.tracker.track("alice", "openai/gpt-4o-mini", 2000, 1000, kind="coordination")
+
+        result = self.tracker.get_team_spend("teamA", "today")
+        assert result["total_cost"] > result["work_cost"] > 0
+        assert result["coordination_cost"] > 0
+        # coordination_cost is the non-enforced remainder (within 4-dp rounding).
+        assert abs(
+            result["coordination_cost"] - (result["total_cost"] - result["work_cost"])
+        ) <= 2e-4
+
     def test_team_spend_unknown_team_errors(self):
         """get_team_spend keeps the historical error-dict contract for an
         unknown team (introspect guards on ``"error" not in``)."""
