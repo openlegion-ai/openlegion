@@ -605,6 +605,67 @@ class TestRemoveLeadReappointWiresStandup:
             blackboard.close()
             importlib.reload(server_module)
 
+    @pytest.mark.asyncio
+    async def test_remove_lead_to_solo_clears_lead_and_retires_standup(self, tmp_path, monkeypatch):
+        """Removing the LEAD of a two-member team drops it to solo — the lead
+        pointer is cleared and its standup cron retired (previously the standup
+        kept firing daily on the departed lead)."""
+        import importlib
+        import json as _json
+
+        import yaml as _yaml
+        from httpx import ASGITransport, AsyncClient
+
+        monkeypatch.chdir(tmp_path)
+        import src.cli.config as cli_cfg
+
+        perms_file = tmp_path / "permissions.json"
+        perms_file.write_text(_json.dumps({"permissions": {
+            "agent1": {"blackboard_read": [], "blackboard_write": []},
+            "agent2": {"blackboard_read": [], "blackboard_write": []},
+        }}))
+        monkeypatch.setattr(cli_cfg, "PERMISSIONS_FILE", perms_file)
+        agents_file = tmp_path / "agents.yaml"
+        agents_file.write_text(_yaml.dump({"agents": {
+            "agent1": {"role": "a"}, "agent2": {"role": "b"}, "operator": {"role": "operator"},
+        }}))
+        monkeypatch.setattr(cli_cfg, "AGENTS_FILE", agents_file)
+
+        import src.host.server as server_module
+        importlib.reload(server_module)
+        from src.host.cron import CronScheduler
+        from src.host.mesh import Blackboard, MessageRouter, PubSub
+        from src.host.permissions import PermissionMatrix
+        from src.host.teams import TeamStore
+
+        blackboard = Blackboard(str(tmp_path / "bb.db"))
+        permissions = PermissionMatrix()
+        router = MessageRouter(permissions, {"operator": "http://op:8400"})
+        teams_store = TeamStore(db_path=str(tmp_path / "teams.db"))
+        teams_store.create_team("squad")
+        cron_scheduler = CronScheduler()
+        app = server_module.create_mesh_app(
+            blackboard=blackboard, pubsub=PubSub(), router=router,
+            permissions=permissions, teams_store=teams_store,
+            cron_scheduler=cron_scheduler, auth_tokens={"operator": "op-token"},
+        )
+        hdr = {"Authorization": "Bearer op-token", "X-Agent-ID": "operator"}
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+                for agent in ("agent1", "agent2"):
+                    r = await c.post("/mesh/teams/squad/members", json={"agent": agent}, headers=hdr)
+                    assert r.status_code == 200, r.text
+                assert teams_store.get_team("squad")["lead_agent_id"] == "agent1"
+                assert cron_scheduler.find_standup_job("squad") is not None
+                # Remove the LEAD → team is now solo {agent2}: no lead, no standup.
+                r = await c.delete("/mesh/teams/squad/members/agent1", headers=hdr)
+                assert r.status_code == 200, r.text
+            assert teams_store.get_team("squad")["lead_agent_id"] is None
+            assert cron_scheduler.find_standup_job("squad") is None
+        finally:
+            blackboard.close()
+            importlib.reload(server_module)
+
 
 # ── Boot reconcile (cli/runtime.RuntimeContext._reconcile_standup_jobs) ──
 
@@ -904,6 +965,66 @@ class TestBackfillTeamLeads:
         RuntimeContext._backfill_team_leads(self._stub(store))
 
         assert store.get_team("old")["lead_agent_id"] is None
+
+    def test_backfill_excludes_archived_member_and_appoints_first_active(self, tmp_path, monkeypatch):
+        """A leaderless team whose first-rowid member is ARCHIVED gets the
+        first ACTIVE member as lead — never the archived one (the dead-lead
+        bug: appointment used to filter only ``!= operator``, not status)."""
+        store = _team_store(tmp_path)
+        _seed_team(store, "alpha", ["ada", "bob", "cid"])  # ada first by rowid
+        import src.cli.runtime as rt
+        monkeypatch.setattr(rt, "_load_config", lambda *a, **k: {
+            "agents": {
+                "ada": {"status": "archived"},
+                "bob": {"status": "active"},
+                "cid": {"status": "active"},
+            }
+        })
+        rt.RuntimeContext._backfill_team_leads(self._stub(store))
+        assert store.get_team("alpha")["lead_agent_id"] == "bob"
+
+    def test_backfill_effectively_solo_when_only_one_active_member(self, tmp_path, monkeypatch):
+        """A 2-row team with only ONE active member is effectively solo — no
+        lead is appointed (the archived row doesn't make it a real pair)."""
+        store = _team_store(tmp_path)
+        _seed_team(store, "alpha", ["ada", "bob"])
+        import src.cli.runtime as rt
+        monkeypatch.setattr(rt, "_load_config", lambda *a, **k: {
+            "agents": {"ada": {"status": "archived"}, "bob": {"status": "active"}}
+        })
+        rt.RuntimeContext._backfill_team_leads(self._stub(store))
+        assert store.get_team("alpha")["lead_agent_id"] is None
+
+    def test_backfill_heals_dead_archived_lead(self, tmp_path, monkeypatch):
+        """A team whose lead pointer references an ARCHIVED agent (a stuck
+        dead lead) is re-appointed to the first active member at boot — the
+        non-empty ``lead_agent_id`` guard no longer blocks the self-heal."""
+        store = _team_store(tmp_path)
+        _seed_team(store, "alpha", ["ada", "bob", "cid"])
+        store.set_lead("alpha", "ada")  # ada leads...
+        import src.cli.runtime as rt
+        monkeypatch.setattr(rt, "_load_config", lambda *a, **k: {
+            "agents": {
+                "ada": {"status": "archived"},  # ...but ada is archived
+                "bob": {"status": "active"},
+                "cid": {"status": "active"},
+            }
+        })
+        rt.RuntimeContext._backfill_team_leads(self._stub(store))
+        assert store.get_team("alpha")["lead_agent_id"] == "bob"
+
+    def test_backfill_clears_dead_lead_when_no_active_pair(self, tmp_path, monkeypatch):
+        """A dead (archived) lead with fewer than two active members is
+        CLEARED so the Team Room + the standup reconcile see no lead."""
+        store = _team_store(tmp_path)
+        _seed_team(store, "alpha", ["ada", "bob"])
+        store.set_lead("alpha", "ada")
+        import src.cli.runtime as rt
+        monkeypatch.setattr(rt, "_load_config", lambda *a, **k: {
+            "agents": {"ada": {"status": "archived"}, "bob": {"status": "active"}}
+        })
+        rt.RuntimeContext._backfill_team_leads(self._stub(store))
+        assert store.get_team("alpha")["lead_agent_id"] is None
 
     def test_backfill_then_standup_reconcile_creates_job(self, tmp_path):
         """End-to-end: a leaderless multi-member team gets a lead at boot,

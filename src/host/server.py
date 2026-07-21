@@ -6732,10 +6732,12 @@ def create_mesh_app(
                 teams_store.create_team(name, description=description)
             except (TeamExists, ValueError) as e:
                 raise HTTPException(400, str(e))
+            _evicted_old_teams: set[str] = set()
             for agent in members:
                 old = teams_store.add_member(name, agent)
                 if old and old != name:
                     _remove_team_blackboard_permissions(agent, old)
+                    _evicted_old_teams.add(old)
                 _add_team_blackboard_permissions(agent, name)
             if members:
                 # ACL writes land on disk; refresh the LIVE matrix so the
@@ -6754,19 +6756,15 @@ def create_mesh_app(
         # refuses the operator. A solo/one-member team self-leads — no lead
         # row (nobody to coordinate). Best-effort: a failure here must not
         # fail team creation; the boot backfill catches any drift.
-        lead_id: str | None = None
-        _real_members = [m for m in members if m != "operator"]
-        if len(_real_members) >= 2:
-            try:
-                teams_store.set_lead(name, _real_members[0])
-                lead_id = _real_members[0]
-            except (TeamNotFound, ValueError) as e:
-                logger.warning("auto-appoint lead for team %s failed: %s", name, e)
-        if lead_id is not None:
-            # Wire the new lead's standup cron immediately (same helper the
-            # dedicated lead endpoint uses) so stewardship starts now, not at
-            # the next mesh restart. No-op when cron_scheduler is unwired.
-            _sync_standup_job_on_lead_change(name, lead_id)
+        # Appoint an active lead for a non-solo team + wire its standup (the
+        # helper filters archived members and self-heals a stale pointer). A
+        # solo/one-member team self-leads — no lead row.
+        _ensure_team_lead(name)
+        # A create can pull members OUT of other teams (add_member move); a
+        # team that lost its lead to this create must be re-evaluated too, or
+        # it sits leaderless until the next reboot's backfill.
+        for _old_team in _evicted_old_teams:
+            _ensure_team_lead(_old_team)
         # Team channel thread (Phase-2 Team Threads): create the durable
         # channel and point the team row at it. Best-effort — a thread
         # hiccup must not fail team creation; the boot backfill catches
@@ -6984,25 +6982,10 @@ def create_mesh_app(
             _remove_team_blackboard_permissions(agent, old)
             _purge_departed_team_signals(agent, old)
             # Lead-orphan seam on the DEPARTURE side of a move: ``add_member``
-            # evicts the agent from ``old`` and clears ``old``'s lead pointer
-            # in-transaction when the mover WAS that team's lead — but nothing
-            # re-appoints, so the team it LEFT sits leaderless until the next
-            # reboot's backfill. Same mirror as the remove/offboard paths: if
-            # ``old`` now has no lead and still >=2 real members, appoint the
-            # first remaining real member + wire its standup. The mover is
-            # already gone from ``old``'s membership (moved to ``team_name``),
-            # so it can't be re-picked. Best-effort — must not fail the move.
-            try:
-                _old_team = teams_store.get_team(old) or {}
-                _old_real = [m for m in _old_team.get("members", []) if m != "operator"]
-                if len(_old_real) >= 2 and not (_old_team.get("lead_agent_id") or "").strip():
-                    try:
-                        teams_store.set_lead(old, _old_real[0])
-                        _sync_standup_job_on_lead_change(old, _old_real[0])
-                    except (TeamNotFound, ValueError) as e:
-                        logger.warning("move auto-appoint lead for team %s failed: %s", old, e)
-            except Exception as e:
-                logger.warning("move auto-appoint check for team %s failed: %s", old, e)
+            # evicts the mover from ``old`` and clears ``old``'s lead pointer
+            # in-transaction when the mover WAS its lead. Re-evaluate ``old`` so
+            # it doesn't sit leaderless until the next reboot's backfill.
+            _ensure_team_lead(old)
         _add_team_blackboard_permissions(agent, team_name)
         permissions.reload()
         # Phase-1 leadership loop (docs/plans/2026-07-16-autonomous-team-
@@ -7020,20 +7003,10 @@ def create_mesh_app(
         # operator). A solo/one-member team self-leads (no lead row). Best-
         # effort: a failure here must not fail the add-members response; the
         # boot backfill catches any drift.
-        try:
-            _team = teams_store.get_team(team_name) or {}
-            _real_members = [m for m in _team.get("members", []) if m != "operator"]
-            if len(_real_members) >= 2 and not (_team.get("lead_agent_id") or "").strip():
-                try:
-                    teams_store.set_lead(team_name, _real_members[0])
-                    # Wire the new lead's standup cron immediately (same helper
-                    # the dedicated lead endpoint uses) so stewardship starts
-                    # now, not at the next mesh restart.
-                    _sync_standup_job_on_lead_change(team_name, _real_members[0])
-                except (TeamNotFound, ValueError) as e:
-                    logger.warning("auto-appoint lead for team %s failed: %s", team_name, e)
-        except Exception as e:
-            logger.warning("auto-appoint lead check for team %s failed: %s", team_name, e)
+        # Appoint an active lead once the roster reaches >=2 active members
+        # (mirrors the create path; the helper self-heals a stale pointer and
+        # a solo/one-member team self-leads with no lead row).
+        _ensure_team_lead(team_name)
         # Join-context seam (docs/plans/2026-07-16-autonomous-team-delivery.md
         # §1): a worker container is started at create_agent BEFORE it joins,
         # so its ``/data/workspace/TEAM.md`` is empty/stale — yet the onboarding
@@ -7081,17 +7054,10 @@ def create_mesh_app(
         # real members appoints nobody (a solo team self-leads); NEVER the
         # operator (``set_lead`` re-checks). Best-effort: a failure here must
         # not fail the remove response; the boot backfill catches any drift.
-        try:
-            _team = teams_store.get_team(team_name) or {}
-            _real_members = [m for m in _team.get("members", []) if m != "operator"]
-            if len(_real_members) >= 2 and not (_team.get("lead_agent_id") or "").strip():
-                try:
-                    teams_store.set_lead(team_name, _real_members[0])
-                    _sync_standup_job_on_lead_change(team_name, _real_members[0])
-                except (TeamNotFound, ValueError) as e:
-                    logger.warning("auto-appoint lead for team %s failed: %s", team_name, e)
-        except Exception as e:
-            logger.warning("auto-appoint lead check for team %s failed: %s", team_name, e)
+        # Re-evaluate the team's lead after a departure: re-appoint an active
+        # member, or clear the lead + retire the standup when it drops to solo
+        # (fixes the orphaned standup cron + stuck dead-lead on removal).
+        _ensure_team_lead(team_name)
         return {"removed": True, "team_id": team_name, "team_name": team_name, "agent": agent}
 
     @app.delete("/mesh/teams/{team_name}")
@@ -8349,6 +8315,57 @@ def create_mesh_app(
             "north_star": north_star,
             "success_criteria": success_criteria,
         }
+
+    def _active_real_members(members: list[str]) -> list[str]:
+        """Members eligible to lead: non-operator AND active. Excludes
+        archived/hibernated agents (``_status_overrides`` is kept in sync on
+        archive/hibernate/offboard and defaults ``"active"``) so a departed-
+        but-still-in-``team_members`` agent can never be appointed — or boot-
+        backfilled — as a dead lead. Preserves stored (rowid) order.
+        """
+        return [
+            m for m in (members or [])
+            if m != "operator" and _status_overrides.get(m, "active") == "active"
+        ]
+
+    def _ensure_team_lead(team_name: str) -> None:
+        """Idempotently keep a non-solo team led by an ACTIVE member; retire
+        the lead + standup when it can't be.
+
+        The single entry point every membership-mutation path calls (create /
+        add / remove / move-eviction / offboard / delete / unarchive / agent-
+        archive). Appointment filters by active status; a current lead that is
+        no longer active or no longer a member is treated as vacant (so a
+        stuck dead-lead self-heals on the next mutation); a team that drops
+        below two active members has its lead cleared and its standup cron
+        retired. Best-effort — never raises into the caller.
+        """
+        try:
+            team = teams_store.get_team(team_name)
+        except Exception as e:  # noqa: BLE001 - best-effort stewardship
+            logger.warning("ensure-lead: get_team(%s) failed: %s", team_name, e)
+            return
+        if not team or (team.get("status") or "active") == "archived":
+            return
+        current = (team.get("lead_agent_id") or "").strip()
+        active = _active_real_members(team.get("members", []))
+        if current and current in active:
+            return  # a still-active current lead is authoritative
+        if len(active) >= 2:
+            try:
+                teams_store.set_lead(team_name, active[0])
+                _sync_standup_job_on_lead_change(team_name, active[0])
+            except (TeamNotFound, ValueError) as e:
+                logger.warning("ensure-lead: appoint for %s failed: %s", team_name, e)
+        else:
+            # Solo / no active pair → no lead. Clear a stale (e.g. now-archived)
+            # pointer and retire the standup so it stops firing on a non-lead.
+            if current:
+                try:
+                    teams_store.set_lead(team_name, None)
+                except (TeamNotFound, ValueError) as e:
+                    logger.warning("ensure-lead: clear for %s failed: %s", team_name, e)
+            _sync_standup_job_on_lead_change(team_name, None)
 
     def _sync_standup_job_on_lead_change(team_name: str, lead_agent_id: str | None) -> None:
         """Live cron sync for a lead assign/unassign (plan §8 #14).
@@ -10832,6 +10849,10 @@ def create_mesh_app(
                     team_name,
                     e,
                 )
+        # Restore the daily STANDUP cron too (archive tore it down). The helper
+        # re-validates/appoints the lead and re-wires its standup — symmetric to
+        # the summary-job restore above.
+        _ensure_team_lead(team_name)
         _emit_team_event(event_bus, "team_unarchived", agent="operator", name=team_name)
         return {
             "archived": False,
@@ -11309,6 +11330,16 @@ def create_mesh_app(
         # the stale pre-archive entry — "active" or "hibernated" — from
         # the cache and either no-op or attempt a wake).
         _status_overrides[agent_id] = "archived"
+        # If the archived agent was a team's lead, its stewardship would go
+        # dormant (a stopped agent's heartbeat never ticks). Re-evaluate that
+        # team so an active member takes over — or the lead is cleared and the
+        # standup retired when none remain. Best-effort.
+        try:
+            _led_team = teams_store.led_team(agent_id)
+            if _led_team:
+                _ensure_team_lead(_led_team)
+        except Exception as e:
+            logger.warning("archive: re-evaluate lead for %s failed: %s", agent_id, e)
         # Stop scheduling: drop heartbeat and any cron jobs the agent owns.
         if cron_scheduler is not None:
             try:
@@ -11743,24 +11774,13 @@ def create_mesh_app(
             # as its own successor. If >=2 OTHER real (non-operator) members
             # remain and there's no lead, appoint the first + wire its standup.
             # Best-effort; the boot backfill catches any drift.
-            try:
-                _team = teams_store.get_team(led_team_id) or {}
-                _real_members = [
-                    m for m in _team.get("members", [])
-                    if m != "operator" and m != agent_id
-                ]
-                if len(_real_members) >= 2 and not (_team.get("lead_agent_id") or "").strip():
-                    try:
-                        teams_store.set_lead(led_team_id, _real_members[0])
-                        _sync_standup_job_on_lead_change(led_team_id, _real_members[0])
-                    except (TeamNotFound, ValueError) as e:
-                        logger.warning(
-                            "offboard auto-appoint lead for team %s failed: %s", led_team_id, e,
-                        )
-            except Exception as e:
-                logger.warning(
-                    "offboard auto-appoint check for team %s failed: %s", led_team_id, e,
-                )
+            # Offboard archives the agent but KEEPS its team_members row, and
+            # ``_archive_agent_core`` (which marks it archived) runs below — so
+            # mark it archived HERE first, then re-evaluate, so the helper's
+            # active-member filter can't re-pick the departing agent as its own
+            # successor.
+            _status_overrides[agent_id] = "archived"
+            _ensure_team_lead(led_team_id)
         archive_result = await _archive_agent_core(agent_id)
         return {"offboarded": True, "manifest": manifest, **archive_result}
 
@@ -12282,22 +12302,11 @@ def create_mesh_app(
             # team (mirror of the remove/offboard/move paths). ``_remove_agent``
             # already removed the deleted agent from ``team_members``, so it
             # can't be re-picked. Best-effort — must not fail the delete.
+            # ``_remove_agent`` above already dropped the deleted agent from
+            # team_members, so it can't be re-picked. Re-evaluate the team it
+            # led so it doesn't sit leaderless until the next reboot's backfill.
             if _deleted_led_team:
-                try:
-                    _team = teams_store.get_team(_deleted_led_team) or {}
-                    _real_members = [m for m in _team.get("members", []) if m != "operator"]
-                    if len(_real_members) >= 2 and not (_team.get("lead_agent_id") or "").strip():
-                        try:
-                            teams_store.set_lead(_deleted_led_team, _real_members[0])
-                            _sync_standup_job_on_lead_change(_deleted_led_team, _real_members[0])
-                        except (TeamNotFound, ValueError) as e:
-                            logger.warning(
-                                "delete auto-appoint lead for team %s failed: %s", _deleted_led_team, e,
-                            )
-                except Exception as e:
-                    logger.warning(
-                        "delete auto-appoint check for team %s failed: %s", _deleted_led_team, e,
-                    )
+                _ensure_team_lead(_deleted_led_team)
             blackboard.log_audit(
                 action="delete_agent",
                 target=target_id,
