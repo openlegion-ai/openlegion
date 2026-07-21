@@ -37,6 +37,26 @@ def test_list_open_orders_oldest_first(tmp_path):
     assert ids == [a, b]
 
 
+def test_record_dedups_identical_open_request(tmp_path):
+    """A retry of the same open request (same kind + agent + name) returns
+    the existing id instead of opening a duplicate 'Needs you' card — the
+    server records BEFORE responding, so a lost response + retry would
+    otherwise double the request (C-F5)."""
+    store = HelpRequests(db_path=str(tmp_path / "hr.db"))
+    a = store.record("credential_request", "scout", {"name": "stripe_key"})
+    b = store.record("credential_request", "scout", {"name": "stripe_key"})
+    assert a == b
+    assert len(store.list_open()) == 1
+    # A different name is a distinct request.
+    c = store.record("credential_request", "scout", {"name": "other_key"})
+    assert c != a
+    assert len(store.list_open()) == 2
+    # A different agent asking for the same name is also distinct.
+    d = store.record("credential_request", "analyst", {"name": "stripe_key"})
+    assert d != a
+    assert len(store.list_open()) == 3
+
+
 def test_resolve_pops_and_is_idempotent(tmp_path):
     store = HelpRequests(db_path=str(tmp_path / "hr.db"))
     rid = store.record("credential_request", "a", {"name": "x"})

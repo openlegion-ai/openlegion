@@ -286,6 +286,25 @@ class TestProxyEnvelopeBlock:
         tracker.close()
 
     @pytest.mark.asyncio
+    async def test_fail_closed_envelope_renders_clear_message(self, tmp_path, monkeypatch):
+        """When the envelope check fails closed (budget-store outage) the
+        block is real but team/limits are null — the render must say the
+        governor is unavailable, not the confusing 'team None … unlimited'
+        (C-F7)."""
+        vault, tracker, store = self._vault_and_tracker(tmp_path, monkeypatch)
+        store.set_budget("alpha", 10.0, None)
+        monkeypatch.setattr(tracker, "team_envelope_check", lambda *a, **k: {
+            "allowed": False, "reason": "envelope_check_unavailable",
+            "team": None, "daily_used": 0.0, "daily_limit": None,
+            "monthly_used": 0.0, "monthly_limit": None, "estimated_cost": 0.0,
+        })
+        result = await vault.execute_api_call(self._chat_request(), agent_id="worker")
+        assert result.success is False
+        assert "governor temporarily unavailable" in result.error
+        assert "'None'" not in result.error  # not the confusing team 'None' render
+        tracker.close()
+
+    @pytest.mark.asyncio
     async def test_zero_envelope_does_not_block(self, tmp_path, monkeypatch):
         """B4 pinned at the proxy: 0 envelope = unlimited; the call reaches
         the provider handler."""
