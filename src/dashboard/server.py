@@ -5876,15 +5876,23 @@ def create_dashboard_router(
             teams_store.create_team(name, description=description)
         except ValueError as e:  # TeamExists / invalid name
             raise HTTPException(status_code=400, detail=str(e))
+        _evicted_old: set[str] = set()
         for agent in members:
             old = teams_store.add_member(name, agent)
             if old and old != name:
                 _remove_team_blackboard_permissions(agent, old)
+                _evicted_old.add(old)
             _add_team_blackboard_permissions(agent, name)
         if members:
             # Refresh the LIVE matrix so the new members' team patterns
             # apply immediately (disk writes alone wait for a restart).
             permissions.reload()
+        # Appoint a lead for the new non-solo team + re-evaluate any team a
+        # moved member was evicted from (mirrors the mesh create path so a
+        # dashboard-built team isn't leaderless until the next reboot).
+        _ensure_team_lead(name)
+        for _old in _evicted_old:
+            _ensure_team_lead(_old)
         # Team channel thread (Phase-2 Team Threads): mirror the mesh
         # create path — best-effort; a thread hiccup must not fail team
         # creation, and the boot backfill catches a NULL thread_ref.
@@ -6012,6 +6020,11 @@ def create_dashboard_router(
             _remove_team_blackboard_permissions(agent, old)
         _add_team_blackboard_permissions(agent, team_name)
         permissions.reload()
+        # Appoint a lead once the team reaches >=2 active members; re-evaluate
+        # any team the agent was moved out of (mirrors the mesh add path).
+        _ensure_team_lead(team_name)
+        if old and old != team_name:
+            _ensure_team_lead(old)
         # Auto-restart the agent so new scope takes effect
         restarted = False
         if transport is not None and agent in agent_registry:
@@ -6053,6 +6066,10 @@ def create_dashboard_router(
         teams_store.remove_member(team_name, agent)
         _remove_team_blackboard_permissions(agent, team_name)
         permissions.reload()
+        # Re-evaluate the lead after a departure: re-appoint an active member,
+        # or clear the lead + retire the standup when it drops to solo
+        # (mirrors the mesh remove path).
+        _ensure_team_lead(team_name)
         # Auto-restart the agent so new scope takes effect
         restarted = False
         if transport is not None and agent in agent_registry:
@@ -6095,6 +6112,52 @@ def create_dashboard_router(
             cron_scheduler.ensure_standup_job(team_name, lead_agent_id, schedule=schedule)
         except Exception as e:
             logger.warning("standup cron sync for team %s failed: %s", team_name, e)
+
+    def _ensure_team_lead(team_name: str) -> None:
+        """Dashboard mirror of the mesh ``_ensure_team_lead``: keep a non-solo
+        team led by an ACTIVE member, and clear the lead + retire the standup
+        when it can't be. The dashboard's create / add / remove endpoints
+        mutate ``teams_store`` directly, so without this a dashboard-built team
+        stayed leaderless (stewardship dormant) until the next reboot's
+        backfill, and removing a lead orphaned its standup. Active status is
+        read from config via ``_agent_status`` (updated on archive). Best-
+        effort — never raises into the caller."""
+        from src.cli.config import _agent_status
+        from src.host.teams import TeamNotFound
+
+        try:
+            team = teams_store.get_team(team_name)
+        except Exception as e:  # noqa: BLE001 - best-effort stewardship
+            logger.warning("dash ensure-lead get_team(%s) failed: %s", team_name, e)
+            return
+        if not team or (team.get("status") or "active") == "archived":
+            return
+
+        def _active(m: str) -> bool:
+            if m == "operator":
+                return False
+            try:
+                return _agent_status(m) == "active"
+            except Exception:
+                return False  # unknown/deleted/archived → not a candidate
+
+        current = (team.get("lead_agent_id") or "").strip()
+        active = [m for m in (team.get("members") or []) if _active(m)]
+        if current and current in active:
+            return
+        if len(active) >= 2:
+            try:
+                teams_store.set_lead(team_name, active[0])
+                _sync_standup_job_on_lead_change(team_name, active[0])
+            except (TeamNotFound, ValueError) as e:
+                logger.warning("dash ensure-lead appoint %s failed: %s", team_name, e)
+        else:
+            if current:
+                try:
+                    teams_store.set_lead(team_name, None)
+                except (TeamNotFound, ValueError) as e:
+                    logger.warning("dash ensure-lead clear %s failed: %s", team_name, e)
+            _sync_standup_job_on_lead_change(team_name, None)
 
     @api_router.put("/api/teams/{team_name}/lead")
     async def api_teams_set_lead(team_name: str, request: Request) -> dict:
