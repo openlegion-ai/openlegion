@@ -1972,7 +1972,6 @@ _VERB_FOR_TOOL_FALLBACK_OK = frozenset({
     # Introspection / mesh-internal — fallback "using X" reads fine.
     "get_system_status",
     "get_agent_profile",
-    "get_team_outputs",
     "list_agent_queue",
     "list_blackboard",
     "list_files",
@@ -1999,16 +1998,8 @@ _VERB_FOR_TOOL_FALLBACK_OK = frozenset({
     "cancel_pending_action",
     "archive_audit_before",
     "undo_change",
-    "manage_agent",
-    "manage_goals",
-    "manage_team",
-    "manage_task",
-    "create_team",
-    "add_agents_to_team",
-    "remove_agents_from_team",
-    "set_team_goal",
-    "update_team_context",
-    "inspect_teams",
+    # summarize_team_progress: removed from the operator surface (#1275) but
+    # still a registered @tool, so it stays on the fallback allowlist.
     "summarize_team_progress",
     # Vault / credentials.
     "vault_generate_secret",
