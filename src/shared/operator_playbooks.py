@@ -669,6 +669,14 @@ _TOOL_PLAYBOOK_MAP: dict[str, str] = {
     "undo_change": "edit",
     "request_credential": "credentials",
     "request_browser_login": "credentials",
+    # Monitoring: inspecting a team / its spend / its goal-vs-evidence is the
+    # signal the operator is reviewing the fleet — surface the monitor
+    # playbook so it ACTS on what it finds (rate_delivery / set_agent_goals /
+    # manage_task) instead of merely observing. Without a trigger here the
+    # monitor playbook was unreachable dead code.
+    "inspect_teams": "monitor",
+    "inspect_team_spend": "monitor",
+    "assess_team_progress": "monitor",
 }
 
 # ── Playbook content map ─────────────────────────────────────

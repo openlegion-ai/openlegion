@@ -69,6 +69,19 @@ class TestExtractTriggeredPlaybooks:
         ]
         assert extract_triggered_playbooks(msgs) == set()
 
+    def test_monitoring_tools_trigger_monitor_playbook(self):
+        """A monitoring read surfaces the (previously unreachable) monitor
+        playbook so the operator acts on what it finds."""
+        for tool in ("inspect_teams", "inspect_team_spend", "assess_team_progress"):
+            msgs = [
+                {"role": "assistant", "tool_calls": [
+                    {"function": {"name": tool}, "id": "t", "type": "function"},
+                ]},
+            ]
+            assert extract_triggered_playbooks(msgs) == {"monitor"}, tool
+            # The triggered content is the real monitor playbook.
+            assert "Monitoring" in get_playbook_content(["monitor"])
+
     def test_all_playbook_triggers(self):
         """Every tool in _TOOL_PLAYBOOK_MAP triggers the expected playbook."""
         for tool_name, expected_pb in _TOOL_PLAYBOOK_MAP.items():
