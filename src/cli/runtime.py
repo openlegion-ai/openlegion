@@ -311,6 +311,13 @@ class RuntimeContext:
         self.lifecycle_store = None
         self.teams_store = None
         self.thread_store = None
+        # Chain watcher (delegate-and-subscribe terminal delivery) — wired in
+        # ``_start_background`` once the mesh app's ``tasks_store`` exists.
+        # Declared here (not only in ``_create_components``) because
+        # ``shutdown()`` dereferences it: ``main.py`` runs ``ctx.shutdown()``
+        # in a ``finally``, so a boot failure BEFORE ``_create_components``
+        # must not turn into an AttributeError that masks the real error.
+        self.chain_watcher = None
         # Idle-agent hibernation sweep (plan §8 #24) — the mesh app builds
         # it inside ``create_mesh_app`` (it needs ``lane_manager``/
         # ``tasks_store``/``ask_broker``, all resolved there); wired here
