@@ -484,7 +484,7 @@ Tenant lookup is by `_tenant_for(agent_id)` reverse-mapping `config/teams/`; age
 
 When a cap is configured but the solver provider name or the (provider, kind) price is unknown, the solve **fails closed** with `solver_outcome="provider_missing"` or `"price_missing"` rather than letting an untrackable charge slip past. Reset by configuring the provider, waiting for next month, or explicitly disabling the cap.
 
-The on-disk counter file (`data/captcha_costs.json` by default; override via `CAPTCHA_COST_COUNTER_PATH`) is in-memory + JSON snapshot — restart loses at most one tick's worth of recorded spend.
+The on-disk counter file (`/data/captcha_costs.json` by default — the browser container's durable volume; override via `CAPTCHA_COST_COUNTER_PATH`) is in-memory + JSON snapshot — restart loses at most one tick's worth of recorded spend.
 
 ### Fingerprint Burn Detection
 

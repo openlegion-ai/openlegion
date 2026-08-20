@@ -49,7 +49,7 @@ On-disk schema::
       "binding_signatures": {"<agent_id>": "<16-hex>", ...}
     }
 
-Default path ``data/fingerprint_state.json``; env override
+Default path ``/data/fingerprint_state.json``; env override
 ``FINGERPRINT_STATE_PATH`` (consistent with ``CAPTCHA_COST_COUNTER_PATH``).
 """
 
@@ -68,10 +68,14 @@ from src.shared.utils import setup_logging
 logger = setup_logging("browser.fingerprint_state")
 
 
-# Persistence path. Lives under ``data/`` alongside the captcha-cost
-# counter sidecar so all browser-service persistence stays under one
-# parent. Override-able via env for tests + custom deployments.
-_DEFAULT_PATH = "data/fingerprint_state.json"
+# Persistence path. Lives under ``/data/`` alongside the captcha-cost
+# counter sidecar so all browser-service persistence stays on the one
+# durable volume. ABSOLUTE on purpose: the browser container's WORKDIR is
+# ``/app`` and only ``/data`` is the mounted ``openlegion_browser_data``
+# volume, so a relative ``data/...`` would land in the ephemeral write
+# layer and the burn/binding state would not actually survive a restart.
+# Override-able via env for tests + custom deployments.
+_DEFAULT_PATH = "/data/fingerprint_state.json"
 _SCHEMA_VERSION = 1
 # Default rolling-window bound. Mirrors ``service._FINGERPRINT_WINDOW_SIZE``
 # but kept as a local default so this module has NO import cycle back into

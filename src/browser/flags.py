@@ -158,7 +158,7 @@ KNOWN_FLAGS: dict[str, str] = {
         "true | false (DEFAULT FALSE) — opt-in persistence of "
         "BrowserContext.storage_state() across container restarts. "
         "Stores cookies + localStorage + sessionStorage + IndexedDB at "
-        "data/sessions/<agent_id>.json with chmod 0o600. Default-off "
+        "/data/sessions/<agent_id>.json with chmod 0o600. Default-off "
         "because the sidecar contains live session tokens; if leaked, "
         "those tokens grant account takeover on whatever sites the "
         "agent was logged into. Operators must opt in deliberately and "
@@ -173,7 +173,7 @@ KNOWN_FLAGS: dict[str, str] = {
         "more disk writes; higher = fewer writes but more state lost "
         "on a hard kill.",
     "BROWSER_SESSION_DIR":
-        "directory for per-agent session sidecars (default data/sessions). "
+        "directory for per-agent session sidecars (default /data/sessions). "
         "Override for tests / custom volume layouts.",
     # ── Observability ─────────────────────────────────────────────────────
     "BROWSER_RECORD_BEHAVIOR": "1 to enable behavior recorder (§5.3)",
