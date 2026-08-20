@@ -8,6 +8,8 @@ Covers:
   * port/display pairing math
   * residue cleanup on release
   * concurrent-style sequencing — alloc, release, alloc same display
+  * transiently-unbindable slots come back to the pool; only a slot that
+    fails MAX_BIND_FAILURES allocations in a row is retired
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import src.browser.display_allocator as display_allocator
 from src.browser.display_allocator import (
     DISPLAY_RANGE_END,
     DISPLAY_RANGE_START,
+    MAX_BIND_FAILURES,
     VNC_PORT_BASE,
     DisplayAllocator,
     PoolExhausted,
@@ -228,6 +231,116 @@ class TestAllocateRecovery:
         finally:
             monkeypatch.undo()
         assert s.display == start + 1
+
+    def test_transiently_unbindable_slot_returns_to_pool(self, caplog):
+        """A one-off probe failure must NOT cost the slot.
+
+        The common cause is a teardown still in flight — ``_teardown_per_agent_
+        x_stack`` releases the slot after a best-effort reap and the spawn
+        rollback releases it right after a bare SIGTERM, so the dying Xvnc can
+        still hold the port for a moment. Once it exits, the slot must be
+        allocatable again.
+        """
+        start, end = TEST_DISPLAY_START, TEST_DISPLAY_END
+        alloc = _alloc_in_range(start, end, run_boot_sweep=False)
+        port = port_for_display(start)
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(
+            display_allocator,
+            "_port_is_bindable",
+            lambda candidate: candidate != port,
+        )
+        try:
+            with caplog.at_level("WARNING", logger="browser.display_allocator"):
+                skipped = alloc.allocate()
+        finally:
+            monkeypatch.undo()
+        assert skipped.display == start + 1
+        # Operator-visible either way — the skip is still logged.
+        assert any("not bindable" in r.getMessage() for r in caplog.records)
+
+        # Port free again → the slot is back in the pool, lowest-first.
+        recovered = alloc.allocate()
+        assert recovered.display == start
+
+    def test_slot_dropped_after_max_consecutive_failures(self, caplog):
+        """A port held across MAX_BIND_FAILURES allocations is retired."""
+        start = TEST_DISPLAY_START
+        end = start + MAX_BIND_FAILURES + 2
+        alloc = _alloc_in_range(start, end, run_boot_sweep=False)
+        port = port_for_display(start)
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(
+            display_allocator,
+            "_port_is_bindable",
+            lambda candidate: candidate != port,
+        )
+        try:
+            with caplog.at_level("WARNING", logger="browser.display_allocator"):
+                for i in range(MAX_BIND_FAILURES):
+                    assert alloc.allocate().display == start + 1 + i
+        finally:
+            monkeypatch.undo()
+        assert any(
+            "dropping slot from pool" in r.getMessage() for r in caplog.records
+        )
+
+        # Even with the port free again, the retired slot never comes back.
+        assert alloc.allocate().display == start + MAX_BIND_FAILURES + 1
+        with pytest.raises(PoolExhausted):
+            alloc.allocate()
+        assert not alloc.is_allocated(start)
+
+    def test_failure_streak_resets_on_successful_allocation(self):
+        """The counter is CONSECUTIVE failures, not lifetime failures."""
+        start, end = TEST_DISPLAY_START, TEST_DISPLAY_END
+        alloc = _alloc_in_range(start, end, run_boot_sweep=False)
+        port = port_for_display(start)
+        bindable = {"ok": False}
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(
+            display_allocator,
+            "_port_is_bindable",
+            lambda candidate: candidate != port or bindable["ok"],
+        )
+        try:
+            # One failure (slot deferred), then a clean allocation of the
+            # same slot, which must wipe the streak.
+            alloc.allocate()
+            bindable["ok"] = True
+            s = alloc.allocate()
+            assert s.display == start
+            alloc.release(s)
+
+            # A fresh streak now needs the full MAX_BIND_FAILURES again:
+            # after MAX_BIND_FAILURES - 1 more failures the slot is still in
+            # the pool.
+            bindable["ok"] = False
+            for _ in range(MAX_BIND_FAILURES - 1):
+                alloc.allocate()
+            bindable["ok"] = True
+            assert alloc.allocate().display == start
+        finally:
+            monkeypatch.undo()
+
+    def test_pool_exhaustion_leaves_deferred_slots_in_pool(self):
+        """Even when every slot probes unbindable, none are lost outright."""
+        start, end = TEST_DISPLAY_START, TEST_DISPLAY_END
+        alloc = _alloc_in_range(start, end, run_boot_sweep=False)
+        width = end - start
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(
+            display_allocator, "_port_is_bindable", lambda _candidate: False,
+        )
+        try:
+            with pytest.raises(PoolExhausted):
+                alloc.allocate()
+        finally:
+            monkeypatch.undo()
+        assert alloc.free_count == width
+        assert alloc.allocate().display == start
 
 
 # ── port/display helpers ────────────────────────────────────────────────────

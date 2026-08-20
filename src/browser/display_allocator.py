@@ -63,6 +63,15 @@ VNC_PORT_BASE = 6000
 DISPLAY_RANGE_START = 100
 DISPLAY_RANGE_END = 164
 
+# How many CONSECUTIVE failed bindability probes retire a slot from the
+# pool.  A failed probe is usually transient — the previous Xvnc on that
+# display is still releasing the port (teardown SIGTERMs and returns the
+# slot before the process has actually exited; the spawn-failure rollback
+# doesn't wait at all) — so a single failure must not cost a slot for the
+# lifetime of the process.  Only a slot that fails this many allocations
+# in a row is treated as genuinely held by a peer and dropped.
+MAX_BIND_FAILURES = 3
+
 
 def display_for_port(port: int) -> int:
     return port - VNC_PORT_BASE
@@ -126,6 +135,10 @@ class DisplayAllocator:
         # Currently-allocated displays.  Set semantics catch double-release
         # bugs loudly.
         self._allocated: set[int] = set()
+        # display → consecutive failed bindability probes in allocate().
+        # Cleared the moment the slot allocates successfully, so the count
+        # only ever reflects an unbroken run of failures.
+        self._bind_failures: dict[int, int] = {}
         if run_boot_sweep:
             self._boot_sweep()
 
@@ -136,35 +149,65 @@ class DisplayAllocator:
 
         Verifies the slot's port is currently bindable before returning;
         if the boot sweep missed something (e.g. a peer X server bound the
-        port between sweep and allocate), the slot is dropped from the
-        pool and the next candidate tried.
+        port between sweep and allocate), the slot is skipped and the next
+        candidate tried.
+
+        A skipped slot goes BACK into the pool — a failed probe is most
+        often transient (the previous Xvnc on that display is still
+        exiting: ``_teardown_per_agent_x_stack`` releases the slot after a
+        best-effort reap, and the spawn-failure rollback in
+        ``_start_browser`` releases it right after a bare SIGTERM).
+        Dropping on the first failure retired those slots permanently
+        until a process restart, so a repeatable start failure could drain
+        the whole pool.  Only after :data:`MAX_BIND_FAILURES` CONSECUTIVE
+        failed probes is the slot treated as genuinely held by a peer and
+        dropped for good.  Both outcomes stay operator-visible in the log.
 
         Raises :class:`PoolExhausted` when no slot is available.
         """
-        while self._free:
-            display = self._free.pop(0)
-            port = port_for_display(display)
-            if not _port_is_bindable(port):
-                # Something legitimately holds the port — drop the slot
-                # permanently.  Surfacing in logs so an operator notices
-                # if many slots leak this way.
-                logger.warning(
-                    "Skipping display :%d — port %d not bindable; "
-                    "dropping slot from pool",
-                    display, port,
+        # Slots skipped during THIS call, held aside so the loop can't
+        # re-probe them, then returned to the pool on the way out.
+        deferred: list[int] = []
+        try:
+            while self._free:
+                display = self._free.pop(0)
+                port = port_for_display(display)
+                if not _port_is_bindable(port):
+                    failures = self._bind_failures.get(display, 0) + 1
+                    if failures >= MAX_BIND_FAILURES:
+                        # Held across repeated allocations — assume a peer
+                        # process owns the port and stop fighting it.
+                        self._bind_failures.pop(display, None)
+                        logger.warning(
+                            "Skipping display :%d — port %d not bindable on "
+                            "%d consecutive attempts; dropping slot from pool",
+                            display, port, failures,
+                        )
+                    else:
+                        self._bind_failures[display] = failures
+                        logger.warning(
+                            "Skipping display :%d — port %d not bindable "
+                            "(attempt %d/%d); returning slot to pool",
+                            display, port, failures, MAX_BIND_FAILURES,
+                        )
+                        deferred.append(display)
+                    continue
+                self._bind_failures.pop(display, None)
+                self._allocated.add(display)
+                slot = Slot(display=display, vnc_port=port)
+                logger.debug(
+                    "Allocated display :%d (port %d); %d slots remain",
+                    display, port, len(self._free) + len(deferred),
                 )
-                continue
-            self._allocated.add(display)
-            slot = Slot(display=display, vnc_port=port)
-            logger.debug(
-                "Allocated display :%d (port %d); %d slots remain",
-                display, port, len(self._free),
+                return slot
+            raise PoolExhausted(
+                f"No free slots in range [{self._range.start}, "
+                f"{self._range.stop}); concurrent browser cap reached",
             )
-            return slot
-        raise PoolExhausted(
-            f"No free slots in range [{self._range.start}, "
-            f"{self._range.stop}); concurrent browser cap reached",
-        )
+        finally:
+            if deferred:
+                self._free.extend(deferred)
+                self._free.sort()
 
     def release(self, slot: Slot) -> None:
         """Return a slot to the pool.
@@ -337,6 +380,7 @@ __all__ = [
     "VNC_PORT_BASE",
     "DISPLAY_RANGE_START",
     "DISPLAY_RANGE_END",
+    "MAX_BIND_FAILURES",
     "display_for_port",
     "port_for_display",
 ]
