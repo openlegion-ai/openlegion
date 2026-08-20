@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import gc
+import logging
 import shutil
 import tempfile
 from datetime import datetime, timedelta, timezone
@@ -2099,6 +2102,79 @@ class TestSchedulerResilience:
         ):
             # Must swallow the raise rather than propagate out of the loop.
             await sched._tick()
+
+
+class TestTickTaskReferences:
+    """A fired job dispatch must be strongly referenced for its lifetime.
+
+    The asyncio event loop only holds WEAK references to tasks, so a bare
+    ``create_task(self._execute_job(job))`` can be garbage-collected
+    mid-flight — a heartbeat / standup / daily summary vanishing with no
+    log. Mirrors ``LaneManager._forward_tasks`` / ``_rehydrate_tasks``.
+    """
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self.config_path = f"{self._tmpdir}/cron.json"
+
+    def teardown_method(self):
+        shutil.rmtree(self._tmpdir, ignore_errors=True)
+
+    def _due_scheduler(self, **kwargs) -> CronScheduler:
+        sched = CronScheduler(config_path=self.config_path, **kwargs)
+        job = sched.add_job(agent="a", schedule="every 1s", message="x")
+        job.last_run = None
+        return sched
+
+    @pytest.mark.asyncio
+    async def test_tick_holds_reference_until_dispatch_completes(self):
+        """The in-flight dispatch survives a GC pass and still finishes."""
+        started = asyncio.Event()
+        release = asyncio.Event()
+        completed: list[str] = []
+
+        async def dispatch(agent, message):
+            started.set()
+            await release.wait()
+            completed.append(agent)
+            return "done"
+
+        sched = self._due_scheduler(dispatch_fn=dispatch)
+        await sched._tick()
+        await asyncio.wait_for(started.wait(), timeout=5)
+        # The scheduler — not just the loop's weak set — owns the task.
+        assert len(sched._job_tasks) == 1
+        gc.collect()
+        release.set()
+        await asyncio.wait_for(
+            asyncio.gather(*list(sched._job_tasks)), timeout=5,
+        )
+        assert completed == ["a"]
+        # Done-callback discards, so the set can't grow without bound.
+        for _ in range(5):
+            await asyncio.sleep(0)
+            if not sched._job_tasks:
+                break
+        assert sched._job_tasks == set()
+
+    @pytest.mark.asyncio
+    async def test_dispatch_raise_outside_execute_job_is_logged(self, caplog):
+        """``_execute_job``'s pre-lock guards sit OUTSIDE its own
+        ``except Exception`` — a raise there must still surface."""
+        health = MagicMock()
+        health.is_quarantined.side_effect = RuntimeError("health probe exploded")
+        sched = self._due_scheduler(
+            dispatch_fn=AsyncMock(return_value="ok"), health_monitor=health,
+        )
+        with caplog.at_level(logging.ERROR, logger="host.cron"):
+            await sched._tick()
+            for _ in range(5):
+                await asyncio.sleep(0)
+                if not sched._job_tasks:
+                    break
+        joined = "\n".join(r.getMessage() for r in caplog.records)
+        assert "health probe exploded" in joined
+        assert sched._job_tasks == set()
 
 
 class TestPerAgentCronCap:
