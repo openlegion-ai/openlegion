@@ -107,9 +107,21 @@ def _redact_bearer(text: str) -> str:
 # (the username alone can leak account ownership), keeping the scheme + host so
 # the string stays diagnostically useful. Anchored on the ``scheme://`` prefix;
 # the userinfo run excludes ``/@`` so it can't cross past the authority.
+#
+# Every quantifier here is BOUNDED, and that is load-bearing rather than
+# cosmetic. With an unbounded scheme class the engine matches
+# ``[A-Za-z][A-Za-z0-9+.\-]*`` greedily from EVERY position in the subject,
+# consuming the rest of the string before failing to find ``://`` and
+# backtracking over every length — O(n^2) in the subject, on a sanitizer that
+# runs over agent-supplied pubsub payloads and blocker notes on the mesh event
+# loop. A 200 KB string shaped like ``https://host/?q=<200k chars>`` took ~93
+# SECONDS. Bounding the scheme to 31 chars (RFC 3986 schemes are short; the
+# longest registered one is well under that) makes the work per start position
+# constant, and the run is linear again — 64 KB went from 9.6 s to 11 ms. The
+# userinfo halves are bounded for the same reason.
 _CONN_USERINFO_RE = re.compile(
-    r"([A-Za-z][A-Za-z0-9+.\-]*://)"   # scheme://
-    r"[^/\s:@]+:[^/\s@]+@",            # user:password@
+    r"([A-Za-z][A-Za-z0-9+.\-]{0,31}://)"   # scheme://
+    r"[^/\s:@]{1,256}:[^/\s@]{1,256}@",     # user:password@
 )
 
 
@@ -455,33 +467,56 @@ def normalize_blocker_note(note: str | None) -> str | None:
 # ── Deep recursion over JSON-shaped structures ──────────────────────────────
 
 
-def _looks_like_url(s: str) -> bool:
-    """Heuristic: bare-minimum check to avoid running urlsplit on plain text.
-
-    Accepts strings with an explicit ``://`` scheme marker. Conservative
-    on purpose — false negatives fall back to pattern-only redaction which
-    is still safe.
-    """
-    return "://" in s and len(s) < 4096
-
-
 def deep_redact(obj):
     """Recursively redact secrets from any JSON-serializable value.
 
-    - Strings flow through :func:`redact_url` if they look like URLs, else
-      :func:`redact_string`.
-    - Dicts and lists recurse.
-    - Tuples are supported but returned as tuples.
-    - Other values (int, bool, None, float) pass through unchanged.
+    Guards the audit log, trace store, lifecycle log, intent log and the
+    pubsub payload path (``src/host/mesh.py``), so anything it declines to
+    walk is a value that reaches durable storage unredacted. It therefore
+    walks EVERY position a string can occupy, and treats an unrecognised
+    container as something to recurse into rather than something to return
+    untouched.
+
+    - Strings flow through :func:`redact_url`, which redacts URL structure
+      (userinfo, sensitive query params, fragment, JWT path segments) when
+      the string parses as one and otherwise falls back to
+      :func:`redact_string` internally.
+    - Dict KEYS are redacted as well as values — a secret is a secret
+      wherever it sits, and callers do put them in keys (a captured header
+      map, a ``{token: metadata}`` index).
+    - Dicts, lists, tuples, sets and frozensets recurse and keep their type.
+    - Other scalars (int, bool, None, float) pass through unchanged.
+
+    Three blind spots this closes, each of which leaked a live secret into
+    durable storage before:
+
+    1. **Dict keys.** ``{k: deep_redact(v) ...}`` never touched ``k``.
+    2. **Unhandled containers.** ``set`` / ``frozenset`` fell through to
+       ``return obj`` and were emitted verbatim.
+    3. **The URL gate.** ``_looks_like_url`` required ``"://"``, but
+       :func:`redact_url` itself also accepts a relative URL carrying a
+       query string (``/cb?code=…``). The gate was STRICTER than the
+       function it guarded, so those took the pattern-only path and kept
+       their structural secrets — ``//user:pass@host/cb?token=…`` retained
+       ``user:pass``. The gate is gone: ``redact_url`` is documented safe on
+       non-URLs and does its own cheap check before parsing, so there is
+       nothing left for a second, divergent heuristic to get wrong.
+
+    Key collisions: if two distinct keys redact to the same string, the last
+    value wins, exactly as a dict literal would. That only happens when both
+    keys contained secrets, where losing one is strictly better than
+    emitting either.
     """
     if isinstance(obj, str):
-        if _looks_like_url(obj):
-            return redact_url(obj)
-        return redact_string(obj)
+        return redact_url(obj)
     if isinstance(obj, dict):
-        return {k: deep_redact(v) for k, v in obj.items()}
+        return {deep_redact(k): deep_redact(v) for k, v in obj.items()}
     if isinstance(obj, list):
         return [deep_redact(item) for item in obj]
     if isinstance(obj, tuple):
         return tuple(deep_redact(item) for item in obj)
+    if isinstance(obj, frozenset):
+        return frozenset(deep_redact(item) for item in obj)
+    if isinstance(obj, set):
+        return {deep_redact(item) for item in obj}
     return obj
