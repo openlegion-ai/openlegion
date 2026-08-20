@@ -234,6 +234,15 @@ class CronScheduler:
         # never persisted across restarts; ``get_last_plate`` is the only
         # reader (the dashboard's Team Room panel).
         self._last_plate: dict[str, dict] = {}
+        # Strong references to in-flight job dispatches. The asyncio event
+        # loop only holds WEAK references to tasks, so a bare
+        # ``create_task(self._execute_job(job))`` can be garbage-collected
+        # mid-flight (a heartbeat / standup / daily summary vanishing with
+        # no log). Same discipline as ``LaneManager._forward_tasks`` /
+        # ``_rehydrate_tasks``: hold the task for its lifetime, discard it
+        # in a done-callback that also retrieves the result so a raise
+        # outside ``_execute_job``'s own ``except`` is surfaced.
+        self._job_tasks: set[asyncio.Task] = set()
         self._load()
 
     def set_health_monitor(self, health_monitor: Any) -> None:
@@ -638,13 +647,29 @@ class CronScheduler:
                 if not job.enabled:
                     continue
                 if self._is_due(job, now):
-                    asyncio.create_task(self._execute_job(job))
+                    task = asyncio.create_task(self._execute_job(job))
+                    self._job_tasks.add(task)
+                    task.add_done_callback(self._on_job_task_done)
             except Exception:
                 logger.error(
                     "Cron tick: job %s raised during scheduling — skipping",
                     getattr(job, "id", "<unknown>"), exc_info=True,
                 )
                 continue
+
+    def _on_job_task_done(self, task: asyncio.Task) -> None:
+        """Drop a finished job dispatch and surface any error.
+
+        Retrieving the result is what keeps an exception raised OUTSIDE
+        ``_execute_job``'s own ``except Exception`` (its pre-lock guards)
+        from being swallowed silently.
+        """
+        self._job_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("Cron tick: job dispatch failed: %s", exc, exc_info=exc)
 
     def _stamp_activity(self, agent: str) -> None:
         """Stamp the idle-sweep's last-activity clock for ``agent`` (plan
