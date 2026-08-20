@@ -29,7 +29,16 @@ dependencies = [
     # connectors). Promoted from the [mcp] extra: the gateway makes the
     # SDK host-critical, and install.sh never installed that extra.
     # Floor 1.9 — streamablehttp_client stabilized there.
-    "mcp>=1.9",
+    # Ceiling <2 — the mcp 2.0 SDK renamed or removed every symbol we
+    # import: `mcp.client.streamable_http.streamablehttp_client` is now
+    # `streamable_http_client`, and `mcp.server.fastmcp` (which backs
+    # tests/fixtures/echo_mcp_server.py) is gone entirely. Both import
+    # sites fail CLOSED (GatewayUnavailable / "MCP SDK not installed"),
+    # so without this ceiling the next container or CI rebuild silently
+    # disables every MCP path with no code change on our side. Lift it
+    # DELIBERATELY, together with src/host/mcp_gateway.py,
+    # src/agent/mcp_client.py and tests/fixtures/echo_mcp_server.py.
+    "mcp>=1.9,<2",
     # Floor raised to >=10.3.0 to exclude CVE-2023-50447 and CVE-2024-28219,
     # reachable via browser-screenshot image processing. NOTE: these are
     # minimum bounds only (no lock file) — for reproducible builds, generate
@@ -52,7 +61,55 @@ dev = [
 # (Phase 2b); the extra remains so documented `pip install -e '.[mcp]'`
 # invocations keep working.
 mcp = [
-    "mcp>=1.9",
+    "mcp>=1.9,<2",
+]
+
+# Browser service container (Dockerfile.browser) — NOT part of the core
+# install: the browser runs in its own image and the mesh host never
+# imports camoufox. Declared here so the image has ONE dependency
+# manifest that tooling can see, instead of a literal pip list only the
+# Dockerfile knew about. Dockerfile.browser installs exactly this list.
+# The bounds below are carried over verbatim from that list, with ONE
+# deliberate change: ``Pillow`` is raised from ``>=10.0`` to ``>=10.3.0``
+# to match the core floor. The core comment says that floor excludes
+# CVE-2023-50447 / CVE-2024-28219 "reachable via browser-screenshot image
+# processing" — and PIL is imported in exactly three places, ALL of them
+# in ``src/browser/`` (``slider_solver.py``, ``service.py`` ×2). The mesh
+# host never imports it. So while the literal list lived in the
+# Dockerfile, the CVE floor sat on the process that doesn't do the
+# processing and the loose floor sat on the one that does. Consolidating
+# the manifest is what made that visible; this puts the bound where the
+# exposure actually is.
+#
+# ``camoufox`` is version-pinned on purpose. Camoufox itself pins
+# ``playwright="*"``, so an unpinned rebuild can silently drift onto a
+# Playwright release that breaks the Camoufox<->Firefox Juggler bridge
+# (camoufox#617), and it also drags in a different fingerprint DB. CI's
+# ``build-and-smoke`` job (.github/workflows/browser-image.yml) builds
+# the browser image whenever Dockerfile.browser/pyproject.toml change,
+# so it WILL catch an un-installable or absent pin — it already caught
+# an earlier bad pin (a non-existent version). What CI does NOT do is
+# run the browser canary (``src/browser/canary.py``) or any live
+# Camoufox-launch / Juggler-bridge / fingerprint check, so the *runtime*
+# behavior of a future version BUMP still surfaces only as a live
+# antibot/session regression. Refresh this pin DELIBERATELY and re-run
+# the browser canary at staging after any bump. The ``python -m camoufox
+# fetch`` step in Dockerfile.browser resolves the matching Firefox build
+# from whatever version is pinned here.
+#
+# ``uvicorn[standard]`` is required (not plain ``uvicorn``): the
+# ``[standard]`` extra pulls in the ``websockets`` package, which
+# uvicorn needs to handle WebSocket upgrades. Without it, every WS
+# request to ``/agent-vnc/{agent_id}/{path}`` returns HTTP 404 at the
+# protocol layer before our route handler ever runs (PR #815 shipped
+# exactly that regression to production).
+browser = [
+    "camoufox[geoip]==0.4.11",
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    "httpx",
+    "Pillow>=10.3.0",
 ]
 
 channels = [
