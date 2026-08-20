@@ -10,6 +10,10 @@ Covers:
     month falls through to live total; older months drop to zero).
   * CSV export endpoint shape — header row, per-agent rows in sorted
     order, ``__tenant_total__`` summary row, period-start column.
+  * CSV export reads per-agent spend from the BROWSER SERVICE over HTTP
+    (``GET /browser/captcha-costs``) rather than from the mesh process's
+    own copy of the counter globals, groups it by team mesh-side, and
+    503s instead of exporting zeros when the service is unreachable.
   * CSV endpoint requires auth (no ol_session cookie in production), GET
     is allowed without ``X-Requested-With`` (CSRF only on state changes).
   * ``record_tenant_threshold_alerts`` fires once per crossing per month
@@ -427,22 +431,42 @@ class TestThresholdAlerts:
 
 
 # ── CSV export endpoint ────────────────────────────────────────────────────
+#
+# The rollup does NOT read the cost counter in-process. ``_state`` is a
+# process-local module global written in the BROWSER SERVICE process
+# (:8500), while the dashboard router runs inside the mesh process
+# (:8420) — an in-process import there reads a copy nothing ever writes.
+# The endpoint therefore fetches per-agent spend over HTTP from the
+# browser service and groups it by team on the mesh side, where the
+# TeamStore lives. These tests wire a stub browser service through
+# ``httpx.MockTransport`` so the real fetch helper is exercised end to end.
+
+_BROWSER_SERVICE_URL = "http://browser.test:8500"
 
 
-def _make_dashboard_client(tmp_path: str) -> TestClient:
+def _make_dashboard_client(
+    tmp_path: str,
+    teams: dict[str, str] | None = None,
+    browser_service_url: str = _BROWSER_SERVICE_URL,
+):
     """Build a TestClient with the dashboard router mounted (auth-bypass).
 
     Auth-bypass: the dashboard's ``verify_session_cookie`` returns
     ``None`` (= pass) when no access-token file is present (dev mode).
     Tests run in dev mode by default, so we don't need to forge cookies.
+
+    ``teams`` maps agent_id → team name and seeds the real TeamStore the
+    router groups by. ``browser_service_url`` is what the runtime reports;
+    pass ``""`` to simulate a browser service that never came up.
     """
-    from unittest.mock import AsyncMock, MagicMock
+    from unittest.mock import MagicMock
 
     from src.dashboard.events import EventBus
     from src.dashboard.server import create_dashboard_router
     from src.host.costs import CostTracker
     from src.host.health import HealthMonitor
     from src.host.mesh import Blackboard
+    from src.host.teams import TeamStore
     from src.host.traces import TraceStore
 
     bb = Blackboard(db_path=os.path.join(tmp_path, "bb.db"))
@@ -450,10 +474,16 @@ def _make_dashboard_client(tmp_path: str) -> TestClient:
     trace_store = TraceStore(db_path=os.path.join(tmp_path, "traces.db"))
     event_bus = EventBus()
 
+    teams_store = TeamStore(db_path=os.path.join(tmp_path, "teams.db"))
+    for agent, team in (teams or {}).items():
+        if not teams_store.team_exists(team):
+            teams_store.create_team(team)
+        teams_store.add_member(team, agent)
+
     runtime_mock = MagicMock()
     runtime_mock.browser_vnc_url = None
-    runtime_mock.browser_service_url = None
-    runtime_mock.browser_auth_token = ""
+    runtime_mock.browser_service_url = browser_service_url
+    runtime_mock.browser_auth_token = "browser-token"
     transport_mock = MagicMock()
     router_mock = MagicMock()
     health_monitor = HealthMonitor(
@@ -474,9 +504,9 @@ def _make_dashboard_client(tmp_path: str) -> TestClient:
             "alpha": "http://localhost:8401",
             "beta": "http://localhost:8402",
         },
+        "runtime": runtime_mock,
+        "teams_store": teams_store,
     }
-    # Suppress unused import warnings for AsyncMock
-    _ = AsyncMock
     router = create_dashboard_router(**components, mesh_port=8420)
     app = FastAPI()
     app.include_router(router)
@@ -501,7 +531,49 @@ class TestCSVExportEndpoint:
         from src.dashboard.auth import reset_cache
 
         reset_cache()
-        self.client, self.components = _make_dashboard_client(self._tmpdir)
+
+        # Stub browser service. ``upstream`` is the per-agent spend the
+        # service reports; ``upstream_status`` lets a test simulate a
+        # failing / unreachable service.
+        self.upstream: dict[str, int] = {}
+        self.upstream_status = 200
+        self.upstream_auth: list[str] = []
+
+        import httpx
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/browser/captcha-costs"
+            self.upstream_auth.append(request.headers.get("Authorization", ""))
+            if self.upstream_status != 200:
+                return httpx.Response(
+                    self.upstream_status,
+                    json={"detail": "browser service error"},
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "month": datetime.now(timezone.utc).strftime("%Y-%m"),
+                    "agents": dict(self.upstream),
+                },
+            )
+
+        original_async_client = httpx.AsyncClient
+
+        def patched_async_client(*args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(handler)
+            return original_async_client(*args, **kwargs)
+
+        # The dashboard builds its browser client at router-construction
+        # time, so the patch only has to be live across the build.
+        httpx_patch = patch.object(httpx, "AsyncClient", patched_async_client)
+        httpx_patch.start()
+        try:
+            self.client, self.components = _make_dashboard_client(
+                self._tmpdir,
+                teams={"alpha": "tenant-a", "beta": "tenant-a"},
+            )
+        finally:
+            httpx_patch.stop()
 
     def teardown_method(self):
         _teardown(self.components)
@@ -513,22 +585,12 @@ class TestCSVExportEndpoint:
 
     def test_csv_endpoint_returns_correct_shape(self):
         """Endpoint returns CSV with header + per-agent rows + total row."""
-        import asyncio
+        self.upstream = {"alpha": 100, "beta": 50}
 
-        with _patch_projects(
-            {
-                "alpha": "tenant-a",
-                "beta": "tenant-a",
-            }
-        ):
-            cost.reset_tenant_cache()
-            asyncio.run(cost.add_cost("alpha", 100))
-            asyncio.run(cost.add_cost("beta", 50))
-
-            resp = self.client.get(
-                "/dashboard/api/billing/captcha-rollup",
-                params={"tenant": "tenant-a", "period": "monthly"},
-            )
+        resp = self.client.get(
+            "/dashboard/api/billing/captcha-rollup",
+            params={"tenant": "tenant-a", "period": "monthly"},
+        )
 
         assert resp.status_code == 200
         assert "text/csv" in resp.headers["content-type"]
@@ -536,43 +598,131 @@ class TestCSVExportEndpoint:
         lines = resp.text.strip().split("\n")
         assert lines[0] == ("period_start,agent_id,millicents,dollars,data_scope")
         # Sorted agent rows then the synthetic total. ``data_scope`` is
-        # ``monthly_actual`` for monthly because the in-memory state
+        # ``monthly_actual`` for monthly because the upstream state
         # IS the current month — the number is correct for the period.
         assert ",alpha,100,0.00100,monthly_actual" in lines[1]
         assert ",beta,50,0.00050,monthly_actual" in lines[2]
         assert "__tenant_total__,150,0.00150,monthly_actual" in lines[3]
 
-    def test_csv_endpoint_period_daily(self):
+    def test_csv_reads_browser_service_not_in_process_counter(self):
+        """Regression: the rollup must NOT read the mesh process's counter.
+
+        ``captcha_cost_counter._state`` is process-local. The dashboard
+        runs in the mesh process where that dict is always empty in production,
+        so the export used to report 0 for every tenant. Seed the local
+        counter with a value the browser service does NOT report: the CSV
+        must carry the browser service's number, never the local one.
+        """
         import asyncio
 
-        with _patch_projects({"alpha": "tenant-a"}):
+        with _patch_projects({"alpha": "tenant-a", "beta": "tenant-a"}):
             cost.reset_tenant_cache()
-            asyncio.run(cost.add_cost("alpha", 100))
+            asyncio.run(cost.add_cost("alpha", 999))
+            asyncio.run(cost.add_cost("beta", 777))
+
+            self.upstream = {"alpha": 100, "beta": 50}
             resp = self.client.get(
                 "/dashboard/api/billing/captcha-rollup",
-                params={"tenant": "tenant-a", "period": "daily"},
+                params={"tenant": "tenant-a", "period": "monthly"},
             )
+
+        assert resp.status_code == 200
+        body = resp.text
+        assert ",alpha,100," in body
+        assert ",beta,50," in body
+        assert "__tenant_total__,150," in body
+        # The in-process numbers must not leak into the export at all.
+        assert "999" not in body
+        assert "777" not in body
+
+    def test_csv_forwards_browser_auth_token(self):
+        """The upstream read carries the runtime's browser bearer token."""
+        self.upstream = {"alpha": 100}
+        resp = self.client.get(
+            "/dashboard/api/billing/captcha-rollup",
+            params={"tenant": "tenant-a", "period": "monthly"},
+        )
+        assert resp.status_code == 200
+        assert self.upstream_auth == ["Bearer browser-token"]
+
+    def test_csv_includes_team_member_with_no_spend(self):
+        """Team members the browser service never charged still get a row."""
+        self.upstream = {"alpha": 100}
+        resp = self.client.get(
+            "/dashboard/api/billing/captcha-rollup",
+            params={"tenant": "tenant-a", "period": "monthly"},
+        )
+        assert resp.status_code == 200
+        lines = resp.text.strip().split("\n")
+        assert ",alpha,100,0.00100,monthly_actual" in lines[1]
+        assert ",beta,0,0.00000,monthly_actual" in lines[2]
+        assert "__tenant_total__,100,0.00100,monthly_actual" in lines[3]
+
+    def test_csv_excludes_agents_outside_the_tenant(self):
+        """Spend from agents outside the requested team is not rolled up."""
+        self.upstream = {"alpha": 100, "stranger": 5000}
+        resp = self.client.get(
+            "/dashboard/api/billing/captcha-rollup",
+            params={"tenant": "tenant-a", "period": "monthly"},
+        )
+        assert resp.status_code == 200
+        assert "stranger" not in resp.text
+        assert "__tenant_total__,100," in resp.text
+
+    def test_csv_503_when_browser_service_not_configured(self):
+        """No browser service → 503, never a zero-filled CSV.
+
+        Silently exporting zeros into finance tooling is the exact
+        failure mode this endpoint exists to avoid.
+        """
+        client, components = _make_dashboard_client(
+            self._tmpdir,
+            teams={"alpha": "tenant-a"},
+            browser_service_url="",
+        )
+        try:
+            resp = client.get(
+                "/dashboard/api/billing/captcha-rollup",
+                params={"tenant": "tenant-a", "period": "monthly"},
+            )
+            assert resp.status_code == 503
+            assert "0.00000" not in resp.text
+        finally:
+            _teardown(components)
+
+    def test_csv_503_when_browser_service_errors(self):
+        """Upstream HTTP failure surfaces as 503, not a zero-filled CSV."""
+        self.upstream_status = 500
+        resp = self.client.get(
+            "/dashboard/api/billing/captcha-rollup",
+            params={"tenant": "tenant-a", "period": "monthly"},
+        )
+        assert resp.status_code == 503
+        assert "0.00000" not in resp.text
+
+    def test_csv_endpoint_period_daily(self):
+        self.upstream = {"alpha": 100}
+        resp = self.client.get(
+            "/dashboard/api/billing/captcha-rollup",
+            params={"tenant": "tenant-a", "period": "daily"},
+        )
         assert resp.status_code == 200
         # Daily period_start is today UTC at midnight.
         first_data_line = resp.text.strip().split("\n")[1]
         cells = first_data_line.split(",")
         assert cells[0].endswith("T00:00:00Z")
         # Billing-honesty: ``daily`` (and ``weekly``) report month-to-date
-        # data because the in-memory state is current-month only — the
+        # data because the upstream state is current-month only — the
         # ``data_scope`` column flags this so finance reconciliation
         # tooling doesn't accept the "daily" CSV as a daily-correct number.
         assert cells[-1] == "current_month_aggregate"
 
     def test_csv_endpoint_period_weekly(self):
-        import asyncio
-
-        with _patch_projects({"alpha": "tenant-a"}):
-            cost.reset_tenant_cache()
-            asyncio.run(cost.add_cost("alpha", 100))
-            resp = self.client.get(
-                "/dashboard/api/billing/captcha-rollup",
-                params={"tenant": "tenant-a", "period": "weekly"},
-            )
+        self.upstream = {"alpha": 100}
+        resp = self.client.get(
+            "/dashboard/api/billing/captcha-rollup",
+            params={"tenant": "tenant-a", "period": "weekly"},
+        )
         assert resp.status_code == 200
         first_data_line = resp.text.strip().split("\n")[1]
         cells = first_data_line.split(",")
@@ -595,17 +745,13 @@ class TestCSVExportEndpoint:
 
     def test_csv_get_does_not_require_csrf_header(self):
         """CSRF check exempts GET — the endpoint works without the header."""
-        import asyncio
-
-        with _patch_projects({"alpha": "tenant-a"}):
-            cost.reset_tenant_cache()
-            asyncio.run(cost.add_cost("alpha", 100))
-            # No X-Requested-With header — should still pass CSRF gate
-            # because GET is in the exempt-method set.
-            resp = self.client.get(
-                "/dashboard/api/billing/captcha-rollup",
-                params={"tenant": "tenant-a", "period": "monthly"},
-            )
+        self.upstream = {"alpha": 100}
+        # No X-Requested-With header — should still pass CSRF gate
+        # because GET is in the exempt-method set.
+        resp = self.client.get(
+            "/dashboard/api/billing/captcha-rollup",
+            params={"tenant": "tenant-a", "period": "monthly"},
+        )
         assert resp.status_code == 200
 
     def test_csv_requires_auth_when_token_present(self):
@@ -636,15 +782,82 @@ class TestCSVExportEndpoint:
 
     def test_csv_tenant_with_no_spend_returns_total_zero(self):
         """An empty tenant still emits the header + a zero-total row."""
-        with _patch_projects({}):
-            cost.reset_tenant_cache()
-            resp = self.client.get(
-                "/dashboard/api/billing/captcha-rollup",
-                params={"tenant": "ghost", "period": "monthly"},
-            )
+        self.upstream = {"alpha": 100}
+        resp = self.client.get(
+            "/dashboard/api/billing/captcha-rollup",
+            params={"tenant": "ghost", "period": "monthly"},
+        )
         assert resp.status_code == 200
         lines = resp.text.strip().split("\n")
         assert lines[0] == ("period_start,agent_id,millicents,dollars,data_scope")
         # No agent rows, just header + total.
         assert len(lines) == 2
         assert "__tenant_total__,0,0.00000,monthly_actual" in lines[1]
+
+
+# ── Browser-service read surface ───────────────────────────────────────────
+
+
+class TestSpendByAgent:
+    """``spend_by_agent`` + its ``GET /browser/captcha-costs`` route.
+
+    This is the seam the mesh-side rollup reads across the process
+    boundary, so both the payload shape and the route have to hold.
+    """
+
+    @pytest.mark.asyncio
+    async def test_returns_every_current_month_bucket(self):
+        await cost.add_cost("alpha", 100)
+        await cost.add_cost("beta", 50)
+        payload = await cost.spend_by_agent()
+        assert payload["month"] == datetime.now(timezone.utc).strftime("%Y-%m")
+        assert payload["agents"] == {"alpha": 100, "beta": 50}
+
+    @pytest.mark.asyncio
+    async def test_skips_stale_month_buckets(self):
+        await cost.add_cost("alpha", 100)
+        # Age the bucket into a previous month — it contributes nothing to
+        # the current month and must not be reported as if it did.
+        cost._state["alpha"]["month"] = "1999-01"
+        payload = await cost.spend_by_agent()
+        assert payload["agents"] == {}
+
+    @pytest.mark.asyncio
+    async def test_empty_state_returns_empty_mapping(self):
+        payload = await cost.spend_by_agent()
+        assert payload["agents"] == {}
+
+    def test_route_returns_counter_state(self, monkeypatch):
+        """The browser service exposes the counter over HTTP."""
+        import asyncio
+        from unittest.mock import MagicMock
+
+        from src.browser.server import create_browser_app
+
+        monkeypatch.delenv("BROWSER_AUTH_TOKEN", raising=False)
+        monkeypatch.delenv("MESH_AUTH_TOKEN", raising=False)
+        asyncio.run(cost.add_cost("alpha", 100))
+
+        app = create_browser_app(MagicMock())
+        with TestClient(app) as client:
+            resp = client.get("/browser/captcha-costs")
+
+        assert resp.status_code == 200
+        assert resp.json()["agents"] == {"alpha": 100}
+
+    def test_route_requires_auth_when_token_set(self, monkeypatch):
+        """The read is bearer-gated like every other service endpoint."""
+        from unittest.mock import MagicMock
+
+        from src.browser.server import create_browser_app
+
+        monkeypatch.setenv("BROWSER_AUTH_TOKEN", "svc-token")
+
+        app = create_browser_app(MagicMock())
+        with TestClient(app) as client:
+            assert client.get("/browser/captcha-costs").status_code == 401
+            ok = client.get(
+                "/browser/captcha-costs",
+                headers={"Authorization": "Bearer svc-token"},
+            )
+        assert ok.status_code == 200
