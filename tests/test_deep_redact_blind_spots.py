@@ -1,8 +1,10 @@
 """``deep_redact`` must walk every position a string can occupy.
 
-It guards the audit log, trace store, lifecycle log, intent log and the pubsub
-payload path (``src/host/mesh.py:930``), so anything it declines to walk is a
-value that reaches durable storage unredacted. Three positions were skipped,
+It guards the trace store, lifecycle log, intent log and the durable DM thread
+record (``src/host/mesh.py:930`` — delivery keeps the original payload), so
+anything it declines to walk reaches durable storage unredacted. It does NOT
+guard ``Blackboard.log_audit``, which writes values verbatim; that is a
+separate, still-open gap. Three positions were skipped,
 each demonstrated below against the pre-fix implementation:
 
   1. Dict KEYS — ``{k: deep_redact(v) ...}`` never touched ``k``.
@@ -75,12 +77,38 @@ class TestUrlGate:
         """The gate's sharpest edge: NO ``://``, so URL structure was skipped.
 
         Pattern matching still caught the token, but ``user:hunter2`` in the
-        userinfo is only reachable by parsing the URL — which the gate
-        prevented.
+        userinfo is only reachable by parsing the URL.
         """
         out = deep_redact(f"//user:hunter2@example.com/cb?token={SECRET}")
         assert "hunter2" not in out, f"userinfo survived: {out!r}"
         assert not _leaks(out)
+
+    def test_network_path_userinfo_without_a_query(self):
+        """Independent of query handling.
+
+        ``redact_url``'s own gate accepted a relative ref only when it began
+        with ``/`` AND contained ``?``, so a network-path reference carrying
+        userinfo but no query fell through to pattern-only redaction.
+        """
+        out = deep_redact("//user:hunter2@example.com/cb")
+        assert "hunter2" not in out, f"userinfo survived: {out!r}"
+
+    def test_relative_url_fragment_is_dropped(self):
+        """Fragments carry OAuth implicit tokens (``#access_token=…``).
+
+        They were already dropped for absolute URLs; a relative ref with a
+        fragment and no query was not parsed at all.
+        """
+        out = deep_redact("/cb#access_token=opaque-token-value")
+        assert "opaque-token-value" not in out, f"fragment survived: {out!r}"
+
+    @pytest.mark.parametrize(
+        "path", ["/etc/passwd", "/var/log/app.log", "a/b/c", "C:\\path\\file"],
+    )
+    def test_plain_paths_are_not_reshaped(self, path: str):
+        """A path with neither query nor fragment has nothing structural to
+        strip, so it must pass through byte-identical."""
+        assert deep_redact(path) == path
 
     def test_absolute_url_still_redacted(self):
         out = deep_redact(f"https://example.com/cb?token={SECRET}")
@@ -137,3 +165,73 @@ class TestRedactionIsLinear:
             f"4x input grew cost {large / small:.1f}x ({small:.1f} -> "
             f"{large:.1f} ms) — that is superlinear, i.e. backtracking."
         )
+
+
+class TestLongCredentialsAreStillRedacted:
+    """The ReDoS fix must not cap the userinfo runs.
+
+    Bounding them to ``{1,256}`` fixed the ReDoS equally well but silently
+    STOPPED redacting long credentials: a 900-char password matched with the
+    run unbounded and was MISSED under the cap. That shape is real — AWS
+    documents IAM database-auth tokens at roughly 1 KiB, and they are used
+    directly as the password in a DSN.
+
+    Only the SCHEME is bounded; see the comment on ``_CONN_USERINFO_RE``.
+    """
+
+    @pytest.mark.parametrize("length", [10, 256, 257, 900, 4000])
+    def test_dsn_password_of_any_length_is_redacted(self, length: int):
+        password = "p" * length
+        out = deep_redact(f"postgres://dbuser:{password}@db.internal:5432/main")
+        assert password not in out, (
+            f"{length}-char DSN password survived — check for a capped "
+            f"quantifier on the userinfo run: {out[:120]!r}"
+        )
+
+    @pytest.mark.parametrize("length", [256, 257, 900])
+    def test_dsn_username_of_any_length_is_redacted(self, length: int):
+        user = "u" * length
+        out = deep_redact(f"postgres://{user}:pw@db/main")
+        assert user not in out, f"{length}-char DSN username survived"
+
+
+class TestBlockerNoteIsLinear:
+    """``normalize_blocker_note`` runs on agent-controlled text, on the loop.
+
+    ``_EMPTY_EXCEPTION_RE`` was ``^(exception:)?\\s*(error:?)?\\s*$`` — two
+    ``\\s*`` runs either side of an optional group that can match empty, so on
+    a long whitespace run the engine tried every split between them. The
+    blocker note arrives on a task-status POST and is normalized synchronously
+    BEFORE the 500-char truncation, so an agent could stall the mesh:
+    "exception:" + 80k spaces took 34 SECONDS.
+    """
+
+    def test_long_whitespace_note_is_fast(self):
+        from src.shared.redaction import normalize_blocker_note
+
+        subject = "exception:" + " " * 80_000 + "x"
+        start = time.perf_counter()
+        normalize_blocker_note(subject)
+        elapsed = (time.perf_counter() - start) * 1000
+        assert elapsed < 1000, (
+            f"normalize_blocker_note took {elapsed:.0f} ms on 80k spaces "
+            "(was ~34,000 ms) — check for ambiguous adjacent \\s* runs."
+        )
+
+    @pytest.mark.parametrize(
+        ("note", "expected"),
+        [
+            ("exception:", "internal_error"),
+            ("Exception: Error:", "internal_error"),
+            ("Error:", "internal_error"),
+            ("error", "internal_error"),
+            ("", None),
+            ("   ", None),
+            ("exception: boom", "exception: boom"),
+        ],
+    )
+    def test_classification_unchanged(self, note, expected):
+        """The rewrite must classify exactly as before."""
+        from src.shared.redaction import normalize_blocker_note
+
+        assert normalize_blocker_note(note) == expected

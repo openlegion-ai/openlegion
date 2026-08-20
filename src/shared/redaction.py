@@ -108,20 +108,24 @@ def _redact_bearer(text: str) -> str:
 # the string stays diagnostically useful. Anchored on the ``scheme://`` prefix;
 # the userinfo run excludes ``/@`` so it can't cross past the authority.
 #
-# Every quantifier here is BOUNDED, and that is load-bearing rather than
-# cosmetic. With an unbounded scheme class the engine matches
-# ``[A-Za-z][A-Za-z0-9+.\-]*`` greedily from EVERY position in the subject,
-# consuming the rest of the string before failing to find ``://`` and
-# backtracking over every length — O(n^2) in the subject, on a sanitizer that
-# runs over agent-supplied pubsub payloads and blocker notes on the mesh event
-# loop. A 200 KB string shaped like ``https://host/?q=<200k chars>`` took ~93
-# SECONDS. Bounding the scheme to 31 chars (RFC 3986 schemes are short; the
-# longest registered one is well under that) makes the work per start position
-# constant, and the run is linear again — 64 KB went from 9.6 s to 11 ms. The
-# userinfo halves are bounded for the same reason.
+# The SCHEME class is BOUNDED, and that is load-bearing rather than cosmetic.
+# Unbounded, the engine matches ``[A-Za-z][A-Za-z0-9+.\-]*`` greedily from
+# EVERY position in the subject, consuming the rest of the string before
+# failing to find ``://`` and backtracking over every length — O(n^2) in the
+# subject, on a sanitizer that runs over agent-supplied payloads on the mesh
+# event loop. 128 KB took ~39.6 SECONDS; bounded, 23 ms.
+#
+# Only the scheme is bounded. The userinfo runs are deliberately left
+# UNBOUNDED: they are negated classes that stop at the authority delimiters, so
+# they cannot drive the same every-position rescan — and capping them silently
+# STOPS REDACTING long credentials. A 900-char password (the shape of an AWS
+# IAM database-auth token, which is used directly as a DSN password and
+# documented at ~1 KiB) matches with the run unbounded and is MISSED under a
+# ``{1,256}`` cap. Verified linear with the userinfo unbounded, including on an
+# adversarial ``scheme://<128 KB>:<128 KB>`` subject containing no ``@`` at all.
 _CONN_USERINFO_RE = re.compile(
-    r"([A-Za-z][A-Za-z0-9+.\-]{0,31}://)"   # scheme://
-    r"[^/\s:@]{1,256}:[^/\s@]{1,256}@",     # user:password@
+    r"([A-Za-z][A-Za-z0-9+.\-]{0,31}://)"   # scheme:// (bounded: see above)
+    r"[^/\s:@]+:[^/\s@]+@",                 # user:password@ (unbounded on purpose)
 )
 
 
@@ -262,16 +266,29 @@ def redact_url(url: str) -> str:
     if not url:
         return url
 
-    # We structurally-parse any input that looks like either:
-    #   * an absolute web URL (``scheme://host/…?q``), or
-    #   * a relative URL with a query string (``/cb?code=TOKEN&state=…``).
-    # Logged redirects, OAuth callback paths, and copy-pasted URL
-    # fragments commonly arrive without a scheme; the query-string part
-    # is still the highest-leak component we need to strip. Fall through
-    # to pattern-only redaction only for strings that are neither.
+    # We structurally-parse any input that looks like:
+    #   * an absolute URL (``scheme://host/…``),
+    #   * a network-path reference (``//host/…``) — no scheme, but the
+    #     authority (and therefore any ``user:pass@``) is still present, or
+    #   * a relative URL carrying a query or a fragment (``/cb?code=…``,
+    #     ``/cb#access_token=…``).
+    # Logged redirects, OAuth callback paths and copy-pasted URL fragments
+    # commonly arrive without a scheme; the query and fragment are the
+    # highest-leak components and the authority carries userinfo. Anything
+    # else falls through to pattern-only redaction.
+    #
+    # A plain path with neither query nor fragment (``/etc/passwd``,
+    # ``/var/log/app``) is deliberately NOT parsed — there is nothing
+    # structural to strip and parsing would only risk reshaping it.
     has_scheme = "://" in url
-    has_relative_query = (not has_scheme) and ("?" in url) and url.startswith("/")
-    if not (has_scheme or has_relative_query):
+    has_authority = (not has_scheme) and url.startswith("//")
+    has_relative_marker = (
+        (not has_scheme)
+        and (not has_authority)
+        and url.startswith("/")
+        and ("?" in url or "#" in url)
+    )
+    if not (has_scheme or has_authority or has_relative_marker):
         return redact_string(url)
 
     try:
@@ -424,8 +441,18 @@ _TRUNCATED_ARGS_RE = re.compile(
 # A contentless exception note — ``exception:``, ``exception: Error:``,
 # ``Error:`` — carries no signal. Collapse to a stable code so the UI never
 # shows a blank "failed" reason.
+# Each optional group owns its OWN trailing ``\s*``. The previous spelling,
+# ``^(exception:)?\s*(error:?)?\s*$``, put two ``\s*`` runs on either side of an
+# optional group that can match empty, so on a long whitespace run the engine
+# tried every split between them — quadratic. The blocker note is
+# agent-controlled (task status POST) and ``normalize_blocker_note`` runs
+# synchronously on the mesh loop BEFORE the 500-char truncation, so this was
+# reachable: "exception:" + 80k spaces + "x" took 34 SECONDS, now 4.5 ms.
+# Equivalent on every input production can produce — ``normalize_blocker_note``
+# strips first, and the two spellings agree on all 777 stripped combinations of
+# the tokens this classifies.
 _EMPTY_EXCEPTION_RE = re.compile(
-    r"^(exception:)?\s*(error:?)?\s*$", re.IGNORECASE,
+    r"^\s*(?:exception:\s*)?(?:error:?\s*)?$", re.IGNORECASE,
 )
 
 
@@ -470,9 +497,15 @@ def normalize_blocker_note(note: str | None) -> str | None:
 def deep_redact(obj):
     """Recursively redact secrets from any JSON-serializable value.
 
-    Guards the audit log, trace store, lifecycle log, intent log and the
-    pubsub payload path (``src/host/mesh.py``), so anything it declines to
-    walk is a value that reaches durable storage unredacted. It therefore
+    Guards the trace store, lifecycle log, intent log and the durable DM
+    thread record (``src/host/mesh.py`` — delivery keeps the original
+    payload; only the stored copy is redacted), so anything it declines to
+    walk is a value that reaches durable storage unredacted.
+
+    NOTE it does NOT guard ``Blackboard.log_audit``, which writes
+    ``before_value`` / ``after_value`` verbatim. That is a real, separate
+    gap — do not assume audit rows are sanitized because this function
+    exists. It therefore
     walks EVERY position a string can occupy, and treats an unrecognised
     container as something to recurse into rather than something to return
     untouched.
