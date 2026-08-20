@@ -53,12 +53,26 @@ by the caller: undo can only restore prior state, never escalate past it.
 
 Revoke, never grant
 -------------------
-Forbidden fields still accept a DE-ESCALATING value — ``False`` for a flag, an
-empty list, ``0`` for a numeric cap. Taking a dangerous power away is always
-safe and is a genuinely useful thing for the operator to be able to do; only
-handing one out requires a human. Numeric caps admit only ``0`` because this
-function sees the proposed value and not the current one, so it cannot tell a
-raise from a lower.
+Most forbidden fields still accept a DE-ESCALATING value — ``False`` for a
+flag, an empty allowlist. Taking a dangerous power away is always safe and is a
+genuinely useful thing for the operator to be able to do; only handing one out
+requires a human.
+
+That is decided PER FIELD, not by the shape of the value, because "empty" and
+"zero" do not mean "less" everywhere in this codebase:
+
+* ``wallet_allowed_contracts`` — ``PermissionMatrix.can_access_wallet_contract``
+  reads ``if not contracts: return True  # Empty = allow all``. An empty list
+  REMOVES the restriction.
+* ``wallet_spend_limit_*`` / ``wallet_rate_limit_per_hour`` —
+  ``get_wallet_limits`` documents ``0 = use global default``. Zeroing an agent
+  whose per-agent cap is TIGHTER than the global default RAISES it.
+
+Those fields therefore accept no value at all from the operator. The ones that
+do accept a revoke were each checked against their enforcement site:
+``can_use_api`` is ``service in perms.allowed_apis``, ``can_manage_vault`` is
+``bool(perms.allowed_credentials)``, and ``can_use_wallet_chain`` requires an
+explicit membership — for all three, empty genuinely means "nothing".
 """
 
 from __future__ import annotations
@@ -106,33 +120,48 @@ _OPERATOR_PERMISSION_CEILING: dict[str, Any] = {
     "can_subscribe": UNRESTRICTED,
 }
 
-# Fields the operator may never GRANT, each with the reason surfaced to the
-# LLM. Values are the human-facing explanation.
-_OPERATOR_FORBIDDEN: dict[str, str] = {
-    # Identity, not a permission.
-    "agent_id": "an agent's identity cannot be reassigned by the operator",
+# Fields the operator may never GRANT, mapping to
+# ``(reason, revoke_allowed)``. ``revoke_allowed`` is False where NO value is
+# unambiguously de-escalating — see the module docstring for the two wallet
+# cases where "empty" and "zero" mean MORE permission, not less.
+_OPERATOR_FORBIDDEN: dict[str, tuple[str, bool]] = {
+    # Identity, not a permission — no value is meaningful.
+    "agent_id": ("an agent's identity cannot be reassigned by the operator", False),
     # Money.
-    "can_use_wallet": "spending money requires explicit human setup",
-    "wallet_spend_limit_per_tx_usd": "wallet spending limits are a human decision",
-    "wallet_spend_limit_daily_usd": "wallet spending limits are a human decision",
-    "wallet_rate_limit_per_hour": "wallet rate limits are a human decision",
-    "wallet_allowed_chains": "wallet chain allowlists are a human decision",
-    "wallet_allowed_contracts": "wallet contract allowlists are a human decision",
-    # Secrets and external reach.
-    "allowed_credentials": "credential access requires explicit human setup",
-    "allowed_apis": "external API allowlists require explicit human setup",
+    "can_use_wallet": ("spending money requires explicit human setup", True),
+    # ``0`` means "use the global default" (get_wallet_limits), so zeroing a
+    # tighter-than-global per-agent cap RAISES it. No safe revoke value.
+    "wallet_spend_limit_per_tx_usd": (
+        "wallet spending limits are a human decision", False,
+    ),
+    "wallet_spend_limit_daily_usd": (
+        "wallet spending limits are a human decision", False,
+    ),
+    "wallet_rate_limit_per_hour": (
+        "wallet rate limits are a human decision", False,
+    ),
+    # Membership-tested (can_use_wallet_chain), so empty really is "none".
+    "wallet_allowed_chains": ("wallet chain allowlists are a human decision", True),
+    # ``if not contracts: return True  # Empty = allow all`` — an empty list
+    # REMOVES the restriction, so there is no safe revoke value.
+    "wallet_allowed_contracts": (
+        "wallet contract allowlists are a human decision", False,
+    ),
+    # Secrets and external reach. Both are membership-tested, so empty = none.
+    "allowed_credentials": ("credential access requires explicit human setup", True),
+    "allowed_apis": ("external API allowlists require explicit human setup", True),
     "can_request_user_credentials": (
-        "asking the human for credentials requires explicit human setup"
+        "asking the human for credentials requires explicit human setup", True,
     ),
     # Durable control-plane powers. ``can_edit_agent_config`` is the power the
     # operator is exercising right now, so granting it would let the operator
     # propagate its own privilege to an agent it manages.
-    "can_manage_fleet": "durable fleet management requires explicit human setup",
-    "can_manage_teams": "team management requires explicit human setup",
+    "can_manage_fleet": ("durable fleet management requires explicit human setup", True),
+    "can_manage_teams": ("team management requires explicit human setup", True),
     "can_edit_agent_config": (
-        "config-edit rights would propagate the operator's own privilege"
+        "config-edit rights would propagate the operator's own privilege", True,
     ),
-    "can_route_tasks": "task-routing rights require explicit human setup",
+    "can_route_tasks": ("task-routing rights require explicit human setup", True),
 }
 
 
@@ -166,12 +195,14 @@ def clamp_to_operator_ceiling(field: str, new_value) -> str | None:
 
     for key, value in new_value.items():
         if key in _OPERATOR_FORBIDDEN:
-            # Revoking a dangerous power is always allowed.
-            if _is_de_escalation(value):
+            reason, revoke_allowed = _OPERATOR_FORBIDDEN[key]
+            # Revoking a dangerous power is allowed — but only where some
+            # value unambiguously means LESS. See the module docstring.
+            if revoke_allowed and _is_de_escalation(value):
                 continue
             return (
                 f"Permission ceiling exceeded: '{key}' cannot be granted by "
-                f"the operator — {_OPERATOR_FORBIDDEN[key]}. Use the "
+                f"the operator — {reason}. Use the "
                 "dashboard for advanced permissions."
             )
 

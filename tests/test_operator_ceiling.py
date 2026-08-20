@@ -114,28 +114,85 @@ class TestEscalationIsBlocked:
         assert err is not None and "allowed_credentials" in err
 
 
-class TestRevokeIsAlwaysAllowed:
-    """Taking a dangerous power AWAY needs no human — only handing one out does."""
+class TestRevokeIsAllowedWhereItIsUnambiguous:
+    """Taking a dangerous power AWAY needs no human — where "less" is real.
+
+    Each field below was checked against its ENFORCEMENT site, not its name:
+    ``can_use_api`` is ``service in perms.allowed_apis``, ``can_manage_vault``
+    is ``bool(perms.allowed_credentials)``, and ``can_use_wallet_chain``
+    requires explicit membership. For all of those, empty means "nothing".
+    """
 
     @pytest.mark.parametrize(
         "payload",
         [
             {"can_use_wallet": False},
             {"can_manage_fleet": False},
+            {"can_manage_teams": False},
             {"can_edit_agent_config": False},
+            {"can_route_tasks": False},
             {"can_request_user_credentials": False},
             {"allowed_credentials": []},
             {"allowed_apis": []},
             {"wallet_allowed_chains": []},
-            {"wallet_spend_limit_daily_usd": 0},
-            {"wallet_spend_limit_per_tx_usd": 0.0},
-            {"wallet_rate_limit_per_hour": 0},
         ],
     )
     def test_de_escalation_passes(self, payload: dict):
         assert clamp_to_operator_ceiling("permissions", payload) is None, (
-            f"revoking should always be allowed: {payload}"
+            f"revoking should be allowed: {payload}"
         )
+
+
+class TestEmptyAndZeroAreNotAlwaysDeEscalation:
+    """Two fields inverted the "empty/zero means less" assumption.
+
+    Shape-based de-escalation is wrong here, and getting it wrong would have
+    reopened the exact hole this module exists to close — through the
+    de-escalation path rather than the grant path.
+    """
+
+    def test_empty_contract_allowlist_is_a_widening(self):
+        """``can_access_wallet_contract``:
+        ``if not contracts: return True  # Empty = allow all``.
+
+        An agent pinned to two contract addresses would be freed to call ANY
+        contract by an edit that looks like a revoke.
+        """
+        assert clamp_to_operator_ceiling(
+            "permissions", {"wallet_allowed_contracts": []},
+        ) is not None
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "wallet_spend_limit_per_tx_usd",
+            "wallet_spend_limit_daily_usd",
+            "wallet_rate_limit_per_hour",
+        ],
+    )
+    def test_zeroing_a_wallet_cap_is_a_widening(self, field: str):
+        """``get_wallet_limits``: "0 = use global default".
+
+        Zeroing an agent whose per-agent cap is TIGHTER than the global
+        default raises it to the global default.
+        """
+        assert clamp_to_operator_ceiling("permissions", {field: 0}) is not None
+        assert clamp_to_operator_ceiling("permissions", {field: 0.0}) is not None
+
+    def test_blanking_agent_id_is_refused(self):
+        assert clamp_to_operator_ceiling("permissions", {"agent_id": ""}) is not None
+
+    def test_fields_without_a_safe_revoke_are_marked_as_such(self):
+        """Pin the flags themselves, so the rationale can't be lost in a
+        future edit that only reads the value-shape helper."""
+        no_revoke = {f for f, (_r, ok) in _OPERATOR_FORBIDDEN.items() if not ok}
+        assert no_revoke == {
+            "agent_id",
+            "wallet_allowed_contracts",
+            "wallet_spend_limit_per_tx_usd",
+            "wallet_spend_limit_daily_usd",
+            "wallet_rate_limit_per_hour",
+        }
 
 
 class TestRoutineManagementStillWorks:
