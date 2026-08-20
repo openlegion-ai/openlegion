@@ -8,6 +8,8 @@ Covers:
   * port/display pairing math
   * residue cleanup on release
   * concurrent-style sequencing — alloc, release, alloc same display
+  * transiently-unbindable slots come back to the pool; only a slot that
+    fails MAX_BIND_FAILURES allocations in a row is retired
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import src.browser.display_allocator as display_allocator
 from src.browser.display_allocator import (
     DISPLAY_RANGE_END,
     DISPLAY_RANGE_START,
+    MAX_BIND_FAILURES,
     VNC_PORT_BASE,
     DisplayAllocator,
     PoolExhausted,
@@ -228,6 +231,178 @@ class TestAllocateRecovery:
         finally:
             monkeypatch.undo()
         assert s.display == start + 1
+
+    def test_transiently_unbindable_slot_returns_to_pool(self, caplog):
+        """A one-off probe failure must NOT cost the slot.
+
+        The common cause is a teardown still in flight — ``_teardown_per_agent_
+        x_stack`` releases the slot after a best-effort reap and the spawn
+        rollback releases it right after a bare SIGTERM, so the dying Xvnc can
+        still hold the port for a moment. Once it exits, the slot must be
+        allocatable again.
+        """
+        start, end = TEST_DISPLAY_START, TEST_DISPLAY_END
+        alloc = _alloc_in_range(start, end, run_boot_sweep=False)
+        port = port_for_display(start)
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(
+            display_allocator,
+            "_port_is_bindable",
+            lambda candidate: candidate != port,
+        )
+        try:
+            with caplog.at_level("WARNING", logger="browser.display_allocator"):
+                skipped = alloc.allocate()
+        finally:
+            monkeypatch.undo()
+        assert skipped.display == start + 1
+        # Operator-visible either way — the skip is still logged.
+        assert any("not bindable" in r.getMessage() for r in caplog.records)
+
+        # Port free again → the slot is back in the pool, lowest-first.
+        recovered = alloc.allocate()
+        assert recovered.display == start
+
+    def test_rapid_failures_do_not_retire_a_healthy_slot(self, caplog):
+        """The regression this policy exists for.
+
+        Browser starts arrive in bursts milliseconds apart. A slot whose
+        Xvnc is merely still exiting will fail every probe in that burst —
+        so a count-only rule retires a PERFECTLY HEALTHY slot, which is the
+        very outcome the retry was added to prevent. The streak must also
+        span ``MIN_BIND_FAILURE_WINDOW_S`` before the slot is retired.
+        """
+        start, end = TEST_DISPLAY_START, TEST_DISPLAY_END
+        alloc = _alloc_in_range(start, end, run_boot_sweep=False)
+        port = port_for_display(start)
+
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(
+            display_allocator, "_port_is_bindable", lambda c: c != port,
+        )
+        try:
+            # Far MORE than MAX_BIND_FAILURES attempts, but all instant —
+            # a burst of browser starts, each released again as it would be
+            # in the churn this policy is meant to survive.
+            with caplog.at_level("WARNING", logger="browser.display_allocator"):
+                for _ in range(MAX_BIND_FAILURES * 3):
+                    alloc.release(alloc.allocate())
+        finally:
+            monkeypatch.undo()
+        assert not any("Retiring display" in r.getMessage() for r in caplog.records)
+
+        # Xvnc has now exited; the slot must still be usable.
+        assert alloc.allocate().display == start
+
+    def test_slot_retired_after_failures_spanning_the_window(self, caplog):
+        """A port held across both the count AND the window is retired."""
+        start = TEST_DISPLAY_START
+        end = start + MAX_BIND_FAILURES + 2
+        alloc = _alloc_in_range(start, end, run_boot_sweep=False)
+        port = port_for_display(start)
+
+        clock = {"t": 0.0}
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(
+            display_allocator, "_port_is_bindable", lambda c: c != port,
+        )
+        monkeypatch.setattr(
+            display_allocator.time, "monotonic", lambda: clock["t"],
+        )
+        try:
+            with caplog.at_level("WARNING", logger="browser.display_allocator"):
+                for i in range(MAX_BIND_FAILURES):
+                    assert alloc.allocate().display == start + 1 + i
+                    # Push each probe past the window boundary.
+                    clock["t"] += display_allocator.MIN_BIND_FAILURE_WINDOW_S
+        finally:
+            monkeypatch.undo()
+        assert any("Retiring display" in r.getMessage() for r in caplog.records)
+        assert not alloc.is_allocated(start)
+
+    def test_exhaustion_reclaims_retired_slots(self):
+        """Retirement is a guess; exhaustion must revisit it.
+
+        A slot retired while a peer held its port has to come back once the
+        port frees, or a transient condition costs capacity for the life of
+        the process.
+        """
+        start = TEST_DISPLAY_START
+        end = start + 2
+        alloc = _alloc_in_range(start, end, run_boot_sweep=False)
+
+        clock = {"t": 0.0}
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(
+            display_allocator, "_port_is_bindable", lambda _c: False,
+        )
+        monkeypatch.setattr(
+            display_allocator.time, "monotonic", lambda: clock["t"],
+        )
+        try:
+            for _ in range(MAX_BIND_FAILURES):
+                with pytest.raises(PoolExhausted):
+                    alloc.allocate()
+                clock["t"] += display_allocator.MIN_BIND_FAILURE_WINDOW_S
+            # Every slot is now retired.
+            assert alloc.free_count == 0
+            # Ports come back. The next allocate must reclaim, not raise.
+            monkeypatch.setattr(
+                display_allocator, "_port_is_bindable", lambda _c: True,
+            )
+            assert alloc.allocate().display == start
+        finally:
+            monkeypatch.undo()
+
+    def test_failure_streak_resets_on_successful_allocation(self):
+        """The counter is CONSECUTIVE failures, not lifetime failures."""
+        start, end = TEST_DISPLAY_START, TEST_DISPLAY_END
+        alloc = _alloc_in_range(start, end, run_boot_sweep=False)
+        port = port_for_display(start)
+        bindable = {"ok": False}
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(
+            display_allocator,
+            "_port_is_bindable",
+            lambda candidate: candidate != port or bindable["ok"],
+        )
+        try:
+            # One failure (slot deferred), then a clean allocation of the
+            # same slot, which must wipe the streak.
+            alloc.allocate()
+            bindable["ok"] = True
+            s = alloc.allocate()
+            assert s.display == start
+            alloc.release(s)
+
+            # A fresh streak now needs the full MAX_BIND_FAILURES again:
+            # after MAX_BIND_FAILURES - 1 more failures the slot is still in
+            # the pool.
+            bindable["ok"] = False
+            for _ in range(MAX_BIND_FAILURES - 1):
+                alloc.allocate()
+            bindable["ok"] = True
+            assert alloc.allocate().display == start
+        finally:
+            monkeypatch.undo()
+
+    def test_pool_exhaustion_leaves_deferred_slots_in_pool(self):
+        """Even when every slot probes unbindable, none are lost outright."""
+        start, end = TEST_DISPLAY_START, TEST_DISPLAY_END
+        alloc = _alloc_in_range(start, end, run_boot_sweep=False)
+        width = end - start
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(
+            display_allocator, "_port_is_bindable", lambda _candidate: False,
+        )
+        try:
+            with pytest.raises(PoolExhausted):
+                alloc.allocate()
+        finally:
+            monkeypatch.undo()
+        assert alloc.free_count == width
+        assert alloc.allocate().display == start
 
 
 # ── port/display helpers ────────────────────────────────────────────────────
