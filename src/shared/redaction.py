@@ -107,9 +107,25 @@ def _redact_bearer(text: str) -> str:
 # (the username alone can leak account ownership), keeping the scheme + host so
 # the string stays diagnostically useful. Anchored on the ``scheme://`` prefix;
 # the userinfo run excludes ``/@`` so it can't cross past the authority.
+#
+# The SCHEME class is BOUNDED, and that is load-bearing rather than cosmetic.
+# Unbounded, the engine matches ``[A-Za-z][A-Za-z0-9+.\-]*`` greedily from
+# EVERY position in the subject, consuming the rest of the string before
+# failing to find ``://`` and backtracking over every length — O(n^2) in the
+# subject, on a sanitizer that runs over agent-supplied payloads on the mesh
+# event loop. 128 KB took ~39.6 SECONDS; bounded, 23 ms.
+#
+# Only the scheme is bounded. The userinfo runs are deliberately left
+# UNBOUNDED: they are negated classes that stop at the authority delimiters, so
+# they cannot drive the same every-position rescan — and capping them silently
+# STOPS REDACTING long credentials. A 900-char password (the shape of an AWS
+# IAM database-auth token, which is used directly as a DSN password and
+# documented at ~1 KiB) matches with the run unbounded and is MISSED under a
+# ``{1,256}`` cap. Verified linear with the userinfo unbounded, including on an
+# adversarial ``scheme://<128 KB>:<128 KB>`` subject containing no ``@`` at all.
 _CONN_USERINFO_RE = re.compile(
-    r"([A-Za-z][A-Za-z0-9+.\-]*://)"   # scheme://
-    r"[^/\s:@]+:[^/\s@]+@",            # user:password@
+    r"([A-Za-z][A-Za-z0-9+.\-]{0,31}://)"   # scheme:// (bounded: see above)
+    r"[^/\s:@]+:[^/\s@]+@",                 # user:password@ (unbounded on purpose)
 )
 
 
@@ -250,16 +266,29 @@ def redact_url(url: str) -> str:
     if not url:
         return url
 
-    # We structurally-parse any input that looks like either:
-    #   * an absolute web URL (``scheme://host/…?q``), or
-    #   * a relative URL with a query string (``/cb?code=TOKEN&state=…``).
-    # Logged redirects, OAuth callback paths, and copy-pasted URL
-    # fragments commonly arrive without a scheme; the query-string part
-    # is still the highest-leak component we need to strip. Fall through
-    # to pattern-only redaction only for strings that are neither.
+    # We structurally-parse any input that looks like:
+    #   * an absolute URL (``scheme://host/…``),
+    #   * a network-path reference (``//host/…``) — no scheme, but the
+    #     authority (and therefore any ``user:pass@``) is still present, or
+    #   * a relative URL carrying a query or a fragment (``/cb?code=…``,
+    #     ``/cb#access_token=…``).
+    # Logged redirects, OAuth callback paths and copy-pasted URL fragments
+    # commonly arrive without a scheme; the query and fragment are the
+    # highest-leak components and the authority carries userinfo. Anything
+    # else falls through to pattern-only redaction.
+    #
+    # A plain path with neither query nor fragment (``/etc/passwd``,
+    # ``/var/log/app``) is deliberately NOT parsed — there is nothing
+    # structural to strip and parsing would only risk reshaping it.
     has_scheme = "://" in url
-    has_relative_query = (not has_scheme) and ("?" in url) and url.startswith("/")
-    if not (has_scheme or has_relative_query):
+    has_authority = (not has_scheme) and url.startswith("//")
+    has_relative_marker = (
+        (not has_scheme)
+        and (not has_authority)
+        and url.startswith("/")
+        and ("?" in url or "#" in url)
+    )
+    if not (has_scheme or has_authority or has_relative_marker):
         return redact_string(url)
 
     try:
@@ -412,8 +441,18 @@ _TRUNCATED_ARGS_RE = re.compile(
 # A contentless exception note — ``exception:``, ``exception: Error:``,
 # ``Error:`` — carries no signal. Collapse to a stable code so the UI never
 # shows a blank "failed" reason.
+# Each optional group owns its OWN trailing ``\s*``. The previous spelling,
+# ``^(exception:)?\s*(error:?)?\s*$``, put two ``\s*`` runs on either side of an
+# optional group that can match empty, so on a long whitespace run the engine
+# tried every split between them — quadratic. The blocker note is
+# agent-controlled (task status POST) and ``normalize_blocker_note`` runs
+# synchronously on the mesh loop BEFORE the 500-char truncation, so this was
+# reachable: "exception:" + 80k spaces + "x" took 34 SECONDS, now 4.5 ms.
+# Equivalent on every input production can produce — ``normalize_blocker_note``
+# strips first, and the two spellings agree on all 777 stripped combinations of
+# the tokens this classifies.
 _EMPTY_EXCEPTION_RE = re.compile(
-    r"^(exception:)?\s*(error:?)?\s*$", re.IGNORECASE,
+    r"^\s*(?:exception:\s*)?(?:error:?\s*)?$", re.IGNORECASE,
 )
 
 
@@ -455,33 +494,62 @@ def normalize_blocker_note(note: str | None) -> str | None:
 # ── Deep recursion over JSON-shaped structures ──────────────────────────────
 
 
-def _looks_like_url(s: str) -> bool:
-    """Heuristic: bare-minimum check to avoid running urlsplit on plain text.
-
-    Accepts strings with an explicit ``://`` scheme marker. Conservative
-    on purpose — false negatives fall back to pattern-only redaction which
-    is still safe.
-    """
-    return "://" in s and len(s) < 4096
-
-
 def deep_redact(obj):
     """Recursively redact secrets from any JSON-serializable value.
 
-    - Strings flow through :func:`redact_url` if they look like URLs, else
-      :func:`redact_string`.
-    - Dicts and lists recurse.
-    - Tuples are supported but returned as tuples.
-    - Other values (int, bool, None, float) pass through unchanged.
+    Guards the trace store, lifecycle log, intent log and the durable DM
+    thread record (``src/host/mesh.py`` — delivery keeps the original
+    payload; only the stored copy is redacted), so anything it declines to
+    walk is a value that reaches durable storage unredacted.
+
+    NOTE it does NOT guard ``Blackboard.log_audit``, which writes
+    ``before_value`` / ``after_value`` verbatim. That is a real, separate
+    gap — do not assume audit rows are sanitized because this function
+    exists. It therefore
+    walks EVERY position a string can occupy, and treats an unrecognised
+    container as something to recurse into rather than something to return
+    untouched.
+
+    - Strings flow through :func:`redact_url`, which redacts URL structure
+      (userinfo, sensitive query params, fragment, JWT path segments) when
+      the string parses as one and otherwise falls back to
+      :func:`redact_string` internally.
+    - Dict KEYS are redacted as well as values — a secret is a secret
+      wherever it sits, and callers do put them in keys (a captured header
+      map, a ``{token: metadata}`` index).
+    - Dicts, lists, tuples, sets and frozensets recurse and keep their type.
+    - Other scalars (int, bool, None, float) pass through unchanged.
+
+    Three blind spots this closes, each of which leaked a live secret into
+    durable storage before:
+
+    1. **Dict keys.** ``{k: deep_redact(v) ...}`` never touched ``k``.
+    2. **Unhandled containers.** ``set`` / ``frozenset`` fell through to
+       ``return obj`` and were emitted verbatim.
+    3. **The URL gate.** ``_looks_like_url`` required ``"://"``, but
+       :func:`redact_url` itself also accepts a relative URL carrying a
+       query string (``/cb?code=…``). The gate was STRICTER than the
+       function it guarded, so those took the pattern-only path and kept
+       their structural secrets — ``//user:pass@host/cb?token=…`` retained
+       ``user:pass``. The gate is gone: ``redact_url`` is documented safe on
+       non-URLs and does its own cheap check before parsing, so there is
+       nothing left for a second, divergent heuristic to get wrong.
+
+    Key collisions: if two distinct keys redact to the same string, the last
+    value wins, exactly as a dict literal would. That only happens when both
+    keys contained secrets, where losing one is strictly better than
+    emitting either.
     """
     if isinstance(obj, str):
-        if _looks_like_url(obj):
-            return redact_url(obj)
-        return redact_string(obj)
+        return redact_url(obj)
     if isinstance(obj, dict):
-        return {k: deep_redact(v) for k, v in obj.items()}
+        return {deep_redact(k): deep_redact(v) for k, v in obj.items()}
     if isinstance(obj, list):
         return [deep_redact(item) for item in obj]
     if isinstance(obj, tuple):
         return tuple(deep_redact(item) for item in obj)
+    if isinstance(obj, frozenset):
+        return frozenset(deep_redact(item) for item in obj)
+    if isinstance(obj, set):
+        return {deep_redact(item) for item in obj}
     return obj
