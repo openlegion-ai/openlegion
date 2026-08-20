@@ -78,9 +78,13 @@ from src.shared.utils import setup_logging
 logger = setup_logging("browser.captcha_cost")
 
 
-# Persistence path. Lives under ``data/`` (NOT a SQLite ``.db`` — see module
+# Persistence path. Lives under ``/data/`` (NOT a SQLite ``.db`` — see module
 # docstring for the deferred-rationale; the trim spec is explicit on this).
-_DEFAULT_PATH = "data/captcha_costs.json"
+# ABSOLUTE on purpose: the browser container's WORKDIR is ``/app`` and only
+# ``/data`` is the mounted ``openlegion_browser_data`` volume, so a relative
+# ``data/...`` would put the spend ledger in the ephemeral write layer and
+# every container recreation would silently reset the month's counted spend.
+_DEFAULT_PATH = "/data/captcha_costs.json"
 
 
 def _state_path() -> Path:

@@ -13,7 +13,7 @@ OpenLegion uses YAML and JSON files in the `config/` directory. Config files are
 | `config/teams/` | Directory | Per-team data (`team.md`, members). |
 | `config/settings.json` | JSON | Dashboard-managed runtime settings: browser speed/delay/timeout, execution limits (`max_iterations`, `chat_max_tool_rounds`, etc.), default budgets, and a `browser_flags` dict that overrides any flag in [`src/browser/flags.py:KNOWN_FLAGS`](../src/browser/flags.py) (precedence sits between per-agent overrides and env vars). Read by the browser service via `src/browser/flags.py`. The dashboard also bridges the CAPTCHA solver provider/key fields into the host process env (via `os.environ[…]` in `src/host/runtime.py`) so the browser container picks them up. **The four `_ENV_ONLY_FLAGS` (`CAPTCHA_SOLVER_KEY`, `CAPTCHA_SOLVER_KEY_SECONDARY`, `CAPTCHA_SOLVER_PROXY_LOGIN`, `CAPTCHA_SOLVER_PROXY_PASSWORD`) are stripped from this file at load with a one-time warning that names the stripped keys** — settings.json is plaintext on disk with no chmod / encryption, so solver secrets must come from env vars only. See [Browser Flag Precedence](#browser-flag-precedence). |
 | `config/api_keys.json` | JSON | Named API keys for mesh authentication. Shape: `{"keys": {key_id: {name, key_hash, created_at, last_used_at}}}`. Key IDs are `"ak_" + token_hex(6)`; the raw key is returned **once** at creation (`POST /api/api-keys`) and never persisted — only the salted SHA-256 hash (`sha256(key_id + raw_key)`) is stored. Name capped at 128 chars. The legacy `OPENLEGION_API_KEY` env var (single key) is also accepted as a back-compat fallback. |
-| `data/captcha_costs.json` | JSON | Runtime CAPTCHA spend ledger (chmod `0o600`). Per-agent monthly buckets in millicents (1/100,000 USD); persisted as a periodic snapshot from in-memory state on the 60s metrics tick. Override path with `CAPTCHA_COST_COUNTER_PATH`. State is current-month only — older windows defer to the planned SQLite snapshots. Restart loses at most one tick of spend. |
+| `/data/captcha_costs.json` | JSON | Runtime CAPTCHA spend ledger (chmod `0o600`), on the browser container's `openlegion_browser_data` volume. Per-agent monthly buckets in millicents (1/100,000 USD); persisted as a periodic snapshot from in-memory state on the 60s metrics tick. Override path with `CAPTCHA_COST_COUNTER_PATH`. State is current-month only — older windows defer to the planned SQLite snapshots. Restart loses at most one tick of spend. |
 | `config/network.yaml` | YAML | Network settings (`no_proxy` exclusion list for proxy mode). |
 | `.env` | dotenv | API keys and credentials |
 
@@ -451,7 +451,7 @@ Cost caps are **opt-in** — unset = no cap. All amounts are USD; the runtime le
 |---|---|---|
 | `CAPTCHA_COST_LIMIT_USD_PER_AGENT_MONTH` | -- (no cap when unset) | Per-agent monthly USD cap. When exceeded, solver short-circuits with `skipped="cost_cap"`. |
 | `CAPTCHA_COST_LIMIT_USD_PER_TENANT_MONTH` | -- (no cap when unset) | Per-tenant monthly USD cap (tenant = team membership from `config/teams/`). Drives 50/80/100% threshold alerts. |
-| `CAPTCHA_COST_COUNTER_PATH` | `data/captcha_costs.json` | Path to the persisted cost counter snapshot. chmod `0o600`. |
+| `CAPTCHA_COST_COUNTER_PATH` | `/data/captcha_costs.json` | Path to the persisted cost counter snapshot. chmod `0o600`. |
 | `OPENLEGION_CAPTCHA_FORCE_SOLVE_DOMAINS` | -- | Comma-separated; force normal solver flow on hosts otherwise classified `unsolvable` by `src/browser/captcha_policy.py` (e.g. `challenges.cloudflare.com`, `humansecurity.com`, `captcha-delivery.com`). Read once at module import — restart browser service to apply changes. |
 | `OPENLEGION_CAPTCHA_SKIP_SOLVE_DOMAINS` | -- | Comma-separated; force escalation-only on hosts the solver would otherwise attempt. Read once at module import — restart browser service to apply changes. |
 | `BROWSER_CAPTCHA_REDETECT_ENABLED` | `true` | Gate the MutationObserver-based post-action captcha re-detection on `click` / `type` / `press_key` / `fill_form`. |
@@ -505,7 +505,7 @@ Opt-in persistence of `BrowserContext.storage_state()` across container restarts
 |---|---|---|
 | `BROWSER_SESSION_PERSISTENCE_ENABLED` | `false` | **Opt-in.** Enable per-agent storage_state snapshots. |
 | `BROWSER_SESSION_PERIODIC_SNAPSHOT_S` | `300` | Periodic snapshot interval in seconds (range 60–3600). Snapshots run on the 60s metrics tick when this elapsed. Lower = better RPO at the cost of disk writes. |
-| `BROWSER_SESSION_DIR` | `data/sessions` | Directory for per-agent sidecars (`<agent_id>.json`, chmod `0o600`). |
+| `BROWSER_SESSION_DIR` | `/data/sessions` | Directory for per-agent sidecars (`<agent_id>.json`, chmod `0o600`). |
 
 ### Mobile / Device Profile
 

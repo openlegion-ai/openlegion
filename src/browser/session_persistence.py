@@ -7,7 +7,7 @@ than one task either re-authenticates (slow, often blocked by 2FA /
 captcha) or stops working entirely.
 
 This module captures Playwright's ``BrowserContext.storage_state()``
-to a per-agent JSON sidecar at ``data/sessions/<agent_id>.json``,
+to a per-agent JSON sidecar at ``/data/sessions/<agent_id>.json``,
 restores it on next launch, and exposes an operator-controlled clear
 path. Lifecycle wiring lives in ``src/browser/service.py``; the flag
 gate lives in ``src/browser/flags.py``.
@@ -76,10 +76,21 @@ from src.shared.utils import setup_logging
 logger = setup_logging("browser.session_persistence")
 
 
-# Default storage location. Override-able via env for tests + custom
-# deployments. The directory is created lazily on first snapshot;
-# missing dir on restore is a non-fatal no-op (returns None).
-_DEFAULT_DIR = "data/sessions"
+# Default storage location. ABSOLUTE on purpose: the browser service runs
+# with ``WORKDIR /app`` (Dockerfile.browser) and the ONLY durable mount is
+# the ``openlegion_browser_data`` volume at ``/data`` (src/host/runtime.py
+# ``start_browser_service``). A relative ``data/sessions`` resolves to
+# ``/app/data/sessions`` — the container's ephemeral write layer, which is
+# discarded every time the engine recreates the container (runtime.py
+# force-removes the stale ``openlegion_browser`` container on each start),
+# so the across-restart durability this module exists to provide would
+# silently not hold. ``/data`` matches the defaults already used by
+# ``service.BrowserManager.profiles_dir`` (``/data/profiles``),
+# ``canary`` (``/data/canary``) and ``recorder`` (``/data/debug``).
+# Override-able via env for tests + custom deployments. The directory is
+# created lazily on first snapshot; missing dir on restore is a non-fatal
+# no-op (returns None).
+_DEFAULT_DIR = "/data/sessions"
 _SCHEMA_VERSION = 1
 # Hard cap on serialized snapshot size. localStorage can be ~5 MiB per
 # origin under spec; a malicious site can inflate one origin's quota by
@@ -140,8 +151,8 @@ def _sessions_dir() -> Path:
     """Return the per-service sessions directory.
 
     Resolved lazily so tests can monkeypatch the env var between
-    cases. A ``data/`` sibling of the captcha-cost counter sidecar
-    keeps all browser-service persistence under one parent.
+    cases. A ``/data/`` sibling of the captcha-cost counter sidecar
+    keeps all browser-service persistence on the one durable volume.
     """
     return Path(os.environ.get("BROWSER_SESSION_DIR", _DEFAULT_DIR))
 

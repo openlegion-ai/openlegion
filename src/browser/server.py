@@ -1003,7 +1003,7 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
     #
     # Read-only summary + operator clear endpoint. Mounted on the browser
     # service so the per-agent JSON sidecar lives next to the rest of the
-    # browser-state files (``data/sessions/<agent_id>.json``). The dashboard
+    # browser-state files (``/data/sessions/<agent_id>.json``). The dashboard
     # router calls these via ``runtime.browser_service_url`` and forwards
     # the privacy-safe shape to the operator panel.
     #

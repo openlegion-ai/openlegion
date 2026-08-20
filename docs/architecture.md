@@ -220,7 +220,7 @@ All persistent state is SQLite (WAL mode, `busy_timeout=30000` except `traces` w
 |---|---|---|
 | `data/costs.db` | Per-agent + per-team LLM cost ledger | `src/host/costs.py` |
 | `data/wallet.db` | Agent wallet index, addresses, derivation metadata | `src/host/wallet.py` |
-| `data/captcha_costs.json` | CAPTCHA cost ledger in millicents (1/100,000 USD) | `src/browser/captcha_cost_counter.py` |
+| `/data/captcha_costs.json` (browser container volume `openlegion_browser_data`) | CAPTCHA cost ledger in millicents (1/100,000 USD) | `src/browser/captcha_cost_counter.py` |
 | Mesh-side blackboard / pubsub / audit-log SQLite | Inter-agent state, atomic CAS, undo/archive | `src/host/mesh.py` |
 | `data/traces.db` | Request traces (lower `busy_timeout=5000`) | `src/host/traces.py` |
 | `data/dashboard.db` | Telemetry | `src/dashboard/telemetry.py` |
