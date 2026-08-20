@@ -227,3 +227,60 @@ class TestRoutineManagementStillWorks:
     def test_non_permission_edits_are_not_the_ceilings_concern(self):
         assert clamp_to_operator_ceiling("model", "claude-opus-5") is None
         assert clamp_to_operator_ceiling("permissions", "not-a-dict") is None
+
+
+class TestMalformedValuesCannotBeWritten:
+    """A wrong-TYPE value must be refused before it reaches permissions.json.
+
+    ``/edit-soft`` writes the submitted permissions JSON and only THEN calls
+    ``PermissionMatrix.reload()``, which catches JSON and I/O errors but not
+    model-construction errors. So ``{"can_message": null}`` passed the ceiling,
+    was persisted, and blew up on reload — leaving the file poisoned and live
+    permission state empty or half-rebuilt, with the request returning 500.
+
+    The check probes the real ``AgentPermissions`` model, so it stays derived
+    from the model rather than becoming a second hand-written type table.
+    """
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"can_message": None},
+            {"can_message": 12345},
+            {"can_message": {"a": 1}},
+            {"allowed_skills": 5},
+            {"browser_actions": 7},
+            {"blackboard_read": "not-a-list"},
+        ],
+    )
+    def test_wrong_type_is_refused(self, payload: dict):
+        err = clamp_to_operator_ceiling("permissions", payload)
+        assert err is not None, f"unwritable value accepted: {payload}"
+        assert "Invalid value" in err
+
+    def test_validation_is_strict_so_coercion_cannot_grant(self):
+        """Lax pydantic turns "yes" and 1 into True.
+
+        A permissions edit must not depend on coercion — a string should never
+        become a boolean capability grant.
+        """
+        assert clamp_to_operator_ceiling(
+            "permissions", {"can_use_browser": "yes"},
+        ) is not None
+        assert clamp_to_operator_ceiling(
+            "permissions", {"can_use_browser": 1},
+        ) is not None
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"can_use_browser": True},
+            {"can_use_browser": False},
+            {"can_message": ["*"]},
+            {"browser_actions": None},
+            {"browser_actions": ["click"]},
+            {"allowed_skills": []},
+        ],
+    )
+    def test_well_formed_values_still_pass(self, payload: dict):
+        assert clamp_to_operator_ceiling("permissions", payload) is None

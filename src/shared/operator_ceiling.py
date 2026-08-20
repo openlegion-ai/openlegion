@@ -41,15 +41,32 @@ without a decision here fails CLOSED rather than silently becoming grantable.
 ``tests/test_operator_ceiling.py`` pins that: the two tables below must together
 cover ``AgentPermissions.model_fields`` exactly.
 
-Not applied to undo
--------------------
+Not applied to undo — and that is a KNOWN GAP, not a proof of safety
+-------------------------------------------------------------------
 The undo path calls ``_apply_pending_change`` directly rather than going
 through ``/mesh/agents/{agent_id}/edit-soft``, so it never reaches this
-function — deliberately. Undo REPLACES the agent's permissions with the full
-pre-edit dict, which would otherwise trip the deny-by-default check on any
-forbidden field the agent legitimately had. That is safe because the stored
-``old_value`` is read from the server's own state at edit time, never supplied
-by the caller: undo can only restore prior state, never escalate past it.
+function. Undo REPLACES the agent's permissions with the full pre-edit dict,
+which would otherwise trip the deny-by-default check on any forbidden field the
+agent legitimately had.
+
+An earlier version of this note claimed that was safe because ``old_value`` is
+server-derived. That argument is WRONG, and the hole it misses is worth
+spelling out so nobody re-derives it. Server-derived proves the snapshot is
+authentic, not that restoring it is monotonic:
+
+  1. an agent holds human-granted wallet or credential authority;
+  2. the operator makes an unrelated, permitted edit — the receipt captures the
+     agent's ENTIRE permissions record, including that authority;
+  3. a human revokes the authority via the dashboard;
+  4. the operator redeems the still-live undo receipt;
+  5. the full historical record is restored, re-granting what the human took
+     away.
+
+Closing it means making undo diff-aware (restore only the keys the original
+edit touched) or ceiling-checking the delta, and the snapshot is also taken
+outside the write lock, so it races other permission writers. Both belong with
+the undo machinery in ``src/host/server.py``, not here. Tracked as a follow-up;
+this module deliberately does not pretend to cover it.
 
 Revoke, never grant
 -------------------
@@ -181,6 +198,35 @@ def _is_de_escalation(value: Any) -> bool:
     return value is None
 
 
+def _type_error(key: str, value: Any) -> str | None:
+    """Reject a value that ``AgentPermissions`` could not hold.
+
+    The ``/edit-soft`` endpoint writes the submitted permissions JSON and only
+    then calls ``PermissionMatrix.reload()``, which catches JSON and I/O errors
+    but not model-construction errors. So a well-formed-JSON-but-wrong-TYPE
+    value (``{"can_message": null}``) passed the ceiling, was persisted, and
+    then blew up on reload — leaving ``permissions.json`` poisoned and live
+    permission state empty or half-rebuilt, with the request returning 500.
+
+    Probing the real model keeps this derived from ``AgentPermissions`` rather
+    than a second hand-written type table.
+    """
+    from src.shared.types import AgentPermissions
+
+    try:
+        # strict: a permissions edit must not rely on coercion. Lax mode turns
+        # "yes" and 1 into True, so a string could grant a boolean capability.
+        AgentPermissions.model_validate(
+            {"agent_id": "_ceiling_type_probe", key: value}, strict=True,
+        )
+    except Exception:
+        return (
+            f"Invalid value for permission '{key}': {value!r} is not a valid "
+            f"{key} value. The edit was rejected before it could be written."
+        )
+    return None
+
+
 def clamp_to_operator_ceiling(field: str, new_value) -> str | None:
     """Return an error string if a permissions edit exceeds the operator ceiling.
 
@@ -214,6 +260,12 @@ def clamp_to_operator_ceiling(field: str, new_value) -> str | None:
                 "operator-manageable permission. Use the dashboard for "
                 "advanced permissions."
             )
+
+        # Type-check BEFORE the bound check: an unwritable value must never
+        # reach the file, and the bound checks below assume the right shape.
+        type_err = _type_error(key, value)
+        if type_err:
+            return type_err
 
         max_val = _OPERATOR_PERMISSION_CEILING[key]
         if max_val is UNRESTRICTED:
