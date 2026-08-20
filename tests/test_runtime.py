@@ -3401,3 +3401,82 @@ class TestUtilityModelEnv:
 
         monkeypatch.setattr("src.cli.config._load_config", _boom)
         assert backend._utility_model_from_config() == ""
+
+
+# ── RuntimeContext.shutdown() before start() ──────────────────
+#
+# ``cli/main.py`` wraps ``ctx.start()`` in ``try/finally: ctx.shutdown()``.
+# A boot failure BEFORE ``_create_components`` runs (e.g. ``_validate_prereqs``
+# calling ``sys.exit(1)`` because Docker is down) therefore still runs the
+# teardown against a context where nothing is wired. Every attribute
+# ``shutdown()`` dereferences must exist from ``__init__`` — otherwise the
+# AttributeError propagates out of the ``finally`` and REPLACES the real boot
+# error, so the operator sees a traceback instead of "Docker is not running".
+
+
+def _bare_runtime_context(monkeypatch, tmp_path):
+    """A RuntimeContext built through the real ``__init__``, nothing started."""
+    from src.cli import runtime as runtime_mod
+
+    monkeypatch.setattr(
+        runtime_mod,
+        "_load_config",
+        lambda *a, **k: {
+            "mesh": {"host": "127.0.0.1", "port": 8420},
+            "llm": {},
+            "agents": {},
+        },
+    )
+    return runtime_mod.RuntimeContext(str(tmp_path / "mesh.yaml"))
+
+
+class TestShutdownBeforeStart:
+    def test_shutdown_without_start_does_not_raise(self, monkeypatch, tmp_path):
+        ctx = _bare_runtime_context(monkeypatch, tmp_path)
+        # Every component guard is falsy, so this walks the whole teardown
+        # body and dereferences each attribute exactly as a failed boot would.
+        ctx.shutdown()
+        assert ctx._shutting_down is True
+
+    def test_chain_watcher_is_declared_by_init(self, monkeypatch, tmp_path):
+        # Pins the specific regression: ``chain_watcher`` used to be assigned
+        # only in ``_create_components``, which a failed boot never reaches.
+        ctx = _bare_runtime_context(monkeypatch, tmp_path)
+        assert ctx.chain_watcher is None
+
+    def test_no_component_attribute_is_late_bound_only(self):
+        """Static guard for the whole class of bug, incl. code paths the
+        no-op teardown above skips (the ``_dispatch_loop`` close closure).
+
+        Every non-method ``self.X`` that ``shutdown()`` reads must be assigned
+        in ``__init__``.
+        """
+        import ast
+        import inspect
+
+        from src.cli import runtime as runtime_mod
+
+        tree = ast.parse(inspect.getsource(runtime_mod))
+        cls = next(n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "RuntimeContext")
+        methods = {f.name for f in cls.body if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+        def self_attrs(node, ctx_type):
+            return {
+                n.attr
+                for n in ast.walk(node)
+                if isinstance(n, ast.Attribute)
+                and isinstance(n.value, ast.Name)
+                and n.value.id == "self"
+                and isinstance(n.ctx, ctx_type)
+            }
+
+        init = next(f for f in cls.body if getattr(f, "name", None) == "__init__")
+        shutdown = next(f for f in cls.body if getattr(f, "name", None) == "shutdown")
+
+        declared = self_attrs(init, ast.Store)
+        touched = {a for a in self_attrs(shutdown, ast.Load) if a not in methods}
+        assert not (touched - declared), (
+            "shutdown() dereferences attributes that __init__ never declares — "
+            "a boot failure before they are wired would mask the real error: "
+            f"{sorted(touched - declared)}"
+        )
