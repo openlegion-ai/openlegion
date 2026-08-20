@@ -3069,3 +3069,58 @@ class TestAutonomyLogUI:
         # tab body rather than declared at the top-nav bar.
         preceding = _INDEX_HTML[:idx]
         assert preceding.count("Sticky \"Needs you\" panel") >= 1
+
+
+# ── Toast helper call sites ────────────────────────────────────────────
+#
+# Regression guard for the CAPTCHA-solver settings handlers, which called
+# a helper that does not exist. See ``TestToastHelperCallSites``.
+
+
+class TestToastHelperCallSites:
+    """``showToast(msg, duration)`` is the component's only toast helper.
+
+    Two contracts are asserted here, both of which the CAPTCHA-solver
+    settings handlers used to violate:
+
+    1. The method is ``showToast`` — there is no ``_showToast``. Calling
+       the underscore-prefixed name is a plain ``TypeError``. In
+       ``saveCaptchaSolver`` the success-branch TypeError was swallowed by
+       the surrounding ``catch``, whose handler called ``this._showToast``
+       *again*; that second TypeError escaped the function, so the
+       ``captchaSolverSaving = false`` line after the try/catch never ran
+       and the Save button stayed stuck spinning.
+
+    2. The second argument is a millisecond duration fed straight to
+       ``setTimeout`` — not a severity. A string such as ``'error'``
+       coerces to ``NaN``, which ``setTimeout`` clamps to ``0``, so the
+       toast would be dropped on the next tick instead of shown. The
+       toast template renders only ``t.msg`` and has no severity styling.
+    """
+
+    def test_no_underscore_prefixed_toast_helper(self):
+        assert "_showToast" not in _APP_JS_TEXT, (
+            "app.js references this._showToast(...), but the method is "
+            "showToast(...) — every such call site throws TypeError"
+        )
+
+    def test_toast_helper_defined_exactly_once(self):
+        assert len(re.findall(r"^\s{4}showToast\(", _APP_JS_TEXT, re.M)) == 1
+
+    def test_no_string_literal_passed_as_duration(self):
+        bad = re.findall(
+            r"showToast\([^\n]*,\s*['\"][A-Za-z_]+['\"]\s*,?\s*\)", _APP_JS_TEXT
+        )
+        assert not bad, (
+            "showToast()'s second argument is a setTimeout duration; a bare "
+            f"word literal silently makes the toast invisible: {bad}"
+        )
+
+    def test_captcha_solver_handlers_use_the_real_helper(self):
+        start = _APP_JS_TEXT.index("async saveCaptchaSolver()")
+        end = _APP_JS_TEXT.index("// ── Network / Proxy")
+        block = _APP_JS_TEXT[start:end]
+        # Two calls in saveCaptchaSolver's try, one in its catch, one in
+        # removeCaptchaSolver.
+        assert block.count("this.showToast(") == 4
+        assert "_showToast" not in block
