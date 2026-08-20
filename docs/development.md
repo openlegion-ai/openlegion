@@ -490,11 +490,12 @@ openlegion/
 | Group | Packages | Purpose |
 |-------|----------|---------|
 | `dev` | `pytest`, `pytest-asyncio`, `pytest-cov`, `pytest-split`, `pytest-xdist`, `ruff` | Testing, coverage, sharding, and linting (`pytest-split` is what CI uses for `--splits 3`) |
-| `mcp` | `mcp>=1.0` | MCP tool support |
+| `mcp` | `mcp>=1.9,<2` | Back-compat alias — `mcp` is a core dependency now (mesh gateway). The `<2` ceiling is load-bearing: the 2.x SDK renamed `streamablehttp_client` and removed `mcp.server.fastmcp`. |
 | `channels` | `python-telegram-bot`, `discord.py`, `slack-bolt` | Messaging channels |
 | `wallet` | `web3`, `eth-account`, `mnemonic`, `solders`, `solana` | Ethereum + Solana wallet support |
+| `browser` | `camoufox[geoip]`, `fastapi`, `uvicorn[standard]`, `pydantic`, `httpx`, `Pillow` | Browser service container only — `Dockerfile.browser` installs exactly this extra. Not installed by `install.sh`. |
 
-There is no `requirements.lock` / `Pipfile.lock` — version bounds in `pyproject.toml` are `>=` only. CI runs the test matrix on both Python 3.11 and 3.12 to catch regressions across the supported range.
+There is no `requirements.lock` / `Pipfile.lock` — version bounds in `pyproject.toml` are `>=` floors, plus an upper bound on the few dependencies whose next major is known to break us (`litellm`, `mcp`, the `wallet` group, the pinned `camoufox`). CI runs the test matrix on both Python 3.11 and 3.12 to catch regressions across the supported range.
 
 ## Common Mistakes
 

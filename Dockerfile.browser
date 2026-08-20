@@ -123,36 +123,22 @@ RUN mkdir -p /opt/openlegion/extensions \
 # library is required. The encode path in src/browser/service.py uses
 # Image.save(..., format="WEBP") which is Pillow's built-in encoder.
 #
-# ``uvicorn[standard]`` is required (not plain ``uvicorn``): the
-# ``[standard]`` extra pulls in the ``websockets`` package, which
-# uvicorn needs to handle WebSocket upgrades. Without it, every WS
-# request to ``/agent-vnc/{agent_id}/{path}`` returns HTTP 404 at the
-# protocol layer before our route handler ever runs — which is what
-# the per-agent VNC iframe was hitting in production. The package is
-# also used by ``vnc_ws`` to connect upstream to the per-agent
-# KasmVNC.
+# The package list itself is NOT written here: it lives in pyproject.toml's
+# ``[project.optional-dependencies] browser`` extra, together with the
+# rationale for each pin (camoufox's Playwright drift, uvicorn[standard]'s
+# websockets requirement, the Pillow floor). Keeping it there means ONE
+# manifest that dependency tooling can actually see, instead of a second,
+# invisible one that has to be kept in sync by hand.
+#
+# We extract just that extra rather than running ``pip install .[browser]``
+# because the latter would also drag in every CORE dependency (litellm,
+# docker, anthropic, …) that the browser container has no use for.
 COPY pyproject.toml .
-# ``camoufox`` is version-pinned on purpose. Camoufox itself pins
-# ``playwright="*"``, so an unpinned rebuild can silently drift onto a
-# Playwright release that breaks the Camoufox<->Firefox Juggler bridge
-# (camoufox#617), and it also drags in a different fingerprint DB. CI's
-# ``build-and-smoke`` job (.github/workflows/browser-image.yml) builds
-# this exact image whenever Dockerfile.browser/pyproject.toml change, so
-# it WILL catch an un-installable or absent pin — it already caught an
-# earlier bad pin (a non-existent version). What CI does NOT do is run
-# the browser canary (``src/browser/canary.py``) or any live
-# Camoufox-launch / Juggler-bridge / fingerprint check, so the *runtime*
-# behavior of a future version BUMP still surfaces only as a live
-# antibot/session regression. 0.4.11 is the current latest release,
-# i.e. exactly what an unpinned build resolves to today — pinning it locks
-# in current, known-good behavior with zero drift. Refresh this pin
-# DELIBERATELY and re-run the browser canary at staging after any bump.
-# The ``python -m camoufox fetch`` below resolves the matching Firefox
-# build from whatever version is pinned here.
 RUN pip install --no-cache-dir --root-user-action=ignore --upgrade pip \
-    && pip install --no-cache-dir --root-user-action=ignore \
-    "camoufox[geoip]==0.4.11" fastapi "uvicorn[standard]" pydantic httpx \
-    "Pillow>=10.0"
+    && python -c 'import tomllib; open("/tmp/browser-requirements.txt", "w").write(chr(10).join(tomllib.load(open("pyproject.toml", "rb"))["project"]["optional-dependencies"]["browser"]) + chr(10))' \
+    && cat /tmp/browser-requirements.txt \
+    && pip install --no-cache-dir --root-user-action=ignore -r /tmp/browser-requirements.txt \
+    && rm /tmp/browser-requirements.txt
 
 # Application code
 COPY src/browser/ /app/src/browser/

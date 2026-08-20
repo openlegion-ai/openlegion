@@ -15,10 +15,14 @@ WORKDIR /app
 # (litellm, pyyaml, click, docker are host-only — not needed here)
 # sqlite-vec --pre: v0.1.7-alpha fixes broken ARM64 wheels
 # No browser deps — browsing is handled by the shared browser service
+# ``mcp`` carries the same ``<2`` ceiling as pyproject.toml: the 2.x SDK
+# renamed/removed the symbols src/agent/mcp_client.py imports, and that
+# import site fails CLOSED (every configured server marked "failed"), so
+# an unbounded resolve would silently disable MCP on the next rebuild.
 COPY pyproject.toml .
 RUN pip install --no-cache-dir --root-user-action=ignore --upgrade pip \
     && pip install --no-cache-dir --root-user-action=ignore \
-    fastapi uvicorn httpx pydantic mcp pypdf \
+    fastapi uvicorn httpx pydantic "mcp>=1.9,<2" pypdf \
     && pip install --no-cache-dir --root-user-action=ignore --pre sqlite-vec
 
 # Application code
