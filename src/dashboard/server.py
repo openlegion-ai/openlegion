@@ -16,6 +16,11 @@ Phase 10 §24 — billing-export endpoint.
   ``monthly`` (current calendar month). Each CSV row is
   ``period_start, agent_id, millicents, dollars, data_scope`` plus a
   final ``__tenant_total__`` synthetic row carrying the rolled-up total.
+  The per-agent spend is fetched over HTTP from the browser service
+  (``GET /browser/captcha-costs``) because the cost counter's state is
+  process-local to THAT process; the tenant grouping happens here, where
+  the TeamStore lives. When the browser service is unreachable the
+  endpoint returns 503 rather than a zero-filled CSV.
   The ``data_scope`` column is ``monthly_actual`` when the period is
   ``monthly`` (live state IS current-month so the number is correct);
   for ``daily`` / ``weekly`` it is ``current_month_aggregate`` because
@@ -137,6 +142,84 @@ async def _fetch_browser_metrics_upstream(
                 "code": "service_unavailable",
                 "message": "Malformed response from browser service",
                 "retry_after_ms": None,
+            },
+        }
+    return {"success": True, "data": data}
+
+
+async def _fetch_captcha_costs_upstream(
+    client: Any,
+    service_url: str,
+    auth_token: str,
+) -> dict:
+    """Call ``GET /browser/captcha-costs`` on the browser service.
+
+    The CAPTCHA cost counter keeps its state in process-local module
+    globals that live in the BROWSER SERVICE process (:8500); the
+    dashboard runs inside the mesh process (:8420). Importing
+    ``src.browser.captcha_cost_counter`` here only ever reads the mesh
+    process's own (permanently empty) copy, so the billing rollup reads
+    the numbers over HTTP from the process that owns them — the same way
+    ``/browser/metrics`` is proxied.
+
+    Module-level (not a closure) so tests can patch it directly. Returns
+    the §2.3 error envelope on any failure and ``{"success": True,
+    "data": {...}}`` on success.
+    """
+    headers: dict[str, str] = {}
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+    try:
+        resp = await client.get(
+            f"{service_url}/browser/captcha-costs",
+            headers=headers,
+            timeout=10,
+        )
+    except Exception as e:
+        logger.debug("CAPTCHA cost fetch failed: %s", e)
+        return {
+            "success": False,
+            "error": {
+                "code": "service_unavailable",
+                "message": "Browser service unreachable",
+            },
+        }
+    if resp.status_code >= 400:
+        logger.debug("CAPTCHA cost fetch returned HTTP %d", resp.status_code)
+        return {
+            "success": False,
+            "error": {
+                "code": "service_unavailable",
+                "message": f"Browser service returned HTTP {resp.status_code}",
+            },
+        }
+    try:
+        data = resp.json()
+    except Exception as e:
+        logger.debug("CAPTCHA cost JSON parse failed: %s", e)
+        return {
+            "success": False,
+            "error": {
+                "code": "service_unavailable",
+                "message": "Malformed response from browser service",
+            },
+        }
+    # Validate the SHAPE, not just the parse. Downstream indexes
+    # ``data["agents"][agent_id]`` and coerces each value with ``int()``,
+    # so a well-formed-JSON-but-wrong-shape response (a list, a null, a
+    # non-numeric string) would raise inside the endpoint and surface as a
+    # 500 instead of the 503 this envelope promises — and a 500 on a
+    # billing export reads as "our bug" rather than "upstream is down".
+    agents = data.get("agents") if isinstance(data, dict) else None
+    if not isinstance(agents, dict) or any(
+        not isinstance(v, int) or isinstance(v, bool) for v in agents.values()
+    ):
+        logger.debug("CAPTCHA cost response had unexpected shape: %r", data)
+        return {
+            "success": False,
+            "error": {
+                "code": "service_unavailable",
+                "message": "Malformed response from browser service",
             },
         }
     return {"success": True, "data": data}
@@ -5694,8 +5777,6 @@ def create_dashboard_router(
 
         from starlette.responses import PlainTextResponse
 
-        from src.browser import captcha_cost_counter as _ccc
-
         if not tenant:
             raise HTTPException(400, "Missing required query param: tenant")
         if period not in _VALID_BILLING_PERIODS:
@@ -5731,21 +5812,76 @@ def create_dashboard_router(
                 microsecond=0,
             )
 
-        # Walk per-agent buckets via the new tenant helpers. The
-        # in-memory state is current-month only (see captcha_cost_counter
-        # docstring for the trim rationale), so for ``daily`` and
-        # ``weekly`` we still report the same per-agent monthly buckets
-        # — operators get a month-to-date number with a ``data_scope``
-        # column flagging that the data IS NOT period-correct.  Older
-        # buckets would require persisted snapshots, deferred per
-        # §11.10's SQLite trim.  The honest column on every row beats
-        # a billing footgun where finance reconciles a "daily" CSV
-        # against month-to-date numbers.
-        breakdown = await _ccc.get_tenant_breakdown(tenant)
-        total_millicents = await _ccc.get_tenant_total(
-            tenant,
-            since=period_start,
+        # Where the numbers come from. The CAPTCHA cost counter keeps its
+        # state in process-local module globals inside the BROWSER SERVICE
+        # process (:8500); this dashboard router runs inside the mesh
+        # process (:8420). Importing ``captcha_cost_counter`` here reads
+        # the mesh's own copy of those globals, which nothing ever writes
+        # — the export reported 0 for every tenant. So: fetch the raw
+        # per-agent spend over HTTP from the process that owns it (same
+        # proxy pattern as ``/browser/metrics``), and do the tenant
+        # grouping HERE, where the team authority (TeamStore) lives. The
+        # browser container mounts neither ``config/`` nor the mesh
+        # ``data/``, so it cannot resolve tenants itself.
+        #
+        # A 503 (rather than a zero-filled CSV) when the service is down
+        # is deliberate: silently exporting zeros into finance tooling is
+        # the exact footgun this endpoint exists to avoid.
+        service_url = getattr(runtime, "browser_service_url", "") if runtime else ""
+        if not service_url:
+            raise HTTPException(
+                503,
+                "Browser service unavailable — CAPTCHA spend cannot be read",
+            )
+        upstream = await _fetch_captcha_costs_upstream(
+            _dashboard_browser_client,
+            service_url,
+            getattr(runtime, "browser_auth_token", "") or "",
         )
+        if not upstream.get("success"):
+            raise HTTPException(
+                503,
+                (upstream.get("error") or {}).get("message") or "Browser service unavailable",
+            )
+        per_agent = (upstream.get("data") or {}).get("agents") or {}
+
+        # Tenant membership from the mesh-side team authority. Every
+        # member is emitted — including members with no spend this month
+        # — so the operator sees which agents in the tenant are active vs
+        # idle rather than having to infer absence.
+        #
+        # The in-memory upstream state is current-month only (see the
+        # captcha_cost_counter docstring for the trim rationale), so for
+        # ``daily`` and ``weekly`` we still report the same monthly
+        # buckets — operators get a month-to-date number with a
+        # ``data_scope`` column flagging that the data IS NOT
+        # period-correct. Older buckets would require persisted
+        # snapshots, deferred per §11.10's SQLite trim. The honest column
+        # on every row beats a billing footgun where finance reconciles a
+        # "daily" CSV against month-to-date numbers.
+        # Fail LOUD, for the same reason the browser-service fetch above
+        # 503s: an empty member list is indistinguishable from a tenant
+        # that spent nothing, so swallowing a lookup failure here would
+        # export a zero-total CSV into finance tooling — exactly the
+        # footgun this endpoint exists to avoid, just reached through the
+        # team authority instead of the cost counter.
+        try:
+            tenant_known = teams_store.team_exists(tenant)
+            members = list(teams_store.members(tenant) or []) if tenant_known else []
+        except Exception as e:
+            logger.warning("billing rollup: team lookup failed for %r: %s", tenant, e)
+            raise HTTPException(
+                503,
+                "Team directory unavailable — CAPTCHA spend cannot be attributed",
+            ) from e
+        # An unknown tenant is a caller error, not an empty bill: a typo'd
+        # ``tenant`` would otherwise return HTTP 200 and a clean zero that
+        # reconciles against nothing. A tenant that DOES exist and simply
+        # spent nothing is a legitimate zero and still returns 200.
+        if not tenant_known:
+            raise HTTPException(404, f"Unknown tenant: {tenant!r}")
+        breakdown = {str(aid): int(per_agent.get(aid, 0) or 0) for aid in members}
+        total_millicents = sum(breakdown.values())
         # ``monthly_actual`` for monthly (the in-memory state IS the
         # current month, so the number is correct for the requested
         # period); ``current_month_aggregate`` for daily/weekly since

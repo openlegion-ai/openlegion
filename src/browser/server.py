@@ -84,7 +84,7 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
             # always agent-scoped (``/browser/{agent_id}/keepalive``)
             # since the legacy bare endpoint was removed in #813.
             if len(parts) >= 3 and parts[2] not in (
-                "", "status", "metrics", "_canary", "settings",
+                "", "status", "metrics", "_canary", "settings", "captcha-costs",
             ):
                 if not _AGENT_ID_RE.fullmatch(parts[2]):
                     return JSONResponse(
@@ -233,6 +233,25 @@ def create_browser_app(manager: BrowserManager, lifespan=None) -> FastAPI:
         except (TypeError, ValueError):
             since_seq = 0
         return manager.get_recent_metrics(since_seq=since_seq)
+
+    @app.get("/browser/captcha-costs")
+    async def service_captcha_costs(request: Request):
+        """Return current-month CAPTCHA spend per agent (millicents).
+
+        The cost counter's state is process-local to THIS process, but the
+        operator billing rollup renders in the dashboard, which runs inside
+        the mesh process. Reading ``captcha_cost_counter`` from there sees
+        an always-empty dict, so the rollup reads it here over HTTP instead
+        (same shape as ``/browser/metrics``: mesh polls, service answers).
+
+        Tenant grouping is deliberately NOT done here — this container has
+        no access to the mesh's team authority. Callers group by team on
+        the mesh side.
+        """
+        _verify_auth(request)
+        from src.browser import captcha_cost_counter as _ccc
+
+        return await _ccc.spend_by_agent()
 
     @app.post("/browser/_canary")
     async def run_canary_endpoint(request: Request):

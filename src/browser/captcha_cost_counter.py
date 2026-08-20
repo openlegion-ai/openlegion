@@ -43,6 +43,10 @@ Public surface:
     log a warning and skip counting (over-counting is worse than
     under-counting for trust).
   * :func:`get_millicents(agent_id)` — current-month spend.
+  * :func:`spend_by_agent()` — every agent's current-month spend, for
+    the read-only ``GET /browser/captcha-costs`` HTTP surface (the
+    billing rollup runs in the MESH process and cannot see this
+    process's ``_state``).
 
 Tenant rollup (Phase 10 §24):
   * :func:`_tenant_for(agent_id)` — resolve an agent to its tenant via
@@ -357,6 +361,35 @@ async def get_millicents(agent_id: str) -> int:
     async with _get_lock():
         bucket = _bucket_for(agent_id)
         return int(bucket["millicents"])
+
+
+async def spend_by_agent() -> dict[str, Any]:
+    """Return every agent's current-month spend as ``{"month", "agents"}``.
+
+    Deliberately tenant-agnostic. ``_state`` is process-local and lives in
+    the browser-service process (the ``openlegion_browser`` container),
+    while the team authority (TeamStore) lives with the mesh — the browser
+    container mounts neither ``config/`` nor the mesh ``data/``, so it
+    cannot resolve tenants at all (see :func:`_tenant_for`). Anything that
+    wants a per-tenant rollup must therefore read these raw per-agent
+    numbers over HTTP (``GET /browser/captcha-costs``) and group them
+    mesh-side, where team membership actually is.
+
+    Buckets stamped with a previous month are omitted rather than
+    reported: they reset lazily on the next write, so their contribution
+    to the CURRENT month is zero.
+    """
+    cm = _current_month()
+    async with _get_lock():
+        # Materialize under the lock so a concurrent ``add_cost`` cannot
+        # mutate the dict mid-walk; same pattern as the tenant helpers.
+        items = list(_state.items())
+    agents: dict[str, int] = {}
+    for agent_id, bucket in items:
+        if not isinstance(bucket, dict) or bucket.get("month") != cm:
+            continue
+        agents[str(agent_id)] = int(bucket.get("millicents", 0))
+    return {"month": cm, "agents": agents}
 
 
 async def check_and_charge(
