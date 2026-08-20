@@ -8295,14 +8295,14 @@ function dashboard() {
           this.captchaSolverProvider = data.provider || '';
           this.captchaSolverKeyMasked = data.key_masked || '';
           if (keyInput) keyInput.value = '';
-          this._showToast('CAPTCHA solver settings saved');
+          this.showToast('CAPTCHA solver settings saved');
         } else {
           const err = await resp.json().catch(() => ({}));
-          this._showToast(err.detail || 'Failed to save', 'error');
+          this.showToast(err.detail || 'Failed to save');
         }
       } catch (e) {
         console.warn('saveCaptchaSolver failed:', e);
-        this._showToast('Failed to save CAPTCHA solver settings', 'error');
+        this.showToast('Failed to save CAPTCHA solver settings');
       }
       this.captchaSolverSaving = false;
     },
@@ -8317,7 +8317,7 @@ function dashboard() {
         if (resp.ok) {
           this.captchaSolverProvider = '';
           this.captchaSolverKeyMasked = '';
-          this._showToast('CAPTCHA solver removed');
+          this.showToast('CAPTCHA solver removed');
         }
       } catch (e) { console.warn('removeCaptchaSolver failed:', e); }
       this.captchaSolverSaving = false;
