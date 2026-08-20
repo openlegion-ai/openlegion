@@ -538,6 +538,8 @@ class TestCSVExportEndpoint:
         self.upstream: dict[str, int] = {}
         self.upstream_status = 200
         self.upstream_auth: list[str] = []
+        # Set to a raw JSON body to simulate a wrong-shaped upstream reply.
+        self.upstream_shape_override = None
 
         import httpx
 
@@ -549,6 +551,8 @@ class TestCSVExportEndpoint:
                     self.upstream_status,
                     json={"detail": "browser service error"},
                 )
+            if self.upstream_shape_override is not None:
+                return httpx.Response(200, json=self.upstream_shape_override)
             return httpx.Response(
                 200,
                 json={
@@ -570,7 +574,13 @@ class TestCSVExportEndpoint:
         try:
             self.client, self.components = _make_dashboard_client(
                 self._tmpdir,
-                teams={"alpha": "tenant-a", "beta": "tenant-a"},
+                teams={
+                    "alpha": "tenant-a",
+                    "beta": "tenant-a",
+                    # A real team that simply hasn't spent — distinct from a
+                    # tenant that doesn't exist at all.
+                    "gamma": "tenant-idle",
+                },
             )
         finally:
             httpx_patch.stop()
@@ -781,18 +791,74 @@ class TestCSVExportEndpoint:
             reset_cache()
 
     def test_csv_tenant_with_no_spend_returns_total_zero(self):
-        """An empty tenant still emits the header + a zero-total row."""
+        """A REAL tenant that simply spent nothing is a legitimate zero.
+
+        It emits the header, a zero row for each member, and a zero total —
+        200, not an error. This is the case that must stay distinguishable
+        from the unknown-tenant and lookup-failure cases below.
+        """
+        self.upstream = {"alpha": 100}
+        resp = self.client.get(
+            "/dashboard/api/billing/captcha-rollup",
+            params={"tenant": "tenant-idle", "period": "monthly"},
+        )
+        assert resp.status_code == 200
+        lines = resp.text.strip().split("\n")
+        assert lines[0] == ("period_start,agent_id,millicents,dollars,data_scope")
+        # One member row (gamma, zero spend) + the total row.
+        assert len(lines) == 3
+        assert ",gamma,0,0.00000,monthly_actual" in lines[1]
+        assert "__tenant_total__,0,0.00000,monthly_actual" in lines[2]
+        # tenant-a's spend must not leak into another tenant's export.
+        assert "alpha" not in resp.text
+
+    def test_csv_unknown_tenant_is_404_not_a_zero_bill(self):
+        """A typo'd tenant must not reconcile as "spent nothing".
+
+        Returning 200 + a clean zero for a name that doesn't exist is the
+        same silent-zero footgun the browser-service path 503s for: finance
+        tooling cannot tell it from a real zero.
+        """
         self.upstream = {"alpha": 100}
         resp = self.client.get(
             "/dashboard/api/billing/captcha-rollup",
             params={"tenant": "ghost", "period": "monthly"},
         )
-        assert resp.status_code == 200
-        lines = resp.text.strip().split("\n")
-        assert lines[0] == ("period_start,agent_id,millicents,dollars,data_scope")
-        # No agent rows, just header + total.
-        assert len(lines) == 2
-        assert "__tenant_total__,0,0.00000,monthly_actual" in lines[1]
+        assert resp.status_code == 404
+
+    def test_csv_503s_on_malformed_upstream_shape(self):
+        """Well-formed JSON in the wrong shape is still an upstream failure.
+
+        The endpoint indexes ``data["agents"][id]`` and coerces with
+        ``int()``, so a list (or a non-numeric value) would raise inside the
+        handler and surface as a 500 — reading as "our bug" rather than
+        "upstream is down". It must take the same 503 path as a dead service.
+        """
+        self.upstream_shape_override = {"month": "2026-08", "agents": ["alpha"]}
+        resp = self.client.get(
+            "/dashboard/api/billing/captcha-rollup",
+            params={"tenant": "tenant-a", "period": "monthly"},
+        )
+        assert resp.status_code == 503
+
+    def test_csv_503s_when_the_team_directory_fails(self):
+        """A team-authority failure must fail LOUD.
+
+        An empty member list is indistinguishable from a tenant that spent
+        nothing, so swallowing the error here would export a zero-total CSV
+        — the exact failure the browser-service branch already 503s for.
+        """
+        self.upstream = {"alpha": 100}
+        store = self.components["teams_store"]
+        with patch.object(
+            type(store), "members", side_effect=RuntimeError("teams db is locked"),
+        ):
+            resp = self.client.get(
+                "/dashboard/api/billing/captcha-rollup",
+                params={"tenant": "tenant-a", "period": "monthly"},
+            )
+        assert resp.status_code == 503
+        assert "0.00000" not in resp.text
 
 
 # ── Browser-service read surface ───────────────────────────────────────────

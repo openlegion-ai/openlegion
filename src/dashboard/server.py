@@ -204,6 +204,24 @@ async def _fetch_captcha_costs_upstream(
                 "message": "Malformed response from browser service",
             },
         }
+    # Validate the SHAPE, not just the parse. Downstream indexes
+    # ``data["agents"][agent_id]`` and coerces each value with ``int()``,
+    # so a well-formed-JSON-but-wrong-shape response (a list, a null, a
+    # non-numeric string) would raise inside the endpoint and surface as a
+    # 500 instead of the 503 this envelope promises — and a 500 on a
+    # billing export reads as "our bug" rather than "upstream is down".
+    agents = data.get("agents") if isinstance(data, dict) else None
+    if not isinstance(agents, dict) or any(
+        not isinstance(v, int) or isinstance(v, bool) for v in agents.values()
+    ):
+        logger.debug("CAPTCHA cost response had unexpected shape: %r", data)
+        return {
+            "success": False,
+            "error": {
+                "code": "service_unavailable",
+                "message": "Malformed response from browser service",
+            },
+        }
     return {"success": True, "data": data}
 
 
@@ -5841,11 +5859,27 @@ def create_dashboard_router(
         # snapshots, deferred per §11.10's SQLite trim. The honest column
         # on every row beats a billing footgun where finance reconciles a
         # "daily" CSV against month-to-date numbers.
+        # Fail LOUD, for the same reason the browser-service fetch above
+        # 503s: an empty member list is indistinguishable from a tenant
+        # that spent nothing, so swallowing a lookup failure here would
+        # export a zero-total CSV into finance tooling — exactly the
+        # footgun this endpoint exists to avoid, just reached through the
+        # team authority instead of the cost counter.
         try:
-            members = list(teams_store.members(tenant) or [])
+            tenant_known = teams_store.team_exists(tenant)
+            members = list(teams_store.members(tenant) or []) if tenant_known else []
         except Exception as e:
-            logger.warning("billing rollup: team member lookup failed for %r: %s", tenant, e)
-            members = []
+            logger.warning("billing rollup: team lookup failed for %r: %s", tenant, e)
+            raise HTTPException(
+                503,
+                "Team directory unavailable — CAPTCHA spend cannot be attributed",
+            ) from e
+        # An unknown tenant is a caller error, not an empty bill: a typo'd
+        # ``tenant`` would otherwise return HTTP 200 and a clean zero that
+        # reconciles against nothing. A tenant that DOES exist and simply
+        # spent nothing is a legitimate zero and still returns 200.
+        if not tenant_known:
+            raise HTTPException(404, f"Unknown tenant: {tenant!r}")
         breakdown = {str(aid): int(per_agent.get(aid, 0) or 0) for aid in members}
         total_millicents = sum(breakdown.values())
         # ``monthly_actual`` for monthly (the in-memory state IS the
