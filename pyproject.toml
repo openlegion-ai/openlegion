@@ -69,10 +69,17 @@ mcp = [
 # imports camoufox. Declared here so the image has ONE dependency
 # manifest that tooling can see, instead of a literal pip list only the
 # Dockerfile knew about. Dockerfile.browser installs exactly this list.
-# The bounds below are carried over verbatim from that list — this is a
-# relocation, not an upgrade. (Note the deliberately-unchanged
-# ``Pillow>=10.0`` floor: it is looser than the core ``Pillow>=10.3.0``
-# CVE floor above. Raising it is a separate, deliberate change.)
+# The bounds below are carried over verbatim from that list, with ONE
+# deliberate change: ``Pillow`` is raised from ``>=10.0`` to ``>=10.3.0``
+# to match the core floor. The core comment says that floor excludes
+# CVE-2023-50447 / CVE-2024-28219 "reachable via browser-screenshot image
+# processing" — and PIL is imported in exactly three places, ALL of them
+# in ``src/browser/`` (``slider_solver.py``, ``service.py`` ×2). The mesh
+# host never imports it. So while the literal list lived in the
+# Dockerfile, the CVE floor sat on the process that doesn't do the
+# processing and the loose floor sat on the one that does. Consolidating
+# the manifest is what made that visible; this puts the bound where the
+# exposure actually is.
 #
 # ``camoufox`` is version-pinned on purpose. Camoufox itself pins
 # ``playwright="*"``, so an unpinned rebuild can silently drift onto a
@@ -102,7 +109,7 @@ browser = [
     "uvicorn[standard]",
     "pydantic",
     "httpx",
-    "Pillow>=10.0",
+    "Pillow>=10.3.0",
 ]
 
 channels = [
