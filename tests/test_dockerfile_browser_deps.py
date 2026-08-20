@@ -21,6 +21,12 @@ These are static checks against file content. They don't build an image
 (too slow for unit-test cadence). The ``build-and-smoke`` job in
 .github/workflows/browser-image.yml closes the remaining gap by actually
 building and importing.
+
+``TestBuildTriggerCoverage`` covers the other half of that gap: the
+``build-and-smoke`` job is path-filtered, so it only defends the paths it
+watches. Those tests pin the filter against the Dockerfile's own ``COPY``
+list, so adding a ``COPY`` without widening the trigger fails here rather
+than shipping unbuilt.
 """
 
 from __future__ import annotations
@@ -29,6 +35,7 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 try:  # tomllib is stdlib on 3.11+; the project floor is 3.10.
     import tomllib
@@ -37,6 +44,7 @@ except ModuleNotFoundError:  # pragma: no cover - only on Python 3.10
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCKERFILE = REPO_ROOT / "Dockerfile.browser"
+WORKFLOW = REPO_ROOT / ".github/workflows/browser-image.yml"
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 
 pytestmark = pytest.mark.skipif(
@@ -188,3 +196,112 @@ class TestDockerfileUsesTheManifest:
             "invisible dependency manifest.\n\n"
             f"Current install block:\n{install_block}"
         )
+
+
+class TestBuildTriggerCoverage:
+    """The image-build workflow must actually run when the image changes.
+
+    ``.github/workflows/browser-image.yml`` is path-filtered, and its
+    filter used to watch only ``Dockerfile.browser``,
+    ``docker/browser-entrypoint.sh`` and ``pyproject.toml``. But the
+    Dockerfile also ``COPY``s ``src/browser/``, ``src/shared/``,
+    ``src/__init__.py`` and the fontconfig alias file into the image —
+    so a change to any of those produced a different image that the
+    only automated build-and-smoke gate never rebuilt.
+
+    These tests derive the expectation from the Dockerfile itself
+    rather than restating a list, so adding a new ``COPY`` without
+    widening the trigger fails here instead of silently shipping.
+    """
+
+    @staticmethod
+    def _copy_sources() -> list[str]:
+        """Return every build-context path ``Dockerfile.browser`` COPYs in."""
+        sources: list[str] = []
+        for raw in DOCKERFILE.read_text().splitlines():
+            line = raw.strip()
+            if not line.upper().startswith("COPY "):
+                continue
+            args = [a for a in line.split()[1:] if not a.startswith("--")]
+            # Last arg is the destination inside the image.
+            sources.extend(args[:-1])
+        return sources
+
+    @staticmethod
+    def _matches(pattern: str, path: str) -> bool:
+        """Match one path against a GitHub ``paths:`` pattern.
+
+        NOT ``fnmatch``: Python's ``*`` crosses ``/``, GitHub's does not.
+        Using fnmatch directly would accept ``src/browser/*`` as covering
+        ``src/browser/nested/new_file.py`` — the exact shallow-filter gap
+        these tests exist to catch — so the check would pass while the
+        build trigger stayed blind to new subpackages.
+        """
+        if pattern.endswith("/**"):
+            prefix = pattern[: -len("/**")]
+            return path == prefix or path.startswith(prefix + "/")
+        # Translate the remaining wildcards segment-wise: ``**`` spans
+        # separators, a single ``*`` (and ``?``) never does.
+        parts = []
+        i = 0
+        while i < len(pattern):
+            c = pattern[i]
+            if pattern.startswith("**", i):
+                parts.append(".*")
+                i += 2
+            elif c == "*":
+                parts.append("[^/]*")
+                i += 1
+            elif c == "?":
+                parts.append("[^/]")
+                i += 1
+            else:
+                parts.append(re.escape(c))
+                i += 1
+        return re.fullmatch("".join(parts), path) is not None
+
+    @pytest.fixture(scope="class")
+    def triggers(self) -> dict[str, list[str]]:
+        workflow = yaml.safe_load(WORKFLOW.read_text())
+        # ``on`` is parsed as the boolean True by YAML 1.1.
+        on = workflow.get("on", workflow.get(True))
+        assert on, "browser-image.yml has no trigger block"
+        return {event: cfg.get("paths", []) for event, cfg in on.items()}
+
+    def test_push_and_pull_request_filters_agree(self, triggers: dict[str, list[str]]):
+        """A filter that fires on one event but not the other means main
+        and PRs are gated differently — the gap just moves rather than
+        closing."""
+        assert triggers["push"] == triggers["pull_request"], (
+            "browser-image.yml's push and pull_request paths filters have "
+            f"drifted:\npush: {triggers['push']}\npull_request: {triggers['pull_request']}"
+        )
+
+    def test_every_copied_path_triggers_a_rebuild(self, triggers: dict[str, list[str]]):
+        """Everything baked into the image must be watched by the filter."""
+        patterns = triggers["pull_request"]
+        uncovered = []
+        for source in self._copy_sources():
+            cleaned = source.rstrip("/")
+            if (REPO_ROOT / cleaned).is_dir():
+                # A directory COPY bakes in the whole subtree, so a
+                # shallow pattern (``src/browser/*.py``) is not enough.
+                probe = f"{cleaned}/nested/new_file.py"
+            else:
+                probe = cleaned
+            if not any(self._matches(p, probe) for p in patterns):
+                uncovered.append(source)
+        assert not uncovered, (
+            "Dockerfile.browser COPYs these paths into the image, but "
+            "browser-image.yml's paths filter does not watch them — a change "
+            f"to any of them ships without a build-and-smoke run: {uncovered}\n"
+            f"Current filter: {patterns}"
+        )
+
+    def test_build_definition_files_trigger_a_rebuild(self, triggers: dict[str, list[str]]):
+        """The Dockerfile and the workflow itself are build inputs too."""
+        patterns = triggers["pull_request"]
+        for required in ("Dockerfile.browser", ".github/workflows/browser-image.yml"):
+            assert any(self._matches(p, required) for p in patterns), (
+                f"browser-image.yml's paths filter does not watch '{required}'. Current filter: {patterns}"
+            )

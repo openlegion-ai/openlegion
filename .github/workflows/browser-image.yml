@@ -8,24 +8,39 @@ name: Browser image smoke
 # Dockerfile *requests* the right packages; this workflow confirms pip
 # can actually *resolve* and *install* them in a fresh container.
 #
-# Path-filtered so it only runs when the build inputs change. PRs that
-# don't touch Dockerfile.browser or pyproject.toml (the dep declarations)
-# don't pay the ~5 minute build cost.
+# Path-filtered so it only runs when the build inputs change. "Build
+# inputs" means everything Dockerfile.browser COPYs into the image, not
+# just the dependency declarations: the image embeds src/browser/,
+# src/shared/ and docker/, so a change to any of them produces a
+# different image and must be re-verified here. Directory-wide globs
+# (rather than an enumeration of the files browser happens to import
+# today) keep the filter fail-closed — an enumeration goes silently
+# stale the first time a new import is added. PRs that touch none of
+# these don't pay the build cost.
+#
+# tests/test_dockerfile_browser_deps.py::TestBuildTriggerCoverage pins
+# the filter against the Dockerfile's COPY list so the two can't drift.
 
 on:
   push:
     branches: [main]
     paths:
       - "Dockerfile.browser"
-      - "docker/browser-entrypoint.sh"
+      - "docker/**"
       - "pyproject.toml"
+      - "src/__init__.py"
+      - "src/browser/**"
+      - "src/shared/**"
       - ".github/workflows/browser-image.yml"
   pull_request:
     branches: [main]
     paths:
       - "Dockerfile.browser"
-      - "docker/browser-entrypoint.sh"
+      - "docker/**"
       - "pyproject.toml"
+      - "src/__init__.py"
+      - "src/browser/**"
+      - "src/shared/**"
       - ".github/workflows/browser-image.yml"
 
 jobs:
@@ -79,6 +94,73 @@ jobs:
                   print(pkg + ": MISSING (" + str(e) + ")", file=sys.stderr)
                   missing.append(pkg)
           if missing:
+              sys.exit(1)
+          '
+
+      - name: Verify application code imports
+        # Without this step the source-path triggers above would be
+        # vacuous: a change under src/browser/ or src/shared/ can never
+        # fail a COPY, and nothing else in this job loads the copied
+        # code. This turns "the image was rebuilt" into "every module in
+        # the image still imports" — which is weaker than "the image
+        # starts": ``__main__`` is imported by name, so its
+        # ``if __name__ == "__main__"`` guard means ``main()`` never runs
+        # here, and lazily-imported deps stay out of reach (below).
+        #
+        # The concrete regression it catches: src/browser gains a new
+        # module-level third-party import, the author adds the package
+        # to pyproject.toml (so the test workflow, which installs
+        # ".[dev]", stays green) and does NOT add it to the hard-coded
+        # pip install list in Dockerfile.browser. The container then
+        # dies on boot in production with ModuleNotFoundError.
+        #
+        # Walked rather than a fixed module list so new modules —
+        # including ones in new subpackages — are covered automatically.
+        # ``__main__`` is imported by name, so
+        # its ``if __name__ == "__main__"`` guard keeps ``main()`` from
+        # running. Lazily-imported deps (camoufox, playwright,
+        # browserforge) are deliberately out of reach here — they are
+        # imported inside functions and only a live launch exercises
+        # them.
+        run: |
+          docker run --rm --entrypoint python3 openlegion-browser:ci -c '
+          import importlib
+          import pathlib
+          import sys
+          sys.path.insert(0, "/app")
+          failed = []
+          root = pathlib.Path("/app/src/browser")
+          modules = ["src.browser"]
+          # rglob, not glob: a shallow scan misses every subpackage, so a
+          # new nested module could ship an unsatisfied import even though
+          # this step "passed". Directories contribute their package name
+          # via __init__.py; other files contribute their own.
+          for path in sorted(root.rglob("*.py")):
+              rel = path.relative_to(root)
+              parts = list(rel.parts[:-1]) + ([] if rel.stem == "__init__" else [rel.stem])
+              if not parts:
+                  continue
+              modules.append("src.browser." + ".".join(parts))
+          modules = sorted(set(modules))
+          for name in modules:
+              try:
+                  importlib.import_module(name)
+                  print(name + ": ok")
+              except Exception as exc:
+                  print(
+                      name + ": FAILED (" + type(exc).__name__ + ": " + str(exc) + ")",
+                      file=sys.stderr,
+                  )
+                  failed.append(name)
+          if failed:
+              print(
+                  "Modules that do not import inside the browser image: "
+                  + ", ".join(failed)
+                  + " — the image is missing a dependency that "
+                  "Dockerfile.browser must install, or the module has a "
+                  "broken import.",
+                  file=sys.stderr,
+              )
               sys.exit(1)
           '
 
