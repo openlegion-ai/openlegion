@@ -1488,6 +1488,11 @@ def create_mesh_app(
         # config/permissions.json, from which ``_remove_agent`` has already
         # dropped this agent. Both are idempotent — safe on the teardown path.
         _auth_tokens.pop(agent_id, None)
+        # A deleted agent must not leave its last status behind: an id
+        # recreated later would inherit ``archived``/``hibernated`` and be
+        # treated as out of service (never woken, skipped for lead
+        # selection) while its fresh config row says ``active``.
+        _status_overrides.pop(agent_id, None)
         try:
             permissions.reload()
         except Exception as e:
@@ -5294,6 +5299,29 @@ def create_mesh_app(
                 # ``failed_agents`` via the handler below — Constraint #3
                 # (per-slot, not atomic) already holds for this loop.
                 async with agent_lifecycle_locked_async(agent_name):
+                    # ``_apply_template`` wrote every slot's config rows under
+                    # ``_creation_lock`` and released it long before this loop
+                    # reached them, so an archive or delete can have acted on
+                    # this name in the gap. Re-read under the lock and compare
+                    # against the snapshot ``agents_cfg`` took right after the
+                    # write: a row that WAS there and is now gone was deleted,
+                    # and starting it would resurrect it. A row that was never
+                    # in the snapshot tells us nothing (the config read simply
+                    # isn't reflecting the write) — that case starts with the
+                    # template defaults exactly as it always has. The start
+                    # parameters below stay on ``acfg``, which carries the
+                    # template resolution (``resolve_slot_model`` precedence)
+                    # that a fresh read would not reproduce.
+                    _fresh_rows = _load_config().get("agents", {})
+                    if agent_name in agents_cfg and agent_name not in _fresh_rows:
+                        raise RuntimeError(
+                            "agent was deleted before its container could start",
+                        )
+                    _fresh_status = (_fresh_rows.get(agent_name, {}).get("status") or "active")
+                    if _fresh_status != "active":
+                        raise RuntimeError(
+                            f"agent was {_fresh_status} before its container could start",
+                        )
                     # Start container with per-agent env_overrides (not shared extra_env)
                     url = container_manager.start_agent(
                         agent_id=agent_name,
@@ -10973,11 +11001,17 @@ def create_mesh_app(
         cfg = _load_config()
         if agent_id not in cfg.get("agents", {}):
             raise HTTPException(404, f"Agent '{agent_id}' not found")
-        try:
-            _unarchive_agent(agent_id)
-        except ValueError as e:
-            raise HTTPException(404, str(e))
-        _status_overrides.pop(agent_id, None)
+        # Unarchive writes no container, but it IS a lifecycle status
+        # transition and has to be serialised with the ones that do:
+        # without the lock it can clear the override while a hibernate is
+        # still inside its threaded container stop, leaving an agent that
+        # reads ``active`` with no container and no health registration.
+        async with agent_lifecycle_locked_async(agent_id):
+            try:
+                _unarchive_agent(agent_id)
+            except ValueError as e:
+                raise HTTPException(404, str(e))
+            _status_overrides.pop(agent_id, None)
         if event_bus is not None:
             try:
                 event_bus.emit(
@@ -11492,6 +11526,27 @@ def create_mesh_app(
         # cron jobs — starts the container back up mid-hibernate and leaves
         # the status saying asleep while the agent runs unmonitored.
         async with agent_lifecycle_locked_async(agent_id):
+            # Every check the caller made — the endpoint's archived/busy/
+            # working-task gates, or the sweep's idle conditions — was made
+            # before queueing on this lock. Re-run the ones whose staleness
+            # actually breaks something. Archiving matters most: ``_hibernate_
+            # agent`` sets the status unconditionally, so an archive that won
+            # the lock would be overwritten with ``hibernated`` and the two
+            # statuses Constraint #14 keeps distinct would blur.
+            if _status_overrides.get(agent_id) == "archived":
+                raise HTTPException(
+                    409, f"Agent '{agent_id}' was archived while the hibernate waited",
+                )
+            if lane_manager is not None:
+                _lstatus_now = lane_manager.get_status().get(agent_id, {})
+                if _lstatus_now.get("busy") or _lstatus_now.get("queued", 0) > 0:
+                    raise HTTPException(
+                        409, f"Agent '{agent_id}' picked up work while the hibernate waited",
+                    )
+            if tasks_store is not None and tasks_store.has_working_task(agent_id):
+                raise HTTPException(
+                    409, f"Agent '{agent_id}' picked up a working task while the hibernate waited",
+                )
             try:
                 _hibernate_agent(agent_id)
             except ValueError as e:
@@ -11583,6 +11638,20 @@ def create_mesh_app(
         # flips the status to active anyway — an agent recorded as running
         # that isn't, and that nothing is monitoring.
         async with agent_lifecycle_locked_async(agent_id):
+            # ``ensure_agent_running`` read the status and claimed this wake
+            # BEFORE queueing here, so re-read it now. An archive that won the
+            # lock in between has already stopped the container and dropped
+            # health — starting it again would resurrect it, and
+            # ``_wake_agent_status`` below stamps ``active`` unconditionally.
+            _status_now = _status_overrides.get(agent_id, "active")
+            if _status_now != "hibernated":
+                logger.info(
+                    "wake_agent: '%s' is now %s, not hibernated — skipping the wake",
+                    agent_id, _status_now,
+                )
+                # Mirrors ``ensure_agent_running``'s own fast path: active is
+                # reachable, anything else (archived) is not.
+                return _status_now == "active"
             try:
                 fresh_cfg = _wake_load_config()
             except Exception as e:

@@ -307,6 +307,17 @@ class HealthMonitor:
                 # while the TTL expires.
                 try:
                     async with agent_lifecycle_locked_async(agent_id):
+                        # Re-read under the lock. The expiry decision above was
+                        # made before queueing here: a delete may have removed
+                        # the agent (``del`` would raise KeyError and abort the
+                        # whole sweep), or a spawn under the same id may have
+                        # re-stamped the TTL, in which case tearing it down now
+                        # would destroy the replacement.
+                        fresh = self.runtime.agents.get(agent_id) or {}
+                        if not fresh.get("ephemeral"):
+                            continue
+                        if (now - fresh.get("spawned_at", 0)) < fresh.get("ttl", 3600):
+                            continue
                         try:
                             loop = asyncio.get_running_loop()
                             await loop.run_in_executor(None, self.runtime.stop_agent, agent_id)
@@ -315,7 +326,7 @@ class HealthMonitor:
                         self.router.unregister_agent(agent_id)
                         if self._cleanup_agent:
                             self._cleanup_agent(agent_id)
-                        del self.agents[agent_id]
+                        self.agents.pop(agent_id, None)
                 except AgentLifecycleBusy as e:
                     # Another lifecycle operation still holds this agent —
                     # leave it for the next sweep rather than stalling the
@@ -544,43 +555,50 @@ class HealthMonitor:
                 return
 
         logger.info(f"Restarting agent '{agent_id}'...")
-        info = self.runtime.agents.get(agent_id)
-        if not info:
-            # The runtime lost its in-memory registry entry (e.g. the
-            # container died and was deregistered during a redeploy), but the
-            # agent may still be fully defined on disk. Rather than stranding
-            # it permanently, rebuild the start parameters from agents.yaml —
-            # the same fallback the CLI manual restart uses
-            # (cli/repl.py:_restart_agent). Only if the agent is ALSO absent
-            # from yaml is it truly unknown and unrecoverable.
-            info = self._info_from_yaml(agent_id)
-            if not info:
-                logger.error(
-                    "Cannot restart agent '%s': no stored config and not "
-                    "defined in agents.yaml. Manual restart required.",
-                    agent_id,
-                )
-                health.status = "failed"
-                return
-            logger.info(
-                "Agent '%s' missing from runtime registry; rebuilding "
-                "container from agents.yaml config.", agent_id,
-            )
         # Stop -> start -> re-register is ONE lifecycle operation, and this
         # sweep runs concurrently with every other one. An archive or delete
         # landing between the stop and the start is undone by the start —
         # a container back up for an agent deliberately taken out of
         # service, and health-registered again on top of it.
         async with agent_lifecycle_locked_async(agent_id):
-            # Re-check under the lock: the sweep decided to restart before
-            # queueing here, and an archive/delete may have won the race.
-            if agent_id not in self.agents:
+            # Re-check under the lock, by IDENTITY not by name: the sweep
+            # decided to restart before queueing here, and an archive/delete
+            # may have won the race. A delete followed by a same-name create
+            # would even repopulate ``self.agents[agent_id]`` — but with a new
+            # ``AgentHealth``, so ``health`` (and the registry ``info`` read
+            # below) would describe the previous incarnation.
+            if self.agents.get(agent_id) is not health:
                 logger.info(
-                    "Agent '%s' was deregistered before its restart began "
-                    "(archived/deleted) — not restarting it.",
+                    "Agent '%s' was deregistered or replaced before its restart "
+                    "began (archived/deleted) — not restarting it.",
                     agent_id,
                 )
                 return
+            # Read the start parameters under the lock too, for the same
+            # reason: outside it they can describe a container that no
+            # longer exists.
+            info = self.runtime.agents.get(agent_id)
+            if not info:
+                # The runtime lost its in-memory registry entry (e.g. the
+                # container died and was deregistered during a redeploy), but
+                # the agent may still be fully defined on disk. Rather than
+                # stranding it permanently, rebuild the start parameters from
+                # agents.yaml — the same fallback the CLI manual restart uses
+                # (cli/repl.py:_restart_agent). Only if the agent is ALSO
+                # absent from yaml is it truly unknown and unrecoverable.
+                info = self._info_from_yaml(agent_id)
+                if not info:
+                    logger.error(
+                        "Cannot restart agent '%s': no stored config and not "
+                        "defined in agents.yaml. Manual restart required.",
+                        agent_id,
+                    )
+                    health.status = "failed"
+                    return
+                logger.info(
+                    "Agent '%s' missing from runtime registry; rebuilding "
+                    "container from agents.yaml config.", agent_id,
+                )
             try:
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, self.runtime.stop_agent, agent_id)
@@ -665,7 +683,7 @@ class HealthMonitor:
                 # the lock, and the pre-check inside it turns this restart away
                 # first. Kept so a deregistration path that ever skips the lock
                 # still can't leave a resurrected container behind.
-                if agent_id not in self.agents:
+                if self.agents.get(agent_id) is not health:
                     logger.info(
                         "Agent '%s' was deregistered during restart "
                         "(archived/deleted) — stopping the restarted container.",

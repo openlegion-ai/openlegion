@@ -454,6 +454,12 @@ class REPLSession:
         # The mesh delete path finds an agent by its config row, so it
         # can reach this name the moment ``_create_agent`` returns.
         with agent_lifecycle_locked(new_name):
+            # The name was validated before the interactive prompts above;
+            # re-check now that we hold the lock so a concurrent create of
+            # the same name can't be half-overwritten.
+            if new_name in self.ctx.agents:
+                click.echo(f"Agent '{new_name}' already exists.", err=True)
+                return
             if selected_template:
                 _create_agent_from_template(new_name, selected_template["id"], model)
             else:
@@ -1417,6 +1423,13 @@ class REPLSession:
         # mesh loop, so a health restart or an archive genuinely can run
         # concurrently with a typed ``/restart``.
         with agent_lifecycle_locked(name):
+            # Re-check under the lock. A mesh or dashboard delete can have
+            # completed while this command waited, and the config read below
+            # would then fall back to empty defaults and rebuild the agent
+            # from nothing.
+            if name not in self.ctx.agents:
+                click.echo(" agent no longer exists.", err=True)
+                return
             # Stop old container
             try:
                 self.ctx.runtime.stop_agent(name)
@@ -1549,6 +1562,12 @@ class REPLSession:
         # take this same lock to deliver it — from the mesh loop, while
         # this thread sits blocked holding it.
         with agent_lifecycle_locked(name):
+            # Re-check under the lock — the offboard turn above can have taken
+            # minutes, and ``_remove_agent`` below raises on an id another
+            # delete surface already cleared.
+            if name not in self.ctx.agents:
+                click.echo(f"Agent '{name}' was already removed.")
+                return
             # Stop the container. remove_data=True (bug fix — this previously
             # left the agent's ``openlegion_data_*`` volume behind forever;
             # H12 parity with the mesh and dashboard delete paths).

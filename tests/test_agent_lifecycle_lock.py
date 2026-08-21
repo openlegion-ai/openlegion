@@ -803,3 +803,400 @@ class TestEveryLifecycleSiteIsCovered:
                 still_open.add((rel, func))
         stale = _UNLOCKED_BY_DESIGN - still_open
         assert not stale, f"_UNLOCKED_BY_DESIGN entries no longer match any site: {stale}"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Revalidation under the lock (mesh)
+# ─────────────────────────────────────────────────────────────────────
+
+
+def _parked_archive(monkeypatch, cfg, park: threading.Event, release: threading.Event):
+    """Make ``_archive_agent`` park BEFORE it writes the status.
+
+    That is the only ordering that reproduces the races below: the archive
+    is holding the lifecycle lock but has not yet flipped the status, so a
+    wake / hibernate / unarchive still reads the pre-archive world, decides
+    to act on it, and only then queues on the lock.
+    """
+    from src.cli import config as cli_config
+
+    def _archive(name):
+        park.set()
+        assert release.wait(5), "parked archive was never released"
+        cfg["agents"][name]["status"] = "archived"
+
+    monkeypatch.setattr(cli_config, "_archive_agent", _archive)
+
+
+def _run_in_thread(fn):
+    box: dict = {}
+
+    def _target():
+        try:
+            box["value"] = fn()
+        except BaseException as e:  # noqa: BLE001 - surfaced by the caller
+            box["error"] = e
+
+    t = threading.Thread(target=_target)
+    t.start()
+    return t, box
+
+
+class TestArchiveWinsAgainstQueuedOperations:
+    """An archive that finishes first must not be undone by what queued.
+
+    Every one of these decided to act while the agent was still in service
+    — the status they read is stale by the time they hold the lock.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_wake_queued_behind_an_archive_does_not_start_the_agent(
+        self, tmp_path, monkeypatch,
+    ):
+        from fastapi.testclient import TestClient
+
+        from tests.test_hibernation import _OP, _build_app
+
+        app, bb, cm, _tr, _hm, _eb, cfg = _build_app(
+            tmp_path, monkeypatch, agent_status="hibernated",
+        )
+        try:
+            assert app.get_agent_status("scout") == "hibernated"
+            park, release = threading.Event(), threading.Event()
+            _parked_archive(monkeypatch, cfg, park, release)
+
+            client = TestClient(app)
+            t, box = _run_in_thread(
+                lambda: client.post("/mesh/agents/scout/archive", headers=_OP).status_code,
+            )
+            try:
+                assert await asyncio.to_thread(park.wait, 5)
+                # The archive holds the lock and has NOT flipped the status
+                # yet, so the wake still sees a hibernated agent and claims.
+                wake = asyncio.create_task(app.ensure_agent_running("scout", trigger="test"))
+                assert await _spin_until_async(lambda: lifecycle_refcount("scout") == 2), (
+                    "the wake never queued on the lifecycle lock"
+                )
+            finally:
+                release.set()
+                t.join(5)
+            assert box.get("value") == 200, box
+
+            assert await asyncio.wait_for(wake, 5) is False
+            assert cm.started == [], "the wake started a container for an archived agent"
+            assert cfg["agents"]["scout"]["status"] == "archived", (
+                "the wake stamped an archived agent back to active"
+            )
+        finally:
+            bb.close()
+
+    @pytest.mark.asyncio
+    async def test_a_hibernate_queued_behind_an_archive_refuses(self, tmp_path, monkeypatch):
+        """Constraint #14: ``archived`` and ``hibernated`` must never blur.
+
+        ``_hibernate_agent`` sets the status unconditionally, so without the
+        re-check the hibernate overwrites ``archived`` — and the agent
+        silently becomes auto-wakeable again.
+        """
+        from fastapi import HTTPException
+        from fastapi.testclient import TestClient
+
+        from tests.test_hibernation import _OP, _build_app
+
+        app, bb, cm, _tr, _hm, _eb, cfg = _build_app(tmp_path, monkeypatch)
+        try:
+            park, release = threading.Event(), threading.Event()
+            _parked_archive(monkeypatch, cfg, park, release)
+            hibernate = app.hibernation_sweeper._hibernate_fn
+
+            client = TestClient(app)
+            t, box = _run_in_thread(
+                lambda: client.post("/mesh/agents/scout/archive", headers=_OP).status_code,
+            )
+            try:
+                assert await asyncio.to_thread(park.wait, 5)
+                hib = asyncio.create_task(hibernate("scout", caller="sweep"))
+                assert await _spin_until_async(lambda: lifecycle_refcount("scout") == 2), (
+                    "the hibernate never queued on the lifecycle lock"
+                )
+            finally:
+                release.set()
+                t.join(5)
+            assert box.get("value") == 200, box
+
+            with pytest.raises(HTTPException) as exc:
+                await asyncio.wait_for(hib, 5)
+            assert exc.value.status_code == 409
+            assert cfg["agents"]["scout"]["status"] == "archived", (
+                "the hibernate overwrote the archived status"
+            )
+        finally:
+            bb.close()
+
+    @pytest.mark.asyncio
+    async def test_an_unarchive_waits_for_the_archive_instead_of_being_overwritten(
+        self, tmp_path, monkeypatch,
+    ):
+        """Unarchive writes no container, but it is still a status transition.
+
+        Unlocked, it lands inside the archive and the archive's own write
+        then clobbers it — the operator's unarchive silently does nothing.
+        """
+        from fastapi.testclient import TestClient
+
+        from tests.test_hibernation import _OP, _build_app
+
+        app, bb, _cm, _tr, _hm, _eb, cfg = _build_app(tmp_path, monkeypatch)
+        try:
+            park, release = threading.Event(), threading.Event()
+            _parked_archive(monkeypatch, cfg, park, release)
+
+            client = TestClient(app)
+            t_arch, box_arch = _run_in_thread(
+                lambda: client.post("/mesh/agents/scout/archive", headers=_OP).status_code,
+            )
+            t_un = box_un = None
+            try:
+                assert await asyncio.to_thread(park.wait, 5)
+                t_un, box_un = _run_in_thread(
+                    lambda: client.post("/mesh/agents/scout/unarchive", headers=_OP).status_code,
+                )
+                assert await _spin_until_async(lambda: lifecycle_refcount("scout") == 2), (
+                    "the unarchive never queued on the lifecycle lock"
+                )
+            finally:
+                release.set()
+                t_arch.join(5)
+                if t_un is not None:
+                    t_un.join(5)
+            assert box_arch.get("value") == 200, box_arch
+            assert box_un.get("value") == 200, box_un
+
+            assert cfg["agents"]["scout"]["status"] == "active", (
+                "the archive overwrote the unarchive that ran inside it"
+            )
+            assert app.get_agent_status("scout") == "active"
+        finally:
+            bb.close()
+
+    def test_deleting_an_agent_clears_its_status_override(self, tmp_path, monkeypatch):
+        """A recreated id must not inherit the previous agent's status.
+
+        A stale ``hibernated`` / ``archived`` entry makes the fresh agent
+        unreachable: never woken, skipped for lead selection, refused by the
+        manual wake endpoint — while its config row says ``active``.
+        """
+        from fastapi.testclient import TestClient
+
+        from tests.test_hibernation import _OP, _build_app
+
+        app, bb, _cm, _tr, _hm, _eb, _cfg = _build_app(tmp_path, monkeypatch)
+        try:
+            assert TestClient(app).post("/mesh/agents/scout/hibernate", headers=_OP).status_code == 200
+            assert app.get_agent_status("scout") == "hibernated"
+            app.cleanup_agent("scout")
+            assert app.get_agent_status("scout") == "active", (
+                "a deleted agent left its status behind for the next agent of that name"
+            )
+        finally:
+            bb.close()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Revalidation under the lock (health monitor, REPL)
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestQueuedOperationsRevalidate:
+    @pytest.mark.asyncio
+    async def test_health_restart_bails_when_the_name_was_recreated(self, monkeypatch):
+        """Name-equality is not enough — the object has to be the same one.
+
+        A delete plus a same-name create repopulates ``self.agents[id]``, so a
+        name check passes while ``health`` and the registry ``info`` this
+        restart captured still describe the agent that was deleted.
+        """
+        from src.host.health import AgentHealth
+
+        monitor, runtime = _make_monitor(monkeypatch)
+        released = asyncio.Event()
+
+        async def delete_and_recreate():
+            async with agent_lifecycle_locked_async("worker"):
+                await released.wait()
+                monitor.agents["worker"] = AgentHealth(agent_id="worker")
+
+        holder = asyncio.create_task(delete_and_recreate())
+        await asyncio.sleep(0)
+        restart = asyncio.create_task(monitor._try_restart("worker"))
+        try:
+            queued = await _spin_until_async(lambda: lifecycle_refcount("worker") == 2)
+        finally:
+            released.set()
+            await asyncio.wait_for(holder, 3)
+            await asyncio.wait_for(restart, 3)
+
+        assert queued, "the restart never queued on the lifecycle lock"
+        assert "start" not in runtime.kinds(), (
+            "the restart rebuilt the previous incarnation's container"
+        )
+
+    @pytest.mark.asyncio
+    async def test_ephemeral_cleanup_skips_an_agent_removed_while_it_queued(self, monkeypatch):
+        """``del self.agents[id]`` raised here, aborting the whole sweep."""
+        from src.host.health import AgentHealth
+
+        monitor, runtime = _make_monitor(monkeypatch)
+        runtime.agents["spawn-x"] = {
+            "ephemeral": True, "ttl": 1, "spawned_at": time.time() - 60,
+        }
+        monitor.agents["spawn-x"] = AgentHealth(agent_id="spawn-x")
+        released = asyncio.Event()
+
+        async def delete_like():
+            async with agent_lifecycle_locked_async("spawn-x"):
+                await released.wait()
+                runtime.agents.pop("spawn-x", None)
+                monitor.agents.pop("spawn-x", None)
+
+        holder = asyncio.create_task(delete_like())
+        await asyncio.sleep(0)
+        sweep = asyncio.create_task(monitor._cleanup_ephemeral_agents())
+        try:
+            queued = await _spin_until_async(lambda: lifecycle_refcount("spawn-x") == 2)
+        finally:
+            released.set()
+            await asyncio.wait_for(holder, 3)
+            # A KeyError here would abort every remaining agent in the pass.
+            await asyncio.wait_for(sweep, 3)
+
+        assert queued, "the cleanup never queued on the lifecycle lock"
+        assert "stop" not in runtime.kinds(), "the cleanup tore down an agent already deleted"
+
+    def test_repl_restart_bails_when_the_agent_was_deleted_while_it_waited(self):
+        from unittest.mock import MagicMock
+
+        from tests.test_repl_remove import _FakeCtx, _make_session
+
+        ctx = _FakeCtx()
+        ctx.runtime = MagicMock()
+        session = _make_session(ctx)
+
+        held = threading.Event()
+        release = threading.Event()
+
+        def holder():
+            with agent_lifecycle_locked("scout"):
+                held.set()
+                assert release.wait(3)
+                ctx.agents.pop("scout", None)
+
+        t = threading.Thread(target=holder)
+        t.start()
+        restart_t = None
+        try:
+            assert held.wait(3)
+            restart_t, box = _run_in_thread(lambda: session._restart_agent("scout"))
+            assert _spin_until(lambda: lifecycle_refcount("scout") == 2), (
+                "the REPL restart never queued on the lifecycle lock"
+            )
+        finally:
+            release.set()
+            t.join(3)
+            if restart_t is not None:
+                restart_t.join(3)
+        assert not box.get("error"), box["error"]
+        ctx.runtime.start_agent.assert_not_called()
+        ctx.runtime.stop_agent.assert_not_called()
+
+
+class TestTemplateSlotsRevalidate:
+    """The template loop's config snapshot is stale by the time it starts.
+
+    ``_apply_template`` writes every slot's config row under the fleet-wide
+    ``_creation_lock`` and releases it long before the per-slot start loop
+    reaches them, so an archive or delete can act on a name in between.
+    """
+
+    def _make_app(self, monkeypatch):
+        from pathlib import Path
+        from unittest.mock import AsyncMock, MagicMock
+
+        from src.cli import config as cli_config
+        from src.host.mesh import Blackboard, MessageRouter, PubSub
+        from src.host.permissions import PermissionMatrix
+        from src.host.server import create_mesh_app
+
+        rows: dict = {}
+
+        def _load_config():
+            # A fresh snapshot per call, like the real one re-reading
+            # agents.yaml — the guard under test compares two of them.
+            return {
+                "agents": {k: dict(v) for k, v in rows.items()},
+                "llm": {"default_model": "openai/gpt-4o-mini"},
+                "network": {},
+                "mesh": {},
+            }
+
+        monkeypatch.setattr(cli_config, "_load_config", _load_config)
+
+        def _fake_apply_template(template_name, tpl, agent_overrides=None):
+            rows["scout"] = {"role": "worker", "model": "openai/gpt-4o-mini"}
+            return ["scout"]
+
+        monkeypatch.setattr(cli_config, "_apply_template", _fake_apply_template)
+        monkeypatch.setattr(cli_config, "_update_agent_field", lambda *a, **k: None)
+
+        perms = PermissionMatrix.__new__(PermissionMatrix)
+        perms.permissions = {}
+        perms._config_path = "/tmp/__nonexistent_permissions_for_lifecycle_test.json"
+        perms._reload_lock = threading.Lock()
+        bb = Blackboard(db_path=":memory:")
+        registry: dict[str, str] = {}
+        cm = MagicMock()
+        cm.project_root = Path("/tmp/test_project")
+        cm.extra_env = {}
+        cm.start_agent.return_value = "http://localhost:8401"
+        cm.wait_for_agent = AsyncMock(return_value=True)
+        app = create_mesh_app(
+            blackboard=bb,
+            pubsub=PubSub(),
+            router=MessageRouter(permissions=perms, agent_registry=registry),
+            permissions=perms,
+            container_manager=cm,
+        )
+        return app, bb, cm, rows
+
+    def test_a_slot_deleted_while_it_queued_is_not_started(self, monkeypatch):
+        import contextlib
+
+        from fastapi.testclient import TestClient
+
+        from src.host import server as server_mod
+
+        app, bb, cm, rows = self._make_app(monkeypatch)
+        try:
+            real_lock = server_mod.agent_lifecycle_locked_async
+
+            @contextlib.asynccontextmanager
+            async def _delete_once_acquired(agent_id, timeout=None):
+                # Stands in for a delete that held the lock while this slot
+                # queued behind it: by the time the slot runs, the row it was
+                # about to start from is gone.
+                async with real_lock(agent_id, timeout=timeout):
+                    rows.pop(agent_id, None)
+                    yield
+
+            monkeypatch.setattr(
+                server_mod, "agent_lifecycle_locked_async", _delete_once_acquired,
+            )
+            resp = TestClient(app).post("/mesh/fleet/apply", json={"template": "starter"})
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            assert body["created"] == []
+            assert [f["agent_id"] for f in body["failed"]] == ["scout"]
+            assert "deleted" in body["failed"][0]["error"]
+            cm.start_agent.assert_not_called()
+        finally:
+            bb.close()

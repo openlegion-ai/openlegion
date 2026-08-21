@@ -35,6 +35,17 @@ Two things this lock deliberately does not do:
   the same holder raises rather than deadlocking or silently passing
   through. (The detection only covers a nest on the same thread and task;
   one that hops threads still deadlocks — hence the rule below.)
+* **A cancelled operation releases the lock; its container call may not
+  have finished.** The routes cap ``start_agent`` / ``stop_agent`` at 60s
+  with ``asyncio.wait_for(asyncio.to_thread(...))`` so a hung Docker daemon
+  returns control, and cancelling that wait does not cancel the worker
+  thread. What the lock still guarantees in that case comes from the layer
+  below: ``RuntimeBackend._agent_locked`` brackets the whole container call,
+  so the next lifecycle operation's start/stop blocks on it and the two
+  registries stay coherent. What is NOT guaranteed is the rest of the
+  sequence — a start that completes after its route gave up leaves a
+  running container with no router, transport or health registration. That
+  predates this lock and is unchanged by it.
 * **Nothing that can dispatch to an agent may run inside a held region.**
   The cold-wake seam is wired into the transport and the mesh router, so
   *any* message routed to a hibernated agent calls ``ensure_agent_running``,
