@@ -20,7 +20,11 @@ from typing import TYPE_CHECKING
 
 from src.cli.config import _load_config
 from src.cli.proxy import build_proxy_env_vars, resolve_agent_proxy
-from src.host.agent_lifecycle import AgentLifecycleBusy, agent_lifecycle_locked_async
+from src.host.agent_lifecycle import (
+    AgentLifecycleBusy,
+    agent_lifecycle_locked_async,
+    retire_agent,
+)
 from src.shared.utils import set_llm_max_tokens_env, setup_logging
 
 if TYPE_CHECKING:
@@ -327,6 +331,12 @@ class HealthMonitor:
                         if self._cleanup_agent:
                             self._cleanup_agent(agent_id)
                         self.agents.pop(agent_id, None)
+                        # Reaping a spawn IS a delete. ``_cleanup_agent``
+                        # retires the id too, but it is an optional seam —
+                        # this path always runs. Bumping twice is harmless:
+                        # callers only ever compare for equality against a
+                        # value captured before this lock was taken.
+                        retire_agent(agent_id)
                 except AgentLifecycleBusy as e:
                     # Another lifecycle operation still holds this agent —
                     # leave it for the next sweep rather than stalling the

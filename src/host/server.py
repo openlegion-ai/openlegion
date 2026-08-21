@@ -847,7 +847,15 @@ class HibernationSweeper:
             if (time.time() - self._lane_manager.last_activity(agent_id)) < idle_seconds:
                 continue  # a direct-path turn stamped activity mid-tick
             try:
-                await self._hibernate_fn(agent_id, caller="sweep")
+                # Captured here, at the last of the candidacy checks: the
+                # sweep hibernates candidates one after another, awaiting a
+                # multi-second container stop between them, so this agent's
+                # turn can come long after the tick began.
+                await self._hibernate_fn(
+                    agent_id,
+                    caller="sweep",
+                    expect_incarnation=agent_incarnation(agent_id),
+                )
                 logger.info(
                     "hibernation sweep: hibernated idle agent '%s' (idle >= %dm)",
                     agent_id, idle_minutes,
@@ -1200,6 +1208,24 @@ def create_mesh_app(
     # archive/unarchive/hibernate/wake transition below — never read
     # from disk again after boot.
     _status_overrides: dict[str, str] = {}
+
+    def _require_same_agent(agent_id: str, expected: int | None) -> None:
+        """Refuse to act on a different agent that reused this name.
+
+        Every lifecycle operation makes its decisions before it queues on
+        the agent's lock — sometimes minutes before, when a handover turn or
+        an operator confirmation sits in between. Holding the lock proves
+        the operation is alone; it does not prove the name still belongs to
+        the agent it was raised against. Callers capture
+        ``agent_incarnation`` at decision time and pass it here from inside
+        the locked region.
+        """
+        if expected is not None and agent_incarnation(agent_id) != expected:
+            raise HTTPException(
+                409,
+                f"Agent '{agent_id}' was deleted and recreated while this "
+                "operation waited — refusing to act on the replacement",
+            )
     try:
         if cfg is not None:
             _boot_status_cfg = cfg
@@ -5747,6 +5773,10 @@ def create_mesh_app(
                     _remove_agent(name)
                 except Exception:
                     pass
+                # The row this create wrote is gone again — retire it so a
+                # lifecycle operation that captured the incarnation between
+                # the write and this rollback can tell.
+                retire_agent(name)
                 import shutil
 
                 shutil.rmtree(tools_dir, ignore_errors=True)
@@ -5794,6 +5824,10 @@ def create_mesh_app(
                     _remove_agent(name)
                 except Exception:
                     pass
+                # The row this create wrote is gone again — retire it so a
+                # lifecycle operation that captured the incarnation between
+                # the write and this rollback can tell.
+                retire_agent(name)
                 import shutil
 
                 shutil.rmtree(tools_dir, ignore_errors=True)
@@ -11007,7 +11041,7 @@ def create_mesh_app(
         cfg = _load_config()
         if agent_id not in cfg.get("agents", {}):
             raise HTTPException(404, f"Agent '{agent_id}' not found")
-        return await _archive_agent_core(agent_id)
+        return await _archive_agent_core(agent_id, expect_incarnation=agent_incarnation(agent_id))
 
     @app.post("/mesh/agents/{agent_id}/unarchive")
     async def unarchive_agent_endpoint(agent_id: str, request: Request) -> dict:
@@ -11025,7 +11059,9 @@ def create_mesh_app(
         # without the lock it can clear the override while a hibernate is
         # still inside its threaded container stop, leaving an agent that
         # reads ``active`` with no container and no health registration.
+        _incarnation = agent_incarnation(agent_id)
         async with agent_lifecycle_locked_async(agent_id):
+            _require_same_agent(agent_id, _incarnation)
             try:
                 _unarchive_agent(agent_id)
             except ValueError as e:
@@ -11094,6 +11130,7 @@ def create_mesh_app(
         return await _hibernate_agent_core(
             agent_id,
             caller="operator" if _caller_is_operator(caller, request) else "internal",
+            expect_incarnation=agent_incarnation(agent_id),
         )
 
     @app.post("/mesh/agents/{agent_id}/wake-from-hibernation")
@@ -11445,7 +11482,7 @@ def create_mesh_app(
 
     app._offboard_agent = _offboard_agent  # exposed for the dashboard + CLI REPL
 
-    async def _archive_agent_core(agent_id: str) -> dict:
+    async def _archive_agent_core(agent_id: str, *, expect_incarnation: int | None = None) -> dict:
         """Archive-agent side effects (cron dereg, health unregister,
         best-effort container stop). Shared by the archive endpoint and
         the offboard endpoint so the two never duplicate-drift. Caller has
@@ -11459,6 +11496,7 @@ def create_mesh_app(
         # ``_ensure_team_lead`` below is safe to hold the lock across: it
         # only touches the team store and cron, and never dispatches.
         async with agent_lifecycle_locked_async(agent_id):
+            _require_same_agent(agent_id, expect_incarnation)
             try:
                 _archive_agent(agent_id)
             except ValueError as e:
@@ -11524,7 +11562,12 @@ def create_mesh_app(
         from src.host.transport import HttpTransport as _HttpTransportForGate
         return isinstance(transport, _HttpTransportForGate)
 
-    async def _hibernate_agent_core(agent_id: str, *, caller: str = "operator") -> dict:
+    async def _hibernate_agent_core(
+        agent_id: str,
+        *,
+        caller: str = "operator",
+        expect_incarnation: int | None = None,
+    ) -> dict:
         """Hibernate-agent side effects (plan §8 #24). Mirrors
         ``_archive_agent_core``'s shape with ONE deliberate difference:
         cron jobs are KEPT (not removed) — the mesh-side heartbeat ticks
@@ -11545,6 +11588,7 @@ def create_mesh_app(
         # cron jobs — starts the container back up mid-hibernate and leaves
         # the status saying asleep while the agent runs unmonitored.
         async with agent_lifecycle_locked_async(agent_id):
+            _require_same_agent(agent_id, expect_incarnation)
             # Every check the caller made — the endpoint's archived/busy/
             # working-task gates, or the sweep's idle conditions — was made
             # before queueing on this lock. Re-run the ones whose staleness
@@ -11630,7 +11674,12 @@ def create_mesh_app(
                 logger.debug("agent_hibernated emit failed: %s", e)
         return {"hibernated": True, "agent_id": agent_id}
 
-    async def _wake_agent_core(agent_id: str, *, trigger: str) -> bool:
+    async def _wake_agent_core(
+        agent_id: str,
+        *,
+        trigger: str,
+        expect_incarnation: int | None = None,
+    ) -> bool:
         """Cold-wake an agent whose container was stopped by hibernation
         (plan §8 #24 leg 3). Mirrors the dashboard single-agent restart
         path: fresh config read (role/tools_dir/model/thinking + proxy +
@@ -11666,6 +11715,16 @@ def create_mesh_app(
             # lock in between has already stopped the container and dropped
             # health — starting it again would resurrect it, and
             # ``_wake_agent_status`` below stamps ``active`` unconditionally.
+            if (
+                expect_incarnation is not None
+                and agent_incarnation(agent_id) != expect_incarnation
+            ):
+                logger.info(
+                    "wake_agent: '%s' was deleted and recreated while the wake "
+                    "queued — not waking the replacement",
+                    agent_id,
+                )
+                return False
             _status_now = _status_overrides.get(agent_id, "active")
             if _status_now != "hibernated":
                 logger.info(
@@ -11790,7 +11849,13 @@ def create_mesh_app(
                 logger.debug("agent_woken emit failed: %s", e)
         return True
 
-    def _launch_wake(agent_id: str, *, trigger: str, shared_fut: "concurrent.futures.Future") -> None:
+    def _launch_wake(
+        agent_id: str,
+        *,
+        trigger: str,
+        shared_fut: "concurrent.futures.Future",
+        expect_incarnation: int | None = None,
+    ) -> None:
         """Run ``_wake_agent_core`` as its OWN task on a stable loop, then
         resolve ``shared_fut`` for the claimer + every joined waiter (M8).
 
@@ -11812,7 +11877,9 @@ def create_mesh_app(
 
         async def _run_wake() -> None:
             try:
-                result = await _wake_agent_core(agent_id, trigger=trigger)
+                result = await _wake_agent_core(
+                    agent_id, trigger=trigger, expect_incarnation=expect_incarnation,
+                )
             except BaseException as e:  # noqa: BLE001 - the future MUST resolve on ANY exit (incl. CancelledError) or joined waiters hang forever
                 cancelled = isinstance(e, (asyncio.CancelledError, KeyboardInterrupt, SystemExit))
                 with _wake_claim_lock:
@@ -11892,7 +11959,15 @@ def create_mesh_app(
                 _wake_futures[agent_id] = fut
 
         if is_claimer:
-            _launch_wake(agent_id, trigger=trigger, shared_fut=fut)
+            _launch_wake(
+                agent_id,
+                trigger=trigger,
+                shared_fut=fut,
+                # Pinned at claim time — the status read above is what makes
+                # this a wake at all, and it described whichever agent held
+                # the name then.
+                expect_incarnation=agent_incarnation(agent_id),
+            )
 
         try:
             return await asyncio.wrap_future(fut)
@@ -11947,6 +12022,10 @@ def create_mesh_app(
         cfg = _load_config()
         if agent_id not in cfg.get("agents", {}):
             raise HTTPException(404, f"Agent '{agent_id}' not found")
+        # Captured before the handover turn: it runs against the live agent
+        # and can take minutes, and the archive below acts on whatever holds
+        # the name by then.
+        _incarnation = agent_incarnation(agent_id)
         manifest = await _offboard_agent(agent_id, reason="offboard")
         # Offboard = departure: a departing lead stops being lead. Clear the
         # pointer BEFORE archiving so no ghost lead lingers in the Team Room
@@ -11991,7 +12070,7 @@ def create_mesh_app(
             # successor.
             _status_overrides[agent_id] = "archived"
             _ensure_team_lead(led_team_id)
-        archive_result = await _archive_agent_core(agent_id)
+        archive_result = await _archive_agent_core(agent_id, expect_incarnation=_incarnation)
         return {"offboarded": True, "manifest": manifest, **archive_result}
 
     # ── Per-agent standing goals (TeamStore ``agent_goals``) ─────

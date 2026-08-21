@@ -1523,6 +1523,10 @@ class REPLSession:
             click.echo("The operator agent cannot be removed.")
             return
 
+        # Captured at the human's decision point, before the confirmation
+        # prompt and the handover turn below — both of which can sit here
+        # for minutes while another surface deletes and recreates the name.
+        _incarnation = agent_incarnation(name)
         if not click.confirm(f"Remove agent '{name}'?"):
             return
 
@@ -1533,9 +1537,6 @@ class REPLSession:
         # via the runtime context's dispatch loop, mirroring how
         # ``/steer`` already bridges a sync command into an async mesh
         # call (``asyncio.run_coroutine_threadsafe``).
-        # Captured before the offboard turn below, which waits on a live
-        # handover and can take minutes.
-        _incarnation = agent_incarnation(name)
         offboard_agent = getattr(self.ctx, "offboard_agent", None)
         if offboard_agent is not None and self.ctx.dispatch_loop is not None:
             from src.shared import limits as _limits_mod

@@ -7766,7 +7766,13 @@ def create_dashboard_router(
         # leave a wide window before any one of them holds its lock. An id
         # deleted and recreated in that window would otherwise be bounced with
         # the previous agent's role, model and tools_dir.
-        _incarnations = {aid: agent_incarnation(aid) for aid in list(agent_registry)}
+        # Pinned as ONE set alongside the config read, and iterated below
+        # instead of a fresh registry read: an agent created after this
+        # snapshot has no row in ``agents_cfg``, so sweeping it into the
+        # fan-out would stop and rebuild a brand-new container from empty
+        # defaults — role "assistant", the default model, no tools_dir.
+        _restart_targets = list(agent_registry)
+        _incarnations = {aid: agent_incarnation(aid) for aid in _restart_targets}
         loop = _asyncio.get_running_loop()
         results = {}
 
@@ -7879,7 +7885,7 @@ def create_dashboard_router(
                 logger.error("Failed to restart agent '%s': %s", agent_id, e)
                 return (agent_id, f"error: {e}")
 
-        agent_results = await _asyncio.gather(*[_restart_one(aid) for aid in list(agent_registry.keys())])
+        agent_results = await _asyncio.gather(*[_restart_one(aid) for aid in _restart_targets])
         results = dict(agent_results)
 
         return {"restarted": results}

@@ -1443,3 +1443,97 @@ class TestTemplateSlotIncarnation:
             cm.start_agent.assert_not_called()
         finally:
             bb.close()
+
+
+class TestRoundThreeGuards:
+    @pytest.mark.asyncio
+    async def test_restart_all_leaves_agents_created_after_its_snapshot_alone(self, dashboard):
+        """The fan-out must restart exactly what it snapshotted.
+
+        Config, incarnations and the target list are all read at the same
+        moment; the browser-service restart then runs before any agent's
+        turn. An agent created in that window has no row in the snapshot, so
+        sweeping it in would stop a brand-new container and rebuild it from
+        empty defaults — role "assistant", the default model, no tools_dir.
+        """
+        from src.host import runtime as runtime_mod
+
+        router, registry, runtime, _yaml, _connectors, _forgotten = dashboard
+        restart_all = _endpoint(router, "/api/restart-agents", "POST")
+
+        # Take the browser-service branch so its window is real here too.
+        monkeypatch_target = type(runtime)
+        runtime.stop_browser_service = lambda: registry.__setitem__(
+            "newcomer", "http://newcomer:8400",
+        )
+        runtime.start_browser_service = lambda: None
+        original = runtime_mod.DockerBackend
+        runtime_mod.DockerBackend = monkeypatch_target
+        try:
+            result = await asyncio.wait_for(restart_all(), 5)
+        finally:
+            runtime_mod.DockerBackend = original
+
+        assert "newcomer" in registry, "the window never opened"
+        assert "newcomer" not in result["restarted"], (
+            "restart-all swept in an agent created after its config snapshot"
+        )
+        assert ("start", "newcomer") not in runtime.calls
+
+    @pytest.mark.asyncio
+    async def test_an_archive_refuses_a_replacement(self, tmp_path, monkeypatch):
+        """The lock wait alone is enough of a window.
+
+        Archive validated its target, then queued. By the time it holds the
+        lock the name can belong to an agent that was never archived and
+        should not be.
+        """
+        from fastapi.testclient import TestClient
+
+        from tests.test_hibernation import _OP, _build_app
+
+        app, bb, cm, _tr, _hm, _eb, cfg = _build_app(tmp_path, monkeypatch)
+        try:
+            client = TestClient(app)
+            async with agent_lifecycle_locked_async("scout"):
+                t, box = _run_in_thread(
+                    lambda: client.post("/mesh/agents/scout/archive", headers=_OP).status_code,
+                )
+                try:
+                    assert await _spin_until_async(lambda: lifecycle_refcount("scout") == 2), (
+                        "the archive never queued on the lifecycle lock"
+                    )
+                    retire_agent("scout")
+                finally:
+                    pass
+            t.join(5)
+            assert box.get("value") == 409, box
+            assert cfg["agents"]["scout"]["status"] == "active", (
+                "the archive took the replacement out of service"
+            )
+            assert cm.stopped == []
+        finally:
+            bb.close()
+
+    @pytest.mark.asyncio
+    async def test_a_wake_refuses_a_replacement(self, tmp_path, monkeypatch):
+        """The wake's claim named an agent that no longer exists."""
+        from tests.test_hibernation import _build_app
+
+        app, bb, cm, _tr, _hm, _eb, _cfg = _build_app(
+            tmp_path, monkeypatch, agent_status="hibernated",
+        )
+        try:
+            async def replace_while_the_wake_queues():
+                async with agent_lifecycle_locked_async("scout"):
+                    await asyncio.sleep(0.05)
+                    retire_agent("scout")
+
+            holder = asyncio.create_task(replace_while_the_wake_queues())
+            await asyncio.sleep(0)
+            wake = asyncio.create_task(app.ensure_agent_running("scout", trigger="test"))
+            await asyncio.wait_for(holder, 3)
+            assert await asyncio.wait_for(wake, 5) is False
+            assert cm.started == [], "the wake started a container for the replacement"
+        finally:
+            bb.close()
