@@ -31,6 +31,7 @@ from src.cli.formatting import (
     display_stream_tool_start,
     user_prompt,
 )
+from src.host.agent_lifecycle import agent_lifecycle_locked
 from src.shared.utils import dumps_safe, set_llm_max_tokens_env
 
 if TYPE_CHECKING:
@@ -449,37 +450,41 @@ class REPLSession:
             credential_vault=self.ctx.credential_vault,
         )
 
-        if selected_template:
-            _create_agent_from_template(new_name, selected_template["id"], model)
-        else:
-            _create_agent(new_name, new_desc, model)
-        # Reload permissions so the mesh grants the new agent API access
-        self.ctx.permissions.reload()
-        agent_cfg_data = _load_config().get("agents", {}).get(new_name, {})
-        _td = agent_cfg_data.get("tools_dir", "")
-        tools_dir = os.path.abspath(_td) if _td else ""
-        add_thinking = agent_cfg_data.get("thinking", "")
-        # Build per-agent env overrides (no shared extra_env mutation)
-        agent_env: dict[str, str] = {}
-        for env_key, cfg_key in (
-            ("INITIAL_INSTRUCTIONS", "initial_instructions"),
-            ("INITIAL_SOUL", "initial_soul"),
-            ("INITIAL_HEARTBEAT", "initial_heartbeat"),
-        ):
-            val = agent_cfg_data.get(cfg_key, "")
-            if val:
-                agent_env[env_key] = val
-        url = self.ctx.runtime.start_agent(
-            agent_id=new_name,
-            role=new_desc,
-            tools_dir=tools_dir,
-            model=agent_cfg_data.get("model", model),
-            thinking=add_thinking,
-            env_overrides=agent_env,
-        )
-        self.ctx.router.register_agent(new_name, url, role=new_desc)
-        if isinstance(self.ctx.transport, HttpTransport):
-            self.ctx.transport.register(new_name, url)
+        # Config write -> start -> register is ONE lifecycle operation.
+        # The mesh delete path finds an agent by its config row, so it
+        # can reach this name the moment ``_create_agent`` returns.
+        with agent_lifecycle_locked(new_name):
+            if selected_template:
+                _create_agent_from_template(new_name, selected_template["id"], model)
+            else:
+                _create_agent(new_name, new_desc, model)
+            # Reload permissions so the mesh grants the new agent API access
+            self.ctx.permissions.reload()
+            agent_cfg_data = _load_config().get("agents", {}).get(new_name, {})
+            _td = agent_cfg_data.get("tools_dir", "")
+            tools_dir = os.path.abspath(_td) if _td else ""
+            add_thinking = agent_cfg_data.get("thinking", "")
+            # Build per-agent env overrides (no shared extra_env mutation)
+            agent_env: dict[str, str] = {}
+            for env_key, cfg_key in (
+                ("INITIAL_INSTRUCTIONS", "initial_instructions"),
+                ("INITIAL_SOUL", "initial_soul"),
+                ("INITIAL_HEARTBEAT", "initial_heartbeat"),
+            ):
+                val = agent_cfg_data.get(cfg_key, "")
+                if val:
+                    agent_env[env_key] = val
+            url = self.ctx.runtime.start_agent(
+                agent_id=new_name,
+                role=new_desc,
+                tools_dir=tools_dir,
+                model=agent_cfg_data.get("model", model),
+                thinking=add_thinking,
+                env_overrides=agent_env,
+            )
+            self.ctx.router.register_agent(new_name, url, role=new_desc)
+            if isinstance(self.ctx.transport, HttpTransport):
+                self.ctx.transport.register(new_name, url)
         click.echo(f"Starting '{new_name}'...")
         ready = asyncio.run(self.ctx.runtime.wait_for_agent(new_name, timeout=60))
         if ready:
@@ -1407,53 +1412,58 @@ class REPLSession:
 
         click.echo(f"Restarting '{name}'...", nl=False)
 
-        # Stop old container
-        try:
-            self.ctx.runtime.stop_agent(name)
-        except Exception as e:
-            logger.debug("Stop agent failed during restart of %s: %s", name, e)
+        # Stop -> start -> re-register, the same unit the dashboard and
+        # mesh restart paths lock. The REPL shares this process with the
+        # mesh loop, so a health restart or an archive genuinely can run
+        # concurrently with a typed ``/restart``.
+        with agent_lifecycle_locked(name):
+            # Stop old container
+            try:
+                self.ctx.runtime.stop_agent(name)
+            except Exception as e:
+                logger.debug("Stop agent failed during restart of %s: %s", name, e)
 
-        # Read fresh config
-        fresh_cfg = _load_config()
-        agent_cfg = fresh_cfg.get("agents", {}).get(name, {})
-        default_model = fresh_cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
-        _td = agent_cfg.get("tools_dir", "")
-        tools_dir = os.path.abspath(_td) if _td else ""
-        agent_model = agent_cfg.get("model", default_model)
-        agent_thinking = agent_cfg.get("thinking", "")
+            # Read fresh config
+            fresh_cfg = _load_config()
+            agent_cfg = fresh_cfg.get("agents", {}).get(name, {})
+            default_model = fresh_cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+            _td = agent_cfg.get("tools_dir", "")
+            tools_dir = os.path.abspath(_td) if _td else ""
+            agent_model = agent_cfg.get("model", default_model)
+            agent_thinking = agent_cfg.get("thinking", "")
 
-        # Preserve operator's ALLOWED_TOOLS on restart
-        from src.cli.config import _OPERATOR_AGENT_ID, _OPERATOR_ALLOWED_TOOLS
-        restart_env: dict[str, str] = {}
-        if name == _OPERATOR_AGENT_ID:
-            restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
-        # Per-agent output-token cap → LLM_MAX_TOKENS (survives /restart).
-        set_llm_max_tokens_env(restart_env, agent_cfg)
-        from src.shared.limits import set_llm_limits_env
-        set_llm_limits_env(restart_env, agent_cfg)
+            # Preserve operator's ALLOWED_TOOLS on restart
+            from src.cli.config import _OPERATOR_AGENT_ID, _OPERATOR_ALLOWED_TOOLS
+            restart_env: dict[str, str] = {}
+            if name == _OPERATOR_AGENT_ID:
+                restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
+            # Per-agent output-token cap → LLM_MAX_TOKENS (survives /restart).
+            set_llm_max_tokens_env(restart_env, agent_cfg)
+            from src.shared.limits import set_llm_limits_env
+            set_llm_limits_env(restart_env, agent_cfg)
 
-        # Start new container
-        url = self.ctx.runtime.start_agent(
-            agent_id=name,
-            role=agent_cfg.get("role", ""),
-            tools_dir=tools_dir,
-            model=agent_model,
-            thinking=agent_thinking,
-            env_overrides=restart_env,
-        )
+            # Start new container
+            url = self.ctx.runtime.start_agent(
+                agent_id=name,
+                role=agent_cfg.get("role", ""),
+                tools_dir=tools_dir,
+                model=agent_model,
+                thinking=agent_thinking,
+                env_overrides=restart_env,
+            )
 
-        # Update router and transport
-        self.ctx.router.register_agent(name, url)
-        if isinstance(self.ctx.transport, HttpTransport):
-            self.ctx.transport.register(name, url)
-        # Archive deregisters from the health monitor; a manual restart is
-        # one of the paths that must re-register (same guard as the
-        # dashboard restart endpoint) or the agent runs unmonitored.
-        if (
-            self.ctx.health_monitor is not None
-            and name not in getattr(self.ctx.health_monitor, "agents", {})
-        ):
-            self.ctx.health_monitor.register(name)
+            # Update router and transport
+            self.ctx.router.register_agent(name, url)
+            if isinstance(self.ctx.transport, HttpTransport):
+                self.ctx.transport.register(name, url)
+            # Archive deregisters from the health monitor; a manual restart is
+            # one of the paths that must re-register (same guard as the
+            # dashboard restart endpoint) or the agent runs unmonitored.
+            if (
+                self.ctx.health_monitor is not None
+                and name not in getattr(self.ctx.health_monitor, "agents", {})
+            ):
+                self.ctx.health_monitor.register(name)
 
         # Wait for readiness
         ready = asyncio.run(self.ctx.runtime.wait_for_agent(name, timeout=60))
@@ -1531,65 +1541,73 @@ class REPLSession:
                 "can run a live handover turn before removal."
             )
 
-        # Stop the container. remove_data=True (bug fix — this previously
-        # left the agent's ``openlegion_data_*`` volume behind forever;
-        # H12 parity with the mesh and dashboard delete paths).
-        try:
-            self.ctx.runtime.stop_agent(name, remove_data=True)
-        except Exception as e:
-            logger.debug("Stop agent failed during removal of %s: %s", name, e)
-
-        # Remove from router and transport
-        if self.ctx.router:
-            self.ctx.router.unregister_agent(name)
-        if isinstance(self.ctx.transport, HttpTransport):
-            self.ctx.transport._urls.pop(name, None)
-        if self.ctx.health_monitor:
-            self.ctx.health_monitor.unregister(name)
-
-        # Clean up PubSub subscriptions, cron jobs, and lane state
-        if self.ctx.pubsub:
-            self.ctx.pubsub.unsubscribe_agent(name)
-        if self.ctx.cron_scheduler:
-            removed = self.ctx.cron_scheduler.remove_agent_jobs(name)
-            if removed:
-                click.echo(f"  Removed {removed} cron job(s).")
-        if self.ctx.lane_manager:
-            self.ctx.lane_manager.remove_lane(name)
-
-        # Strip the id from connector assignments + pending-restart
-        # stamps — otherwise a future agent recreated under the same
-        # name silently inherits this agent's MCP connectors (and
-        # their $CRED-bearing env). Mirrors the dashboard delete path.
-        if getattr(self.ctx, "connector_store", None) is not None:
+        # Stop through config removal is ONE lifecycle operation — a
+        # health restart or a cold wake interleaving in it puts the
+        # container back for an agent this command already destroyed.
+        # The offboard handover above stays OUTSIDE the lock: it
+        # dispatches a turn to the agent, and the cold-wake seam would
+        # take this same lock to deliver it — from the mesh loop, while
+        # this thread sits blocked holding it.
+        with agent_lifecycle_locked(name):
+            # Stop the container. remove_data=True (bug fix — this previously
+            # left the agent's ``openlegion_data_*`` volume behind forever;
+            # H12 parity with the mesh and dashboard delete paths).
             try:
-                self.ctx.connector_store.remove_agent(name)
+                self.ctx.runtime.stop_agent(name, remove_data=True)
             except Exception as e:
-                click.echo(f"  Warning: connector cleanup failed: {e}")
+                logger.debug("Stop agent failed during removal of %s: %s", name, e)
 
-        # Remove from config, permissions, and any team membership
-        from src.cli.config import _remove_agent
+            # Remove from router and transport
+            if self.ctx.router:
+                self.ctx.router.unregister_agent(name)
+            if isinstance(self.ctx.transport, HttpTransport):
+                self.ctx.transport._urls.pop(name, None)
+            if self.ctx.health_monitor:
+                self.ctx.health_monitor.unregister(name)
 
-        _remove_agent(name)
+            # Clean up PubSub subscriptions, cron jobs, and lane state
+            if self.ctx.pubsub:
+                self.ctx.pubsub.unsubscribe_agent(name)
+            if self.ctx.cron_scheduler:
+                removed = self.ctx.cron_scheduler.remove_agent_jobs(name)
+                if removed:
+                    click.echo(f"  Removed {removed} cron job(s).")
+            if self.ctx.lane_manager:
+                self.ctx.lane_manager.remove_lane(name)
 
-        # Per-agent store teardown (M11) — parity with the mesh + dashboard
-        # delete paths. ``cleanup_agent`` (the mesh app's helper, wired onto
-        # the runtime context in ``_start_mesh_server``) clears the stores
-        # the ad-hoc block above misses — vault, private blackboard
-        # namespace, cost/trace rows, wallet — and runs ``permissions.reload()``
-        # (called AFTER ``_remove_agent`` dropped the id from permissions.json,
-        # so the reload actually takes). Without it a same-name recreated
-        # agent silently inherits the deleted agent's wallet + private
-        # namespace. Overlapping calls (pubsub/cron/lane/connector) are
-        # idempotent. The seam is ``None`` only when the mesh app is not
-        # wired (not a live REPL); the ad-hoc block already ran the partial
-        # cleanup in that degraded case.
-        cleanup_agent = getattr(self.ctx, "cleanup_agent", None)
-        if cleanup_agent is not None:
-            try:
-                cleanup_agent(name)
-            except Exception as e:
-                click.echo(f"  Warning: per-agent cleanup failed: {e}")
+            # Strip the id from connector assignments + pending-restart
+            # stamps — otherwise a future agent recreated under the same
+            # name silently inherits this agent's MCP connectors (and
+            # their $CRED-bearing env). Mirrors the dashboard delete path.
+            if getattr(self.ctx, "connector_store", None) is not None:
+                try:
+                    self.ctx.connector_store.remove_agent(name)
+                except Exception as e:
+                    click.echo(f"  Warning: connector cleanup failed: {e}")
+
+            # Remove from config, permissions, and any team membership
+            from src.cli.config import _remove_agent
+
+            _remove_agent(name)
+
+            # Per-agent store teardown (M11) — parity with the mesh + dashboard
+            # delete paths. ``cleanup_agent`` (the mesh app's helper, wired onto
+            # the runtime context in ``_start_mesh_server``) clears the stores
+            # the ad-hoc block above misses — vault, private blackboard
+            # namespace, cost/trace rows, wallet — and runs ``permissions.reload()``
+            # (called AFTER ``_remove_agent`` dropped the id from permissions.json,
+            # so the reload actually takes). Without it a same-name recreated
+            # agent silently inherits the deleted agent's wallet + private
+            # namespace. Overlapping calls (pubsub/cron/lane/connector) are
+            # idempotent. The seam is ``None`` only when the mesh app is not
+            # wired (not a live REPL); the ad-hoc block already ran the partial
+            # cleanup in that degraded case.
+            cleanup_agent = getattr(self.ctx, "cleanup_agent", None)
+            if cleanup_agent is not None:
+                try:
+                    cleanup_agent(name)
+                except Exception as e:
+                    click.echo(f"  Warning: per-agent cleanup failed: {e}")
 
         click.echo(f"Removed agent '{name}'.")
         if self.ctx.event_bus:

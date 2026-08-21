@@ -33,6 +33,7 @@ from fastapi.responses import StreamingResponse
 
 from src.host import auto_merge
 from src.host import drive as team_drive
+from src.host.agent_lifecycle import AgentLifecycleBusy, agent_lifecycle_locked_async
 from src.host.asks import AskBroker, AskDeliveryFailed, AskLimitExceeded
 from src.host.change_history import ChangeHistory
 from src.host.credentials import ConnectionRefreshError, is_system_credential
@@ -892,6 +893,18 @@ def create_mesh_app(
     )
     app = FastAPI(title="OpenLegion Mesh", **_docs_kwargs)
     _install_body_size_limit(app)
+
+    @app.exception_handler(AgentLifecycleBusy)
+    async def _agent_lifecycle_busy_handler(request: Request, exc: AgentLifecycleBusy):
+        """A lifecycle lock that never came free is a 409, not a 500.
+
+        The timeout is minutes long, so reaching it means another create /
+        delete / restart / archive / wake for the same agent is genuinely
+        still running — "retry shortly" is the accurate answer.
+        """
+        from starlette.responses import JSONResponse as _JSONResponse
+
+        return _JSONResponse(status_code=409, content={"detail": str(exc)})
 
     # L11: stamp baseline security headers on every response. Outer middleware —
     # only adds headers, never strips existing ones, so the CSRF dependency and
@@ -5273,49 +5286,57 @@ def create_mesh_app(
             set_llm_limits_env(env_overrides, acfg)
 
             try:
-                # Start container with per-agent env_overrides (not shared extra_env)
-                url = container_manager.start_agent(
-                    agent_id=agent_name,
-                    role=acfg.get("role", agent_name),
-                    tools_dir=tools_dir,
-                    model=agent_model,
-                    thinking=acfg.get("thinking", ""),
-                    env_overrides=env_overrides,
-                )
-
-                # Register with router, transport, health, cron
-                router.register_agent(agent_name, url, role=acfg.get("role", ""))
-                if transport is not None:
-                    from src.host.transport import HttpTransport
-
-                    if isinstance(transport, HttpTransport):
-                        transport.register(agent_name, url)
-                if health_monitor is not None:
-                    health_monitor.register(agent_name)
-                if cron_scheduler is not None:
-                    cron_scheduler.ensure_heartbeat(agent_name, hb_schedule)
-
-                # Wait for readiness
-                ready = await container_manager.wait_for_agent(agent_name, timeout=60)
-
-                if event_bus is not None:
-                    event_bus.emit(
-                        "agent_state",
-                        agent=agent_name,
-                        data={
-                            "state": "added",
-                            "role": acfg.get("role", ""),
-                            "ready": ready,
-                        },
+                # Per-slot start + registration, same unit the single-agent
+                # create path locks. The configs for every slot were written
+                # under ``_creation_lock`` further up and it is long released
+                # by now, so each slot's container work is on its own here.
+                # A lock that never comes free lands this slot in
+                # ``failed_agents`` via the handler below — Constraint #3
+                # (per-slot, not atomic) already holds for this loop.
+                async with agent_lifecycle_locked_async(agent_name):
+                    # Start container with per-agent env_overrides (not shared extra_env)
+                    url = container_manager.start_agent(
+                        agent_id=agent_name,
+                        role=acfg.get("role", agent_name),
+                        tools_dir=tools_dir,
+                        model=agent_model,
+                        thinking=acfg.get("thinking", ""),
+                        env_overrides=env_overrides,
                     )
 
-                created_agents.append(
-                    {
-                        "agent_id": agent_name,
-                        "role": acfg.get("role", agent_name),
-                        "ready": ready,
-                    }
-                )
+                    # Register with router, transport, health, cron
+                    router.register_agent(agent_name, url, role=acfg.get("role", ""))
+                    if transport is not None:
+                        from src.host.transport import HttpTransport
+
+                        if isinstance(transport, HttpTransport):
+                            transport.register(agent_name, url)
+                    if health_monitor is not None:
+                        health_monitor.register(agent_name)
+                    if cron_scheduler is not None:
+                        cron_scheduler.ensure_heartbeat(agent_name, hb_schedule)
+
+                    # Wait for readiness
+                    ready = await container_manager.wait_for_agent(agent_name, timeout=60)
+
+                    if event_bus is not None:
+                        event_bus.emit(
+                            "agent_state",
+                            agent=agent_name,
+                            data={
+                                "state": "added",
+                                "role": acfg.get("role", ""),
+                                "ready": ready,
+                            },
+                        )
+
+                    created_agents.append(
+                        {
+                            "agent_id": agent_name,
+                            "role": acfg.get("role", agent_name),
+                            "ready": ready,
+                        }
+                    )
             except Exception as e:
                 logger.error("Failed to start agent '%s' from template: %s", agent_name, e)
                 failed_agents.append({"agent_id": agent_name, "error": str(e)})
@@ -5600,128 +5621,136 @@ def create_mesh_app(
             _update_agent_field,
         )
 
-        # M15 — atomic plan-limit check + config write. Hold the shared
-        # creation lock across the count re-read and ``_add_agent_to_config``
-        # so two concurrent creates can't both pass the cap and overshoot
-        # ``OPENLEGION_MAX_AGENTS``. Re-load config inside the lock for the
-        # authoritative count (another create may have landed since the
-        # dup-name check above).
-        async with _creation_lock:
-            _agents_now = _load_config().get("agents", {})
-            # Dup-name re-check inside the lock (another create may have
-            # landed since the pre-lock check above).
-            if name in _agents_now or name in router.agent_registry:
-                raise HTTPException(409, f"Agent '{name}' already exists")
-            if max_agents > 0:
-                # Union config + live registry (same semantics as
-                # apply_fleet_template) so the cap counts agents written by
-                # a concurrent template apply even before they register.
-                _existing = {a for a in _agents_now if a != "operator"} | {
-                    aid for aid in router.agent_registry if aid != "operator"
-                }
-                current = len(_existing)
-                if current >= max_agents:
-                    raise HTTPException(
-                        409,
-                        f"Plan limit reached ({current}/{max_agents} agents). Remove an agent or upgrade your plan.",
-                    )
-            _add_agent_to_config(
-                name=name,
-                role=role or name,
-                model=model,
-                initial_instructions=instructions,
-                initial_soul=soul,
-            )
-        _update_agent_field(name, "avatar", random.randint(1, 50))
-        # Operator-created agents need the same coordination defaults as the
-        # human create path (`_create_agent`) and template-created agents —
-        # empty blackboard_read/write would lock them out of the coordination
-        # protocol entirely (and skip the auto-watch setup at /mesh/register,
-        # which is gated on blackboard_read being truthy). Single source of
-        # truth lives in cli.config so both create paths stay in lockstep.
-        _add_agent_permissions(name, permissions=_DEFAULT_AGENT_COORDINATION_PERMS)
-        # _add_agent_permissions writes to config/permissions.json on disk;
-        # the live PermissionMatrix has to reload or the agent's imminent
-        # /mesh/register call will fall through to default/deny-all (cf. PR
-        # #656 which added the same reload for the no-defaults case).
-        permissions.reload()
-        tools_dir = PROJECT_ROOT / "agent_tools" / name
-        tools_dir.mkdir(parents=True, exist_ok=True)
-
-        # Start container using env_overrides pattern
-        agent_env: dict[str, str] = {}
-        if instructions:
-            agent_env["INITIAL_INSTRUCTIONS"] = instructions
-        if soul:
-            agent_env["INITIAL_SOUL"] = soul
-
-        try:
-            url = container_manager.start_agent(
-                agent_id=name,
-                role=role or name,
-                tools_dir=str(tools_dir),
-                model=model,
-                env_overrides=agent_env,
-            )
-        except Exception as e:
-            # Roll back: remove config and permissions so the name isn't blocked
-            from src.cli.config import _remove_agent
-
-            try:
-                _remove_agent(name)
-            except Exception:
-                pass
-            import shutil
-
-            shutil.rmtree(tools_dir, ignore_errors=True)
-            raise HTTPException(500, f"Failed to start agent container: {e}") from e
-
-        try:
-            router.register_agent(name, url, role=role or name)
-            if transport is not None:
-                from src.host.transport import HttpTransport
-
-                if isinstance(transport, HttpTransport):
-                    transport.register(name, url)
-            if health_monitor is not None:
-                health_monitor.register(name)
-            if cron_scheduler is not None:
-                hb_schedule = config.get("mesh", {}).get("heartbeat_schedule")
-                cron_scheduler.ensure_heartbeat(name, hb_schedule)
-
-            ready = await container_manager.wait_for_agent(name, timeout=60)
-
-            if event_bus is not None:
-                event_bus.emit("agent_state", agent=name, data={"state": "added", "role": role, "ready": ready})
-
-            if trace_store:
-                from src.shared.trace import new_trace_id as _new_trace_id
-
-                trace_store.record(
-                    trace_id=_new_trace_id(),
-                    source="mesh.create_agent",
-                    agent=name,
-                    event_type="create_agent",
-                    detail=f"role={role}, model={model}, created_by={data.get('created_by', 'operator')}",
+        # Config write -> container start -> router/transport/health/cron
+        # registration is ONE lifecycle operation. The mesh delete path
+        # targets an agent by its CONFIG row, so it can reach this name the
+        # moment ``_add_agent_to_config`` returns — well before there is a
+        # container or a registration for it to clean up. Lock order is this
+        # lock, then the fleet-wide ``_creation_lock``; never the reverse.
+        async with agent_lifecycle_locked_async(name):
+            # M15 — atomic plan-limit check + config write. Hold the shared
+            # creation lock across the count re-read and ``_add_agent_to_config``
+            # so two concurrent creates can't both pass the cap and overshoot
+            # ``OPENLEGION_MAX_AGENTS``. Re-load config inside the lock for the
+            # authoritative count (another create may have landed since the
+            # dup-name check above).
+            async with _creation_lock:
+                _agents_now = _load_config().get("agents", {})
+                # Dup-name re-check inside the lock (another create may have
+                # landed since the pre-lock check above).
+                if name in _agents_now or name in router.agent_registry:
+                    raise HTTPException(409, f"Agent '{name}' already exists")
+                if max_agents > 0:
+                    # Union config + live registry (same semantics as
+                    # apply_fleet_template) so the cap counts agents written by
+                    # a concurrent template apply even before they register.
+                    _existing = {a for a in _agents_now if a != "operator"} | {
+                        aid for aid in router.agent_registry if aid != "operator"
+                    }
+                    current = len(_existing)
+                    if current >= max_agents:
+                        raise HTTPException(
+                            409,
+                            f"Plan limit reached ({current}/{max_agents} agents). "
+                            "Remove an agent or upgrade your plan.",
+                        )
+                _add_agent_to_config(
+                    name=name,
+                    role=role or name,
+                    model=model,
+                    initial_instructions=instructions,
+                    initial_soul=soul,
                 )
+            _update_agent_field(name, "avatar", random.randint(1, 50))
+            # Operator-created agents need the same coordination defaults as the
+            # human create path (`_create_agent`) and template-created agents —
+            # empty blackboard_read/write would lock them out of the coordination
+            # protocol entirely (and skip the auto-watch setup at /mesh/register,
+            # which is gated on blackboard_read being truthy). Single source of
+            # truth lives in cli.config so both create paths stay in lockstep.
+            _add_agent_permissions(name, permissions=_DEFAULT_AGENT_COORDINATION_PERMS)
+            # _add_agent_permissions writes to config/permissions.json on disk;
+            # the live PermissionMatrix has to reload or the agent's imminent
+            # /mesh/register call will fall through to default/deny-all (cf. PR
+            # #656 which added the same reload for the no-defaults case).
+            permissions.reload()
+            tools_dir = PROJECT_ROOT / "agent_tools" / name
+            tools_dir.mkdir(parents=True, exist_ok=True)
 
-            return {"agent_id": name, "role": role or name, "ready": ready}
-        except Exception as e:
-            # Roll back: stop container, remove config so the name isn't blocked
+            # Start container using env_overrides pattern
+            agent_env: dict[str, str] = {}
+            if instructions:
+                agent_env["INITIAL_INSTRUCTIONS"] = instructions
+            if soul:
+                agent_env["INITIAL_SOUL"] = soul
+
             try:
-                container_manager.stop_agent(name)
-            except Exception:
-                pass
-            from src.cli.config import _remove_agent
+                url = container_manager.start_agent(
+                    agent_id=name,
+                    role=role or name,
+                    tools_dir=str(tools_dir),
+                    model=model,
+                    env_overrides=agent_env,
+                )
+            except Exception as e:
+                # Roll back: remove config and permissions so the name isn't blocked
+                from src.cli.config import _remove_agent
+
+                try:
+                    _remove_agent(name)
+                except Exception:
+                    pass
+                import shutil
+
+                shutil.rmtree(tools_dir, ignore_errors=True)
+                raise HTTPException(500, f"Failed to start agent container: {e}") from e
 
             try:
-                _remove_agent(name)
-            except Exception:
-                pass
-            import shutil
+                router.register_agent(name, url, role=role or name)
+                if transport is not None:
+                    from src.host.transport import HttpTransport
 
-            shutil.rmtree(tools_dir, ignore_errors=True)
-            raise HTTPException(500, f"Failed to register agent: {e}") from e
+                    if isinstance(transport, HttpTransport):
+                        transport.register(name, url)
+                if health_monitor is not None:
+                    health_monitor.register(name)
+                if cron_scheduler is not None:
+                    hb_schedule = config.get("mesh", {}).get("heartbeat_schedule")
+                    cron_scheduler.ensure_heartbeat(name, hb_schedule)
+
+                ready = await container_manager.wait_for_agent(name, timeout=60)
+
+                if event_bus is not None:
+                    event_bus.emit("agent_state", agent=name, data={"state": "added", "role": role, "ready": ready})
+
+                if trace_store:
+                    from src.shared.trace import new_trace_id as _new_trace_id
+
+                    trace_store.record(
+                        trace_id=_new_trace_id(),
+                        source="mesh.create_agent",
+                        agent=name,
+                        event_type="create_agent",
+                        detail=f"role={role}, model={model}, created_by={data.get('created_by', 'operator')}",
+                    )
+
+                return {"agent_id": name, "role": role or name, "ready": ready}
+            except Exception as e:
+                # Roll back: stop container, remove config so the name isn't blocked
+                try:
+                    container_manager.stop_agent(name)
+                except Exception:
+                    pass
+                from src.cli.config import _remove_agent
+
+                try:
+                    _remove_agent(name)
+                except Exception:
+                    pass
+                import shutil
+
+                shutil.rmtree(tools_dir, ignore_errors=True)
+                raise HTTPException(500, f"Failed to register agent: {e}") from e
 
     # === Agent History Access ===
 
@@ -11370,48 +11399,55 @@ def create_mesh_app(
         already verified auth, target != operator, and agent existence."""
         from src.cli.config import _archive_agent
 
-        try:
-            _archive_agent(agent_id)
-        except ValueError as e:
-            raise HTTPException(404, str(e))
-        # Hibernation status-override cache (plan §8 #24): keep it in sync
-        # so ``ensure_agent_running`` correctly refuses to wake an agent
-        # archived after boot (its fast path would otherwise still read
-        # the stale pre-archive entry — "active" or "hibernated" — from
-        # the cache and either no-op or attempt a wake).
-        _status_overrides[agent_id] = "archived"
-        # If the archived agent was a team's lead, its stewardship would go
-        # dormant (a stopped agent's heartbeat never ticks). Re-evaluate that
-        # team so an active member takes over — or the lead is cleared and the
-        # standup retired when none remain. Best-effort.
-        try:
-            _led_team = teams_store.led_team(agent_id)
-            if _led_team:
-                _ensure_team_lead(_led_team)
-        except Exception as e:
-            logger.warning("archive: re-evaluate lead for %s failed: %s", agent_id, e)
-        # Stop scheduling: drop heartbeat and any cron jobs the agent owns.
-        if cron_scheduler is not None:
+        # Flipping the status, dropping cron + health and stopping the
+        # container is ONE lifecycle operation. A cold wake interleaving in
+        # it starts the container back up and flips the status to active —
+        # against an agent this call has already taken out of service.
+        # ``_ensure_team_lead`` below is safe to hold the lock across: it
+        # only touches the team store and cron, and never dispatches.
+        async with agent_lifecycle_locked_async(agent_id):
             try:
-                cron_scheduler.remove_agent_jobs(agent_id)
-            except Exception as e:
-                logger.warning("archive_agent: cron cleanup for %s failed: %s", agent_id, e)
-        # Deregister from health monitoring BEFORE stopping the container, so
-        # the poller doesn't see the intentional stop as a failure and fight
-        # the archive by auto-restarting it (~90s window). Mirrors the delete
-        # path. Monitoring is re-established when the agent is next started
-        # (the restart / boot-reconcile paths re-register a deregistered agent).
-        if health_monitor is not None:
+                _archive_agent(agent_id)
+            except ValueError as e:
+                raise HTTPException(404, str(e))
+            # Hibernation status-override cache (plan §8 #24): keep it in sync
+            # so ``ensure_agent_running`` correctly refuses to wake an agent
+            # archived after boot (its fast path would otherwise still read
+            # the stale pre-archive entry — "active" or "hibernated" — from
+            # the cache and either no-op or attempt a wake).
+            _status_overrides[agent_id] = "archived"
+            # If the archived agent was a team's lead, its stewardship would go
+            # dormant (a stopped agent's heartbeat never ticks). Re-evaluate that
+            # team so an active member takes over — or the lead is cleared and the
+            # standup retired when none remain. Best-effort.
             try:
-                health_monitor.unregister(agent_id)
+                _led_team = teams_store.led_team(agent_id)
+                if _led_team:
+                    _ensure_team_lead(_led_team)
             except Exception as e:
-                logger.warning("archive_agent: health deregister for %s failed: %s", agent_id, e)
-        # Best-effort container stop. Failures here don't break archive.
-        if container_manager is not None:
-            try:
-                container_manager.stop_agent(agent_id)
-            except Exception as e:
-                logger.warning("archive_agent: container stop for %s failed: %s", agent_id, e)
+                logger.warning("archive: re-evaluate lead for %s failed: %s", agent_id, e)
+            # Stop scheduling: drop heartbeat and any cron jobs the agent owns.
+            if cron_scheduler is not None:
+                try:
+                    cron_scheduler.remove_agent_jobs(agent_id)
+                except Exception as e:
+                    logger.warning("archive_agent: cron cleanup for %s failed: %s", agent_id, e)
+            # Deregister from health monitoring BEFORE stopping the container, so
+            # the poller doesn't see the intentional stop as a failure and fight
+            # the archive by auto-restarting it (~90s window). Mirrors the delete
+            # path. Monitoring is re-established when the agent is next started
+            # (the restart / boot-reconcile paths re-register a deregistered agent).
+            if health_monitor is not None:
+                try:
+                    health_monitor.unregister(agent_id)
+                except Exception as e:
+                    logger.warning("archive_agent: health deregister for %s failed: %s", agent_id, e)
+            # Best-effort container stop. Failures here don't break archive.
+            if container_manager is not None:
+                try:
+                    container_manager.stop_agent(agent_id)
+                except Exception as e:
+                    logger.warning("archive_agent: container stop for %s failed: %s", agent_id, e)
         if event_bus is not None:
             try:
                 event_bus.emit(
@@ -11450,42 +11486,48 @@ def create_mesh_app(
         """
         from src.cli.config import _hibernate_agent
 
-        try:
-            _hibernate_agent(agent_id)
-        except ValueError as e:
-            raise HTTPException(404, str(e))
-        _status_overrides[agent_id] = "hibernated"
-        # Deregister from health monitoring — the archive-proven
-        # mechanism (B3 leg 1) — so the poller doesn't see the
-        # intentional stop as a failure and fight the hibernate by
-        # auto-restarting it. Re-established on wake.
-        if health_monitor is not None:
+        # Same unit as archive: status flip + health dereg + container
+        # stop. Without the lock a cold wake — which the heartbeat can
+        # trigger at any moment, since hibernation deliberately KEEPS the
+        # cron jobs — starts the container back up mid-hibernate and leaves
+        # the status saying asleep while the agent runs unmonitored.
+        async with agent_lifecycle_locked_async(agent_id):
             try:
-                health_monitor.unregister(agent_id)
-            except Exception as e:
-                logger.warning(
-                    "hibernate_agent: health deregister for %s failed: %s", agent_id, e,
-                )
-        # Best-effort container stop WITHOUT data removal — the
-        # invariant that makes hibernation volume-loss-impossible by
-        # construction. Never pass a variable here; this literal is
-        # the pin.
-        if container_manager is not None:
-            try:
-                # Off-loop: ``stop_agent`` makes synchronous Docker API calls
-                # — ``container.stop(timeout=10)`` then ``remove()`` — so a
-                # graceful stop blocks for ~10s plus Docker overhead, per
-                # agent. This runs on uvicorn's loop from both the manual
-                # hibernate route and the idle sweep, and the sweep hibernates
-                # candidates one after another. The ``remove_data=False``
-                # literal stays at this call site (see the pin above).
-                await asyncio.to_thread(
-                    container_manager.stop_agent, agent_id, remove_data=False,
-                )
-            except Exception as e:
-                logger.warning(
-                    "hibernate_agent: container stop for %s failed: %s", agent_id, e,
-                )
+                _hibernate_agent(agent_id)
+            except ValueError as e:
+                raise HTTPException(404, str(e))
+            _status_overrides[agent_id] = "hibernated"
+            # Deregister from health monitoring — the archive-proven
+            # mechanism (B3 leg 1) — so the poller doesn't see the
+            # intentional stop as a failure and fight the hibernate by
+            # auto-restarting it. Re-established on wake.
+            if health_monitor is not None:
+                try:
+                    health_monitor.unregister(agent_id)
+                except Exception as e:
+                    logger.warning(
+                        "hibernate_agent: health deregister for %s failed: %s", agent_id, e,
+                    )
+            # Best-effort container stop WITHOUT data removal — the
+            # invariant that makes hibernation volume-loss-impossible by
+            # construction. Never pass a variable here; this literal is
+            # the pin.
+            if container_manager is not None:
+                try:
+                    # Off-loop: ``stop_agent`` makes synchronous Docker API calls
+                    # — ``container.stop(timeout=10)`` then ``remove()`` — so a
+                    # graceful stop blocks for ~10s plus Docker overhead, per
+                    # agent. This runs on uvicorn's loop from both the manual
+                    # hibernate route and the idle sweep, and the sweep hibernates
+                    # candidates one after another. The ``remove_data=False``
+                    # literal stays at this call site (see the pin above).
+                    await asyncio.to_thread(
+                        container_manager.stop_agent, agent_id, remove_data=False,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "hibernate_agent: container stop for %s failed: %s", agent_id, e,
+                    )
         # Cron jobs are DELIBERATELY left untouched — unlike archive,
         # a hibernated agent's heartbeat keeps ticking mesh-probe-only
         # (see cron.py's ``agent_status_fn`` gate) so it can cold-wake
@@ -11534,92 +11576,99 @@ def create_mesh_app(
         from src.shared.limits import set_llm_limits_env
         from src.shared.utils import set_llm_max_tokens_env
 
-        try:
-            fresh_cfg = _wake_load_config()
-        except Exception as e:
-            logger.error("wake_agent: config reload failed for '%s': %s", agent_id, e)
-            return False
-        agents_cfg = fresh_cfg.get("agents", {})
-        agent_cfg = agents_cfg.get(agent_id)
-        if agent_cfg is None:
-            logger.error("wake_agent: '%s' missing from agents.yaml — cannot rebuild", agent_id)
-            return False
-        default_model = fresh_cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
-        _td = agent_cfg.get("tools_dir", "")
-        tools_dir = os.path.abspath(_td) if _td else ""
+        # Config read -> start -> re-register -> status flip is ONE
+        # lifecycle operation, and the readiness wait sits in the middle of
+        # it, so the lock has to span the wait too: an archive landing there
+        # stops the container and drops health, and this coroutine then
+        # flips the status to active anyway — an agent recorded as running
+        # that isn't, and that nothing is monitoring.
+        async with agent_lifecycle_locked_async(agent_id):
+            try:
+                fresh_cfg = _wake_load_config()
+            except Exception as e:
+                logger.error("wake_agent: config reload failed for '%s': %s", agent_id, e)
+                return False
+            agents_cfg = fresh_cfg.get("agents", {})
+            agent_cfg = agents_cfg.get(agent_id)
+            if agent_cfg is None:
+                logger.error("wake_agent: '%s' missing from agents.yaml — cannot rebuild", agent_id)
+                return False
+            default_model = fresh_cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+            _td = agent_cfg.get("tools_dir", "")
+            tools_dir = os.path.abspath(_td) if _td else ""
 
-        env_overrides: dict[str, str] = {}
-        _network_cfg = fresh_cfg.get("network", {})
-        _proxy_url = resolve_agent_proxy(agent_id, agents_cfg, _network_cfg)
-        env_overrides.update(
-            build_proxy_env_vars(_proxy_url, _network_cfg.get("no_proxy", "")),
-        )
-        set_llm_max_tokens_env(env_overrides, agent_cfg)
-        set_llm_limits_env(env_overrides, agent_cfg)
-
-        try:
-            loop = asyncio.get_running_loop()
-            url = await asyncio.wait_for(
-                loop.run_in_executor(
-                    None,
-                    lambda: container_manager.start_agent(
-                        agent_id=agent_id,
-                        role=agent_cfg.get("role", agent_id),
-                        tools_dir=tools_dir,
-                        model=agent_cfg.get("model", default_model),
-                        thinking=agent_cfg.get("thinking", ""),
-                        env_overrides=env_overrides,
-                    ),
-                ),
-                timeout=60,
+            env_overrides: dict[str, str] = {}
+            _network_cfg = fresh_cfg.get("network", {})
+            _proxy_url = resolve_agent_proxy(agent_id, agents_cfg, _network_cfg)
+            env_overrides.update(
+                build_proxy_env_vars(_proxy_url, _network_cfg.get("no_proxy", "")),
             )
-        except Exception as e:
-            logger.error("wake_agent: start_agent failed for '%s': %s", agent_id, e)
-            return False
+            set_llm_max_tokens_env(env_overrides, agent_cfg)
+            set_llm_limits_env(env_overrides, agent_cfg)
 
-        router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
-        from src.host.transport import HttpTransport as _HttpTransportForWake
+            try:
+                loop = asyncio.get_running_loop()
+                url = await asyncio.wait_for(
+                    loop.run_in_executor(
+                        None,
+                        lambda: container_manager.start_agent(
+                            agent_id=agent_id,
+                            role=agent_cfg.get("role", agent_id),
+                            tools_dir=tools_dir,
+                            model=agent_cfg.get("model", default_model),
+                            thinking=agent_cfg.get("thinking", ""),
+                            env_overrides=env_overrides,
+                        ),
+                    ),
+                    timeout=60,
+                )
+            except Exception as e:
+                logger.error("wake_agent: start_agent failed for '%s': %s", agent_id, e)
+                return False
 
-        if isinstance(transport, _HttpTransportForWake):
-            transport.register(agent_id, url)
-        if health_monitor is not None:
-            health_monitor.register(agent_id)
+            router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
+            from src.host.transport import HttpTransport as _HttpTransportForWake
 
-        def _wake_teardown() -> None:
-            """Restore a CLEAN hibernated state after a failed wake (Phase-5
-            review finding). ``start_agent`` already ran (container up) and
-            transport/router/health are re-registered; a bare ``return False``
-            here would leave a container running AND health-registered while
-            the status stays ``hibernated`` — the exact inverse of the
-            hibernate invariant, so the health monitor would fight it with
-            restarts and every later dispatch would force-recreate the
-            container. Undo the registration + container so the next dispatch
-            retries a genuinely-asleep agent instead of a health-monitored
-            zombie. Status is deliberately LEFT ``hibernated``."""
+            if isinstance(transport, _HttpTransportForWake):
+                transport.register(agent_id, url)
             if health_monitor is not None:
-                try:
-                    health_monitor.unregister(agent_id)
-                except Exception as e:
-                    logger.warning("wake_teardown: health dereg for %s failed: %s", agent_id, e)
-            if container_manager is not None:
-                try:
-                    container_manager.stop_agent(agent_id, remove_data=False)
-                except Exception as e:
-                    logger.warning("wake_teardown: container stop for %s failed: %s", agent_id, e)
+                health_monitor.register(agent_id)
 
-        ready = await container_manager.wait_for_agent(agent_id, timeout=60)
-        if not ready:
-            logger.error("wake_agent: '%s' did not become ready after cold-wake", agent_id)
-            _wake_teardown()
-            return False
+            def _wake_teardown() -> None:
+                """Restore a CLEAN hibernated state after a failed wake (Phase-5
+                review finding). ``start_agent`` already ran (container up) and
+                transport/router/health are re-registered; a bare ``return False``
+                here would leave a container running AND health-registered while
+                the status stays ``hibernated`` — the exact inverse of the
+                hibernate invariant, so the health monitor would fight it with
+                restarts and every later dispatch would force-recreate the
+                container. Undo the registration + container so the next dispatch
+                retries a genuinely-asleep agent instead of a health-monitored
+                zombie. Status is deliberately LEFT ``hibernated``."""
+                if health_monitor is not None:
+                    try:
+                        health_monitor.unregister(agent_id)
+                    except Exception as e:
+                        logger.warning("wake_teardown: health dereg for %s failed: %s", agent_id, e)
+                if container_manager is not None:
+                    try:
+                        container_manager.stop_agent(agent_id, remove_data=False)
+                    except Exception as e:
+                        logger.warning("wake_teardown: container stop for %s failed: %s", agent_id, e)
 
-        try:
-            _wake_agent_status(agent_id)
-        except ValueError as e:
-            logger.error("wake_agent: status flip failed for '%s': %s", agent_id, e)
-            _wake_teardown()
-            return False
-        _status_overrides.pop(agent_id, None)
+            ready = await container_manager.wait_for_agent(agent_id, timeout=60)
+            if not ready:
+                logger.error("wake_agent: '%s' did not become ready after cold-wake", agent_id)
+                _wake_teardown()
+                return False
+
+            try:
+                _wake_agent_status(agent_id)
+            except ValueError as e:
+                logger.error("wake_agent: status flip failed for '%s': %s", agent_id, e)
+                _wake_teardown()
+                return False
+            _status_overrides.pop(agent_id, None)
         if lane_manager is not None:
             try:
                 lane_manager.mark_activity(agent_id)
@@ -12310,53 +12359,60 @@ def create_mesh_app(
             # an agent that was already explicitly offboarded just gets a
             # second dated snapshot — no dedup machinery needed.
             offboard_manifest = await _offboard_agent(target_id, reason="delete")
-            # H11/H12: stop the container through the runtime backend (not the
-            # raw-docker path inside ``_remove_agent``) so the agent's mesh
-            # auth token is popped (H11) AND its private ``openlegion_data_*``
-            # named volume is removed (H12). ``remove_data=True`` is the delete
-            # contract — archive deliberately calls ``stop_agent`` WITHOUT it
-            # so the volume survives for unarchive. ``_remove_agent`` is then
-            # called with ``stop_container=False`` so it only does config +
-            # permissions removal and never re-runs a token/volume-blind stop.
-            if container_manager is not None:
+            # Volume-destroying stop through config + registry removal is
+            # ONE lifecycle operation: a wake or a restart interleaving in it
+            # brings the container back after the volume is gone and the
+            # config is dropped. The offboard handover above stays OUTSIDE
+            # the lock — it dispatches a turn to the agent, and the cold-wake
+            # seam would take this same lock to deliver it.
+            async with agent_lifecycle_locked_async(target_id):
+                # H11/H12: stop the container through the runtime backend (not the
+                # raw-docker path inside ``_remove_agent``) so the agent's mesh
+                # auth token is popped (H11) AND its private ``openlegion_data_*``
+                # named volume is removed (H12). ``remove_data=True`` is the delete
+                # contract — archive deliberately calls ``stop_agent`` WITHOUT it
+                # so the volume survives for unarchive. ``_remove_agent`` is then
+                # called with ``stop_container=False`` so it only does config +
+                # permissions removal and never re-runs a token/volume-blind stop.
+                if container_manager is not None:
+                    try:
+                        container_manager.stop_agent(target_id, remove_data=True)
+                    except Exception as e:
+                        logger.warning(
+                            "stop_agent(%s, remove_data=True) failed during delete: %s",
+                            target_id,
+                            e,
+                        )
+                # Lead-orphan seam on the DELETE departure path: capture the team
+                # this agent LEADS (if any) BEFORE ``_remove_agent`` drops its
+                # membership and clears ``lead_agent_id`` in-transaction. A deleted
+                # lead's team would otherwise sit leaderless until the next reboot's
+                # backfill (plain archive keeps the lead pointer, so a lead survives
+                # archive intact and is only orphaned here at delete time).
+                _deleted_led_team = None
                 try:
-                    container_manager.stop_agent(target_id, remove_data=True)
+                    _deleted_led_team = teams_store.led_team(target_id)
                 except Exception as e:
-                    logger.warning(
-                        "stop_agent(%s, remove_data=True) failed during delete: %s",
-                        target_id,
-                        e,
-                    )
-            # Lead-orphan seam on the DELETE departure path: capture the team
-            # this agent LEADS (if any) BEFORE ``_remove_agent`` drops its
-            # membership and clears ``lead_agent_id`` in-transaction. A deleted
-            # lead's team would otherwise sit leaderless until the next reboot's
-            # backfill (plain archive keeps the lead pointer, so a lead survives
-            # archive intact and is only orphaned here at delete time).
-            _deleted_led_team = None
-            try:
-                _deleted_led_team = teams_store.led_team(target_id)
-            except Exception as e:
-                logger.warning("delete lead lookup for %s failed: %s", target_id, e)
-            try:
-                _remove_agent(target_id, stop_container=False)
-            except Exception as e:
-                raise HTTPException(500, f"Failed to delete agent: {e}")
-            # Drop runtime state via cleanup_agent (rate buckets, vault,
-            # blackboard, pubsub, lanes, cron, costs, traces, wallets).
-            try:
-                app.cleanup_agent(target_id)
-            except Exception as e:
-                logger.warning("cleanup_agent(%s) failed during delete: %s", target_id, e)
-            try:
-                router.unregister_agent(target_id)
-            except Exception:
-                pass
-            if health_monitor is not None:
+                    logger.warning("delete lead lookup for %s failed: %s", target_id, e)
                 try:
-                    health_monitor.unregister(target_id)
+                    _remove_agent(target_id, stop_container=False)
+                except Exception as e:
+                    raise HTTPException(500, f"Failed to delete agent: {e}")
+                # Drop runtime state via cleanup_agent (rate buckets, vault,
+                # blackboard, pubsub, lanes, cron, costs, traces, wallets).
+                try:
+                    app.cleanup_agent(target_id)
+                except Exception as e:
+                    logger.warning("cleanup_agent(%s) failed during delete: %s", target_id, e)
+                try:
+                    router.unregister_agent(target_id)
                 except Exception:
                     pass
+                if health_monitor is not None:
+                    try:
+                        health_monitor.unregister(target_id)
+                    except Exception:
+                        pass
             # Re-appoint a remaining real member as lead for the deleted lead's
             # team (mirror of the remove/offboard/move paths). ``_remove_agent``
             # already removed the deleted agent from ``team_members``, so it

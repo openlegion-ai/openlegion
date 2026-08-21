@@ -52,6 +52,7 @@ from pydantic import ValidationError
 from src.cli.proxy import build_proxy_env_vars, resolve_agent_proxy
 from src.dashboard.auth import verify_session_cookie
 from src.host import drive as team_drive
+from src.host.agent_lifecycle import AgentLifecycleBusy, agent_lifecycle_locked_async
 from src.shared import limits as _limits
 from src.shared.paths import resolve_under_root
 from src.shared.sqlite_helpers import open_db
@@ -725,6 +726,24 @@ def _validate_cookies(
 
     dropped = [{"reason": reason, "count": count} for reason, count in sorted(drop_counts.items())]
     return accepted, dropped, detected
+
+
+@contextlib.asynccontextmanager
+async def _agent_lifecycle_or_409(agent_id: str):
+    """``agent_lifecycle_locked_async`` with the busy timeout mapped to 409.
+
+    Reaching the timeout means a lifecycle operation for this agent has been
+    running for minutes — "try again shortly" is the honest answer, and a 409
+    says that where the default 500 would read as a bug in the request.
+
+    The bodies below never take a second lifecycle lock, so the only
+    ``AgentLifecycleBusy`` this can see is the acquire's own.
+    """
+    try:
+        async with agent_lifecycle_locked_async(agent_id):
+            yield
+    except AgentLifecycleBusy as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
 
 
 def create_dashboard_router(
@@ -2676,94 +2695,105 @@ def create_dashboard_router(
             raise HTTPException(status_code=503, detail="Runtime not available")
 
         try:
-            from src.cli.config import (
-                _create_agent,
-                _create_agent_from_template,
-                _load_config,
-                _update_agent_field,
-            )
+            # Config write, container start and the router/transport/health/
+            # cron registrations are ONE lifecycle operation. Without the
+            # lock a concurrent delete of the same name — which unregisters
+            # before it clears agents.yaml — removes the config this create
+            # just wrote, leaving a running, routable agent with nothing on
+            # disk describing it.
+            async with _agent_lifecycle_or_409(name):
+                # The duplicate-name check above ran before we queued on the
+                # lock, so re-check now that we hold it.
+                if name in agent_registry:
+                    raise HTTPException(status_code=409, detail=f"Agent '{name}' already exists")
+                from src.cli.config import (
+                    _create_agent,
+                    _create_agent_from_template,
+                    _load_config,
+                    _update_agent_field,
+                )
 
-            if template:
-                try:
-                    _create_agent_from_template(name, template, model)
-                except ValueError as e:
-                    raise HTTPException(status_code=400, detail=str(e))
-            else:
-                _create_agent(name, role, model)
-            _update_agent_field(name, "avatar", avatar)
-            if color is not None:
-                _update_agent_field(name, "color", color)
-            if permissions is not None:
-                permissions.reload()
-
-            cfg = _load_config()
-            acfg = cfg.get("agents", {}).get(name, {})
-            if template:
-                role = acfg.get("role", role)
-            _td = acfg.get("tools_dir", "")
-            tools_dir = os.path.abspath(_td) if _td else ""
-            # Build per-agent env overrides (no shared extra_env mutation)
-            agent_env: dict[str, str] = {}
-            for env_key, cfg_key in (
-                ("INITIAL_INSTRUCTIONS", "initial_instructions"),
-                ("INITIAL_SOUL", "initial_soul"),
-                ("INITIAL_HEARTBEAT", "initial_heartbeat"),
-            ):
-                val = acfg.get(cfg_key, "")
-                if val:
-                    agent_env[env_key] = val
-            url = runtime.start_agent(
-                agent_id=name,
-                role=role,
-                tools_dir=tools_dir,
-                model=acfg.get("model", model),
-                thinking=acfg.get("thinking", ""),
-                env_overrides=agent_env,
-            )
-            if router is not None:
-                router.register_agent(name, url, role=role)
-            else:
-                agent_registry[name] = url
-            if transport is not None:
-                from src.host.transport import HttpTransport
-
-                if isinstance(transport, HttpTransport):
-                    transport.register(name, url)
-            if health_monitor is not None:
-                health_monitor.register(name)
-            if cron_scheduler is not None:
-                hb_schedule = cfg.get("mesh", {}).get("heartbeat_schedule")
-                cron_scheduler.ensure_heartbeat(name, hb_schedule)
-            ready = await runtime.wait_for_agent(name, timeout=60)
-            if team:
-                if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", team):
-                    logger.warning("Skipping invalid team name '%s' for agent '%s'", team, name)
-                    team = ""
-                else:
-                    from src.cli.config import (
-                        _add_team_blackboard_permissions,
-                        _remove_team_blackboard_permissions,
-                    )
-                    from src.host.teams import TeamNotFound
-
+                if template:
                     try:
-                        old = teams_store.add_member(team, name)
-                    except (TeamNotFound, ValueError):
-                        logger.warning("Team '%s' not found; agent '%s' created standalone", team, name)
+                        _create_agent_from_template(name, template, model)
+                    except ValueError as e:
+                        raise HTTPException(status_code=400, detail=str(e))
+                else:
+                    _create_agent(name, role, model)
+                _update_agent_field(name, "avatar", avatar)
+                if color is not None:
+                    _update_agent_field(name, "color", color)
+                if permissions is not None:
+                    permissions.reload()
+
+                cfg = _load_config()
+                acfg = cfg.get("agents", {}).get(name, {})
+                if template:
+                    role = acfg.get("role", role)
+                _td = acfg.get("tools_dir", "")
+                tools_dir = os.path.abspath(_td) if _td else ""
+                # Build per-agent env overrides (no shared extra_env mutation)
+                agent_env: dict[str, str] = {}
+                for env_key, cfg_key in (
+                    ("INITIAL_INSTRUCTIONS", "initial_instructions"),
+                    ("INITIAL_SOUL", "initial_soul"),
+                    ("INITIAL_HEARTBEAT", "initial_heartbeat"),
+                ):
+                    val = acfg.get(cfg_key, "")
+                    if val:
+                        agent_env[env_key] = val
+                url = runtime.start_agent(
+                    agent_id=name,
+                    role=role,
+                    tools_dir=tools_dir,
+                    model=acfg.get("model", model),
+                    thinking=acfg.get("thinking", ""),
+                    env_overrides=agent_env,
+                )
+                if router is not None:
+                    router.register_agent(name, url, role=role)
+                else:
+                    agent_registry[name] = url
+                if transport is not None:
+                    from src.host.transport import HttpTransport
+
+                    if isinstance(transport, HttpTransport):
+                        transport.register(name, url)
+                if health_monitor is not None:
+                    health_monitor.register(name)
+                if cron_scheduler is not None:
+                    hb_schedule = cfg.get("mesh", {}).get("heartbeat_schedule")
+                    cron_scheduler.ensure_heartbeat(name, hb_schedule)
+                ready = await runtime.wait_for_agent(name, timeout=60)
+                if team:
+                    if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", team):
+                        logger.warning("Skipping invalid team name '%s' for agent '%s'", team, name)
                         team = ""
                     else:
-                        if old and old != team:
-                            _remove_team_blackboard_permissions(name, old)
-                        _add_team_blackboard_permissions(name, team)
-                        permissions.reload()
-            if event_bus is not None:
-                event_bus.emit("agent_state", agent=name, data={"state": "added", "role": role, "ready": ready})
-            return {
-                "created": True,
-                "agent": name,
-                "ready": ready,
-                "team": team or None,
-            }
+                        from src.cli.config import (
+                            _add_team_blackboard_permissions,
+                            _remove_team_blackboard_permissions,
+                        )
+                        from src.host.teams import TeamNotFound
+
+                        try:
+                            old = teams_store.add_member(team, name)
+                        except (TeamNotFound, ValueError):
+                            logger.warning("Team '%s' not found; agent '%s' created standalone", team, name)
+                            team = ""
+                        else:
+                            if old and old != team:
+                                _remove_team_blackboard_permissions(name, old)
+                            _add_team_blackboard_permissions(name, team)
+                            permissions.reload()
+                if event_bus is not None:
+                    event_bus.emit("agent_state", agent=name, data={"state": "added", "role": role, "ready": ready})
+                return {
+                    "created": True,
+                    "agent": name,
+                    "ready": ready,
+                    "team": team or None,
+                }
         except HTTPException:
             raise
         except Exception as e:
@@ -2798,129 +2828,141 @@ def create_dashboard_router(
             except Exception as e:
                 logger.warning("Offboard attempt for '%s' failed: %s", agent_id, e)
 
-        # Stop container and remove data volume (best-effort — agent may already be gone)
-        if runtime is not None:
+        # From here to the end of the config cleanup is ONE lifecycle
+        # operation. A restart interleaving in it stops, then starts the
+        # container back up after this delete has already dropped the
+        # config — resurrecting the agent with a live token and nothing on
+        # disk. The offboard handover above stays OUTSIDE the lock on
+        # purpose: it dispatches a turn to the agent, and the transport's
+        # cold-wake seam would take this same lock to deliver it.
+        async with _agent_lifecycle_or_409(agent_id):
+            # Re-check under the lock — a concurrent delete can have
+            # finished while the offboard turn was running.
+            if agent_id not in agent_registry:
+                raise HTTPException(status_code=404, detail="Agent not found")
+            # Stop container and remove data volume (best-effort — agent may already be gone)
+            if runtime is not None:
+                try:
+                    runtime.stop_agent(agent_id, remove_data=True)
+                except Exception as e:
+                    logger.debug("Runtime cleanup for '%s' failed: %s", agent_id, e)
+
+            # Unregister from router, transport, and health monitor
+            if router is not None:
+                router.unregister_agent(agent_id)
+            else:
+                agent_registry.pop(agent_id, None)
+            if transport is not None:
+                from src.host.transport import HttpTransport
+
+                if isinstance(transport, HttpTransport):
+                    transport._urls.pop(agent_id, None)
+            if health_monitor is not None:
+                health_monitor.unregister(agent_id)
+
+            # Clean up PubSub subscriptions, cron jobs, and lane state
+            if pubsub is not None:
+                pubsub.unsubscribe_agent(agent_id)
+            if cron_scheduler is not None:
+                removed = cron_scheduler.remove_agent_jobs(agent_id)
+                if removed:
+                    logger.info(f"Removed {removed} cron job(s) for agent {agent_id}")
+            if lane_manager is not None:
+                lane_manager.remove_lane(agent_id)
+
+            # Strip the id from connector assignments + pending-restart
+            # stamps — otherwise a future agent recreated under the same
+            # name silently inherits this agent's MCP connectors (and their
+            # $CRED-bearing env).
+            if connector_store is not None:
+                try:
+                    import asyncio as _asyncio
+
+                    await _asyncio.to_thread(connector_store.remove_agent, agent_id)
+                except Exception as e:
+                    logger.warning(
+                        "Connector cleanup for '%s' failed: %s",
+                        agent_id,
+                        e,
+                    )
+
+            # Clean up per-agent data: blackboard, costs, traces, wallet
             try:
-                runtime.stop_agent(agent_id, remove_data=True)
+                blackboard.cleanup_agent_data(agent_id)
             except Exception as e:
-                logger.debug("Runtime cleanup for '%s' failed: %s", agent_id, e)
+                logger.warning("Blackboard cleanup for '%s' failed: %s", agent_id, e)
+            if cost_tracker is not None:
+                try:
+                    cost_tracker.cleanup_agent(agent_id)
+                except Exception as e:
+                    logger.warning("Cost cleanup for '%s' failed: %s", agent_id, e)
+            if trace_store is not None:
+                try:
+                    trace_store.cleanup_agent(agent_id)
+                except Exception as e:
+                    logger.warning("Trace cleanup for '%s' failed: %s", agent_id, e)
+            _ws_ref_local = wallet_service_ref or [None]
+            _wallet_svc = _ws_ref_local[0]
+            if _wallet_svc is not None:
+                try:
+                    _wallet_svc.cleanup_agent(agent_id)
+                except Exception as e:
+                    logger.warning("Wallet cleanup for '%s' failed: %s", agent_id, e)
 
-        # Unregister from router, transport, and health monitor
-        if router is not None:
-            router.unregister_agent(agent_id)
-        else:
-            agent_registry.pop(agent_id, None)
-        if transport is not None:
-            from src.host.transport import HttpTransport
-
-            if isinstance(transport, HttpTransport):
-                transport._urls.pop(agent_id, None)
-        if health_monitor is not None:
-            health_monitor.unregister(agent_id)
-
-        # Clean up PubSub subscriptions, cron jobs, and lane state
-        if pubsub is not None:
-            pubsub.unsubscribe_agent(agent_id)
-        if cron_scheduler is not None:
-            removed = cron_scheduler.remove_agent_jobs(agent_id)
-            if removed:
-                logger.info(f"Removed {removed} cron job(s) for agent {agent_id}")
-        if lane_manager is not None:
-            lane_manager.remove_lane(agent_id)
-
-        # Strip the id from connector assignments + pending-restart
-        # stamps — otherwise a future agent recreated under the same
-        # name silently inherits this agent's MCP connectors (and their
-        # $CRED-bearing env).
-        if connector_store is not None:
+            # Clean up proxy credential if exists
             try:
-                import asyncio as _asyncio
+                from src.cli.config import _load_config as _load_cfg_for_delete
 
-                await _asyncio.to_thread(connector_store.remove_agent, agent_id)
+                _del_cfg = _load_cfg_for_delete()
+                _del_agent_cfg = _del_cfg.get("agents", {}).get(agent_id, {})
+                _del_proxy = _del_agent_cfg.get("proxy", {})
+                if _del_proxy.get("credential"):
+                    from src.host.credentials import _remove_from_env
+
+                    _cred_env_key = f"OPENLEGION_CRED_{_del_proxy['credential']}"
+                    _remove_from_env(_cred_env_key)
+                    os.environ.pop(_cred_env_key, None)
             except Exception as e:
-                logger.warning(
-                    "Connector cleanup for '%s' failed: %s",
-                    agent_id,
-                    e,
+                logger.warning("Proxy credential cleanup for '%s' failed: %s", agent_id, e)
+
+            # Remove from config and permissions (best-effort — don't fail if files are missing)
+            try:
+                from src.cli.config import (
+                    _config_lock,
+                    _load_agents_yaml,
+                    _load_permissions,
+                    _remove_team_blackboard_permissions,
+                    _save_agents_yaml,
+                    _save_permissions,
                 )
 
-        # Clean up per-agent data: blackboard, costs, traces, wallet
-        try:
-            blackboard.cleanup_agent_data(agent_id)
-        except Exception as e:
-            logger.warning("Blackboard cleanup for '%s' failed: %s", agent_id, e)
-        if cost_tracker is not None:
-            try:
-                cost_tracker.cleanup_agent(agent_id)
+                # B-pre #2: both files' load->mutate->save happen under ONE
+                # lock acquisition — closes the lost-update race this used to
+                # run as two independent bare-``open(..., "w")`` writes.
+                with _config_lock():
+                    # Bug fix: this path used to skip team-membership cleanup
+                    # entirely, leaving a dangling ``team_members`` row (and a
+                    # stale ``agent_goals``/``lead_agent_id`` pointer) after the
+                    # config was already gone — mirrors ``_remove_agent``'s own
+                    # team-first ordering (src/cli/config.py) so both delete
+                    # surfaces converge on the same cleanup.
+                    if teams_store is not None:
+                        with contextlib.suppress(Exception):
+                            _old_team = teams_store.remove_agent(agent_id)
+                            if _old_team:
+                                _remove_team_blackboard_permissions(agent_id, _old_team)
+
+                    agents_data = _load_agents_yaml()
+                    agents_data.get("agents", {}).pop(agent_id, None)
+                    _save_agents_yaml(agents_data)
+
+                    perms = _load_permissions()
+                    perms.get("permissions", {}).pop(agent_id, None)
+                    _save_permissions(perms)
+                if permissions is not None:
+                    permissions.reload()
             except Exception as e:
-                logger.warning("Cost cleanup for '%s' failed: %s", agent_id, e)
-        if trace_store is not None:
-            try:
-                trace_store.cleanup_agent(agent_id)
-            except Exception as e:
-                logger.warning("Trace cleanup for '%s' failed: %s", agent_id, e)
-        _ws_ref_local = wallet_service_ref or [None]
-        _wallet_svc = _ws_ref_local[0]
-        if _wallet_svc is not None:
-            try:
-                _wallet_svc.cleanup_agent(agent_id)
-            except Exception as e:
-                logger.warning("Wallet cleanup for '%s' failed: %s", agent_id, e)
-
-        # Clean up proxy credential if exists
-        try:
-            from src.cli.config import _load_config as _load_cfg_for_delete
-
-            _del_cfg = _load_cfg_for_delete()
-            _del_agent_cfg = _del_cfg.get("agents", {}).get(agent_id, {})
-            _del_proxy = _del_agent_cfg.get("proxy", {})
-            if _del_proxy.get("credential"):
-                from src.host.credentials import _remove_from_env
-
-                _cred_env_key = f"OPENLEGION_CRED_{_del_proxy['credential']}"
-                _remove_from_env(_cred_env_key)
-                os.environ.pop(_cred_env_key, None)
-        except Exception as e:
-            logger.warning("Proxy credential cleanup for '%s' failed: %s", agent_id, e)
-
-        # Remove from config and permissions (best-effort — don't fail if files are missing)
-        try:
-            from src.cli.config import (
-                _config_lock,
-                _load_agents_yaml,
-                _load_permissions,
-                _remove_team_blackboard_permissions,
-                _save_agents_yaml,
-                _save_permissions,
-            )
-
-            # B-pre #2: both files' load->mutate->save happen under ONE
-            # lock acquisition — closes the lost-update race this used to
-            # run as two independent bare-``open(..., "w")`` writes.
-            with _config_lock():
-                # Bug fix: this path used to skip team-membership cleanup
-                # entirely, leaving a dangling ``team_members`` row (and a
-                # stale ``agent_goals``/``lead_agent_id`` pointer) after the
-                # config was already gone — mirrors ``_remove_agent``'s own
-                # team-first ordering (src/cli/config.py) so both delete
-                # surfaces converge on the same cleanup.
-                if teams_store is not None:
-                    with contextlib.suppress(Exception):
-                        _old_team = teams_store.remove_agent(agent_id)
-                        if _old_team:
-                            _remove_team_blackboard_permissions(agent_id, _old_team)
-
-                agents_data = _load_agents_yaml()
-                agents_data.get("agents", {}).pop(agent_id, None)
-                _save_agents_yaml(agents_data)
-
-                perms = _load_permissions()
-                perms.get("permissions", {}).pop(agent_id, None)
-                _save_permissions(perms)
-            if permissions is not None:
-                permissions.reload()
-        except Exception as e:
-            logger.warning(f"Failed to clean config for {agent_id}: {e}")
+                logger.warning(f"Failed to clean config for {agent_id}: {e}")
 
         if event_bus is not None:
             event_bus.emit("agent_state", agent=agent_id, data={"state": "removed"})
@@ -3330,97 +3372,109 @@ def create_dashboard_router(
         # the spinner would never clear and the user would refresh.
         fired_terminal = False
         try:
-            from src.cli.config import _load_config
+            # Stop -> start -> re-register is ONE lifecycle operation. The
+            # two container calls below each release the loop, and a delete
+            # landing in that gap drops the config and unregisters the agent
+            # — then this start puts a fresh container back and re-registers
+            # it. ``wait_for_agent`` and the event emits stay outside: they
+            # write no durable or registry state, and a 60s poll is a long
+            # time to make a delete queue behind.
+            async with _agent_lifecycle_or_409(agent_id):
+                # Re-check under the lock — the agent may have been deleted
+                # while we queued, and restarting it would resurrect it.
+                if agent_id not in agent_registry:
+                    raise HTTPException(status_code=404, detail="Agent not found")
+                from src.cli.config import _load_config
 
-            cfg = _load_config()
-            agent_cfg = cfg.get("agents", {}).get(agent_id, {})
-            default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
-            # Hard-cap the synchronous Docker stop/start at 120s combined
-            # so a hung daemon returns control to the request handler.
-            await asyncio.wait_for(
-                asyncio.to_thread(runtime.stop_agent, agent_id),
-                timeout=60,
-            )
-            tools_dir = agent_cfg.get("tools_dir", "")
-            if tools_dir:
-                tools_dir = str(Path(tools_dir).resolve())
-            # Preserve operator's ALLOWED_TOOLS on restart
-            from src.cli.config import (
-                _OPERATOR_AGENT_ID,
-                _OPERATOR_ALLOWED_TOOLS,
-                _load_permissions,
-            )
+                cfg = _load_config()
+                agent_cfg = cfg.get("agents", {}).get(agent_id, {})
+                default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+                # Hard-cap the synchronous Docker stop/start at 120s combined
+                # so a hung daemon returns control to the request handler.
+                await asyncio.wait_for(
+                    asyncio.to_thread(runtime.stop_agent, agent_id),
+                    timeout=60,
+                )
+                tools_dir = agent_cfg.get("tools_dir", "")
+                if tools_dir:
+                    tools_dir = str(Path(tools_dir).resolve())
+                # Preserve operator's ALLOWED_TOOLS on restart
+                from src.cli.config import (
+                    _OPERATOR_AGENT_ID,
+                    _OPERATOR_ALLOWED_TOOLS,
+                    _load_permissions,
+                )
 
-            restart_env: dict[str, str] = {}
-            if agent_id == _OPERATOR_AGENT_ID:
-                restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
-                # Re-seed internet/browser access flags on restart so the
-                # operator's toggle state survives the bounce. Default
-                # True matches the operator-by-default UX.
-                try:
-                    _op_perms = (
-                        _load_permissions()
-                        .get(
-                            "permissions",
-                            {},
+                restart_env: dict[str, str] = {}
+                if agent_id == _OPERATOR_AGENT_ID:
+                    restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
+                    # Re-seed internet/browser access flags on restart so the
+                    # operator's toggle state survives the bounce. Default
+                    # True matches the operator-by-default UX.
+                    try:
+                        _op_perms = (
+                            _load_permissions()
+                            .get(
+                                "permissions",
+                                {},
+                            )
+                            .get(_OPERATOR_AGENT_ID, {})
                         )
-                        .get(_OPERATOR_AGENT_ID, {})
-                    )
-                    restart_env["OL_INTERNET_ACCESS_ENABLED"] = (
-                        "true" if _op_perms.get("can_use_internet", True) else "false"
-                    )
-                    restart_env["OL_BROWSER_ACCESS_ENABLED"] = (
-                        "true" if _op_perms.get("can_use_browser", True) else "false"
-                    )
-                except Exception:
-                    restart_env["OL_INTERNET_ACCESS_ENABLED"] = "true"
-                    restart_env["OL_BROWSER_ACCESS_ENABLED"] = "true"
-            # Proxy goes in env_overrides (not runtime.extra_env) so
-            # concurrent single-agent restarts don't stomp each other.
-            _proxy_url = resolve_agent_proxy(
-                agent_id,
-                cfg.get("agents", {}),
-                cfg.get("network", {}),
-            )
-            _proxy_env = build_proxy_env_vars(
-                _proxy_url,
-                cfg.get("network", {}).get("no_proxy", ""),
-            )
-            restart_env.update(_proxy_env)
-            # Per-agent output-token cap → LLM_MAX_TOKENS so an edit_agent
-            # change survives a single-agent dashboard restart (not just the
-            # live hot-reload). Absent = LLMClient default 16384.
-            set_llm_max_tokens_env(restart_env, agent_cfg)
-            from src.shared.limits import set_llm_limits_env
+                        restart_env["OL_INTERNET_ACCESS_ENABLED"] = (
+                            "true" if _op_perms.get("can_use_internet", True) else "false"
+                        )
+                        restart_env["OL_BROWSER_ACCESS_ENABLED"] = (
+                            "true" if _op_perms.get("can_use_browser", True) else "false"
+                        )
+                    except Exception:
+                        restart_env["OL_INTERNET_ACCESS_ENABLED"] = "true"
+                        restart_env["OL_BROWSER_ACCESS_ENABLED"] = "true"
+                # Proxy goes in env_overrides (not runtime.extra_env) so
+                # concurrent single-agent restarts don't stomp each other.
+                _proxy_url = resolve_agent_proxy(
+                    agent_id,
+                    cfg.get("agents", {}),
+                    cfg.get("network", {}),
+                )
+                _proxy_env = build_proxy_env_vars(
+                    _proxy_url,
+                    cfg.get("network", {}).get("no_proxy", ""),
+                )
+                restart_env.update(_proxy_env)
+                # Per-agent output-token cap → LLM_MAX_TOKENS so an edit_agent
+                # change survives a single-agent dashboard restart (not just the
+                # live hot-reload). Absent = LLMClient default 16384.
+                set_llm_max_tokens_env(restart_env, agent_cfg)
+                from src.shared.limits import set_llm_limits_env
 
-            set_llm_limits_env(restart_env, agent_cfg)
-            url = await asyncio.wait_for(
-                asyncio.to_thread(
-                    runtime.start_agent,
-                    agent_id=agent_id,
-                    role=agent_cfg.get("role", "assistant"),
-                    tools_dir=tools_dir,
-                    model=agent_cfg.get("model", default_model),
-                    thinking=agent_cfg.get("thinking", ""),
-                    env_overrides=restart_env,
-                ),
-                timeout=60,
-            )
-            if router is not None:
-                router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
-            else:
-                agent_registry[agent_id] = url
-            if transport is not None:
-                from src.host.transport import HttpTransport
+                set_llm_limits_env(restart_env, agent_cfg)
+                url = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        runtime.start_agent,
+                        agent_id=agent_id,
+                        role=agent_cfg.get("role", "assistant"),
+                        tools_dir=tools_dir,
+                        model=agent_cfg.get("model", default_model),
+                        thinking=agent_cfg.get("thinking", ""),
+                        env_overrides=restart_env,
+                    ),
+                    timeout=60,
+                )
+                if router is not None:
+                    router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
+                else:
+                    agent_registry[agent_id] = url
+                if transport is not None:
+                    from src.host.transport import HttpTransport
 
-                if isinstance(transport, HttpTransport):
-                    transport.register(agent_id, url)
-            # Re-establish health monitoring if this agent had been deregistered
-            # (e.g. archived, then unarchived and restarted). A normal restart of
-            # an already-monitored agent is left untouched. Mirrors the batch
-            # restart and boot-reconcile paths, which register unconditionally.
-            if health_monitor is not None and agent_id not in getattr(health_monitor, "agents", {}):
-                health_monitor.register(agent_id)
+                    if isinstance(transport, HttpTransport):
+                        transport.register(agent_id, url)
+                # Re-establish health monitoring if this agent had been deregistered
+                # (e.g. archived, then unarchived and restarted). A normal restart of
+                # an already-monitored agent is left untouched. Mirrors the batch
+                # restart and boot-reconcile paths, which register unconditionally.
+                if health_monitor is not None and agent_id not in getattr(health_monitor, "agents", {}):
+                    health_monitor.register(agent_id)
             ready = await runtime.wait_for_agent(agent_id, timeout=60)
             # Push proxy config to browser service
             await _push_browser_proxy_for_agent(agent_id)
@@ -3457,6 +3511,12 @@ def create_dashboard_router(
                         emit_e,
                     )
             raise HTTPException(status_code=504, detail="Restart timed out") from e
+        except HTTPException:
+            # A 404 (deleted while we queued on the lifecycle lock) or a 409
+            # (the lock never came free) is the accurate answer — don't let
+            # the generic handler below relabel it a 500. The ``finally``
+            # still fires a terminal event so the SPA clears its spinner.
+            raise
         except Exception as e:
             logger.error(f"Failed to restart agent {agent_id}: {e}")
             # Emit a failure signal via the existing ``agent_state``
@@ -7685,72 +7745,83 @@ def create_dashboard_router(
         async def _restart_one(agent_id: str) -> tuple[str, str]:
             agent_cfg = agents_cfg.get(agent_id, {})
             try:
-                await loop.run_in_executor(None, runtime.stop_agent, agent_id)
-                tools_dir = agent_cfg.get("tools_dir", "")
-                if tools_dir:
-                    tools_dir = str(Path(tools_dir).resolve())
-                # Per-agent env overrides (proxy + operator tools).
-                # Proxy goes in env_overrides instead of runtime.extra_env
-                # so parallel restarts don't stomp each other's proxy vars.
-                _restart_env: dict[str, str] = {}
-                if agent_id == _OPERATOR_AGENT_ID:
-                    _restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
-                    # Re-seed internet/browser access flags so a fleet
-                    # restart (incl. the dashboard's auto-restart on
-                    # restart-gated setting changes) doesn't silently
-                    # re-enable a capability the operator toggled OFF.
-                    # Mirrors the single-agent restart path; default True
-                    # matches the operator-by-default UX.
-                    try:
-                        _op_perms = (
-                            _load_permissions()
-                            .get(
-                                "permissions",
-                                {},
+                # Same stop -> start -> re-register unit as the single-agent
+                # restart endpoint, and it needs the same lock: this fan-out
+                # runs every agent concurrently, so a delete landing between
+                # this agent's stop and start would be undone by the start.
+                # A lock that never comes free surfaces as this agent's
+                # ``error:`` result via the handler below — the rest of the
+                # fleet still restarts.
+                async with agent_lifecycle_locked_async(agent_id):
+                    if agent_id not in agent_registry:
+                        # Deleted while this agent waited its turn.
+                        return (agent_id, "skipped: agent no longer exists")
+                    await loop.run_in_executor(None, runtime.stop_agent, agent_id)
+                    tools_dir = agent_cfg.get("tools_dir", "")
+                    if tools_dir:
+                        tools_dir = str(Path(tools_dir).resolve())
+                    # Per-agent env overrides (proxy + operator tools).
+                    # Proxy goes in env_overrides instead of runtime.extra_env
+                    # so parallel restarts don't stomp each other's proxy vars.
+                    _restart_env: dict[str, str] = {}
+                    if agent_id == _OPERATOR_AGENT_ID:
+                        _restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
+                        # Re-seed internet/browser access flags so a fleet
+                        # restart (incl. the dashboard's auto-restart on
+                        # restart-gated setting changes) doesn't silently
+                        # re-enable a capability the operator toggled OFF.
+                        # Mirrors the single-agent restart path; default True
+                        # matches the operator-by-default UX.
+                        try:
+                            _op_perms = (
+                                _load_permissions()
+                                .get(
+                                    "permissions",
+                                    {},
+                                )
+                                .get(_OPERATOR_AGENT_ID, {})
                             )
-                            .get(_OPERATOR_AGENT_ID, {})
-                        )
-                        _restart_env["OL_INTERNET_ACCESS_ENABLED"] = (
-                            "true" if _op_perms.get("can_use_internet", True) else "false"
-                        )
-                        _restart_env["OL_BROWSER_ACCESS_ENABLED"] = (
-                            "true" if _op_perms.get("can_use_browser", True) else "false"
-                        )
-                    except Exception:
-                        _restart_env["OL_INTERNET_ACCESS_ENABLED"] = "true"
-                        _restart_env["OL_BROWSER_ACCESS_ENABLED"] = "true"
-                _proxy_url = resolve_agent_proxy(agent_id, agents_cfg, _network_cfg)
-                _proxy_env = build_proxy_env_vars(
-                    _proxy_url,
-                    _network_cfg.get("no_proxy", ""),
-                )
-                _restart_env.update(_proxy_env)
-                # Per-agent output-token cap → LLM_MAX_TOKENS (survives the
-                # dashboard "restart all agents" flow, not just hot-reload).
-                set_llm_max_tokens_env(_restart_env, agent_cfg)
-                from src.shared.limits import set_llm_limits_env
+                            _restart_env["OL_INTERNET_ACCESS_ENABLED"] = (
+                                "true" if _op_perms.get("can_use_internet", True) else "false"
+                            )
+                            _restart_env["OL_BROWSER_ACCESS_ENABLED"] = (
+                                "true" if _op_perms.get("can_use_browser", True) else "false"
+                            )
+                        except Exception:
+                            _restart_env["OL_INTERNET_ACCESS_ENABLED"] = "true"
+                            _restart_env["OL_BROWSER_ACCESS_ENABLED"] = "true"
+                    _proxy_url = resolve_agent_proxy(agent_id, agents_cfg, _network_cfg)
+                    _proxy_env = build_proxy_env_vars(
+                        _proxy_url,
+                        _network_cfg.get("no_proxy", ""),
+                    )
+                    _restart_env.update(_proxy_env)
+                    # Per-agent output-token cap → LLM_MAX_TOKENS (survives the
+                    # dashboard "restart all agents" flow, not just hot-reload).
+                    set_llm_max_tokens_env(_restart_env, agent_cfg)
+                    from src.shared.limits import set_llm_limits_env
 
-                set_llm_limits_env(_restart_env, agent_cfg)
-                url = await loop.run_in_executor(
-                    None,
-                    lambda aid=agent_id, acfg=agent_cfg, sd=tools_dir, re=_restart_env: runtime.start_agent(
-                        agent_id=aid,
-                        role=acfg.get("role", "assistant"),
-                        tools_dir=sd,
-                        model=acfg.get("model", default_model),
-                        thinking=acfg.get("thinking", ""),
-                        env_overrides=re,
-                    ),
-                )
-                if router is not None:
-                    router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
-                else:
-                    agent_registry[agent_id] = url
-                if transport is not None:
-                    from src.host.transport import HttpTransport
+                    set_llm_limits_env(_restart_env, agent_cfg)
+                    url = await loop.run_in_executor(
+                        None,
+                        lambda aid=agent_id, acfg=agent_cfg, sd=tools_dir, re=_restart_env: runtime.start_agent(
+                            agent_id=aid,
+                            role=acfg.get("role", "assistant"),
+                            tools_dir=sd,
+                            model=acfg.get("model", default_model),
+                            thinking=acfg.get("thinking", ""),
+                            env_overrides=re,
+                        ),
+                    )
+                    if router is not None:
+                        router.register_agent(agent_id, url, role=agent_cfg.get("role", ""))
+                    else:
+                        agent_registry[agent_id] = url
+                    if transport is not None:
+                        from src.host.transport import HttpTransport
 
-                    if isinstance(transport, HttpTransport):
-                        transport.register(agent_id, url)
+                        if isinstance(transport, HttpTransport):
+                            transport.register(agent_id, url)
                 ready = await runtime.wait_for_agent(agent_id, timeout=60)
                 await _push_browser_proxy_for_agent(agent_id)
                 return (agent_id, "ready" if ready else "started")

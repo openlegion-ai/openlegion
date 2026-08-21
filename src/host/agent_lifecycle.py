@@ -1,0 +1,216 @@
+"""Per-agent lifecycle serialisation.
+
+``RuntimeBackend._agent_locked`` makes a single ``start_agent`` /
+``stop_agent`` call atomic for one agent. That is the innermost layer only.
+A *lifecycle operation* — create, delete, restart, archive, wake — is a
+sequence of steps spanning five subsystems (agents.yaml + permissions, the
+runtime backend, the router/transport registries, the health monitor, and
+cron), and none of that sequence is atomic today. Two of them running at
+once for the same agent interleave, and the durable state ends up
+disagreeing with the runtime state:
+
+* **delete vs restart.** A restart releases the loop between its stop and
+  its start. A delete landing in that window destroys the volume, drops the
+  config and unregisters the agent — and then the restart's ``start_agent``
+  puts a fresh container back and re-registers it. The agent is resurrected
+  with no config row, no permissions row, and a live mesh auth token.
+* **delete vs create.** Once the delete has unregistered the id, a create of
+  the same name gets past the ``already exists`` check and writes its config
+  — which the delete, still running, then removes. The new agent is left
+  running and routable with nothing on disk describing it.
+* **archive vs wake.** Archive unregisters health and stops the container;
+  wake, already past its own ``start_agent``, flips the status back to
+  ``active``. The status says running, the container is not, and nothing is
+  monitoring it.
+
+So lifecycle operations take a lock of their own, one layer up from the
+backend's. Lock order is ALWAYS this lock first, then
+``RuntimeBackend._agent_locked`` (which start/stop take internally); nothing
+acquires them the other way round.
+
+Two things this lock deliberately does not do:
+
+* **It is not re-entrant.** A lifecycle operation nested inside another for
+  the same agent is a bug, not a pattern to support, so a re-acquire from
+  the same holder raises rather than deadlocking or silently passing
+  through. (The detection only covers a nest on the same thread and task;
+  one that hops threads still deadlocks — hence the rule below.)
+* **Nothing that can dispatch to an agent may run inside a held region.**
+  The cold-wake seam is wired into the transport and the mesh router, so
+  *any* message routed to a hibernated agent calls ``ensure_agent_running``,
+  which takes this lock. A handover turn (``_offboard_agent``) or a standup
+  post inside a locked region would therefore deadlock against itself. Run
+  those before taking the lock — they are best-effort steps against an agent
+  that is still fully registered anyway.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import threading
+import time
+from collections.abc import AsyncIterator, Iterator
+
+from src.shared.utils import setup_logging
+
+logger = setup_logging("host.agent_lifecycle")
+
+# How long an async acquire waits before giving up. Every locked region is
+# internally bounded (the stop/start calls inside them are wrapped in 60s
+# ``asyncio.wait_for`` timeouts), so reaching this means a lifecycle
+# operation is genuinely wedged — at which point a 409 tells the operator
+# far more than a request that never returns.
+DEFAULT_LIFECYCLE_TIMEOUT = 300.0
+
+# Poll interval for the async acquire. The wait is a poll rather than a
+# blocking acquire in a worker thread on purpose: a cancelled coroutine
+# would abandon that thread mid-acquire and leak the lock forever, whereas
+# a cancellation here lands on the sleep with the lock not held.
+_POLL_INTERVAL = 0.02
+
+# ``{agent_id: [Lock, refcount]}`` — refcounted so ids that appear once
+# (ephemeral spawns, an agent created and deleted) don't leak a lock each.
+_locks: dict[str, list] = {}
+_guard = threading.Lock()
+
+# ``{agent_id: holder_token}`` for the re-entrancy check, written by the
+# holder under ``_guard``.
+_holders: dict[str, tuple] = {}
+
+
+class AgentLifecycleBusy(Exception):
+    """Another lifecycle operation for this agent is still running."""
+
+    def __init__(self, agent_id: str, timeout: float):
+        self.agent_id = agent_id
+        self.timeout = timeout
+        super().__init__(
+            f"another lifecycle operation for agent '{agent_id}' is still "
+            f"in progress after {timeout:g}s",
+        )
+
+
+def _holder_token() -> tuple:
+    """Identify the current holder well enough to catch a self-nest.
+
+    A coroutine and a plain call on the same thread are different holders
+    only if a task is running, so both halves are needed: the thread ident
+    separates worker threads, the task id separates coroutines interleaved
+    on one loop thread.
+    """
+    task = None
+    with contextlib.suppress(RuntimeError):
+        task = asyncio.current_task()
+    return (threading.get_ident(), id(task) if task is not None else None)
+
+
+def _checkout(agent_id: str) -> list:
+    """Claim a reference on ``agent_id``'s lock entry and return it."""
+    with _guard:
+        entry = _locks.get(agent_id)
+        if entry is None:
+            entry = [threading.Lock(), 0]
+            _locks[agent_id] = entry
+        entry[1] += 1
+        return entry
+
+
+def _checkin(agent_id: str, entry: list) -> None:
+    """Drop a reference, reclaiming the entry once nobody holds or waits."""
+    with _guard:
+        entry[1] -= 1
+        if entry[1] <= 0 and _locks.get(agent_id) is entry:
+            _locks.pop(agent_id, None)
+
+
+def _claim_holder(agent_id: str, token: tuple) -> None:
+    with _guard:
+        _holders[agent_id] = token
+
+
+def _release_holder(agent_id: str, token: tuple) -> None:
+    with _guard:
+        if _holders.get(agent_id) == token:
+            _holders.pop(agent_id, None)
+
+
+def _reject_self_nest(agent_id: str, token: tuple) -> None:
+    with _guard:
+        held_by = _holders.get(agent_id)
+    if held_by == token:
+        raise RuntimeError(
+            f"lifecycle lock for agent '{agent_id}' is already held by this "
+            f"caller — lifecycle operations must not nest (see "
+            f"src/host/agent_lifecycle.py)",
+        )
+
+
+@contextlib.contextmanager
+def agent_lifecycle_locked(agent_id: str) -> Iterator[None]:
+    """Serialise one agent's lifecycle operation. Blocking; sync callers only.
+
+    For the REPL, boot reconcile and any other caller that is not on an
+    event loop. Async callers must use :func:`agent_lifecycle_locked_async`
+    — this one blocks the thread it is called on, which on a loop thread
+    would stall every other coroutine including the operation it is waiting
+    for.
+    """
+    token = _holder_token()
+    _reject_self_nest(agent_id, token)
+    entry = _checkout(agent_id)
+    lock: threading.Lock = entry[0]
+    acquired = False
+    try:
+        lock.acquire()
+        acquired = True
+        _claim_holder(agent_id, token)
+        yield
+    finally:
+        if acquired:
+            _release_holder(agent_id, token)
+            lock.release()
+        _checkin(agent_id, entry)
+
+
+@contextlib.asynccontextmanager
+async def agent_lifecycle_locked_async(
+    agent_id: str,
+    timeout: float | None = DEFAULT_LIFECYCLE_TIMEOUT,
+) -> AsyncIterator[None]:
+    """Serialise one agent's lifecycle operation from a coroutine.
+
+    Safe to use from any of this process's event loops — the underlying
+    primitive is a ``threading.Lock``, not an ``asyncio.Lock`` whose waiter
+    queue is bound to the loop that created it (the cold-wake seam alone is
+    driven from three of them).
+
+    Raises :class:`AgentLifecycleBusy` if ``timeout`` elapses first. Pass
+    ``timeout=None`` to wait indefinitely.
+    """
+    token = _holder_token()
+    _reject_self_nest(agent_id, token)
+    entry = _checkout(agent_id)
+    lock: threading.Lock = entry[0]
+    acquired = False
+    try:
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not lock.acquire(blocking=False):
+            if deadline is not None and time.monotonic() >= deadline:
+                raise AgentLifecycleBusy(agent_id, timeout)
+            await asyncio.sleep(_POLL_INTERVAL)
+        acquired = True
+        _claim_holder(agent_id, token)
+        yield
+    finally:
+        if acquired:
+            _release_holder(agent_id, token)
+            lock.release()
+        _checkin(agent_id, entry)
+
+
+def lifecycle_refcount(agent_id: str) -> int:
+    """Holders plus waiters on ``agent_id``'s lock. Test/diagnostic use."""
+    with _guard:
+        entry = _locks.get(agent_id)
+        return entry[1] if entry else 0
