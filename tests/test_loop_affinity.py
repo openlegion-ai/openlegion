@@ -59,10 +59,13 @@ def _stop_loop(loop: asyncio.AbstractEventLoop) -> None:
         except Exception:
             pass
         loop.call_soon_threadsafe(loop.stop)
-        for _ in range(200):
-            if not loop.is_running():
-                break
+        # Generous: on a loaded machine the loop's thread may not be
+        # scheduled for a while, and a test that proceeds against a loop it
+        # only ASSUMED was stopped fails confusingly and intermittently.
+        deadline = time.time() + 10
+        while loop.is_running() and time.time() < deadline:
             time.sleep(0.01)
+        assert not loop.is_running(), "loop did not stop within 10s"
     if not loop.is_closed():
         loop.close()
 
@@ -142,6 +145,26 @@ class TestLaneOwnerLoop:
         fut = asyncio.run_coroutine_threadsafe(lm.enqueue("erin", "two"), mesh)
         with pytest.raises(LaneLoopUnavailable):
             fut.result(timeout=10)
+
+    def test_never_started_owner_loop_raises_immediately(self):
+        """The same guard, with no shutdown race in the test at all.
+
+        The sibling above stops a live loop, which on a loaded machine is a
+        timing exercise. Here the owner is a loop that was never started, so
+        ``is_running()`` is False by construction.
+        """
+        idle_owner = asyncio.new_event_loop()
+        try:
+            lm = _lane()
+            lm.bind_loop(idle_owner)
+
+            async def _go():
+                await lm.enqueue("nina", "hi")
+
+            with pytest.raises(LaneLoopUnavailable):
+                asyncio.run(_go())
+        finally:
+            idle_owner.close()
 
     def test_unbound_lane_runs_on_the_calling_loop(self):
         # Backwards compatibility: with no owner bound, behaviour is exactly
