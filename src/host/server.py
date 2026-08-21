@@ -11484,7 +11484,12 @@ def create_mesh_app(
 
     app._offboard_agent = _offboard_agent  # exposed for the dashboard + CLI REPL
 
-    async def _archive_agent_core(agent_id: str, *, expect_incarnation: int | None = None) -> dict:
+    async def _archive_agent_core(
+        agent_id: str,
+        *,
+        expect_incarnation: int | None = None,
+        pre_archive: Callable[[], None] | None = None,
+    ) -> dict:
         """Archive-agent side effects (cron dereg, health unregister,
         best-effort container stop). Shared by the archive endpoint and
         the offboard endpoint so the two never duplicate-drift. Caller has
@@ -11499,6 +11504,12 @@ def create_mesh_app(
         # only touches the team store and cron, and never dispatches.
         async with agent_lifecycle_locked_async(agent_id):
             _require_same_agent(agent_id, expect_incarnation)
+            if pre_archive is not None:
+                # Runs INSIDE the lock, after the identity check, so a
+                # caller's own pre-archive writes (the offboard endpoint's
+                # lead teardown) can't land on an agent that replaced this
+                # one between the check and the archive. Must not dispatch.
+                pre_archive()
             try:
                 _archive_agent(agent_id)
             except ValueError as e:
@@ -12031,22 +12042,27 @@ def create_mesh_app(
         # the name by then.
         _incarnation = agent_incarnation(agent_id)
         manifest = await _offboard_agent(agent_id, reason="offboard")
-        # Checked HERE, not just in ``_archive_agent_core`` below: the lead
-        # clearing and standup teardown between the two are writes of their
-        # own, and a 409 raised only at the archive would leave them applied
-        # to whatever agent now holds the name.
-        _require_same_agent(agent_id, _incarnation)
         # Offboard = departure: a departing lead stops being lead. Clear the
         # pointer BEFORE archiving so no ghost lead lingers in the Team Room
         # and the standup cron for this team is removed (otherwise the boot
         # reconcile would recreate it for the now-archived agent). Plain
         # archive (a reversible pause) deliberately leaves leadership intact.
-        led_team_id = None
-        try:
-            led_team_id = teams_store.led_team(agent_id)
-        except Exception as e:
-            logger.warning("offboard lead lookup for %s failed: %s", agent_id, e)
-        if led_team_id:
+        #
+        # These are writes, so they run INSIDE the archive's lifecycle lock
+        # via its ``pre_archive`` hook, after the identity check. Left out
+        # here between the handover turn and the archive they could land on
+        # an agent that took over the name while the handover ran — clearing
+        # a live team's lead and marking a running agent archived, with the
+        # archive itself then refusing. Nothing in here dispatches, which is
+        # what makes it safe to hold the lock across.
+        def _clear_departing_lead() -> None:
+            led_team_id = None
+            try:
+                led_team_id = teams_store.led_team(agent_id)
+            except Exception as e:
+                logger.warning("offboard lead lookup for %s failed: %s", agent_id, e)
+            if not led_team_id:
+                return
             try:
                 teams_store.set_lead(led_team_id, None)
                 _sync_standup_job_on_lead_change(led_team_id, None)
@@ -12079,7 +12095,12 @@ def create_mesh_app(
             # successor.
             _status_overrides[agent_id] = "archived"
             _ensure_team_lead(led_team_id)
-        archive_result = await _archive_agent_core(agent_id, expect_incarnation=_incarnation)
+
+        archive_result = await _archive_agent_core(
+            agent_id,
+            expect_incarnation=_incarnation,
+            pre_archive=_clear_departing_lead,
+        )
         return {"offboarded": True, "manifest": manifest, **archive_result}
 
     # ── Per-agent standing goals (TeamStore ``agent_goals``) ─────
@@ -12438,6 +12459,11 @@ def create_mesh_app(
         payload = {
             "agent_id": agent_id,
             "summary": summary,
+            # The delete this raises is irreversible and the confirmation is
+            # a HUMAN one — the row can sit here for its whole TTL. Stamping
+            # the incarnation is what lets the apply side tell that the name
+            # changed hands in the meantime; nothing else in the row can.
+            "incarnation": agent_incarnation(agent_id),
         }
         record = pending_actions.store(
             nonce=nonce,
@@ -12548,11 +12574,29 @@ def create_mesh_app(
             # whatever host-side state still exists. Belt-and-suspenders:
             # an agent that was already explicitly offboarded just gets a
             # second dated snapshot — no dedup machinery needed.
-            # Captured BEFORE the offboard turn, which can take minutes: by
-            # the time this delete holds the lock, another delete plus a
-            # create of the same name can have produced a live agent that is
-            # not the one this confirmation was raised against.
-            _target_incarnation = agent_incarnation(target_id)
+            # The incarnation this delete was PROPOSED against, not the one
+            # it happens to see now: a human confirmation can arrive at any
+            # point inside the row's TTL, and an agent deleted and recreated
+            # under the same name in between is a different agent that never
+            # had a delete raised against it. A row with no stamp predates
+            # this field and cannot be checked — refuse it rather than run an
+            # irreversible action blind; re-proposing costs one click.
+            _proposed = (record.get("payload") or {}).get("incarnation")
+            if _proposed is None:
+                raise HTTPException(
+                    409,
+                    f"This delete confirmation for '{target_id}' predates "
+                    "identity stamping — propose the delete again",
+                )
+            if agent_incarnation(target_id) != _proposed:
+                raise HTTPException(
+                    409,
+                    f"Agent '{target_id}' was deleted and recreated since this "
+                    "delete was proposed — refusing to destroy the replacement",
+                )
+            # Re-checked under the lock below as well: the handover turn that
+            # follows can itself take minutes.
+            _target_incarnation = _proposed
             offboard_manifest = await _offboard_agent(target_id, reason="delete")
             # Volume-destroying stop through config + registry removal is
             # ONE lifecycle operation: a wake or a restart interleaving in it

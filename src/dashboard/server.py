@@ -7807,10 +7807,19 @@ def create_dashboard_router(
                     if agent_id not in agent_registry:
                         # Deleted while this agent waited its turn.
                         return (agent_id, "skipped: agent no longer exists")
-                    if agent_incarnation(agent_id) != _incarnations.get(agent_id, 0):
+                    if agent_incarnation(agent_id) != _incarnations[agent_id]:
                         # Same name, different agent — ``agent_cfg`` above
                         # describes the one that was deleted.
                         return (agent_id, "skipped: agent was replaced")
+                    if agent_id not in agents_cfg:
+                        # No row in the snapshot this restart is built from.
+                        # Restarting anyway means rebuilding the container
+                        # from empty defaults — role "assistant", the default
+                        # model, no tools_dir — which is worse than leaving it
+                        # running. Covers an agent whose row was removed
+                        # between the two reads above, and an ephemeral spawn,
+                        # which lives in the registry and never in agents.yaml.
+                        return (agent_id, "skipped: no config for this agent")
                     await loop.run_in_executor(None, runtime.stop_agent, agent_id)
                     tools_dir = agent_cfg.get("tools_dir", "")
                     if tools_dir:

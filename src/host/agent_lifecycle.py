@@ -89,11 +89,17 @@ _guard = threading.Lock()
 # holder under ``_guard``.
 _holders: dict[str, tuple] = {}
 
-# ``{agent_id: n}`` — bumped every time an id is retired. See
-# :func:`agent_incarnation`. Bounded: ephemeral spawns mint a fresh id per
-# call and retire it at TTL, so an unbounded table would grow for the life
-# of the process.
+# ``{agent_id: seq}`` — the value of a process-global counter at the moment
+# that id was last retired. See :func:`agent_incarnation`. The counter is
+# global rather than per-id so that an evicted entry can never be recreated
+# with a value some in-flight operation is still holding.
 _incarnations: dict[str, int] = {}
+_incarnation_seq = 0
+# What an id that is NOT in the table reads as. Rises to the highest value
+# ever evicted, so a captured value can never be re-issued below it.
+# Bounded: ephemeral spawns mint a fresh id per call and retire it at TTL,
+# so an unbounded table would grow for the life of the process.
+_incarnation_floor = 0
 _MAX_INCARNATIONS = 4096
 
 
@@ -251,7 +257,7 @@ def agent_incarnation(agent_id: str) -> int:
     always compares equal and the check costs one dict lookup.
     """
     with _guard:
-        return _incarnations.get(agent_id, 0)
+        return _incarnations.get(agent_id, _incarnation_floor)
 
 
 def retire_agent(agent_id: str) -> int:
@@ -261,20 +267,24 @@ def retire_agent(agent_id: str) -> int:
     captured incarnation sees the bump exactly when the delete's other
     effects become visible. Returns the new value.
     """
+    global _incarnation_seq, _incarnation_floor
     with _guard:
-        n = _incarnations.get(agent_id, 0) + 1
-        _incarnations[agent_id] = n
+        _incarnation_seq += 1
+        _incarnations[agent_id] = _incarnation_seq
         if len(_incarnations) > _MAX_INCARNATIONS:
-            # Drop the oldest half. Dropping a tombstone can only ever make a
-            # comparison FAIL (a caller holding a captured 1 reads 0 back and
-            # refuses), never falsely pass — the one exception needs an
-            # eviction to land between a single operation's capture and its
-            # check, which at this cap means thousands of deletes inside one
-            # lifecycle operation.
+            # Drop the oldest half, and raise the floor past everything
+            # dropped. Both halves matter: a per-id count would restart an
+            # evicted id at 1 and hand a stale holder of 1 a false match,
+            # and an unraised floor would let an id evicted at N read back
+            # as 0 — the value a never-retired id reads. With a global
+            # sequence and a rising floor an evicted entry can only ever
+            # read HIGHER than what anyone captured, so eviction fails
+            # closed: a spurious refusal, never a wrong agent acted on.
             for stale in list(_incarnations)[: _MAX_INCARNATIONS // 2]:
-                if stale != agent_id:
-                    _incarnations.pop(stale, None)
-        return n
+                if stale == agent_id:
+                    continue
+                _incarnation_floor = max(_incarnation_floor, _incarnations.pop(stale, 0))
+        return _incarnation_seq
 
 
 def lifecycle_refcount(agent_id: str) -> int:

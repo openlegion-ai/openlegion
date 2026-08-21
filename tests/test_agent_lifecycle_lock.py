@@ -49,6 +49,8 @@ def _no_leaked_lock_entries():
         lifecycle._locks.clear()
         lifecycle._holders.clear()
         lifecycle._incarnations.clear()
+        lifecycle._incarnation_seq = 0
+        lifecycle._incarnation_floor = 0
     assert not leaked, f"lock entries left behind: { {k: v[1] for k, v in leaked.items()} }"
 
 
@@ -1395,12 +1397,20 @@ class TestIncarnation:
             holder = asyncio.create_task(replace_while_the_delete_queues())
             await asyncio.sleep(0)
             queued = asyncio.create_task(
-                delete({"target_kind": "agent", "target_id": "scout", "nonce": "n1"}),
+                delete({
+                    "target_kind": "agent",
+                    "target_id": "scout",
+                    "nonce": "n1",
+                    # Stamped at propose time, when the name still belonged
+                    # to the agent this confirmation was raised against.
+                    "payload": {"incarnation": agent_incarnation("scout")},
+                }),
             )
             await asyncio.wait_for(holder, 3)
             with pytest.raises(HTTPException) as exc:
                 await asyncio.wait_for(queued, 5)
             assert exc.value.status_code == 409
+            assert "recreated" in str(exc.value.detail)
             assert cm.stopped == [], "the queued delete destroyed the replacement"
         finally:
             bb.close()
@@ -1548,8 +1558,31 @@ class TestRoundFourGuards:
         assert len(al._incarnations) <= al._MAX_INCARNATIONS, (
             "ephemeral spawns mint a fresh id per call — the table has to shed"
         )
-        # The most recent retirement always survives its own eviction pass.
-        assert agent_incarnation(f"spawn-{al._MAX_INCARNATIONS + 199}") == 1
+        # The most recent retirement always survives its own eviction pass,
+        # and reads back higher than anything evicted before it.
+        last = agent_incarnation(f"spawn-{al._MAX_INCARNATIONS + 199}")
+        assert last == al._MAX_INCARNATIONS + 200
+        assert last > al._incarnation_floor
+
+    def test_eviction_can_never_re_issue_a_captured_value(self):
+        """Eviction has to fail CLOSED.
+
+        A per-id count restarts an evicted id at 1 and hands a stale holder
+        of 1 a false match — it acts on the replacement believing it is the
+        agent it captured. A global sequence plus a floor that rises past
+        everything evicted makes an evicted entry read back HIGHER than any
+        captured value, so the comparison can only refuse.
+        """
+        from src.host import agent_lifecycle as al
+
+        captured = retire_agent("scout")
+        for i in range(al._MAX_INCARNATIONS + 10):
+            retire_agent(f"filler-{i}")
+        assert "scout" not in al._incarnations, "the entry under test was not evicted"
+        assert agent_incarnation("scout") != captured
+        assert agent_incarnation("scout") > captured
+        # And retiring the name again still cannot land back on it.
+        assert retire_agent("scout") != captured
 
     @pytest.mark.asyncio
     async def test_offboard_refuses_a_replacement(self, tmp_path, monkeypatch):
@@ -1620,3 +1653,83 @@ class TestRoundFourGuards:
         assert fired["done"], "the window never opened"
         assert result["restarted"]["worker"] == "skipped: agent was replaced"
         assert "start" not in runtime.kinds()
+
+
+class TestRoundFiveGuards:
+    @pytest.mark.asyncio
+    async def test_a_confirmed_delete_checks_the_incarnation_it_was_proposed_against(
+        self, tmp_path, monkeypatch,
+    ):
+        """The widest window in the system is a human confirmation.
+
+        A delete proposal sits in the ledger for its whole TTL. Nothing else
+        in the row can tell that the name changed hands in between — the
+        target is stored as a name.
+        """
+        from fastapi import HTTPException
+
+        from tests.test_hibernation import _build_app
+
+        app, bb, cm, _tr, _hm, _eb, _cfg = _build_app(tmp_path, monkeypatch)
+        try:
+            delete = app.pending_executors["delete"]
+            proposed_at = agent_incarnation("scout")
+            retire_agent("scout")  # deleted and recreated before confirmation
+
+            with pytest.raises(HTTPException) as exc:
+                await asyncio.wait_for(
+                    delete({
+                        "target_kind": "agent",
+                        "target_id": "scout",
+                        "nonce": "n1",
+                        "payload": {"incarnation": proposed_at},
+                    }),
+                    5,
+                )
+            assert exc.value.status_code == 409
+            assert "since this delete was proposed" in str(exc.value.detail)
+            assert cm.stopped == []
+        finally:
+            bb.close()
+
+    @pytest.mark.asyncio
+    async def test_a_delete_row_with_no_stamp_is_refused(self, tmp_path, monkeypatch):
+        """Rows proposed before this field exists cannot be checked.
+
+        Running an irreversible action blind is the worse option; the
+        operator re-proposes, and the row's TTL is minutes.
+        """
+        from fastapi import HTTPException
+
+        from tests.test_hibernation import _build_app
+
+        app, bb, cm, _tr, _hm, _eb, _cfg = _build_app(tmp_path, monkeypatch)
+        try:
+            delete = app.pending_executors["delete"]
+            with pytest.raises(HTTPException) as exc:
+                await asyncio.wait_for(
+                    delete({"target_kind": "agent", "target_id": "scout", "nonce": "n1"}),
+                    5,
+                )
+            assert exc.value.status_code == 409
+            assert "predates identity stamping" in str(exc.value.detail)
+            assert cm.stopped == []
+        finally:
+            bb.close()
+
+    @pytest.mark.asyncio
+    async def test_restart_all_skips_an_agent_with_no_config_row(self, dashboard):
+        """Restarting from a missing row rebuilds the container from defaults.
+
+        That is how an ephemeral spawn — registry-only, never in agents.yaml
+        — and an agent whose row vanished mid-snapshot both look here.
+        """
+        router, registry, runtime, _yaml, _connectors, _forgotten = dashboard
+        restart_all = _endpoint(router, "/api/restart-agents", "POST")
+        registry["spawn-abc"] = "http://spawn-abc:8400"
+
+        result = await asyncio.wait_for(restart_all(), 5)
+
+        assert result["restarted"]["spawn-abc"] == "skipped: no config for this agent"
+        assert ("start", "spawn-abc") not in runtime.calls
+        assert result["restarted"]["worker"] == "ready"
