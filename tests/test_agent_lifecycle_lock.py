@@ -1537,3 +1537,86 @@ class TestRoundThreeGuards:
             assert cm.started == [], "the wake started a container for the replacement"
         finally:
             bb.close()
+
+
+class TestRoundFourGuards:
+    def test_the_incarnation_table_is_bounded(self):
+        from src.host import agent_lifecycle as al
+
+        for i in range(al._MAX_INCARNATIONS + 200):
+            retire_agent(f"spawn-{i}")
+        assert len(al._incarnations) <= al._MAX_INCARNATIONS, (
+            "ephemeral spawns mint a fresh id per call — the table has to shed"
+        )
+        # The most recent retirement always survives its own eviction pass.
+        assert agent_incarnation(f"spawn-{al._MAX_INCARNATIONS + 199}") == 1
+
+    @pytest.mark.asyncio
+    async def test_offboard_refuses_a_replacement(self, tmp_path, monkeypatch):
+        """Offboard's window is the handover turn plus the lock wait.
+
+        Covers the outcome — nothing stopped, status untouched, 409. It does
+        NOT discriminate where the check fires: the endpoint checks the
+        incarnation again right after the handover so the lead teardown and
+        status write BETWEEN the handover and the archive can't land on a
+        replacement, and reaching only those needs a team with this agent as
+        its lead. That earlier check is covered by inspection.
+        """
+        from fastapi.testclient import TestClient
+
+        from tests.test_hibernation import _OP, _build_app
+
+        app, bb, cm, _tr, _hm, _eb, cfg = _build_app(tmp_path, monkeypatch)
+        try:
+            client = TestClient(app)
+            async with agent_lifecycle_locked_async("scout"):
+                # The handover turn runs unlocked, so the request gets that
+                # far and then queues; retire while it is parked there.
+                t, box = _run_in_thread(
+                    lambda: client.post("/mesh/agents/scout/offboard", headers=_OP).status_code,
+                )
+                assert await _spin_until_async(lambda: lifecycle_refcount("scout") == 2)
+                retire_agent("scout")
+            t.join(5)
+            assert box.get("value") == 409, box
+            assert cfg["agents"]["scout"]["status"] == "active"
+            assert cm.stopped == []
+        finally:
+            bb.close()
+
+    @pytest.mark.asyncio
+    async def test_restart_all_pins_targets_before_it_reads_config(self, dashboard, monkeypatch):
+        """Capture order decides which agent the stale row is applied to.
+
+        Captured BEFORE the config read, an agent replaced between the two
+        has a stale incarnation and is skipped. Captured after, its NEW
+        incarnation is pinned against the OLD agent's row — and it gets
+        restarted with the previous agent's role, model and tools_dir.
+        """
+        from src.cli import config as cli_config
+
+        router, registry, runtime, yaml_state, _connectors, _forgotten = dashboard
+        restart_all = _endpoint(router, "/api/restart-agents", "POST")
+
+        full_cfg = {
+            "agents": yaml_state["agents"],
+            "llm": {"default_model": "openai/gpt-4o-mini"},
+            "network": {},
+            "mesh": {},
+        }
+        fired = {"done": False}
+
+        def _load_config_that_replaces():
+            # Stands in for a REPL/other-loop delete+create landing between
+            # the target snapshot and the config read.
+            if not fired["done"]:
+                fired["done"] = True
+                retire_agent("worker")
+            return full_cfg
+
+        monkeypatch.setattr(cli_config, "_load_config", _load_config_that_replaces)
+
+        result = await asyncio.wait_for(restart_all(), 5)
+        assert fired["done"], "the window never opened"
+        assert result["restarted"]["worker"] == "skipped: agent was replaced"
+        assert "start" not in runtime.kinds()

@@ -829,6 +829,10 @@ class HibernationSweeper:
             last_activity = self._lane_manager.last_activity(agent_id)
             if (now - last_activity) < idle_seconds:
                 continue
+            # Captured BEFORE the fresh checks below, so it covers them too:
+            # they are what decides this agent is hibernatable, and they
+            # describe whichever agent holds the name right now.
+            incarnation = agent_incarnation(agent_id)
             # M7: re-check against a FRESH read immediately before the stop.
             # The per-tick ``lane_status``/``now`` snapshot above was taken
             # once and can be tens of seconds stale by the time this loop
@@ -852,9 +856,7 @@ class HibernationSweeper:
                 # multi-second container stop between them, so this agent's
                 # turn can come long after the tick began.
                 await self._hibernate_fn(
-                    agent_id,
-                    caller="sweep",
-                    expect_incarnation=agent_incarnation(agent_id),
+                    agent_id, caller="sweep", expect_incarnation=incarnation,
                 )
                 logger.info(
                     "hibernation sweep: hibernated idle agent '%s' (idle >= %dm)",
@@ -11940,6 +11942,11 @@ def create_mesh_app(
         task and the future is locked RUNNING at claim time so a
         cancelled awaiter can never cancel it out from under the others.
         """
+        # Captured WITH the status read, not after the claim below: the two
+        # together are the decision ("this agent, asleep, needs waking"), and
+        # a delete plus a recreate between them would pin the replacement's
+        # incarnation against the predecessor's status.
+        _incarnation = agent_incarnation(agent_id)
         status = _status_overrides.get(agent_id, "active")
         if status == "active":
             return True
@@ -11963,10 +11970,7 @@ def create_mesh_app(
                 agent_id,
                 trigger=trigger,
                 shared_fut=fut,
-                # Pinned at claim time — the status read above is what makes
-                # this a wake at all, and it described whichever agent held
-                # the name then.
-                expect_incarnation=agent_incarnation(agent_id),
+                expect_incarnation=_incarnation,
             )
 
         try:
@@ -12027,6 +12031,11 @@ def create_mesh_app(
         # the name by then.
         _incarnation = agent_incarnation(agent_id)
         manifest = await _offboard_agent(agent_id, reason="offboard")
+        # Checked HERE, not just in ``_archive_agent_core`` below: the lead
+        # clearing and standup teardown between the two are writes of their
+        # own, and a 409 raised only at the archive would leave them applied
+        # to whatever agent now holds the name.
+        _require_same_agent(agent_id, _incarnation)
         # Offboard = departure: a departing lead stops being lead. Clear the
         # pointer BEFORE archiving so no ghost lead lingers in the Team Room
         # and the standup cron for this team is removed (otherwise the boot

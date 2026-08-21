@@ -7758,21 +7758,20 @@ def create_dashboard_router(
             except (ValueError, OSError):
                 pass
 
+        # Targets and incarnations FIRST, config second, and the fan-out
+        # below iterates this pinned set rather than a fresh registry read.
+        # Order matters: an agent replaced between these two reads then has a
+        # stale captured incarnation and is skipped. Capturing after the
+        # config read would do the opposite — pin the NEW agent's incarnation
+        # against the OLD agent's row, and rebuild it with the wrong role,
+        # model and tools_dir. An agent created after both reads is simply
+        # not a target; it has no row here, and restarting a brand-new
+        # container from empty defaults is worse than leaving it alone.
+        _restart_targets = list(agent_registry)
+        _incarnations = {aid: agent_incarnation(aid) for aid in _restart_targets}
         cfg = _load_config()
         agents_cfg = cfg.get("agents", {})
         default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
-        # Pinned alongside the config snapshot: every agent is restarted from
-        # THIS read, and the fan-out below plus the browser-service restart
-        # leave a wide window before any one of them holds its lock. An id
-        # deleted and recreated in that window would otherwise be bounced with
-        # the previous agent's role, model and tools_dir.
-        # Pinned as ONE set alongside the config read, and iterated below
-        # instead of a fresh registry read: an agent created after this
-        # snapshot has no row in ``agents_cfg``, so sweeping it into the
-        # fan-out would stop and rebuild a brand-new container from empty
-        # defaults — role "assistant", the default model, no tools_dir.
-        _restart_targets = list(agent_registry)
-        _incarnations = {aid: agent_incarnation(aid) for aid in _restart_targets}
         loop = _asyncio.get_running_loop()
         results = {}
 

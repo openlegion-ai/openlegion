@@ -90,8 +90,11 @@ _guard = threading.Lock()
 _holders: dict[str, tuple] = {}
 
 # ``{agent_id: n}`` — bumped every time an id is retired. See
-# :func:`agent_incarnation`.
+# :func:`agent_incarnation`. Bounded: ephemeral spawns mint a fresh id per
+# call and retire it at TTL, so an unbounded table would grow for the life
+# of the process.
 _incarnations: dict[str, int] = {}
+_MAX_INCARNATIONS = 4096
 
 
 class AgentLifecycleBusy(Exception):
@@ -261,6 +264,16 @@ def retire_agent(agent_id: str) -> int:
     with _guard:
         n = _incarnations.get(agent_id, 0) + 1
         _incarnations[agent_id] = n
+        if len(_incarnations) > _MAX_INCARNATIONS:
+            # Drop the oldest half. Dropping a tombstone can only ever make a
+            # comparison FAIL (a caller holding a captured 1 reads 0 back and
+            # refuses), never falsely pass — the one exception needs an
+            # eviction to land between a single operation's capture and its
+            # check, which at this cap means thousands of deletes inside one
+            # lifecycle operation.
+            for stale in list(_incarnations)[: _MAX_INCARNATIONS // 2]:
+                if stale != agent_id:
+                    _incarnations.pop(stale, None)
         return n
 
 
