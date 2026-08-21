@@ -544,11 +544,37 @@ class TestFailedStartRollsBack:
         assert "gone" not in backend.agents
         assert "gone" not in backend.auth_tokens, "a destroyed container's token was re-armed by the rollback"
 
+    def test_container_that_vanished_during_the_reap_also_deregisters(self):
+        """``remove()`` raising NotFound means the container disappeared
+        between the lookup and the removal. It is just as gone as if we had
+        removed it, so reporting "not destroyed" would restore a token for
+        something that no longer exists."""
+        import docker as _docker
+
+        backend = _make_docker_backend()
+        backend.agents["ghosted"] = {"container": MagicMock(), "url": "http://ghosted", "role": "r"}
+        backend.auth_tokens["ghosted"] = "GHOST-TOKEN"
+        backend.client = _docker_client()
+        stale = MagicMock()
+        stale.remove.side_effect = _docker.errors.NotFound("already gone")
+        backend.client.containers.get.side_effect = None
+        backend.client.containers.get.return_value = stale
+        backend.client.containers.run.side_effect = RuntimeError("image missing")
+
+        with pytest.raises(RuntimeError):
+            backend.start_agent(agent_id="ghosted", role="r", tools_dir="")
+
+        assert "ghosted" not in backend.agents
+        assert "ghosted" not in backend.auth_tokens
+
     def test_sandbox_failure_after_create_deregisters(self, tmp_path, monkeypatch):
         """A successful ``sandbox create`` binds the name to a NEW microVM, so
         the previous registration is unreachable from that point on. Restoring
         its token would hand it to a sandbox started with a different one."""
         backend = _make_sandbox_backend(tmp_path)
+        # The registered name and the one start_agent computes are both
+        # ``openlegion_{_docker_safe_name(agent_id)}``, so creating this name
+        # really does replace what was registered.
         backend.agents["s4"] = {"sandbox_name": "openlegion_s4", "workspace": None, "url": "u", "role": "r"}
         backend.auth_tokens["s4"] = "OLD-TOKEN"
 

@@ -823,11 +823,18 @@ class DockerBackend(RuntimeBackend):
         try:
             stale = self.client.containers.get(container_name)
             stale.remove(force=True)
-            # Past this point any previous instance of this agent is gone.
-            if progress is not None:
-                progress["prior_destroyed"] = True
         except _docker.errors.NotFound:
+            # Either there was no same-named container, or it vanished between
+            # the lookup and the removal. The postcondition below holds either
+            # way, so this counts as destroyed too — reporting "not destroyed"
+            # here would restore a token for a container that is gone.
             pass
+        # Reaching this line means nothing is running under this agent's
+        # container name any more. An APIError from ``remove`` propagates
+        # instead, leaving the flag false: that outcome is genuinely
+        # ambiguous, and a rollback that changes nothing is the safe read.
+        if progress is not None:
+            progress["prior_destroyed"] = True
 
         container = self.client.containers.run(self.BASE_IMAGE, **run_kwargs)
         url = f"http://127.0.0.1:{port}"
