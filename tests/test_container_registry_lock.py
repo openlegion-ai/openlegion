@@ -17,6 +17,7 @@ for them.
 
 from __future__ import annotations
 
+import subprocess
 import threading
 import time
 from unittest.mock import MagicMock
@@ -498,74 +499,89 @@ class TestFailedStartRollsBack:
     to drop that token and keep the old entry — ``agents`` populated,
     ``auth_tokens`` empty, with no concurrency involved at all."""
 
-    def test_failed_restart_keeps_a_SURVIVING_agents_token(self):
-        """Failure before the start got far enough to destroy anything: the
-        previous container is still up, so its token has to go back."""
+    def test_failure_BEFORE_the_reap_keeps_the_previous_token(self):
+        """The start died while still looking the stale container up, so it
+        never removed anything. The previous container is still running and
+        needs its token back."""
+        import docker as _docker
+
         backend = _make_docker_backend()
-        survivor = MagicMock()
-        survivor.status = "running"
-        backend.agents["live"] = {"container": survivor, "url": "http://live", "role": "r"}
+        backend.agents["live"] = {"container": MagicMock(), "url": "http://live", "role": "r"}
         backend.auth_tokens["live"] = "LIVE-TOKEN"
         backend.client = _docker_client()
-        backend.client.containers.run.side_effect = RuntimeError("docker daemon said no")
+        backend.client.containers.get.side_effect = _docker.errors.APIError("daemon hiccup")
 
-        with pytest.raises(RuntimeError):
+        with pytest.raises(_docker.errors.APIError):
             backend.start_agent(agent_id="live", role="r", tools_dir="")
 
+        # The reap never ran, so nothing was destroyed.
         assert backend.agents["live"]["url"] == "http://live"
         assert backend.auth_tokens["live"] == "LIVE-TOKEN", (
             "the still-running previous container was stranded without a token"
         )
 
-    def test_failed_restart_deregisters_a_REAPED_agent(self):
+    def test_failure_AFTER_the_reap_deregisters(self):
         """``_start_agent_container`` force-removes the same-named container
-        immediately before ``containers.run``, so a failure THERE has already
+        immediately before ``containers.run``, so a failure there has already
         destroyed the previous agent. Restoring its token would re-arm a
-        credential for a container that no longer exists, and keeping the entry
-        would advertise a URL nothing answers."""
+        credential for a container that no longer exists, and keeping the
+        entry would advertise a URL nothing answers."""
         backend = _make_docker_backend()
-        reaped = MagicMock()
-        reaped.status = "exited"
-        backend.agents["gone"] = {"container": reaped, "url": "http://gone", "role": "r"}
+        backend.agents["gone"] = {"container": MagicMock(), "url": "http://gone", "role": "r"}
         backend.auth_tokens["gone"] = "REAPED-TOKEN"
         backend.client = _docker_client()
+        # A stale container EXISTS, so the reap actually runs — the default
+        # mock client raises NotFound here and would skip it entirely.
+        stale = MagicMock()
+        backend.client.containers.get.side_effect = None
+        backend.client.containers.get.return_value = stale
         backend.client.containers.run.side_effect = RuntimeError("image missing")
 
         with pytest.raises(RuntimeError):
             backend.start_agent(agent_id="gone", role="r", tools_dir="")
 
+        stale.remove.assert_called_once_with(force=True)  # the reap really ran
         assert "gone" not in backend.agents
         assert "gone" not in backend.auth_tokens, "a destroyed container's token was re-armed by the rollback"
 
-    def test_failed_restart_deregisters_when_liveness_cannot_be_read(self):
-        """An unreachable daemon must fail closed — deregister rather than
-        re-arm a token on a guess."""
-        backend = _make_docker_backend()
-        unknown = MagicMock()
-        unknown.reload.side_effect = RuntimeError("daemon unreachable")
-        backend.agents["murky"] = {"container": unknown, "url": "http://murky", "role": "r"}
-        backend.auth_tokens["murky"] = "MURKY-TOKEN"
-        backend.client = _docker_client()
-        backend.client.containers.run.side_effect = RuntimeError("boom")
+    def test_sandbox_failure_after_create_deregisters(self, tmp_path, monkeypatch):
+        """A successful ``sandbox create`` binds the name to a NEW microVM, so
+        the previous registration is unreachable from that point on. Restoring
+        its token would hand it to a sandbox started with a different one."""
+        backend = _make_sandbox_backend(tmp_path)
+        backend.agents["s4"] = {"sandbox_name": "openlegion_s4", "workspace": None, "url": "u", "role": "r"}
+        backend.auth_tokens["s4"] = "OLD-TOKEN"
+
+        def fake_run(cmd, *_a, **_k):
+            if "exec" in cmd:
+                raise subprocess.TimeoutExpired(cmd, 60)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr("src.host.runtime.subprocess.run", fake_run)
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            backend.start_agent(agent_id="s4", role="r", tools_dir="")
+
+        assert "s4" not in backend.agents
+        assert "s4" not in backend.auth_tokens
+
+    def test_sandbox_failure_at_create_keeps_the_previous_token(self, tmp_path, monkeypatch):
+        backend = _make_sandbox_backend(tmp_path)
+        backend.agents["s5"] = {"sandbox_name": "openlegion_s5", "workspace": None, "url": "u", "role": "r"}
+        backend.auth_tokens["s5"] = "OLD-TOKEN"
+
+        def fake_run(cmd, *_a, **_k):
+            if "create" in cmd:
+                return MagicMock(returncode=1, stdout="", stderr="no sandbox support")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr("src.host.runtime.subprocess.run", fake_run)
 
         with pytest.raises(RuntimeError):
-            backend.start_agent(agent_id="murky", role="r", tools_dir="")
+            backend.start_agent(agent_id="s5", role="r", tools_dir="")
 
-        assert "murky" not in backend.agents
-        assert "murky" not in backend.auth_tokens
-
-    def test_failed_first_start_still_leaves_no_token(self):
-        """M16: a start that never came up must not leave a live token behind.
-        The rollback above must not weaken that."""
-        backend = _make_docker_backend()
-        backend.client = _docker_client()
-        backend.client.containers.run.side_effect = RuntimeError("boom")
-
-        with pytest.raises(RuntimeError):
-            backend.start_agent(agent_id="never", role="r", tools_dir="")
-
-        assert "never" not in backend.auth_tokens
-        assert "never" not in backend.agents
+        assert backend.agents["s5"]["url"] == "u"
+        assert backend.auth_tokens["s5"] == "OLD-TOKEN"
 
     def test_sandbox_failed_create_leaves_no_orphan_token(self, tmp_path, monkeypatch):
         backend = _make_sandbox_backend(tmp_path)

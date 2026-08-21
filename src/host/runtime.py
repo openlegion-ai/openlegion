@@ -152,7 +152,14 @@ class RuntimeBackend(abc.ABC):
                 if entry[1] <= 0 and locks.get(agent_id) is entry:
                     locks.pop(agent_id, None)
 
-    def _rollback_failed_start(self, agent_id: str, *, prior_token: str | None, minted_token: str) -> None:
+    def _rollback_failed_start(
+        self,
+        agent_id: str,
+        *,
+        prior_token: str | None,
+        minted_token: str,
+        prior_destroyed: bool,
+    ) -> None:
         """Undo a start that raised, leaving the registries coherent.
 
         ``start_agent`` publishes the auth token BEFORE the container call, so
@@ -161,38 +168,38 @@ class RuntimeBackend(abc.ABC):
 
         * **No previous registration.** M16: an agent that never came up must
           not leave a live token behind. Pop it.
-        * **The previous container is still running** — the start failed
-          before it got far enough to destroy anything (resolving credentials,
-          building env). Put the previous token back, or that container is
-          stranded with a credential the mesh no longer accepts.
-        * **The previous container is gone.** ``_start_agent_container``
-          force-removes the same-named container immediately before
-          ``containers.run``, so a failure there destroys the old agent
-          without deregistering it. Restoring its token would re-arm a
-          credential for a container that no longer exists; keeping the entry
-          would advertise a URL nothing answers. Deregister both.
+        * **The start never touched the previous instance** — it failed while
+          resolving credentials or building env. Put the previous token back,
+          or that still-running container is stranded with a credential the
+          mesh no longer accepts.
+        * **The start destroyed the previous instance.**
+          ``_start_agent_container`` force-removes the same-named container
+          immediately before ``containers.run``, so a failure there has
+          already killed the old agent without deregistering it. Restoring its
+          token would re-arm a credential for a container that no longer
+          exists; keeping the entry would advertise a URL nothing answers.
+          Deregister both.
 
-        Liveness is asked of the backend rather than inferred, because only
-        the backend knows whether its own start path had already torn the
-        previous instance down.
+        ``prior_destroyed`` is reported BY the start path rather than probed
+        for afterwards. A health check would have to answer "is the old
+        instance still there?" from outside, and it cannot: a transient daemon
+        error reads exactly like a destroyed container, and deregistering on
+        that guess orphans a container that is running perfectly well. The
+        start path already knows the answer.
         """
         prior = self.agents.get(agent_id)
         if prior is None:
             if self.auth_tokens.get(agent_id) == minted_token:
                 self.auth_tokens.pop(agent_id, None)
             return
-        try:
-            alive = self.health_check(agent_id)
-        except Exception:
-            alive = False
-        if alive:
-            if prior_token is not None:
-                self.auth_tokens[agent_id] = prior_token
-            elif self.auth_tokens.get(agent_id) == minted_token:
-                self.auth_tokens.pop(agent_id, None)
+        if prior_destroyed:
+            self.agents.pop(agent_id, None)
+            self.auth_tokens.pop(agent_id, None)
             return
-        self.agents.pop(agent_id, None)
-        self.auth_tokens.pop(agent_id, None)
+        if prior_token is not None:
+            self.auth_tokens[agent_id] = prior_token
+        elif self.auth_tokens.get(agent_id) == minted_token:
+            self.auth_tokens.pop(agent_id, None)
 
     def set_credential_resolver(
         self,
@@ -646,8 +653,10 @@ class DockerBackend(RuntimeBackend):
             # an agent that never came up. Pop it on any failure and re-raise so
             # the caller's error handling is unchanged. Only registry insertion
             # on the success path keeps the token.
+            progress: dict[str, bool] = {}
             try:
                 return self._start_agent_container(
+                    progress=progress,
                     agent_id=agent_id,
                     role=role,
                     tools_dir=tools_dir,
@@ -667,6 +676,7 @@ class DockerBackend(RuntimeBackend):
                     agent_id,
                     prior_token=prior_token,
                     minted_token=auth_token,
+                    prior_destroyed=progress.get("prior_destroyed", False),
                 )
                 raise
 
@@ -682,7 +692,11 @@ class DockerBackend(RuntimeBackend):
         model: str,
         thinking: str,
         env_overrides: dict[str, str] | None,
+        progress: dict[str, bool] | None = None,
     ) -> str:
+        """``progress["prior_destroyed"]`` is set once the same-named stale
+        container has been force-removed, so a failure after that point rolls
+        back as "the previous instance is gone" without having to guess."""
         import docker as _docker
 
         mesh_host = "127.0.0.1" if self.use_host_network else "host.docker.internal"
@@ -809,6 +823,9 @@ class DockerBackend(RuntimeBackend):
         try:
             stale = self.client.containers.get(container_name)
             stale.remove(force=True)
+            # Past this point any previous instance of this agent is gone.
+            if progress is not None:
+                progress["prior_destroyed"] = True
         except _docker.errors.NotFound:
             pass
 
@@ -1464,6 +1481,7 @@ class SandboxBackend(RuntimeBackend):
             # and publishes the auth token, and a failed ``sandbox create``
             # below used to leave it behind with no matching entry.
             prior_token = self.auth_tokens.get(agent_id)
+            prior_destroyed = False
             try:
                 ws = self._prepare_workspace(
                     agent_id,
@@ -1496,6 +1514,12 @@ class SandboxBackend(RuntimeBackend):
                 if result.returncode != 0:
                     raise RuntimeError(f"Failed to create sandbox for '{agent_id}': {result.stderr.strip()}")
                 logger.info(f"Created sandbox '{sandbox_name}'")
+                # The sandbox name is now bound to a NEW microVM, so whatever
+                # was registered under this agent id is no longer reachable.
+                # Anything that fails below rolls back as "the previous
+                # instance is gone" — restoring its token would hand it to a
+                # sandbox that was started with a different one.
+                prior_destroyed = True
 
                 # Start the agent process inside the sandbox (detached)
                 env_file = ws / ".agent.env"
@@ -1543,6 +1567,7 @@ class SandboxBackend(RuntimeBackend):
                     agent_id,
                     prior_token=prior_token,
                     minted_token=self.auth_tokens.get(agent_id, ""),
+                    prior_destroyed=prior_destroyed,
                 )
                 raise
 
