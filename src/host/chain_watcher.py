@@ -160,6 +160,11 @@ class BlockedTaskLadder:
 
         return limits_mod.resolve("ladder_human_fallback_hours") * 3600.0
 
+    def _reset_and_list_blocked(self) -> list:
+        """Sync half of the ladder sweep's opening read, for ``to_thread``."""
+        self._tasks.ladder_reset_unblocked()
+        return self._tasks.list_blocked()
+
     async def sweep_once(self) -> None:
         """One ladder pass over every blocked task (claim-then-deliver)."""
         interval_s = self._resolve_interval_s()
@@ -170,8 +175,9 @@ class BlockedTaskLadder:
         fallback_s = self._resolve_fallback_s()
         now = self._wall_clock()
         try:
-            self._tasks.ladder_reset_unblocked()
-            blocked = self._tasks.list_blocked()
+            # Off-loop: a write plus a scan over the task table, on
+            # uvicorn's loop. Kept as one hop so they stay adjacent.
+            blocked = await asyncio.to_thread(self._reset_and_list_blocked)
         except Exception as e:
             logger.warning("ladder: listing blocked tasks failed: %s", e)
             return
@@ -456,7 +462,10 @@ class ChainWatcher:
         """One pass: deliver terminal outcomes for settled human chains."""
         since = time.time() - self._watch_window_s
         try:
-            roots = self._tasks.list_watchable_human_roots(since=since)
+            # Off-loop: a scan over the task table, on uvicorn's loop.
+            roots = await asyncio.to_thread(
+                lambda: self._tasks.list_watchable_human_roots(since=since),
+            )
         except Exception as e:
             logger.warning("chain watcher: listing roots failed: %s", e)
             return

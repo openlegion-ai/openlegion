@@ -204,14 +204,43 @@ class TestLaneOwnerLoop:
         finally:
             released.set()
 
-    def test_context_is_not_needed_across_the_hop(self, two_loops):
-        """Trace identity rides the task, not ambient context.
+    def test_caller_context_reaches_the_hopped_coroutine(self, two_loops):
+        """The hop must not lose the caller's contextvars.
 
-        ``run_coroutine_threadsafe`` starts the coroutine in a fresh
-        context, so anything the lane read from a contextvar set by the
-        CALLER would be silently lost. It reads none — ``trace_id`` is an
-        explicit argument carried on the QueuedTask — and this pins that.
+        ``run_coroutine_threadsafe`` schedules through
+        ``call_soon_threadsafe``, which copies the SUBMITTING context — so
+        the enqueue body runs with the caller's contextvars, not a fresh
+        set. Mesh code depends on this shape (server.py reads
+        ``current_trace_id`` at bind time before enqueuing), and a hop
+        reimplemented with a plain thread pool would silently drop it.
         """
+        import contextvars
+
+        probe: contextvars.ContextVar[str] = contextvars.ContextVar("probe", default="UNSET")
+        dispatch, mesh = two_loops
+        seen: dict[str, str] = {}
+
+        class _Recording(LaneManager):
+            async def _handle_followup(self, agent, message, **kw):
+                seen["ctx"] = probe.get()
+                return "ok"
+
+        async def _noop(agent, message, **_kw):
+            return "ok"
+
+        lm = _Recording(_noop, queue_maxsize=10)
+        lm.bind_loop(dispatch)
+
+        async def _caller() -> str:
+            probe.set("SET-BY-CALLER")
+            return await lm.enqueue("jane", "hi")
+
+        assert asyncio.run_coroutine_threadsafe(_caller(), mesh).result(timeout=10) == "ok"
+        assert seen["ctx"] == "SET-BY-CALLER"
+
+    def test_worker_trace_id_comes_from_the_argument(self, two_loops):
+        # Trace identity rides the QueuedTask, so it is unaffected by which
+        # loop the caller was on or what its ambient trace happened to be.
         from src.shared.trace import current_trace_id
 
         dispatch, mesh = two_loops
@@ -246,6 +275,77 @@ class TestLaneOwnerLoop:
         assert undecorated == [], (
             f"public async LaneManager methods missing @_on_owner_loop: {undecorated}"
         )
+
+
+class TestCallerCancellationDoesNotWedgeTheLane:
+    """A caller going away must not take the agent's lane with it.
+
+    Cancelling a caller propagates into the per-item future the worker
+    resolves. ``Future.set_result`` then raises ``InvalidStateError``, and
+    the worker's trace-record path calls ``Future.exception()``, which
+    RAISES ``CancelledError`` on a cancelled future rather than returning
+    it. Both escape ``_worker``, killing it while it is still registered in
+    ``_workers`` — so every later enqueue for that agent is accepted and
+    never drained. That is the same silent hang this module's loop work
+    exists to remove, arrived at from the other direction.
+
+    Reachable on one loop (a cancelled HTTP request awaiting an enqueue) and
+    across loops. Both are covered.
+
+    Note the trace store: the ``exception()`` read is behind
+    ``if task.trace_id and self._trace_store``, so a lane built without one
+    never reaches the second half of the chain and the bug looks fixed when
+    it is not.
+    """
+
+    class _TraceStore:
+        def record(self, **kwargs) -> None:
+            pass
+
+    def _lane_with_tracing(self, hold: float = 1.0) -> LaneManager:
+        async def _slow(agent: str, message: str, **_kw) -> str:
+            await asyncio.sleep(hold)
+            return f"reply:{message}"
+
+        return LaneManager(_slow, queue_maxsize=10, trace_store=self._TraceStore())
+
+    def test_same_loop_cancellation_leaves_the_lane_usable(self):
+        lm = self._lane_with_tracing()
+
+        async def _go() -> None:
+            first = asyncio.create_task(lm.enqueue("alice", "first", trace_id="t1"))
+            await asyncio.sleep(0.3)      # turn in flight
+            first.cancel()
+            await asyncio.sleep(1.2)      # let the turn finish under it
+
+            assert not lm._workers["alice"].done(), "cancelling a caller killed the worker"
+            second = await asyncio.wait_for(
+                lm.enqueue("alice", "second", trace_id="t2"), timeout=5,
+            )
+            assert second == "reply:second"
+
+        asyncio.run(_go())
+
+    def test_cross_loop_cancellation_leaves_the_lane_usable(self, two_loops):
+        dispatch, mesh = two_loops
+        lm = self._lane_with_tracing()
+        lm.bind_loop(dispatch)
+
+        holder: dict[str, asyncio.Task] = {}
+
+        async def _start() -> None:
+            holder["task"] = asyncio.create_task(lm.enqueue("bob", "first", trace_id="t1"))
+
+        asyncio.run_coroutine_threadsafe(_start(), mesh).result(timeout=5)
+        time.sleep(0.3)
+        mesh.call_soon_threadsafe(holder["task"].cancel)
+        time.sleep(1.2)
+
+        assert not lm._workers["bob"].done(), "cancelling a caller killed the worker"
+        second = asyncio.run_coroutine_threadsafe(
+            lm.enqueue("bob", "second", trace_id="t2"), mesh,
+        )
+        assert second.result(timeout=10) == "reply:second"
 
 
 class TestLaneTeardownAcrossThreads:

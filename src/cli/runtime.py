@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import os
 import socket
@@ -407,6 +408,13 @@ class RuntimeContext:
             self.cron_scheduler.stop()
         if self.hibernation_sweeper:
             self.hibernation_sweeper.stop()
+        # ``.stop()`` above only flips a bool, which a sweep notices at its
+        # next tick — up to 60s away, and not at all if it is mid-tick. The
+        # sweeps run on the mesh loop now, so leaving them alive would let one
+        # keep dispatching work, restarting agents, or reading stores while
+        # the lines below stop containers and close SQLite. Cancel and give
+        # them a moment to unwind before teardown proceeds.
+        self._stop_mesh_sweeps()
         if self.runtime:
             self.runtime.stop_all()
             if hasattr(self.runtime, "stop_browser_service"):
@@ -2906,6 +2914,34 @@ class RuntimeContext:
             except Exception as e:
                 logger.warning("team-lead backfill for team %s failed: %s", name, e)
 
+    def _stop_mesh_sweeps(self, timeout: float = 5.0) -> None:
+        """Cancel every sweep running on the mesh loop and wait briefly.
+
+        Best-effort: a sweep that will not unwind must not wedge shutdown,
+        so a timeout here is logged and teardown continues.
+        """
+        pending = [f for f in self._mesh_sweeps if not f.done()]
+        for fut in pending:
+            fut.cancel()
+        deadline = time.time() + timeout
+        for fut in pending:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            try:
+                fut.result(timeout=remaining)
+            except (concurrent.futures.CancelledError, asyncio.CancelledError):
+                pass
+            except Exception as e:
+                logger.debug("sweep raised while shutting down: %s", e)
+        still_running = [f for f in pending if not f.done()]
+        if still_running:
+            logger.warning(
+                "%d background sweep(s) did not stop within %.0fs — "
+                "continuing shutdown", len(still_running), timeout,
+            )
+        self._mesh_sweeps.clear()
+
     def _start_sweep(self, name: str, coro_fn) -> None:
         """Run one periodic sweep on the mesh loop.
 
@@ -2931,6 +2967,14 @@ class RuntimeContext:
             return
 
         async def _run() -> None:
+            # Shutdown can land between scheduling and first execution. Every
+            # sweep's ``start()`` opens with ``self._running = True``, so a
+            # ``stop()`` that arrived in that window would be overwritten and
+            # the sweep would run on through teardown. Check the flag here,
+            # on the loop, right before starting.
+            if self._shutting_down:
+                logger.debug("%s sweep not started — shutting down", name)
+                return
             try:
                 await coro_fn()
             except asyncio.CancelledError:
@@ -2938,7 +2982,12 @@ class RuntimeContext:
             except Exception:
                 logger.exception("%s sweep exited on an unhandled error", name)
 
-        fut = asyncio.run_coroutine_threadsafe(_run(), self._mesh_loop)
+        try:
+            fut = asyncio.run_coroutine_threadsafe(_run(), self._mesh_loop)
+        except RuntimeError as e:
+            # The loop closed between the check above and this submit.
+            logger.error("mesh loop closed while starting the %s sweep: %s", name, e)
+            return
         self._mesh_sweeps.append(fut)
 
     def _start_background(self) -> None:
@@ -2978,31 +3027,60 @@ class RuntimeContext:
                 # impersonating the user or feeding ``looks_like_correction``.
                 # Bills the nudged agent's normal WORK ledger.
                 #
-                # C4: returns True ONLY when the nudge was durably ACCEPTED by
-                # the lane (enqueue succeeded), False when it could not be
-                # delivered (no lane/loop, or the enqueue raised). The ladder
+                # C4: returns True ONLY when the nudge was ACCEPTED by the
+                # lane, False when it could not be delivered (no lane/loop,
+                # lane at its depth cap, or scheduling raised). The ladder
                 # advances the rung only on True, so a failed dispatch
                 # (loop/container down) re-drives the SAME rung next sweep
-                # instead of climbing past it. We wait only for the ENQUEUE (a
-                # fast lane-queue put) — NEVER the agent turn — so the sweep
-                # still never blocks on an agent's work.
+                # instead of climbing past it.
+                #
+                # This must NEVER wait on the agent's turn. It used to call
+                # ``fut.result(timeout=10)``, and because ``enqueue`` returns
+                # ``await task.future`` — the completed turn, not the queue
+                # put — that waited up to 10s for the WHOLE turn. Two
+                # consequences: this function runs on the chain watcher, which
+                # now shares uvicorn's loop, so it froze every HTTP route for
+                # 10s per due nudge; and any turn longer than 10s timed out,
+                # so the rung never advanced and the next sweep re-sent the
+                # same nudge on top of the queued one.
+                #
+                # Fire-and-forget instead, pre-flighting the depth cap the way
+                # every other cross-loop enqueue does (``lane_full`` exists for
+                # exactly this: a LaneQueueFull raised on the dispatch loop
+                # cannot be caught here).
                 if self.lane_manager is None or self._dispatch_loop is None:
                     return False
                 try:
-                    fut = asyncio.run_coroutine_threadsafe(
-                        self.lane_manager.enqueue(
-                            agent, message, mode="followup", system_note=True,
-                        ),
-                        self._dispatch_loop,
-                    )
+                    if self.lane_manager.lane_full(agent):
+                        logger.warning(
+                            "ladder nudge not delivered — %s's lane is at its "
+                            "depth cap", agent,
+                        )
+                        return False
                 except Exception as e:
+                    logger.debug("ladder nudge lane-full pre-flight failed for %s: %s", agent, e)
+                # Build the coroutine first so it can be closed explicitly if
+                # scheduling fails — otherwise it leaks a "coroutine was never
+                # awaited" warning.
+                coro = self.lane_manager.enqueue(
+                    agent, message, mode="followup", system_note=True,
+                )
+                try:
+                    fut = asyncio.run_coroutine_threadsafe(coro, self._dispatch_loop)
+                except Exception as e:
+                    coro.close()
                     logger.warning("ladder nudge dispatch failed to schedule for %s: %s", agent, e)
                     return False
-                try:
-                    fut.result(timeout=10)
-                except Exception as e:
-                    logger.warning("ladder nudge enqueue failed for %s: %s", agent, e)
-                    return False
+
+                def _log_nudge_outcome(f) -> None:
+                    # The turn itself is not the ladder's business, but a
+                    # failure should not vanish.
+                    try:
+                        f.result()
+                    except Exception as exc:
+                        logger.warning("ladder nudge turn for %s failed: %s", agent, exc)
+
+                fut.add_done_callback(_log_nudge_outcome)
                 return True
 
             def _ladder_send_assignee(agent: str, message: str) -> bool:

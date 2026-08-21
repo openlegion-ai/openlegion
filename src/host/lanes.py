@@ -66,6 +66,21 @@ class LaneLoopUnavailable(RuntimeError):
     """
 
 
+def _future_error(fut: asyncio.Future) -> BaseException | None:
+    """The exception on ``fut``, or ``None``. Never raises.
+
+    ``Future.exception()`` RAISES ``CancelledError`` on a cancelled future
+    rather than returning it. Reading it bare from the worker's trace-record
+    path turned "the caller went away" into an exception that escaped
+    ``_worker`` and killed the lane permanently — every later enqueue for
+    that agent was accepted and never drained, which is the exact silent
+    hang this module's loop-affinity work exists to remove.
+    """
+    if not fut.done() or fut.cancelled():
+        return None
+    return fut.exception()
+
+
 def _on_owner_loop(method):
     """Run ``method`` on the loop that owns this lane's asyncio primitives.
 
@@ -93,9 +108,19 @@ def _on_owner_loop(method):
                 f"lane loop is not running — cannot {method.__name__}() "
                 f"from another loop"
             )
-        return await asyncio.wrap_future(
-            asyncio.run_coroutine_threadsafe(method(self, *args, **kwargs), owner)
-        )
+        # Build the coroutine first so it can be closed explicitly if the
+        # submit fails — the loop can close between the check above and the
+        # call below, and an unsubmitted coroutine leaks a "never awaited"
+        # warning. Same shape as the mesh's other cross-loop enqueues.
+        coro = method(self, *args, **kwargs)
+        try:
+            concurrent_future = asyncio.run_coroutine_threadsafe(coro, owner)
+        except RuntimeError as e:
+            coro.close()
+            raise LaneLoopUnavailable(
+                f"lane loop closed while scheduling {method.__name__}()"
+            ) from e
+        return await asyncio.wrap_future(concurrent_future)
 
     return _hop
 
@@ -938,7 +963,13 @@ class LaneManager:
                         self._dispatch_fn(agent, task.message),
                         timeout=resolved_timeout,
                     )
-                task.future.set_result(result)
+                # Guard: the caller may have been cancelled while the turn
+                # ran (a client disconnect cancels the route handler, which
+                # cancels the await on this future). ``set_result`` on a
+                # cancelled future raises InvalidStateError, which escapes
+                # the worker and kills the lane for good.
+                if not task.future.done():
+                    task.future.set_result(result)
                 # Auto-forward result to origin channel+user when requested.
                 # Runs as a background task with a timeout so a hung channel
                 # send does not leak a coroutine or stall the worker.
@@ -1094,8 +1125,8 @@ class LaneManager:
                     self._trace_store.record(
                         trace_id=task.trace_id, source="lane", agent=agent,
                         event_type="lane_complete", duration_ms=duration_ms,
-                        status="error" if task.future.done() and task.future.exception() else "ok",
-                        error=str(task.future.exception()) if task.future.done() and task.future.exception() else "",
+                        status="error" if _future_error(task.future) else "ok",
+                        error=str(_future_error(task.future) or ""),
                     )
                 async with lock:
                     self._busy[agent] = False

@@ -273,7 +273,11 @@ class HealthMonitor:
         await self._cleanup_ephemeral_agents()
         if self._blackboard:
             try:
-                self._blackboard.gc_expired()
+                # Off-loop: a TTL sweep over the blackboard is a write that
+                # contends for SQLite, whose busy timeout is 30s. This tick
+                # runs on uvicorn's loop, so a contended GC would freeze
+                # every HTTP route for as long as it waits.
+                await asyncio.to_thread(self._blackboard.gc_expired)
             except Exception as e:
                 logger.debug("Blackboard TTL cleanup failed: %s", e)
         agent_ids = list(self.agents.keys())
