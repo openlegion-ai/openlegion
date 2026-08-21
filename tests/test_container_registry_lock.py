@@ -24,7 +24,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.host.runtime import DockerBackend, SandboxBackend
+from src.host.runtime import DockerBackend, SandboxBackend, _docker_safe_name
 from tests.test_runtime import _make_docker_backend
 
 
@@ -684,6 +684,30 @@ class TestFailedStartRollsBack:
         backend.client.containers.run.side_effect = None
         backend.start_agent(agent_id="brief", role="r", tools_dir="")
         assert "brief" in backend.agents
+
+
+# ── The container namespace agents share with the browser ─────
+
+
+class TestBrowserNameCollision:
+    def test_browser_is_a_reserved_agent_id(self):
+        """Agent containers and the shared browser service share one Docker
+        name namespace. An agent with id ``browser`` is named
+        ``openlegion_browser`` — exactly the browser service's container — so
+        the stale reap on every start of that agent would force-remove the
+        browser service, and the failed-start cleanup would too."""
+        from src.cli.config import _validate_agent_name
+        from src.shared.types import RESERVED_AGENT_IDS
+
+        assert "browser" in RESERVED_AGENT_IDS
+        with pytest.raises(ValueError, match="reserved"):
+            _validate_agent_name("browser")
+
+    def test_agent_and_browser_service_container_names_would_collide(self):
+        """Pins WHY it is reserved, so the reservation is not dropped as
+        arbitrary. If the browser service is ever renamed, this fails and the
+        reservation can be revisited."""
+        assert f"openlegion_{_docker_safe_name('browser')}" == "openlegion_browser"
 
 
 # ── Regressions the lock must not undo (from the 1a work) ─────

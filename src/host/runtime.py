@@ -1184,7 +1184,10 @@ class DockerBackend(RuntimeBackend):
 
         Only called once the stale reap has run, so anything under this name
         was created by the start that just failed, and the per-agent lock is
-        held throughout — no concurrent start of this agent can own it.
+        held throughout — no concurrent start of this agent can own it. The
+        one name an agent could otherwise collide with is the shared browser
+        service's ``openlegion_browser``; ``browser`` is a reserved agent id
+        for exactly that reason (the reap above has the same collision).
         """
         import docker as _docker
 

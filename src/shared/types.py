@@ -31,8 +31,15 @@ def _generate_id(prefix: str, length: int = 12) -> str:
 SILENT_REPLY_TOKEN = "__SILENT__"
 """Sentinel returned by agents to suppress empty responses."""
 
-RESERVED_AGENT_IDS = frozenset({"mesh", "operator", "canary-probe", "default"})
+RESERVED_AGENT_IDS = frozenset({"mesh", "operator", "canary-probe", "default", "browser"})
 """Internal component names that must not be used as agent IDs.
+
+``browser`` is reserved because agent containers and the shared browser
+service share one Docker name namespace: an agent with that id is named
+``openlegion_browser``, exactly the browser service's container. The
+stale-container reap that runs on every ``start_agent`` would then
+force-remove the browser service, taking every agent's browsing with it,
+and the failed-start cleanup would too.
 
 ``canary-probe`` is the stable agent-id used by the stealth canary
 (§5.4) for its dedicated profile. Reserving it prevents a user from
