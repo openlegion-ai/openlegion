@@ -47,7 +47,33 @@ a ``default`` record, a new agent's capability defaults (which now include
 agent spawn — breaking the recursion wall. A deployment may still hand-author
 a ``default`` template directly in permissions.json; only the create path is
 blocked.
+
+Shared with TEAM id validation (:func:`src.host.teams.validate_team_id`) —
+agents and teams live in one downstream namespace. Anything reserved only
+because it collides with a container the runtime creates belongs in
+:data:`RESERVED_CONTAINER_AGENT_IDS` instead, since teams create none.
 """
+
+RESERVED_CONTAINER_AGENT_IDS = frozenset({"browser"})
+"""Agent IDs that collide with a container the runtime creates for itself.
+
+Agent containers and the shared browser service share one Docker name
+namespace: an agent whose id is ``browser`` is named ``openlegion_browser``,
+exactly the browser service's container. The stale-container reap that runs on
+every ``start_agent`` would then force-remove the browser service, taking every
+agent's browsing with it.
+
+Deliberately NOT part of :data:`RESERVED_AGENT_IDS`: teams create no
+containers, so there is no reason a team may not be called ``browser``, and
+folding it in would reject legitimate existing teams.
+
+Validation is creation-time, so this cannot help an agent that already exists
+under one of these names — ``DockerBackend.start_agent`` refuses those outright.
+"""
+
+ALL_RESERVED_AGENT_IDS = RESERVED_AGENT_IDS | RESERVED_CONTAINER_AGENT_IDS
+"""Every id an AGENT may not be created under. Team validation uses the
+narrower :data:`RESERVED_AGENT_IDS`."""
 
 AGENT_ID_RE_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
 """Canonical agent ID regex — 1-64 chars, alphanumeric start, then alphanumeric/hyphen/underscore."""

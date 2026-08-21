@@ -20,7 +20,7 @@ import yaml
 
 from src.shared.limits import THINKING_LEVELS
 from src.shared.operator_playbooks import _OPERATOR_CORE
-from src.shared.types import RESERVED_AGENT_IDS
+from src.shared.types import ALL_RESERVED_AGENT_IDS
 from src.shared.utils import atomic_write_text, truncate
 
 logger = logging.getLogger("cli")
@@ -877,7 +877,7 @@ def _validate_agent_name(name: str) -> str:
             f"Invalid agent name '{name}': must be 1–64 alphanumeric chars, "
             "hyphens, or underscores (must start with a letter or digit)."
         )
-    if name in RESERVED_AGENT_IDS:
+    if name in ALL_RESERVED_AGENT_IDS:
         raise ValueError(f"Agent name '{name}' is reserved for internal use")
     return name
 

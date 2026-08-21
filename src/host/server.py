@@ -66,8 +66,8 @@ from src.shared.paths import resolve_under_root
 from src.shared.redaction import redact_text_with_urls, redact_url
 from src.shared.types import (
     AGENT_ID_RE_PATTERN,
+    ALL_RESERVED_AGENT_IDS,
     HARD_EDIT_FIELDS,
-    RESERVED_AGENT_IDS,
     SOFT_EDIT_FIELDS,
     AgentMessage,
     APIProxyRequest,
@@ -1308,7 +1308,7 @@ def create_mesh_app(
     def _validate_agent_id(agent_id: str) -> str:
         if not agent_id or not _AGENT_ID_RE.match(agent_id):
             raise HTTPException(400, "Invalid agent_id: must be 1-64 alphanumeric/hyphen/underscore chars")
-        if agent_id in RESERVED_AGENT_IDS:
+        if agent_id in ALL_RESERVED_AGENT_IDS:
             raise HTTPException(400, f"Agent ID '{agent_id}' is reserved for internal use")
         return agent_id
 
@@ -4905,15 +4905,12 @@ def create_mesh_app(
             router.register_agent(agent_id, url)
             if health_monitor is not None:
                 health_monitor.register(agent_id)
-            # Store ephemeral metadata for TTL cleanup
-            container_manager.agents.setdefault(agent_id, {}).update(
-                {
-                    "ephemeral": True,
-                    "ttl": ttl,
-                    "spawned_at": time.time(),
-                    "role": role,
-                }
-            )
+            # The ephemeral TTL metadata is stamped by ``spawn_agent`` itself,
+            # inside the per-agent lock. Re-stamping it here used ``setdefault``
+            # on an unlocked registry: if a stop deregistered the agent in the
+            # meantime this RESURRECTED it as a metadata-only entry with no
+            # container and no ``url``, which then raised KeyError out of
+            # ``list_agents`` / ``get_agent_url``.
             ready = await container_manager.wait_for_agent(agent_id, timeout=60)
             if trace_store:
                 from src.shared.trace import new_trace_id as _new_trace_id
