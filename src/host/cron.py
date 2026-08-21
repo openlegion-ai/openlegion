@@ -744,7 +744,14 @@ class CronScheduler:
                     )
                 elif self.dispatch_fn:
                     if job.heartbeat:
-                        probes = self._run_heartbeat_probes(job.agent)
+                        # Off-loop: the probes stat the filesystem and run
+                        # several blackboard prefix scans per agent. Cheap,
+                        # but this is the coarsest synchronous block the cron
+                        # sweep performs and the sweep now shares uvicorn's
+                        # loop, which serves every HTTP route.
+                        probes = await asyncio.to_thread(
+                            self._run_heartbeat_probes, job.agent,
+                        )
                         triggered = [p for p in probes if p.triggered]
 
                         # Hibernation (plan §8 #24 leg 2): a hibernated

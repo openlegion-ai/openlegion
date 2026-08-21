@@ -117,6 +117,25 @@ Engine is standalone — NO imports, calls, or shared code with app/ or provisio
 - Async by default (FastAPI + asyncio); wrap blocking calls in `run_in_executor`.
 - All state is SQLite with WAL mode — blackboard, memory, costs, cron, traces. No Redis, no external databases.
 
+### Event-loop discipline — two loops, and only two
+
+The host runs exactly two event loops. Creating a third is a bug.
+
+| Loop | Thread | Owns |
+|---|---|---|
+| **mesh** | uvicorn (`_start_mesh_server`) | every HTTP route, and every periodic sweep — cron, health, hibernation, chain watcher, browser-metrics poll, upload GC |
+| **dispatch** | `_setup_dispatch` | the lane manager, and nothing else: its queues, locks and per-agent worker tasks |
+
+Rules:
+
+- **Never call `asyncio.new_event_loop()` in the host runtime** outside `_setup_dispatch`. A sweep that needs a loop runs on the mesh loop via `RuntimeContext._start_sweep`. `tests/test_loop_affinity.py` parses `cli/runtime.py` and fails the build if a third loop appears. (Two loops outside the host are fine and not covered by this rule: each async channel SDK gets its own in `cli/channels.py`, and one-shot CLI commands like `openlegion wallet` run a transient loop in their own process.)
+- **Cross-loop contact goes through `run_coroutine_threadsafe`** — never a bare `await` on an object that belongs to the other loop. `LaneManager` enforces this for you: `bind_loop()` names its owner at bootstrap and every public coroutine hops there automatically, so mesh and dashboard routes can `await lane_manager.enqueue(...)` directly and it still lands on the dispatch loop.
+- **Never make a lock or queue loop-aware to work around this.** `asyncio.Lock`/`Queue`/`Event` bind to the first loop that awaits them, and the failure is silent: a cross-loop `put` is accepted, the worker parked on the owning loop is never woken, and the caller's future never resolves — no exception on either side. A lock that re-creates itself per loop doesn't fix that, it just hands each loop its own lock so both enter the critical section (`health.py` did exactly this).
+- Channel loops live on the channel object as `ch._channel_loop`, and every use hops to it — including teardown. WhatsApp is webhook-driven and legitimately has none, so it is the one channel that may be awaited directly.
+- **A sweep on the mesh loop blocks every HTTP route.** Work that was harmless on a private loop is not harmless here: SQLite's busy timeout is 30s, and a Docker `container.stop()` takes ~10s. Scans, GC, container operations and anything that can wait on a lock go through `asyncio.to_thread`. Per-row point lookups are fine. When wrapping, pass keyword-only arguments as keywords — `to_thread(fn, x)` against a `def fn(*, x)` raises, and these call sites sit inside `except Exception: return`, so it fails silently.
+- **Never block a loop waiting on a lane turn.** `LaneManager.enqueue` returns `await task.future` — the completed turn, not the queue put. To hand work to an agent without waiting, pre-flight `lane_full(agent)` and fire-and-forget with `run_coroutine_threadsafe`, closing the coroutine if the submit raises.
+- **A cancelled caller must not wedge a lane.** Cancellation propagates into the per-item future the worker resolves; `set_result` on it raises `InvalidStateError` and `Future.exception()` *raises* `CancelledError` rather than returning it. Both escape `_worker` and kill the lane while it is still registered, so every later enqueue is accepted and never drained. Guard with `if not fut.done()` and read errors through `_future_error`.
+
 ### Config & Environment
 
 - `.env` loaded via python-dotenv at CLI startup.

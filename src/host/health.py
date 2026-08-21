@@ -99,15 +99,23 @@ class HealthMonitor:
         # the staleness check is a no-op (reachability behaviour unchanged).
         self._queue_depth_fn = queue_depth_fn
         self.agents: dict[str, AgentHealth] = {}
-        self._agent_lock: asyncio.Lock | None = None
-        self._agent_lock_loop: asyncio.AbstractEventLoop | None = None
+        # One lock, created once. It used to re-create itself whenever the
+        # running loop differed from the one it was made on — which handed
+        # each loop its OWN lock, so both sides entered the critical section
+        # together and the lock silently stopped excluding anything (see
+        # ``tests/test_loop_affinity.py``).
+        #
+        # It never needed to span loops: the only thing it guards is
+        # ``_cleanup_ephemeral_agents``, reached solely from this monitor's
+        # own ``_check_all`` tick, so it serializes overlapping TICKS on one
+        # loop. What the rebinding actually bought was surviving reuse
+        # across successive short-lived loops (``asyncio.run`` per test, as
+        # tests/test_health.py does) — and a plain lock already handles that,
+        # because an uncontended acquire returns before binding to a loop.
+        self._agent_lock = asyncio.Lock()
         self._running = False
 
     def _get_agent_lock(self) -> asyncio.Lock:
-        loop = asyncio.get_running_loop()
-        if self._agent_lock is None or self._agent_lock_loop is not loop:
-            self._agent_lock = asyncio.Lock()
-            self._agent_lock_loop = loop
         return self._agent_lock
 
     def register(self, agent_id: str, url: str = "") -> None:
@@ -265,7 +273,11 @@ class HealthMonitor:
         await self._cleanup_ephemeral_agents()
         if self._blackboard:
             try:
-                self._blackboard.gc_expired()
+                # Off-loop: a TTL sweep over the blackboard is a write that
+                # contends for SQLite, whose busy timeout is 30s. This tick
+                # runs on uvicorn's loop, so a contended GC would freeze
+                # every HTTP route for as long as it waits.
+                await asyncio.to_thread(self._blackboard.gc_expired)
             except Exception as e:
                 logger.debug("Blackboard TTL cleanup failed: %s", e)
         agent_ids = list(self.agents.keys())

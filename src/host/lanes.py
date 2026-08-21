@@ -13,6 +13,7 @@ Two queue modes control how incoming messages interact with busy agents:
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
 import tempfile
@@ -53,6 +54,75 @@ class LaneQueueFull(Exception):
     """Raised by ``enqueue`` when an agent's followup queue is at its
     depth cap. The mesh wake/task endpoints map this to HTTP 429 so the
     caller backs off rather than the lane silently dropping work."""
+
+
+class LaneLoopUnavailable(RuntimeError):
+    """The lane's owning loop is bound but not running.
+
+    Raised instead of silently running lane work on the calling loop —
+    which would touch queues/locks/worker tasks bound to a dead loop and
+    hang the caller forever with no exception anywhere (see
+    ``tests/test_loop_affinity.py``).
+    """
+
+
+def _future_error(fut: asyncio.Future) -> BaseException | None:
+    """The exception on ``fut``, or ``None``. Never raises.
+
+    ``Future.exception()`` RAISES ``CancelledError`` on a cancelled future
+    rather than returning it. Reading it bare from the worker's trace-record
+    path turned "the caller went away" into an exception that escaped
+    ``_worker`` and killed the lane permanently — every later enqueue for
+    that agent was accepted and never drained, which is the exact silent
+    hang this module's loop-affinity work exists to remove.
+    """
+    if not fut.done() or fut.cancelled():
+        return None
+    return fut.exception()
+
+
+def _on_owner_loop(method):
+    """Run ``method`` on the loop that owns this lane's asyncio primitives.
+
+    ``asyncio.Queue``/``Lock``/``Task`` bind to the loop that first awaits
+    them. ``_ensure_lane`` creates all three on whichever loop reaches an
+    agent first, so a later call from a DIFFERENT loop appends to the queue
+    and then resolves the waiting worker's future from the wrong thread —
+    the owning loop is parked in ``select()`` and never wakes. The item sits
+    in the queue, the worker stays blocked on ``queue.get()``, and the
+    caller's future never resolves. No exception is raised on either loop.
+
+    Binding an owner (``bind_loop``) makes every entry point hop instead.
+    Unbound (the default, and every test/embedded construction) this is a
+    no-op and behaviour is unchanged.
+    """
+
+    @functools.wraps(method)
+    async def _hop(self, *args, **kwargs):
+        owner = self._foreign_owner_loop()
+        if owner is None:
+            self._warn_if_unbound_cross_loop(method.__name__)
+            return await method(self, *args, **kwargs)
+        if not owner.is_running():
+            raise LaneLoopUnavailable(
+                f"lane loop is not running — cannot {method.__name__}() "
+                f"from another loop"
+            )
+        # Build the coroutine first so it can be closed explicitly if the
+        # submit fails — the loop can close between the check above and the
+        # call below, and an unsubmitted coroutine leaks a "never awaited"
+        # warning. Same shape as the mesh's other cross-loop enqueues.
+        coro = method(self, *args, **kwargs)
+        try:
+            concurrent_future = asyncio.run_coroutine_threadsafe(coro, owner)
+        except RuntimeError as e:
+            coro.close()
+            raise LaneLoopUnavailable(
+                f"lane loop closed while scheduling {method.__name__}()"
+            ) from e
+        return await asyncio.wrap_future(concurrent_future)
+
+    return _hop
 
 
 @dataclass
@@ -176,6 +246,100 @@ class LaneManager:
         self._activity: dict[str, float] = {}
         self._activity_path: Path | None = Path(activity_path) if activity_path else None
         self._load_activity()
+        # The loop that owns this lane's asyncio primitives. ``None`` (the
+        # default, and every test/embedded construction) means "whichever
+        # loop is running" — the pre-existing behaviour. Production binds
+        # the dispatch loop in ``cli/runtime.py._setup_dispatch``; from then
+        # on every public async entry point hops here instead of touching
+        # a foreign loop's queue. See ``_on_owner_loop``.
+        self._owner_loop: asyncio.AbstractEventLoop | None = None
+        # Diagnostic only (never used for routing): the loop that actually
+        # created the first lane. When no owner is bound we cannot hop, but
+        # we can still SAY that a cross-loop call just happened instead of
+        # letting it hang in silence.
+        self._first_lane_loop: asyncio.AbstractEventLoop | None = None
+        self._warned_cross_loop = False
+
+    def _warn_if_unbound_cross_loop(self, method_name: str) -> None:
+        """Warn once when an unbound lane is used from two loops.
+
+        Production binds an owner loop, so this never fires there. Embedded
+        and test constructions don't, and for them this is the difference
+        between a diagnosable warning and an unexplained hang: the enqueue
+        will be accepted into a queue whose worker is parked on the other
+        loop, and neither side ever raises.
+        """
+        if self._warned_cross_loop or self._first_lane_loop is None:
+            return
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if running is self._first_lane_loop:
+            return
+        self._warned_cross_loop = True
+        logger.warning(
+            "LaneManager.%s() called from a different loop than the one that "
+            "created its lanes, and no owner loop is bound — this call can "
+            "hang forever without raising. Call bind_loop() during bootstrap.",
+            method_name,
+        )
+
+    @staticmethod
+    def _cancel_from_any_thread(task: asyncio.Task) -> None:
+        """Cancel a lane task safely from whatever thread we are on.
+
+        ``Task.cancel()`` queues its callback on the owning loop but does
+        NOT wake that loop, so a cross-thread cancel lands only if the loop
+        happens to wake for some other reason. Measured on an idle loop: the
+        task was still not cancelled after 1s, versus 0.01s on a loop that
+        had other work. ``remove_lane`` is reached from mesh routes, the
+        dashboard, and the REPL thread — all foreign to the dispatch loop
+        that owns the worker — so on a quiet mesh the worker outlived the
+        lane it belonged to. ``call_soon_threadsafe`` wakes the loop.
+        """
+        loop = task.get_loop()
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            running = None
+        if running is loop:
+            task.cancel()
+            return
+        try:
+            loop.call_soon_threadsafe(task.cancel)
+        except RuntimeError:
+            # Loop already closed — the task went down with it.
+            pass
+
+    def bind_loop(self, loop: asyncio.AbstractEventLoop | None) -> None:
+        """Declare the loop that owns this lane's queues, locks and workers.
+
+        Call once during bootstrap, before any lane is created. Passing
+        ``None`` unbinds (restoring run-on-the-calling-loop behaviour).
+        """
+        self._owner_loop = loop
+
+    @property
+    def owner_loop(self) -> asyncio.AbstractEventLoop | None:
+        return self._owner_loop
+
+    def _foreign_owner_loop(self) -> asyncio.AbstractEventLoop | None:
+        """Return the owner loop when the CALLER is on a different loop.
+
+        ``None`` means "run right here": either no owner is bound, or we
+        are already on it, or there is no running loop at all (in which
+        case the caller is scheduling this coroutine onto some loop and
+        the check re-runs there, on the loop that actually executes it).
+        """
+        owner = self._owner_loop
+        if owner is None:
+            return None
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+        return None if running is owner else owner
 
     def set_event_bus(self, bus: Any) -> None:
         """Wire the dashboard EventBus after construction.
@@ -275,6 +439,7 @@ class LaneManager:
         """
         self._tasks_store = store
 
+    @_on_owner_loop
     async def rehydrate_pending(self) -> int:
         """Re-enqueue durable PENDING tasks stranded by a mesh restart.
 
@@ -434,8 +599,14 @@ class LaneManager:
         return q.qsize() >= self._queue_maxsize
 
     def _ensure_lane(self, agent: str) -> None:
-        """Lazily create queue, worker, and tracking structures for an agent."""
+        """Lazily create queue, worker, and tracking structures for an agent.
+
+        Every caller reaches this through a ``@_on_owner_loop`` entry point,
+        so once an owner loop is bound these are always created on it.
+        """
         if agent not in self._queues:
+            if self._first_lane_loop is None:
+                self._first_lane_loop = asyncio.get_running_loop()
             # H7 — bound the followup backlog. ``maxsize<=0`` →
             # unbounded (asyncio semantics), preserving the escape hatch.
             self._queues[agent] = asyncio.Queue(
@@ -446,6 +617,7 @@ class LaneManager:
             self._state_locks[agent] = asyncio.Lock()
             self._workers[agent] = asyncio.create_task(self._worker(agent))
 
+    @_on_owner_loop
     async def enqueue(
         self, agent: str, message: str, *, mode: str = "followup",
         trace_id: str | None = None,
@@ -576,6 +748,7 @@ class LaneManager:
             logger.warning(f"Steer to '{agent}' failed, falling back to followup: {e}")
             return await self._handle_followup(agent, message, system_note=system_note)
 
+    @_on_owner_loop
     async def try_steer(
         self, agent: str, message: str, *, system_note: bool = False,
     ) -> bool:
@@ -604,6 +777,7 @@ class LaneManager:
             self.mark_activity(agent)
         return injected
 
+    @_on_owner_loop
     async def try_steer_and_wait(
         self, agent: str, message: str, *, timeout: float | None = None,
     ) -> tuple[bool, str | None]:
@@ -636,6 +810,7 @@ class LaneManager:
             self.mark_activity(agent)
         return injected, result.get("reply")
 
+    @_on_owner_loop
     async def deliver_chat(
         self, agent: str, message: str, *,
         trace_id: str | None = None,
@@ -744,11 +919,21 @@ class LaneManager:
             current_trace_id.set(task.trace_id)
             t0 = time.time()
             if task.trace_id and self._trace_store:
-                self._trace_store.record(
-                    trace_id=task.trace_id, source="lane", agent=agent,
-                    event_type="lane_start", detail=task.message[:200],
-                    meta={"mode": task.mode, "queue_depth": queue.qsize()},
-                )
+                # Observability must never kill the lane. ``record`` does
+                # SQLite I/O and can raise under contention or after close;
+                # unguarded, that escapes ``_worker`` while the dead task is
+                # still registered in ``_workers``, so this agent's dequeued
+                # task never completes and every later enqueue hangs.
+                try:
+                    self._trace_store.record(
+                        trace_id=task.trace_id, source="lane", agent=agent,
+                        event_type="lane_start", detail=task.message[:200],
+                        meta={"mode": task.mode, "queue_depth": queue.qsize()},
+                    )
+                except Exception as trace_err:
+                    logger.debug(
+                        "lane_start trace record failed for %s: %s", agent, trace_err,
+                    )
             try:
                 # Build kwargs lazily — older test/dispatch signatures
                 # accept only ``(agent, message)`` (no **kwargs), so only
@@ -788,7 +973,13 @@ class LaneManager:
                         self._dispatch_fn(agent, task.message),
                         timeout=resolved_timeout,
                     )
-                task.future.set_result(result)
+                # Guard: the caller may have been cancelled while the turn
+                # ran (a client disconnect cancels the route handler, which
+                # cancels the await on this future). ``set_result`` on a
+                # cancelled future raises InvalidStateError, which escapes
+                # the worker and kills the lane for good.
+                if not task.future.done():
+                    task.future.set_result(result)
                 # Auto-forward result to origin channel+user when requested.
                 # Runs as a background task with a timeout so a hung channel
                 # send does not leak a coroutine or stall the worker.
@@ -941,12 +1132,23 @@ class LaneManager:
             finally:
                 duration_ms = int((time.time() - t0) * 1000)
                 if task.trace_id and self._trace_store:
-                    self._trace_store.record(
-                        trace_id=task.trace_id, source="lane", agent=agent,
-                        event_type="lane_complete", duration_ms=duration_ms,
-                        status="error" if task.future.done() and task.future.exception() else "ok",
-                        error=str(task.future.exception()) if task.future.done() and task.future.exception() else "",
-                    )
+                    # Same guard as lane_start, and it matters more here: this
+                    # sits in the ``finally``, ahead of the busy/pending/
+                    # task_done cleanup below. A raise here skips all of it
+                    # AND kills the worker, so the lane is left permanently
+                    # busy with a dead worker still registered.
+                    try:
+                        self._trace_store.record(
+                            trace_id=task.trace_id, source="lane", agent=agent,
+                            event_type="lane_complete", duration_ms=duration_ms,
+                            status="error" if _future_error(task.future) else "ok",
+                            error=str(_future_error(task.future) or ""),
+                        )
+                    except Exception as trace_err:
+                        logger.debug(
+                            "lane_complete trace record failed for %s: %s",
+                            agent, trace_err,
+                        )
                 async with lock:
                     self._busy[agent] = False
                     pending = self._pending.get(agent, [])
@@ -992,7 +1194,7 @@ class LaneManager:
         """Remove all lane state for an agent, cancelling its worker task."""
         worker = self._workers.pop(agent, None)
         if worker is not None:
-            worker.cancel()
+            self._cancel_from_any_thread(worker)
         self._queues.pop(agent, None)
         self._pending.pop(agent, None)
         self._busy.pop(agent, None)
@@ -1000,14 +1202,15 @@ class LaneManager:
         self._steer_wakeup_ts.pop(agent, None)
         self._emit_queue_changed(agent)
 
+    @_on_owner_loop
     async def stop(self) -> None:
         """Cancel all worker tasks and any in-flight auto-notify forwards."""
         for task in self._workers.values():
-            task.cancel()
+            self._cancel_from_any_thread(task)
         self._workers.clear()
         for fwd in list(self._forward_tasks):
-            fwd.cancel()
+            self._cancel_from_any_thread(fwd)
         self._forward_tasks.clear()
         for reh in list(self._rehydrate_tasks):
-            reh.cancel()
+            self._cancel_from_any_thread(reh)
         self._rehydrate_tasks.clear()

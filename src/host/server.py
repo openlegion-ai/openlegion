@@ -11475,7 +11475,16 @@ def create_mesh_app(
         # the pin.
         if container_manager is not None:
             try:
-                container_manager.stop_agent(agent_id, remove_data=False)
+                # Off-loop: ``stop_agent`` makes synchronous Docker API calls
+                # — ``container.stop(timeout=10)`` then ``remove()`` — so a
+                # graceful stop blocks for ~10s plus Docker overhead, per
+                # agent. This runs on uvicorn's loop from both the manual
+                # hibernate route and the idle sweep, and the sweep hibernates
+                # candidates one after another. The ``remove_data=False``
+                # literal stays at this call site (see the pin above).
+                await asyncio.to_thread(
+                    container_manager.stop_agent, agent_id, remove_data=False,
+                )
             except Exception as e:
                 logger.warning(
                     "hibernate_agent: container stop for %s failed: %s", agent_id, e,
