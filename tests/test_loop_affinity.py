@@ -21,7 +21,22 @@ import time
 
 import pytest
 
-from src.host.lanes import LaneLoopUnavailable, LaneManager
+from src.host.lanes import LaneManager
+
+
+def _loop_unavailable_exc() -> type[BaseException]:
+    """Look the exception up through the module, not a module-level import.
+
+    ``tests/test_lanes.py`` calls ``importlib.reload`` on ``src.host.lanes``,
+    which rebinds every class in the module's globals. The decorator resolves
+    ``LaneLoopUnavailable`` by name at RAISE time, so after a reload it raises
+    the new class while an ``from ... import`` binding here still refers to
+    the old one — and ``pytest.raises`` stops matching, depending purely on
+    test order.
+    """
+    import src.host.lanes as lanes_mod
+
+    return lanes_mod.LaneLoopUnavailable
 
 
 def _spin_loop() -> asyncio.AbstractEventLoop:
@@ -143,7 +158,7 @@ class TestLaneOwnerLoop:
         _stop_loop(dispatch)
 
         fut = asyncio.run_coroutine_threadsafe(lm.enqueue("erin", "two"), mesh)
-        with pytest.raises(LaneLoopUnavailable):
+        with pytest.raises(_loop_unavailable_exc()):
             fut.result(timeout=10)
 
     def test_never_started_owner_loop_raises_immediately(self):
@@ -161,7 +176,7 @@ class TestLaneOwnerLoop:
             async def _go():
                 await lm.enqueue("nina", "hi")
 
-            with pytest.raises(LaneLoopUnavailable):
+            with pytest.raises(_loop_unavailable_exc()):
                 asyncio.run(_go())
         finally:
             idle_owner.close()
@@ -422,6 +437,101 @@ class TestLaneTeardownAcrossThreads:
         while not worker.done() and time.time() < deadline:
             time.sleep(0.01)
         assert worker.done(), "worker survived remove_lane from a plain thread"
+
+
+class TestObservabilityCannotKillTheLane:
+    """A failing trace write must not take the agent down with it."""
+
+    class _BrokenTraceStore:
+        def __init__(self, fail_on: str) -> None:
+            self._fail_on = fail_on
+
+        def record(self, **kwargs) -> None:
+            if kwargs.get("event_type") == self._fail_on:
+                raise RuntimeError("database is locked")
+
+    def _run_two_turns(self, fail_on: str) -> str:
+        async def _dispatch(agent: str, message: str, **_kw) -> str:
+            return f"reply:{message}"
+
+        lm = LaneManager(
+            _dispatch, queue_maxsize=10, trace_store=self._BrokenTraceStore(fail_on),
+        )
+
+        async def _go() -> str:
+            await asyncio.wait_for(lm.enqueue("alice", "first", trace_id="t1"), timeout=5)
+            assert not lm._workers["alice"].done(), (
+                f"a failing {fail_on} trace write killed the worker"
+            )
+            return await asyncio.wait_for(
+                lm.enqueue("alice", "second", trace_id="t2"), timeout=5,
+            )
+
+        return asyncio.run(_go())
+
+    def test_lane_start_trace_failure_does_not_wedge_the_lane(self):
+        # This one is worse than it looks: the raise happens BEFORE the
+        # dispatch, so the dequeued task never completes and its caller
+        # hangs too.
+        assert self._run_two_turns("lane_start") == "reply:second"
+
+    def test_lane_complete_trace_failure_does_not_wedge_the_lane(self):
+        # This one sits in the ``finally``, ahead of the busy/pending/
+        # task_done cleanup — a raise skips all of it AND kills the worker.
+        assert self._run_two_turns("lane_complete") == "reply:second"
+
+
+class TestStopAgentIsRaceTolerant:
+    """stop_agent runs off-loop now, concurrently with wake and shutdown."""
+
+    def _manager(self):
+        from src.host.runtime import DockerBackend
+
+        mgr = DockerBackend.__new__(DockerBackend)
+        mgr.agents = {}
+        mgr.auth_tokens = {}
+        return mgr
+
+    def test_a_concurrent_wake_keeps_its_container(self):
+        # The agent is stopped off-loop while a cold wake recreates it. The
+        # stop must not delete the NEW registration or its auth token.
+        mgr = self._manager()
+        new_entry = {"container": object(), "generation": "new"}
+
+        class _OldContainer:
+            def stop(self, timeout: int = 10) -> None:
+                # The wake lands while we are inside the blocking stop.
+                mgr.agents["alice"] = new_entry
+                mgr.auth_tokens["alice"] = "new-token"
+
+            def remove(self) -> None:
+                pass
+
+        mgr.agents["alice"] = {"container": _OldContainer(), "generation": "old"}
+        mgr.auth_tokens["alice"] = "old-token"
+
+        mgr.stop_agent("alice")
+
+        assert mgr.agents.get("alice") is new_entry, "the wake's registration was dropped"
+        assert mgr.auth_tokens.get("alice") == "new-token", "the wake's auth token was dropped"
+
+    def test_double_stop_does_not_raise(self):
+        # shutdown()'s stop_all can race a hibernation stop still in flight.
+        # This used to raise KeyError out of stop_agent — outside its own
+        # try — aborting teardown partway through.
+        mgr = self._manager()
+
+        class _Container:
+            def stop(self, timeout: int = 10) -> None:
+                mgr.agents.pop("bob", None)   # the other stop got here first
+
+            def remove(self) -> None:
+                pass
+
+        mgr.agents["bob"] = {"container": _Container()}
+        mgr.stop_agent("bob")            # must not raise
+        mgr.stop_agent("bob")            # nor must a plain repeat
+        assert "bob" not in mgr.agents
 
 
 class TestHealthMonitorAgentLock:

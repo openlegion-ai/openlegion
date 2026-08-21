@@ -413,7 +413,9 @@ class RuntimeContext:
         # sweeps run on the mesh loop now, so leaving them alive would let one
         # keep dispatching work, restarting agents, or reading stores while
         # the lines below stop containers and close SQLite. Cancel and give
-        # them a moment to unwind before teardown proceeds.
+        # them a moment to unwind before teardown proceeds — noting this stops
+        # them starting NEW work rather than joining work already in flight
+        # (see the method docstring).
         self._stop_mesh_sweeps()
         if self.runtime:
             self.runtime.stop_all()
@@ -2917,8 +2919,19 @@ class RuntimeContext:
     def _stop_mesh_sweeps(self, timeout: float = 5.0) -> None:
         """Cancel every sweep running on the mesh loop and wait briefly.
 
-        Best-effort: a sweep that will not unwind must not wedge shutdown,
-        so a timeout here is logged and teardown continues.
+        NOT a completion barrier, and callers must not treat it as one.
+        Cancelling the ``run_coroutine_threadsafe`` wrapper marks the WRAPPER
+        done at once, while the coroutine under it — and in particular
+        anything it already handed to ``asyncio.to_thread``, such as a Docker
+        ``container.stop(timeout=10)`` — keeps running on its own thread. So
+        this reliably stops a sweep from starting more work, and does not
+        guarantee that work already in flight has finished when it returns.
+
+        Everything torn down after this must therefore tolerate a late call
+        from one of those threads: ``stop_agent`` is idempotent and
+        compare-and-deletes for exactly this reason, and the stores close
+        best-effort. A sweep that will not unwind must not wedge shutdown, so
+        a timeout is logged and teardown continues.
         """
         pending = [f for f in self._mesh_sweeps if not f.done()]
         for fut in pending:

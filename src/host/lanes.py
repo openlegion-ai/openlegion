@@ -919,11 +919,21 @@ class LaneManager:
             current_trace_id.set(task.trace_id)
             t0 = time.time()
             if task.trace_id and self._trace_store:
-                self._trace_store.record(
-                    trace_id=task.trace_id, source="lane", agent=agent,
-                    event_type="lane_start", detail=task.message[:200],
-                    meta={"mode": task.mode, "queue_depth": queue.qsize()},
-                )
+                # Observability must never kill the lane. ``record`` does
+                # SQLite I/O and can raise under contention or after close;
+                # unguarded, that escapes ``_worker`` while the dead task is
+                # still registered in ``_workers``, so this agent's dequeued
+                # task never completes and every later enqueue hangs.
+                try:
+                    self._trace_store.record(
+                        trace_id=task.trace_id, source="lane", agent=agent,
+                        event_type="lane_start", detail=task.message[:200],
+                        meta={"mode": task.mode, "queue_depth": queue.qsize()},
+                    )
+                except Exception as trace_err:
+                    logger.debug(
+                        "lane_start trace record failed for %s: %s", agent, trace_err,
+                    )
             try:
                 # Build kwargs lazily — older test/dispatch signatures
                 # accept only ``(agent, message)`` (no **kwargs), so only
@@ -1122,12 +1132,23 @@ class LaneManager:
             finally:
                 duration_ms = int((time.time() - t0) * 1000)
                 if task.trace_id and self._trace_store:
-                    self._trace_store.record(
-                        trace_id=task.trace_id, source="lane", agent=agent,
-                        event_type="lane_complete", duration_ms=duration_ms,
-                        status="error" if _future_error(task.future) else "ok",
-                        error=str(_future_error(task.future) or ""),
-                    )
+                    # Same guard as lane_start, and it matters more here: this
+                    # sits in the ``finally``, ahead of the busy/pending/
+                    # task_done cleanup below. A raise here skips all of it
+                    # AND kills the worker, so the lane is left permanently
+                    # busy with a dead worker still registered.
+                    try:
+                        self._trace_store.record(
+                            trace_id=task.trace_id, source="lane", agent=agent,
+                            event_type="lane_complete", duration_ms=duration_ms,
+                            status="error" if _future_error(task.future) else "ok",
+                            error=str(_future_error(task.future) or ""),
+                        )
+                    except Exception as trace_err:
+                        logger.debug(
+                            "lane_complete trace record failed for %s: %s",
+                            agent, trace_err,
+                        )
                 async with lock:
                     self._busy[agent] = False
                     pending = self._pending.get(agent, [])

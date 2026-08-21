@@ -1001,16 +1001,34 @@ class DockerBackend(RuntimeBackend):
 
     def stop_agent(self, agent_id: str, *, remove_data: bool = False) -> None:
         safe_name = _docker_safe_name(agent_id)
-        if agent_id in self.agents:
+        # Read the registration ONCE and hold the reference. This runs off
+        # the event loop (hibernation stops agents via ``asyncio.to_thread``)
+        # and concurrently with cold wake, health restarts, dashboard
+        # restart/archive/delete and shutdown's ``stop_all`` — none of which
+        # share a per-agent lock. Re-reading ``self.agents[agent_id]`` between
+        # the stop and the remove let a wake that recreated the agent in that
+        # window have its BRAND NEW container removed instead.
+        entry = self.agents.get(agent_id)
+        if entry is not None:
+            container = entry.get("container")
             try:
-                self.agents[agent_id]["container"].stop(timeout=10)
-                self.agents[agent_id]["container"].remove()
+                if container is not None:
+                    container.stop(timeout=10)
+                    container.remove()
                 logger.info(f"Stopped agent '{agent_id}'")
             except Exception as e:
                 logger.warning(f"Error stopping agent '{agent_id}': {e}")
-            del self.agents[agent_id]
-            if hasattr(self, "auth_tokens"):
-                self.auth_tokens.pop(agent_id, None)
+            # Compare-and-delete, for the same reason: only drop the
+            # registration if it is still the one we just stopped, so a
+            # concurrent wake's registration and auth token survive. ``pop``
+            # rather than ``del`` also makes a double stop idempotent — the
+            # bare ``del`` sat OUTSIDE the try above, so a second stop raised
+            # KeyError out of this method and aborted ``stop_all`` mid-way
+            # through shutdown.
+            if self.agents.get(agent_id) is entry:
+                self.agents.pop(agent_id, None)
+                if hasattr(self, "auth_tokens"):
+                    self.auth_tokens.pop(agent_id, None)
         # Volume removal must be INDEPENDENT of live registration: the only
         # supported delete path is archive→delete, and archive already
         # deregistered the agent (removed it from self.agents), so gating the
