@@ -413,9 +413,9 @@ class RuntimeContext:
         # sweeps run on the mesh loop now, so leaving them alive would let one
         # keep dispatching work, restarting agents, or reading stores while
         # the lines below stop containers and close SQLite. Cancel and give
-        # them a moment to unwind before teardown proceeds — noting this stops
-        # them starting NEW work rather than joining work already in flight
-        # (see the method docstring).
+        # them a moment to unwind before teardown proceeds. Note the limits
+        # in that method's docstring: it does not join work already in
+        # flight, and it does not cover tasks a sweep detached.
         self._stop_mesh_sweeps()
         if self.runtime:
             self.runtime.stop_all()
@@ -2926,6 +2926,12 @@ class RuntimeContext:
         ``container.stop(timeout=10)`` — keeps running on its own thread. So
         this reliably stops a sweep from starting more work, and does not
         guarantee that work already in flight has finished when it returns.
+
+        It also only covers the sweeps themselves. Work a sweep DETACHED is
+        not tracked here — cron spawns each due job as its own task — so a
+        job can resume after this returns and dispatch, which for a
+        hibernated agent means cold-waking it back into existence after
+        teardown. Tracking those is follow-up work, noted in the PR.
 
         Everything torn down after this must therefore tolerate a late call
         from one of those threads: ``stop_agent`` is idempotent and

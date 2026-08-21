@@ -18,6 +18,7 @@ import asyncio
 import inspect
 import threading
 import time
+from unittest import mock
 
 import pytest
 
@@ -482,7 +483,16 @@ class TestObservabilityCannotKillTheLane:
 
 
 class TestStopAgentIsRaceTolerant:
-    """stop_agent runs off-loop now, concurrently with wake and shutdown."""
+    """stop_agent runs off-loop, concurrently with wake and shutdown.
+
+    Scope, stated plainly: these cover the double-stop and the replacement
+    that lands DURING the container stop. They do NOT cover the wider
+    registry races — a wake publishing between the identity check and the
+    pop, or its token landing before its entry. Those need a per-agent lock
+    across both backends, they pre-date this branch (on main the hibernation
+    sweep already ran stop_agent on its own thread while wake ran on the
+    dispatch thread, with no lock anywhere), and they are follow-up work.
+    """
 
     def _manager(self):
         from src.host.runtime import DockerBackend
@@ -514,6 +524,28 @@ class TestStopAgentIsRaceTolerant:
 
         assert mgr.agents.get("alice") is new_entry, "the wake's registration was dropped"
         assert mgr.auth_tokens.get("alice") == "new-token", "the wake's auth token was dropped"
+
+    def test_sandbox_backend_concurrent_stop_does_not_raise(self):
+        """The sibling backend had the identical bare ``del``.
+
+        Sequential stops never reach it — the second returns at the
+        membership check. The failure needs the entry to disappear WHILE a
+        stop is in flight, which is what a health stop racing shutdown's
+        stop_all does, so the removal happens inside the subprocess call.
+        """
+        from src.host.runtime import SandboxBackend
+
+        mgr = SandboxBackend.__new__(SandboxBackend)
+        mgr.agents = {"zoe": {"sandbox_name": "sb-zoe", "workspace": None}}
+        mgr.auth_tokens = {"zoe": "tok"}
+
+        def _other_stop_wins(*_args, **_kwargs):
+            mgr.agents.pop("zoe", None)
+            return mock.Mock(returncode=0)
+
+        with mock.patch("subprocess.run", side_effect=_other_stop_wins):
+            mgr.stop_agent("zoe")   # used to raise KeyError out of the method
+        assert "zoe" not in mgr.agents
 
     def test_double_stop_does_not_raise(self):
         # shutdown()'s stop_all can race a hibernation stop still in flight.

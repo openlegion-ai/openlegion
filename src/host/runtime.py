@@ -1372,10 +1372,15 @@ class SandboxBackend(RuntimeBackend):
         return url
 
     def stop_agent(self, agent_id: str, *, remove_data: bool = False) -> None:
-        if agent_id not in self.agents:
+        # Same one-read/compare-and-delete shape as DockerBackend below —
+        # this runs off the event loop too, and a bare ``del`` on a
+        # concurrently-removed entry raised KeyError out of this method and
+        # aborted ``stop_all`` partway through shutdown.
+        entry = self.agents.get(agent_id)
+        if entry is None:
             return
-        sandbox_name = self.agents[agent_id]["sandbox_name"]
-        workspace = self.agents[agent_id].get("workspace")
+        sandbox_name = entry["sandbox_name"]
+        workspace = entry.get("workspace")
         try:
             subprocess.run(
                 ["docker", "sandbox", "rm", "-f", sandbox_name],
@@ -1391,9 +1396,10 @@ class SandboxBackend(RuntimeBackend):
                 logger.info(f"Removed workspace for agent '{agent_id}'")
             except Exception as e:
                 logger.debug(f"Workspace cleanup for '{agent_id}': {e}")
-        del self.agents[agent_id]
-        if hasattr(self, "auth_tokens"):
-            self.auth_tokens.pop(agent_id, None)
+        if self.agents.get(agent_id) is entry:
+            self.agents.pop(agent_id, None)
+            if hasattr(self, "auth_tokens"):
+                self.auth_tokens.pop(agent_id, None)
 
     def health_check(self, agent_id: str) -> bool:
         if agent_id not in self.agents:
