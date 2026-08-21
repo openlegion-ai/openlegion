@@ -668,6 +668,8 @@ class DockerBackend(RuntimeBackend):
                     env_overrides=env_overrides,
                 )
             except Exception:
+                if progress.get("prior_destroyed"):
+                    self._remove_orphaned_container(agent_id)
                 # Keeping the old entry while dropping its token (what this
                 # used to do) left ``agents`` populated and ``auth_tokens``
                 # empty — the exact drift this lock exists to prevent, and
@@ -1169,6 +1171,32 @@ class DockerBackend(RuntimeBackend):
             self._browser_container = None
             self.browser_service_url = None
 
+    def _remove_orphaned_container(self, agent_id: str) -> None:
+        """Remove whatever this agent's failed start left under its container
+        name.
+
+        ``containers.run`` is not atomic — docker-py implements it as
+        ``create()`` then ``start()``, so a ``start()`` that raises leaves a
+        created container behind that ``run`` never returned. The rollback
+        that follows deregisters the agent, after which ``stop_agent`` returns
+        at its first lookup and never reaches it: the container would leak AND
+        hold the name against every later start.
+
+        Only called once the stale reap has run, so anything under this name
+        was created by the start that just failed, and the per-agent lock is
+        held throughout — no concurrent start of this agent can own it.
+        """
+        import docker as _docker
+
+        try:
+            orphan = self.client.containers.get(f"openlegion_{_docker_safe_name(agent_id)}")
+            orphan.remove(force=True)
+            logger.info("Removed container left behind by a failed start of '%s'", agent_id)
+        except _docker.errors.NotFound:
+            pass  # the common case: the failure was before anything was created
+        except Exception as e:
+            logger.warning("failed start left a container behind for '%s': %s", agent_id, e)
+
     def stop_agent(self, agent_id: str, *, remove_data: bool = False) -> None:
         safe_name = _docker_safe_name(agent_id)
         # One critical section per agent. This runs off the event loop
@@ -1581,11 +1609,17 @@ class SandboxBackend(RuntimeBackend):
                     # here, or it leaks AND holds the name against every
                     # later start.
                     try:
-                        subprocess.run(
+                        rm = subprocess.run(
                             ["docker", "sandbox", "rm", "-f", sandbox_name],
                             capture_output=True,
                             timeout=15,
                         )
+                        if rm.returncode != 0:
+                            logger.warning(
+                                "failed start left sandbox '%s' behind: %s",
+                                sandbox_name,
+                                (rm.stderr or b"").decode("utf-8", "replace").strip(),
+                            )
                     except Exception as cleanup_error:
                         logger.warning(
                             "failed start left sandbox '%s' behind: %s",

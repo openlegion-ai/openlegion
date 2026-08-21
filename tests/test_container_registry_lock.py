@@ -535,10 +535,18 @@ class TestFailedStartRollsBack:
         backend.auth_tokens["gone"] = "REAPED-TOKEN"
         backend.client = _docker_client()
         # A stale container EXISTS, so the reap actually runs — the default
-        # mock client raises NotFound here and would skip it entirely.
+        # mock client raises NotFound here and would skip it entirely. Once
+        # the reap removes it the name is free again, which is what the
+        # rollback's orphan sweep must then find.
+        import docker as _docker
+
         stale = MagicMock()
-        backend.client.containers.get.side_effect = None
-        backend.client.containers.get.return_value = stale
+
+        def get_once(_name):
+            backend.client.containers.get.side_effect = _docker.errors.NotFound("removed")
+            return stale
+
+        backend.client.containers.get.side_effect = get_once
         backend.client.containers.run.side_effect = RuntimeError("image missing")
 
         with pytest.raises(RuntimeError):
@@ -570,6 +578,30 @@ class TestFailedStartRollsBack:
 
         assert "ghosted" not in backend.agents
         assert "ghosted" not in backend.auth_tokens
+
+    def test_container_created_by_a_failed_start_is_removed(self):
+        """``containers.run`` is not atomic — docker-py implements it as
+        ``create()`` then ``start()``, so a ``start()`` that raises leaves a
+        named container behind that ``run`` never returned. The rollback
+        deregisters the agent, so ``stop_agent`` will never reach it."""
+        backend = _make_docker_backend()
+        backend.client = _docker_client()
+        created = MagicMock()
+
+        def create_then_fail(*_a, **_k):
+            # From here on the name is taken, exactly as after a real create().
+            backend.client.containers.get.side_effect = None
+            backend.client.containers.get.return_value = created
+            raise RuntimeError("container start failed")
+
+        backend.client.containers.run.side_effect = create_then_fail
+
+        with pytest.raises(RuntimeError):
+            backend.start_agent(agent_id="halfborn", role="r", tools_dir="")
+
+        created.remove.assert_called_once_with(force=True)
+        assert "halfborn" not in backend.agents
+        assert "halfborn" not in backend.auth_tokens
 
     def test_sandbox_failure_after_create_deregisters(self, tmp_path, monkeypatch):
         """A successful ``sandbox create`` binds the name to a NEW microVM, so
