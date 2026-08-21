@@ -25,9 +25,11 @@ import pytest
 from src.host import agent_lifecycle as lifecycle
 from src.host.agent_lifecycle import (
     AgentLifecycleBusy,
+    agent_incarnation,
     agent_lifecycle_locked,
     agent_lifecycle_locked_async,
     lifecycle_refcount,
+    retire_agent,
 )
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -46,6 +48,7 @@ def _no_leaked_lock_entries():
     with lifecycle._guard:
         lifecycle._locks.clear()
         lifecycle._holders.clear()
+        lifecycle._incarnations.clear()
     assert not leaked, f"lock entries left behind: { {k: v[1] for k, v in leaked.items()} }"
 
 
@@ -455,6 +458,7 @@ def dashboard(tmp_path, monkeypatch):
     registry = {"worker": "http://worker:8400"}
     runtime = _FakeRuntime()
     connectors = _ParkingConnectorStore()
+    forgotten: list[str] = []
     blackboard = Blackboard(db_path=str(tmp_path / "bb.db"))
     costs = CostTracker(str(tmp_path / "costs.db"))
 
@@ -469,8 +473,9 @@ def dashboard(tmp_path, monkeypatch):
         router=None,
         transport=None,
         connector_store=connectors,
+        forget_agent_status=forgotten.append,
     )
-    yield router, registry, runtime, yaml_state, connectors
+    yield router, registry, runtime, yaml_state, connectors, forgotten
     blackboard.close()
     costs.close()
 
@@ -514,7 +519,7 @@ class TestDashboardRoutesSerialise:
         unregistered — and then the restart's ``start_agent`` registers a
         fresh container for an agent that no longer exists anywhere else.
         """
-        router, registry, runtime, yaml_state, connectors = dashboard
+        router, registry, runtime, yaml_state, connectors, forgotten = dashboard
         restart = _endpoint(router, "/api/agents/{agent_id}/restart", "POST")
         delete = _endpoint(router, "/api/agents/{agent_id}", "DELETE")
 
@@ -548,7 +553,7 @@ class TestDashboardRoutesSerialise:
         — and then the delete's ``_save_agents_yaml`` removes the row the
         create just wrote, leaving a live registered agent with no config.
         """
-        router, registry, runtime, yaml_state, connectors = dashboard
+        router, registry, runtime, yaml_state, connectors, forgotten = dashboard
         create = _endpoint(router, "/api/agents", "POST")
         delete = _endpoint(router, "/api/agents/{agent_id}", "DELETE")
 
@@ -584,7 +589,7 @@ class TestDashboardRoutesSerialise:
         """
         from fastapi import HTTPException
 
-        router, registry, runtime, _yaml, _connectors = dashboard
+        router, registry, runtime, _yaml, _connectors, _forgotten = dashboard
         restart = _endpoint(router, "/api/agents/{agent_id}/restart", "POST")
 
         async def archive_like():
@@ -607,7 +612,7 @@ class TestDashboardRoutesSerialise:
 
         from src.dashboard import server as dash_server
 
-        router, _registry, _runtime, _yaml, _connectors = dashboard
+        router, _registry, _runtime, _yaml, _connectors, _forgotten = dashboard
         restart = _endpoint(router, "/api/agents/{agent_id}/restart", "POST")
 
         monkeypatch.setattr(dash_server, "agent_lifecycle_locked_async", _always_busy)
@@ -1197,6 +1202,244 @@ class TestTemplateSlotsRevalidate:
             assert body["created"] == []
             assert [f["agent_id"] for f in body["failed"]] == ["scout"]
             assert "deleted" in body["failed"][0]["error"]
+            cm.start_agent.assert_not_called()
+        finally:
+            bb.close()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Incarnation: the same name is not the same agent
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestIncarnation:
+    def test_it_only_moves_when_an_id_is_retired(self):
+        assert agent_incarnation("worker") == 0
+        assert agent_incarnation("worker") == 0
+        assert retire_agent("worker") == 1
+        assert agent_incarnation("worker") == 1
+        assert agent_incarnation("other") == 0
+
+    @pytest.mark.asyncio
+    async def test_a_delete_refuses_to_destroy_a_replacement(self, dashboard):
+        """ABA. Every name-based check passes and the wrong agent dies.
+
+        Delete A checks the name, then spends minutes offboarding. Delete B
+        removes that agent and a create puts a NEW one under the same name.
+        Delete A finally acquires the lock, sees the name present, and — on
+        a name check alone — destroys the replacement's container, volume
+        and config.
+        """
+        from fastapi import HTTPException
+
+        router, registry, runtime, yaml_state, _connectors, _forgotten = dashboard
+        delete = _endpoint(router, "/api/agents/{agent_id}", "DELETE")
+
+        async def delete_then_recreate():
+            """The other delete, plus the create that reuses the name."""
+            async with agent_lifecycle_locked_async("worker"):
+                await asyncio.sleep(0.05)
+                registry.pop("worker", None)
+                yaml_state["agents"].pop("worker", None)
+                retire_agent("worker")
+                registry["worker"] = "http://worker-2:8400"
+                yaml_state["agents"]["worker"] = {"role": "assistant"}
+
+        holder = asyncio.create_task(delete_then_recreate())
+        await asyncio.sleep(0)
+        queued = asyncio.create_task(delete("worker"))
+        await asyncio.wait_for(holder, 3)
+
+        with pytest.raises(HTTPException) as exc:
+            await asyncio.wait_for(queued, 5)
+        assert exc.value.status_code == 409
+        assert "recreated" in str(exc.value.detail)
+        assert registry.get("worker") == "http://worker-2:8400", (
+            "the queued delete destroyed the replacement"
+        )
+        assert "worker" in yaml_state["agents"]
+        assert ("stop", "worker", True) not in runtime.calls
+
+    @pytest.mark.asyncio
+    async def test_a_restart_refuses_a_replacement(self, dashboard):
+        from fastapi import HTTPException
+
+        router, registry, runtime, _yaml, _connectors, _forgotten = dashboard
+        restart = _endpoint(router, "/api/agents/{agent_id}/restart", "POST")
+
+        async def delete_and_recreate():
+            async with agent_lifecycle_locked_async("worker"):
+                await asyncio.sleep(0.05)
+                retire_agent("worker")
+                registry["worker"] = "http://worker-2:8400"
+
+        holder = asyncio.create_task(delete_and_recreate())
+        await asyncio.sleep(0)
+        restart_task = asyncio.create_task(restart("worker"))
+        await asyncio.wait_for(holder, 3)
+        with pytest.raises(HTTPException) as exc:
+            await asyncio.wait_for(restart_task, 3)
+        assert exc.value.status_code == 404
+        assert "start" not in runtime.kinds(), "the restart bounced the replacement"
+
+    @pytest.mark.asyncio
+    async def test_restart_all_skips_a_replaced_agent(self, dashboard):
+        """The fleet restart pins ONE config snapshot for every agent.
+
+        Between that read and a given agent's turn at the lock sit the
+        browser-service restart and every other agent's stop/start, so the
+        row it would restart from can be several minutes stale.
+        """
+        router, registry, runtime, _yaml, _connectors, _forgotten = dashboard
+        restart_all = _endpoint(router, "/api/restart-agents", "POST")
+
+        async def replace_during_the_fan_out():
+            async with agent_lifecycle_locked_async("worker"):
+                await asyncio.sleep(0.05)
+                retire_agent("worker")
+                registry["worker"] = "http://worker-2:8400"
+
+        holder = asyncio.create_task(replace_during_the_fan_out())
+        await asyncio.sleep(0)
+        result = await asyncio.wait_for(restart_all(), 5)
+        await asyncio.wait_for(holder, 3)
+
+        assert result["restarted"]["worker"] == "skipped: agent was replaced"
+        assert "start" not in runtime.kinds()
+
+    @pytest.mark.asyncio
+    async def test_a_delete_drops_the_cached_lifecycle_status(self, dashboard):
+        """The dashboard runs its own cleanup and never calls ``cleanup_agent``.
+
+        Without the injected seam a recreated id inherits the previous
+        agent's ``archived`` (every dispatch refuses it) or ``hibernated``
+        (a pointless cold start over a running container).
+        """
+        router, _registry, _runtime, _yaml, _connectors, forgotten = dashboard
+        delete = _endpoint(router, "/api/agents/{agent_id}", "DELETE")
+        await asyncio.wait_for(delete("worker"), 5)
+        assert forgotten == ["worker"]
+
+    @pytest.mark.asyncio
+    async def test_a_wake_reports_failure_when_it_did_not_wake_anything(
+        self, tmp_path, monkeypatch,
+    ):
+        """"Status says active now" is not the same as "I woke it".
+
+        Unarchive flips the status without starting a container, so a wake
+        that queued behind one and then read ``active`` would report success
+        for an agent that is still stopped — and the caller would dispatch
+        into it. Deleting the agent (which drops the override entirely, so
+        the default ``active`` applies) reads the same way.
+        """
+        from fastapi.testclient import TestClient
+
+        from src.cli import config as cli_config
+        from tests.test_hibernation import _OP, _build_app
+
+        app, bb, cm, _tr, _hm, _eb, cfg = _build_app(
+            tmp_path, monkeypatch, agent_status="hibernated",
+        )
+        try:
+            park, release = threading.Event(), threading.Event()
+
+            def _unarchive(name):
+                park.set()
+                assert release.wait(5)
+                cfg["agents"][name]["status"] = "active"
+
+            monkeypatch.setattr(cli_config, "_unarchive_agent", _unarchive)
+
+            client = TestClient(app)
+            t, box = _run_in_thread(
+                lambda: client.post("/mesh/agents/scout/unarchive", headers=_OP).status_code,
+            )
+            try:
+                assert await asyncio.to_thread(park.wait, 5)
+                wake = asyncio.create_task(app.ensure_agent_running("scout", trigger="test"))
+                assert await _spin_until_async(lambda: lifecycle_refcount("scout") == 2)
+            finally:
+                release.set()
+                t.join(5)
+            assert box.get("value") == 200, box
+
+            assert await asyncio.wait_for(wake, 5) is False, (
+                "the wake reported success without starting anything"
+            )
+            assert cm.started == []
+        finally:
+            bb.close()
+
+    @pytest.mark.asyncio
+    async def test_a_mesh_delete_refuses_to_destroy_a_replacement(self, tmp_path, monkeypatch):
+        """The mesh delete's window is the widest of all — a handover turn.
+
+        By the time a confirmed ``agent_delete`` reaches the container, the
+        name it was raised against can belong to a different agent.
+        """
+        from fastapi import HTTPException
+
+        from tests.test_hibernation import _build_app
+
+        app, bb, cm, _tr, _hm, _eb, cfg = _build_app(tmp_path, monkeypatch)
+        try:
+            delete = app.pending_executors["delete"]
+
+            async def replace_while_the_delete_queues():
+                async with agent_lifecycle_locked_async("scout"):
+                    # Long enough for the delete below to capture the
+                    # incarnation and reach the lock behind us.
+                    await asyncio.sleep(0.05)
+                    retire_agent("scout")
+
+            holder = asyncio.create_task(replace_while_the_delete_queues())
+            await asyncio.sleep(0)
+            queued = asyncio.create_task(
+                delete({"target_kind": "agent", "target_id": "scout", "nonce": "n1"}),
+            )
+            await asyncio.wait_for(holder, 3)
+            with pytest.raises(HTTPException) as exc:
+                await asyncio.wait_for(queued, 5)
+            assert exc.value.status_code == 409
+            assert cm.stopped == [], "the queued delete destroyed the replacement"
+        finally:
+            bb.close()
+
+
+class TestTemplateSlotIncarnation:
+    def test_a_slot_deleted_and_recreated_is_not_started(self, monkeypatch):
+        """The row is present in both snapshots, and is still a different agent.
+
+        Presence alone cannot see this: the delete removed the row and the
+        recreate put one back, so the guard has to compare incarnations.
+        """
+        import contextlib
+
+        from fastapi.testclient import TestClient
+
+        from src.host import server as server_mod
+
+        app, bb, cm, rows = TestTemplateSlotsRevalidate()._make_app(monkeypatch)
+        try:
+            real_lock = server_mod.agent_lifecycle_locked_async
+
+            @contextlib.asynccontextmanager
+            async def _replace_once_acquired(agent_id, timeout=None):
+                async with real_lock(agent_id, timeout=timeout):
+                    # Deleted and recreated while this slot queued: the row
+                    # is back, under the same name, for a different agent.
+                    retire_agent(agent_id)
+                    yield
+
+            monkeypatch.setattr(
+                server_mod, "agent_lifecycle_locked_async", _replace_once_acquired,
+            )
+            resp = TestClient(app).post("/mesh/fleet/apply", json={"template": "starter"})
+            assert resp.status_code == 200, resp.text
+            body = resp.json()
+            assert body["created"] == []
+            assert [f["agent_id"] for f in body["failed"]] == ["scout"]
+            assert "scout" in rows, "the row itself is still present"
             cm.start_agent.assert_not_called()
         finally:
             bb.close()

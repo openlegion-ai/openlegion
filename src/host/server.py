@@ -33,7 +33,12 @@ from fastapi.responses import StreamingResponse
 
 from src.host import auto_merge
 from src.host import drive as team_drive
-from src.host.agent_lifecycle import AgentLifecycleBusy, agent_lifecycle_locked_async
+from src.host.agent_lifecycle import (
+    AgentLifecycleBusy,
+    agent_incarnation,
+    agent_lifecycle_locked_async,
+    retire_agent,
+)
 from src.host.asks import AskBroker, AskDeliveryFailed, AskLimitExceeded
 from src.host.change_history import ChangeHistory
 from src.host.credentials import ConnectionRefreshError, is_system_credential
@@ -1493,6 +1498,9 @@ def create_mesh_app(
         # treated as out of service (never woken, skipped for lead
         # selection) while its fresh config row says ``active``.
         _status_overrides.pop(agent_id, None)
+        # Retire the incarnation so any lifecycle operation still queued on
+        # this id can tell it is about to act on a different agent.
+        retire_agent(agent_id)
         try:
             permissions.reload()
         except Exception as e:
@@ -5215,6 +5223,13 @@ def create_mesh_app(
                 tpl,
                 agent_overrides=agent_overrides or None,
             )
+            # Captured while the config rows are still fresh and this lock is
+            # still held, so a delete landing anywhere between here and a
+            # slot's own lock is visible to it. Presence alone can't see that:
+            # a delete that lands before the snapshot below leaves both reads
+            # agreeing the row is absent, and a delete-then-recreate leaves
+            # both agreeing it is present.
+            _slot_incarnations = {n: agent_incarnation(n) for n in created_names}
             # _apply_template calls _add_agent_permissions for each new
             # agent; reload the live matrix so /mesh/register sees the
             # on-disk perms instead of falling through to default/deny-all.
@@ -5312,6 +5327,10 @@ def create_mesh_app(
                     # parameters below stay on ``acfg``, which carries the
                     # template resolution (``resolve_slot_model`` precedence)
                     # that a fresh read would not reproduce.
+                    if agent_incarnation(agent_name) != _slot_incarnations.get(agent_name, 0):
+                        raise RuntimeError(
+                            "agent was deleted before its container could start",
+                        )
                     _fresh_rows = _load_config().get("agents", {})
                     if agent_name in agents_cfg and agent_name not in _fresh_rows:
                         raise RuntimeError(
@@ -11547,6 +11566,10 @@ def create_mesh_app(
                 raise HTTPException(
                     409, f"Agent '{agent_id}' picked up a working task while the hibernate waited",
                 )
+            if ask_broker is not None and ask_broker.has_open_asks(agent_id):
+                raise HTTPException(
+                    409, f"Agent '{agent_id}' joined an ask while the hibernate waited",
+                )
             try:
                 _hibernate_agent(agent_id)
             except ValueError as e:
@@ -11649,9 +11672,12 @@ def create_mesh_app(
                     "wake_agent: '%s' is now %s, not hibernated — skipping the wake",
                     agent_id, _status_now,
                 )
-                # Mirrors ``ensure_agent_running``'s own fast path: active is
-                # reachable, anything else (archived) is not.
-                return _status_now == "active"
+                # Always False, never "well, it says active now": we did
+                # not wake anything. An unarchive flips the status without
+                # starting a container, and a delete pops the entry
+                # entirely — reporting either as reachable would have the
+                # caller dispatch into a stopped or nonexistent agent.
+                return False
             try:
                 fresh_cfg = _wake_load_config()
             except Exception as e:
@@ -11881,6 +11907,13 @@ def create_mesh_app(
 
     app.ensure_agent_running = ensure_agent_running  # exposed for the transport seam
     app.get_agent_status = lambda agent_id: _status_overrides.get(agent_id, "active")
+    # Cross-router seam (same pattern as ``app.cleanup_agent``): the dashboard
+    # runs its own delete cleanup and never calls ``_cleanup_agent``, so it has
+    # no other way to drop a deleted agent's cached status. Leaving it behind
+    # makes the next agent created under that name inherit ``archived`` (every
+    # dispatch refuses it) or ``hibernated`` (a pointless cold start over an
+    # already-running container).
+    app.forget_agent_status = lambda agent_id: _status_overrides.pop(agent_id, None)
     from src.cli.config import _load_config as _load_config_for_sweep
 
     app.hibernation_sweeper = HibernationSweeper(
@@ -12427,6 +12460,11 @@ def create_mesh_app(
             # whatever host-side state still exists. Belt-and-suspenders:
             # an agent that was already explicitly offboarded just gets a
             # second dated snapshot — no dedup machinery needed.
+            # Captured BEFORE the offboard turn, which can take minutes: by
+            # the time this delete holds the lock, another delete plus a
+            # create of the same name can have produced a live agent that is
+            # not the one this confirmation was raised against.
+            _target_incarnation = agent_incarnation(target_id)
             offboard_manifest = await _offboard_agent(target_id, reason="delete")
             # Volume-destroying stop through config + registry removal is
             # ONE lifecycle operation: a wake or a restart interleaving in it
@@ -12435,6 +12473,12 @@ def create_mesh_app(
             # the lock — it dispatches a turn to the agent, and the cold-wake
             # seam would take this same lock to deliver it.
             async with agent_lifecycle_locked_async(target_id):
+                if agent_incarnation(target_id) != _target_incarnation:
+                    raise HTTPException(
+                        409,
+                        f"Agent '{target_id}' was deleted and recreated while this "
+                        "delete waited — refusing to destroy the replacement",
+                    )
                 # H11/H12: stop the container through the runtime backend (not the
                 # raw-docker path inside ``_remove_agent``) so the agent's mesh
                 # auth token is popped (H11) AND its private ``openlegion_data_*``

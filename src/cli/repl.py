@@ -31,7 +31,7 @@ from src.cli.formatting import (
     display_stream_tool_start,
     user_prompt,
 )
-from src.host.agent_lifecycle import agent_lifecycle_locked
+from src.host.agent_lifecycle import agent_incarnation, agent_lifecycle_locked, retire_agent
 from src.shared.utils import dumps_safe, set_llm_max_tokens_env
 
 if TYPE_CHECKING:
@@ -1417,6 +1417,7 @@ class REPLSession:
         from src.host.transport import HttpTransport
 
         click.echo(f"Restarting '{name}'...", nl=False)
+        _incarnation = agent_incarnation(name)
 
         # Stop -> start -> re-register, the same unit the dashboard and
         # mesh restart paths lock. The REPL shares this process with the
@@ -1427,7 +1428,7 @@ class REPLSession:
             # completed while this command waited, and the config read below
             # would then fall back to empty defaults and rebuild the agent
             # from nothing.
-            if name not in self.ctx.agents:
+            if name not in self.ctx.agents or agent_incarnation(name) != _incarnation:
                 click.echo(" agent no longer exists.", err=True)
                 return
             # Stop old container
@@ -1532,6 +1533,9 @@ class REPLSession:
         # via the runtime context's dispatch loop, mirroring how
         # ``/steer`` already bridges a sync command into an async mesh
         # call (``asyncio.run_coroutine_threadsafe``).
+        # Captured before the offboard turn below, which waits on a live
+        # handover and can take minutes.
+        _incarnation = agent_incarnation(name)
         offboard_agent = getattr(self.ctx, "offboard_agent", None)
         if offboard_agent is not None and self.ctx.dispatch_loop is not None:
             from src.shared import limits as _limits_mod
@@ -1567,6 +1571,13 @@ class REPLSession:
             # delete surface already cleared.
             if name not in self.ctx.agents:
                 click.echo(f"Agent '{name}' was already removed.")
+                return
+            if agent_incarnation(name) != _incarnation:
+                click.echo(
+                    f"Agent '{name}' was removed and recreated while the handover ran — "
+                    "not removing the replacement.",
+                    err=True,
+                )
                 return
             # Stop the container. remove_data=True (bug fix — this previously
             # left the agent's ``openlegion_data_*`` volume behind forever;
@@ -1627,6 +1638,11 @@ class REPLSession:
                     cleanup_agent(name)
                 except Exception as e:
                     click.echo(f"  Warning: per-agent cleanup failed: {e}")
+
+            # Inside the lock, with the rest of this removal's effects. The
+            # mesh's ``cleanup_agent`` retires the id too, but that seam is
+            # ``None`` on an unwired REPL — this is the path that always runs.
+            retire_agent(name)
 
         click.echo(f"Removed agent '{name}'.")
         if self.ctx.event_bus:

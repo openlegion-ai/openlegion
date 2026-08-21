@@ -52,7 +52,12 @@ from pydantic import ValidationError
 from src.cli.proxy import build_proxy_env_vars, resolve_agent_proxy
 from src.dashboard.auth import verify_session_cookie
 from src.host import drive as team_drive
-from src.host.agent_lifecycle import AgentLifecycleBusy, agent_lifecycle_locked_async
+from src.host.agent_lifecycle import (
+    AgentLifecycleBusy,
+    agent_incarnation,
+    agent_lifecycle_locked_async,
+    retire_agent,
+)
 from src.shared import limits as _limits
 from src.shared.paths import resolve_under_root
 from src.shared.sqlite_helpers import open_db
@@ -827,6 +832,12 @@ def create_dashboard_router(
     # keep working — the delete endpoint skips the offboard attempt when
     # absent (no manifest to run).
     offboard_agent: Any = None,
+    # Mesh seam (``app.forget_agent_status``, injected in cli/runtime.py the
+    # same way as ``offboard_agent``): drops a deleted agent's cached
+    # lifecycle status. This router runs its own delete cleanup rather than
+    # the mesh's ``cleanup_agent``, so without it a recreated id inherits the
+    # previous agent's ``archived``/``hibernated`` status.
+    forget_agent_status: Any = None,
     # Same seam for the onboarding wake: ``def onboarding_wake(agent_id,
     # team_id) -> None`` — fire-and-forget (schedules its own background
     # task; never awaited here). Optional for the same reason.
@@ -2821,6 +2832,10 @@ def create_dashboard_router(
         # Offboarding-with-handover BEFORE any volume destruction. Never
         # raises (the helper itself never raises); best-effort so a
         # hiccup here must not block the human's deliberate delete.
+        # Captured BEFORE the offboard turn, which runs against the live
+        # agent and can take minutes. A name that is present again by the
+        # time this delete holds the lock is not necessarily the same agent.
+        _incarnation = agent_incarnation(agent_id)
         offboard_manifest = None
         if offboard_agent is not None:
             try:
@@ -2840,6 +2855,18 @@ def create_dashboard_router(
             # finished while the offboard turn was running.
             if agent_id not in agent_registry:
                 raise HTTPException(status_code=404, detail="Agent not found")
+            if agent_incarnation(agent_id) != _incarnation:
+                # Present again, but it is a different agent: deleted and
+                # recreated under the same name while this delete waited.
+                # Destroying it would take out the replacement's container,
+                # volume and config.
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Agent '{agent_id}' was deleted and recreated while this "
+                        "delete waited — refusing to destroy the replacement"
+                    ),
+                )
             # Stop container and remove data volume (best-effort — agent may already be gone)
             if runtime is not None:
                 try:
@@ -2963,6 +2990,15 @@ def create_dashboard_router(
                     permissions.reload()
             except Exception as e:
                 logger.warning(f"Failed to clean config for {agent_id}: {e}")
+
+            if forget_agent_status is not None:
+                try:
+                    forget_agent_status(agent_id)
+                except Exception as e:
+                    logger.warning("Status-cache cleanup for '%s' failed: %s", agent_id, e)
+            # Retire the incarnation last, inside the lock, so it becomes
+            # visible together with the rest of this delete's effects.
+            retire_agent(agent_id)
 
         if event_bus is not None:
             event_bus.emit("agent_state", agent=agent_id, data={"state": "removed"})
@@ -3371,6 +3407,7 @@ def create_dashboard_router(
         # below has to fire a generic ``restart_failed``. Without this
         # the spinner would never clear and the user would refresh.
         fired_terminal = False
+        _incarnation = agent_incarnation(agent_id)
         try:
             # Stop -> start -> re-register is ONE lifecycle operation. The
             # two container calls below each release the loop, and a delete
@@ -3381,8 +3418,11 @@ def create_dashboard_router(
             # time to make a delete queue behind.
             async with _agent_lifecycle_or_409(agent_id):
                 # Re-check under the lock — the agent may have been deleted
-                # while we queued, and restarting it would resurrect it.
-                if agent_id not in agent_registry:
+                # while we queued, and restarting it would resurrect it. The
+                # incarnation covers the case the name check cannot: deleted
+                # AND recreated, where bouncing the replacement with this
+                # request's intent is just as wrong.
+                if agent_id not in agent_registry or agent_incarnation(agent_id) != _incarnation:
                     raise HTTPException(status_code=404, detail="Agent not found")
                 from src.cli.config import _load_config
 
@@ -7721,6 +7761,12 @@ def create_dashboard_router(
         cfg = _load_config()
         agents_cfg = cfg.get("agents", {})
         default_model = cfg.get("llm", {}).get("default_model", "openai/gpt-4o-mini")
+        # Pinned alongside the config snapshot: every agent is restarted from
+        # THIS read, and the fan-out below plus the browser-service restart
+        # leave a wide window before any one of them holds its lock. An id
+        # deleted and recreated in that window would otherwise be bounced with
+        # the previous agent's role, model and tools_dir.
+        _incarnations = {aid: agent_incarnation(aid) for aid in list(agent_registry)}
         loop = _asyncio.get_running_loop()
         results = {}
 
@@ -7756,6 +7802,10 @@ def create_dashboard_router(
                     if agent_id not in agent_registry:
                         # Deleted while this agent waited its turn.
                         return (agent_id, "skipped: agent no longer exists")
+                    if agent_incarnation(agent_id) != _incarnations.get(agent_id, 0):
+                        # Same name, different agent — ``agent_cfg`` above
+                        # describes the one that was deleted.
+                        return (agent_id, "skipped: agent was replaced")
                     await loop.run_in_executor(None, runtime.stop_agent, agent_id)
                     tools_dir = agent_cfg.get("tools_dir", "")
                     if tools_dir:

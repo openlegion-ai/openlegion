@@ -2198,6 +2198,10 @@ class RuntimeContext:
             # ``getattr(app, ...)`` injection pattern as tasks_store above.
             offboard_agent=getattr(app, "_offboard_agent", None),
             onboarding_wake=getattr(app, "_schedule_onboarding_wake", None),
+            # Same seam pattern: the dashboard delete runs its own cleanup
+            # rather than the mesh's ``cleanup_agent``, so this is its only
+            # way to drop a deleted agent's cached lifecycle status.
+            forget_agent_status=getattr(app, "forget_agent_status", None),
         )
         app.include_router(dashboard_router)
         app.include_router(create_spa_catchall_router())  # Must be last — SPA deep linking

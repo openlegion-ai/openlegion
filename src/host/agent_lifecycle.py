@@ -89,6 +89,10 @@ _guard = threading.Lock()
 # holder under ``_guard``.
 _holders: dict[str, tuple] = {}
 
+# ``{agent_id: n}`` — bumped every time an id is retired. See
+# :func:`agent_incarnation`.
+_incarnations: dict[str, int] = {}
+
 
 class AgentLifecycleBusy(Exception):
     """Another lifecycle operation for this agent is still running."""
@@ -218,6 +222,46 @@ async def agent_lifecycle_locked_async(
             _release_holder(agent_id, token)
             lock.release()
         _checkin(agent_id, entry)
+
+
+def agent_incarnation(agent_id: str) -> int:
+    """How many times this id has been retired. Capture before you queue.
+
+    Holding the lock proves nothing about WHICH agent you hold it for. Agent
+    ids are names the operator reuses, and a delete followed by a create of
+    the same name inside the window an operation waits produces a live agent
+    with the name the operation checked — a different agent entirely. Every
+    name-based re-check then passes, and the queued operation acts on the
+    replacement: a delete destroys the fresh container and volume, a restart
+    bounces it with the previous agent's role and model.
+
+    So the pattern is: read this before you queue, compare it after you
+    acquire, and bail if it moved::
+
+        incarnation = agent_incarnation(agent_id)
+        ...                                     # slow, unlocked work
+        async with agent_lifecycle_locked_async(agent_id):
+            if agent_incarnation(agent_id) != incarnation:
+                raise HTTPException(404, "agent was replaced")
+
+    Only :func:`retire_agent` moves it, so an id that was never deleted
+    always compares equal and the check costs one dict lookup.
+    """
+    with _guard:
+        return _incarnations.get(agent_id, 0)
+
+
+def retire_agent(agent_id: str) -> int:
+    """Mark this id's current agent gone. Call from every delete path.
+
+    Under the agent's lifecycle lock, so that anything comparing against a
+    captured incarnation sees the bump exactly when the delete's other
+    effects become visible. Returns the new value.
+    """
+    with _guard:
+        n = _incarnations.get(agent_id, 0) + 1
+        _incarnations[agent_id] = n
+        return n
 
 
 def lifecycle_refcount(agent_id: str) -> int:
