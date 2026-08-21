@@ -489,7 +489,7 @@ class TestSandboxBackendLocking:
         assert backend.auth_tokens["s2"] != "OLD-TOKEN"
 
 
-# ── A failed start must leave the registries as it found them ─
+# ── A failed start must leave the registries coherent ─────────
 
 
 class TestFailedStartRollsBack:
@@ -497,7 +497,11 @@ class TestFailedStartRollsBack:
     that is incoherent on its own. ``start_agent`` overwrites the auth token
     BEFORE the container call; a restart of a LIVE agent that then fails used
     to drop that token and keep the old entry — ``agents`` populated,
-    ``auth_tokens`` empty, with no concurrency involved at all."""
+    ``auth_tokens`` empty, with no concurrency involved at all.
+
+    "Coherent" is not always "exactly as found": a failure AFTER the start
+    destroyed the previous instance deliberately deregisters it, because the
+    thing the entry and token referred to no longer exists."""
 
     def test_failure_BEFORE_the_reap_keeps_the_previous_token(self):
         """The start died while still looking the stale container up, so it
@@ -578,7 +582,10 @@ class TestFailedStartRollsBack:
         backend.agents["s4"] = {"sandbox_name": "openlegion_s4", "workspace": None, "url": "u", "role": "r"}
         backend.auth_tokens["s4"] = "OLD-TOKEN"
 
+        commands: list[list[str]] = []
+
         def fake_run(cmd, *_a, **_k):
+            commands.append(list(cmd))
             if "exec" in cmd:
                 raise subprocess.TimeoutExpired(cmd, 60)
             return MagicMock(returncode=0, stdout="", stderr="")
@@ -590,6 +597,12 @@ class TestFailedStartRollsBack:
 
         assert "s4" not in backend.agents
         assert "s4" not in backend.auth_tokens
+        # Deregistering means stop_agent would return at its first lookup and
+        # never reach the microVM, so the rollback has to tear it down itself
+        # or it leaks and holds the name against every later start.
+        assert ["docker", "sandbox", "rm", "-f", "openlegion_s4"] in commands, (
+            f"the created sandbox was never removed; ran: {commands}"
+        )
 
     def test_sandbox_failure_at_create_keeps_the_previous_token(self, tmp_path, monkeypatch):
         backend = _make_sandbox_backend(tmp_path)

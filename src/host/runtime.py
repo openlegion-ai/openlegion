@@ -172,13 +172,13 @@ class RuntimeBackend(abc.ABC):
           resolving credentials or building env. Put the previous token back,
           or that still-running container is stranded with a credential the
           mesh no longer accepts.
-        * **The start destroyed the previous instance.**
-          ``_start_agent_container`` force-removes the same-named container
-          immediately before ``containers.run``, so a failure there has
-          already killed the old agent without deregistering it. Restoring its
-          token would re-arm a credential for a container that no longer
-          exists; keeping the entry would advertise a URL nothing answers.
-          Deregister both.
+        * **The previous instance is gone** — the start destroyed it, or
+          confirmed it was already absent. ``_start_agent_container``
+          force-removes the same-named container immediately before
+          ``containers.run``, so a failure there has already killed the old
+          agent without deregistering it. Restoring its token would re-arm a
+          credential for a container that no longer exists; keeping the entry
+          would advertise a URL nothing answers. Deregister both.
 
         ``prior_destroyed`` is reported BY the start path rather than probed
         for afterwards. A health check would have to answer "is the old
@@ -694,9 +694,10 @@ class DockerBackend(RuntimeBackend):
         env_overrides: dict[str, str] | None,
         progress: dict[str, bool] | None = None,
     ) -> str:
-        """``progress["prior_destroyed"]`` is set once the same-named stale
-        container has been force-removed, so a failure after that point rolls
-        back as "the previous instance is gone" without having to guess."""
+        """``progress["prior_destroyed"]`` is set once no container exists
+        under this agent's name — whether this call removed one or found none
+        to remove — so a failure after that point rolls back as "the previous
+        instance is gone" without having to guess."""
         import docker as _docker
 
         mesh_host = "127.0.0.1" if self.use_host_network else "host.docker.internal"
@@ -830,9 +831,11 @@ class DockerBackend(RuntimeBackend):
             # here would restore a token for a container that is gone.
             pass
         # Reaching this line means nothing is running under this agent's
-        # container name any more. An APIError from ``remove`` propagates
-        # instead, leaving the flag false: that outcome is genuinely
-        # ambiguous, and a rollback that changes nothing is the safe read.
+        # container name any more. Any OTHER APIError from the lookup or the
+        # removal (``NotFound`` is itself an ``APIError`` subclass, and is
+        # handled above) propagates instead and leaves the flag false: that
+        # outcome is genuinely ambiguous about whether the removal applied,
+        # and a rollback that changes nothing is the safe read.
         if progress is not None:
             progress["prior_destroyed"] = True
 
@@ -1570,6 +1573,25 @@ class SandboxBackend(RuntimeBackend):
                 logger.info(f"Started agent '{agent_id}' in sandbox '{sandbox_name}'")
                 return url
             except Exception:
+                if prior_destroyed:
+                    # ``create`` succeeded, so a microVM exists under this
+                    # name. The rollback below deregisters the agent, after
+                    # which ``stop_agent`` returns at its first lookup and
+                    # never reaches the sandbox — so it has to be torn down
+                    # here, or it leaks AND holds the name against every
+                    # later start.
+                    try:
+                        subprocess.run(
+                            ["docker", "sandbox", "rm", "-f", sandbox_name],
+                            capture_output=True,
+                            timeout=15,
+                        )
+                    except Exception as cleanup_error:
+                        logger.warning(
+                            "failed start left sandbox '%s' behind: %s",
+                            sandbox_name,
+                            cleanup_error,
+                        )
                 self._rollback_failed_start(
                     agent_id,
                     prior_token=prior_token,

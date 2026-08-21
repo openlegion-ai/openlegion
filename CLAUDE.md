@@ -145,7 +145,8 @@ Rules:
 - **Don't mirror the token into `self.agents` to compare against.** Those dicts get inspected in a lot of places; the lock is the mechanism, not an identity check on a secret.
 - **Anything that touches a second field after `start_agent` returns belongs inside the lock too** — `spawn_agent`'s `ephemeral`/`ttl`/`spawned_at` stamps raised `KeyError` from a concurrent stop before they were.
 - **Iterate the registry from a snapshot.** `list(self.agents.items())` — comprehending over the live dict raises "dictionary changed size during iteration" out of whichever mesh route asked for the roster.
-- Reads that only need one entry (`get_agent_url`, `health_check`, `get_logs`) take no lock by design: a health poll must not queue behind a 120s sandbox create. They one-read via `.get()` instead.
+- Reads that only need one entry (`get_agent_url`, `health_check`, `get_logs`) take no lock by design: a health poll must not queue behind a 120s sandbox create.
+- **`start_agent` / `stop_agent` are the standing exception to the "container operations go through `asyncio.to_thread`" rule above**, and deliberately so. Moving them off the mesh loop inserts a yield between writing an agent's config and registering it with the router, health monitor and cron — a window in which archive can interleave with create, or delete with restart, leaving durable state and runtime state disagreeing. Blocking the loop is the lesser evil until lifecycle operations are serialised per agent one layer up, across config + runtime + router + health + cron. Do not "fix" these call sites in isolation. They one-read via `.get()` instead.
 
 ### Config & Environment
 
