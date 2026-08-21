@@ -152,6 +152,48 @@ class RuntimeBackend(abc.ABC):
                 if entry[1] <= 0 and locks.get(agent_id) is entry:
                     locks.pop(agent_id, None)
 
+    def _rollback_failed_start(self, agent_id: str, *, prior_token: str | None, minted_token: str) -> None:
+        """Undo a start that raised, leaving the registries coherent.
+
+        ``start_agent`` publishes the auth token BEFORE the container call, so
+        a failure has three distinct states to clean up and only one of them
+        is "pop the token":
+
+        * **No previous registration.** M16: an agent that never came up must
+          not leave a live token behind. Pop it.
+        * **The previous container is still running** — the start failed
+          before it got far enough to destroy anything (resolving credentials,
+          building env). Put the previous token back, or that container is
+          stranded with a credential the mesh no longer accepts.
+        * **The previous container is gone.** ``_start_agent_container``
+          force-removes the same-named container immediately before
+          ``containers.run``, so a failure there destroys the old agent
+          without deregistering it. Restoring its token would re-arm a
+          credential for a container that no longer exists; keeping the entry
+          would advertise a URL nothing answers. Deregister both.
+
+        Liveness is asked of the backend rather than inferred, because only
+        the backend knows whether its own start path had already torn the
+        previous instance down.
+        """
+        prior = self.agents.get(agent_id)
+        if prior is None:
+            if self.auth_tokens.get(agent_id) == minted_token:
+                self.auth_tokens.pop(agent_id, None)
+            return
+        try:
+            alive = self.health_check(agent_id)
+        except Exception:
+            alive = False
+        if alive:
+            if prior_token is not None:
+                self.auth_tokens[agent_id] = prior_token
+            elif self.auth_tokens.get(agent_id) == minted_token:
+                self.auth_tokens.pop(agent_id, None)
+            return
+        self.agents.pop(agent_id, None)
+        self.auth_tokens.pop(agent_id, None)
+
     def set_credential_resolver(
         self,
         *,
@@ -617,18 +659,15 @@ class DockerBackend(RuntimeBackend):
                     env_overrides=env_overrides,
                 )
             except Exception:
-                # Restore exactly the state we found, so a failed start is a
-                # no-op rather than a half-applied one. M16's rule — never
-                # leave a live token for an agent that did not come up — is
-                # about the token minted ABOVE, not about a pre-existing
-                # registration's. Keeping the old entry while dropping its
-                # token (what this used to do) left ``agents`` populated and
-                # ``auth_tokens`` empty: the exact drift this lock exists to
-                # prevent, reachable without any concurrency at all.
-                if prior_token is not None and self.agents.get(agent_id) is not None:
-                    self.auth_tokens[agent_id] = prior_token
-                elif self.auth_tokens.get(agent_id) == auth_token:
-                    self.auth_tokens.pop(agent_id, None)
+                # Keeping the old entry while dropping its token (what this
+                # used to do) left ``agents`` populated and ``auth_tokens``
+                # empty — the exact drift this lock exists to prevent, and
+                # reachable with no concurrency at all.
+                self._rollback_failed_start(
+                    agent_id,
+                    prior_token=prior_token,
+                    minted_token=auth_token,
+                )
                 raise
 
     def _start_agent_container(
@@ -1500,10 +1539,11 @@ class SandboxBackend(RuntimeBackend):
                 logger.info(f"Started agent '{agent_id}' in sandbox '{sandbox_name}'")
                 return url
             except Exception:
-                if prior_token is not None and self.agents.get(agent_id) is not None:
-                    self.auth_tokens[agent_id] = prior_token
-                else:
-                    self.auth_tokens.pop(agent_id, None)
+                self._rollback_failed_start(
+                    agent_id,
+                    prior_token=prior_token,
+                    minted_token=self.auth_tokens.get(agent_id, ""),
+                )
                 raise
 
     def stop_agent(self, agent_id: str, *, remove_data: bool = False) -> None:

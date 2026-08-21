@@ -498,9 +498,13 @@ class TestFailedStartRollsBack:
     to drop that token and keep the old entry — ``agents`` populated,
     ``auth_tokens`` empty, with no concurrency involved at all."""
 
-    def test_failed_restart_keeps_the_live_agents_token(self):
+    def test_failed_restart_keeps_a_SURVIVING_agents_token(self):
+        """Failure before the start got far enough to destroy anything: the
+        previous container is still up, so its token has to go back."""
         backend = _make_docker_backend()
-        backend.agents["live"] = {"container": MagicMock(), "url": "http://live", "role": "r"}
+        survivor = MagicMock()
+        survivor.status = "running"
+        backend.agents["live"] = {"container": survivor, "url": "http://live", "role": "r"}
         backend.auth_tokens["live"] = "LIVE-TOKEN"
         backend.client = _docker_client()
         backend.client.containers.run.side_effect = RuntimeError("docker daemon said no")
@@ -512,6 +516,43 @@ class TestFailedStartRollsBack:
         assert backend.auth_tokens["live"] == "LIVE-TOKEN", (
             "the still-running previous container was stranded without a token"
         )
+
+    def test_failed_restart_deregisters_a_REAPED_agent(self):
+        """``_start_agent_container`` force-removes the same-named container
+        immediately before ``containers.run``, so a failure THERE has already
+        destroyed the previous agent. Restoring its token would re-arm a
+        credential for a container that no longer exists, and keeping the entry
+        would advertise a URL nothing answers."""
+        backend = _make_docker_backend()
+        reaped = MagicMock()
+        reaped.status = "exited"
+        backend.agents["gone"] = {"container": reaped, "url": "http://gone", "role": "r"}
+        backend.auth_tokens["gone"] = "REAPED-TOKEN"
+        backend.client = _docker_client()
+        backend.client.containers.run.side_effect = RuntimeError("image missing")
+
+        with pytest.raises(RuntimeError):
+            backend.start_agent(agent_id="gone", role="r", tools_dir="")
+
+        assert "gone" not in backend.agents
+        assert "gone" not in backend.auth_tokens, "a destroyed container's token was re-armed by the rollback"
+
+    def test_failed_restart_deregisters_when_liveness_cannot_be_read(self):
+        """An unreachable daemon must fail closed — deregister rather than
+        re-arm a token on a guess."""
+        backend = _make_docker_backend()
+        unknown = MagicMock()
+        unknown.reload.side_effect = RuntimeError("daemon unreachable")
+        backend.agents["murky"] = {"container": unknown, "url": "http://murky", "role": "r"}
+        backend.auth_tokens["murky"] = "MURKY-TOKEN"
+        backend.client = _docker_client()
+        backend.client.containers.run.side_effect = RuntimeError("boom")
+
+        with pytest.raises(RuntimeError):
+            backend.start_agent(agent_id="murky", role="r", tools_dir="")
+
+        assert "murky" not in backend.agents
+        assert "murky" not in backend.auth_tokens
 
     def test_failed_first_start_still_leaves_no_token(self):
         """M16: a start that never came up must not leave a live token behind.

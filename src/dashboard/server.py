@@ -30,7 +30,6 @@ Phase 10 §24 — billing-export endpoint.
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import hashlib
 import ipaddress
@@ -2713,10 +2712,7 @@ def create_dashboard_router(
                 val = acfg.get(cfg_key, "")
                 if val:
                     agent_env[env_key] = val
-            # Off the loop: the backend holds a per-agent lock across the
-            # container build (see runtime._agent_locked).
-            url = await asyncio.to_thread(
-                runtime.start_agent,
+            url = runtime.start_agent(
                 agent_id=name,
                 role=role,
                 tools_dir=tools_dir,
@@ -2805,7 +2801,7 @@ def create_dashboard_router(
         # Stop container and remove data volume (best-effort — agent may already be gone)
         if runtime is not None:
             try:
-                await asyncio.to_thread(runtime.stop_agent, agent_id, remove_data=True)
+                runtime.stop_agent(agent_id, remove_data=True)
             except Exception as e:
                 logger.debug("Runtime cleanup for '%s' failed: %s", agent_id, e)
 
