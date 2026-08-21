@@ -4895,7 +4895,8 @@ def create_mesh_app(
 
         agent_id = generate_id("spawn")
         try:
-            url = container_manager.spawn_agent(
+            url = await asyncio.to_thread(
+                container_manager.spawn_agent,
                 agent_id=agent_id,
                 role=role,
                 system_prompt=system_prompt,
@@ -4905,15 +4906,12 @@ def create_mesh_app(
             router.register_agent(agent_id, url)
             if health_monitor is not None:
                 health_monitor.register(agent_id)
-            # Store ephemeral metadata for TTL cleanup
-            container_manager.agents.setdefault(agent_id, {}).update(
-                {
-                    "ephemeral": True,
-                    "ttl": ttl,
-                    "spawned_at": time.time(),
-                    "role": role,
-                }
-            )
+            # The ephemeral TTL metadata is stamped by ``spawn_agent`` itself,
+            # inside the per-agent lock. Re-stamping it here used ``setdefault``
+            # on an unlocked registry: if a stop deregistered the agent in the
+            # meantime this RESURRECTED it as a metadata-only entry with no
+            # container and no ``url``, which then raised KeyError out of
+            # ``list_agents`` / ``get_agent_url``.
             ready = await container_manager.wait_for_agent(agent_id, timeout=60)
             if trace_store:
                 from src.shared.trace import new_trace_id as _new_trace_id
@@ -5276,8 +5274,12 @@ def create_mesh_app(
             set_llm_limits_env(env_overrides, acfg)
 
             try:
-                # Start container with per-agent env_overrides (not shared extra_env)
-                url = container_manager.start_agent(
+                # Start container with per-agent env_overrides (not shared extra_env).
+                # Off the mesh loop: the backend holds a per-agent lock across
+                # the container build, so a same-agent wake or health restart
+                # would otherwise stall every route until Docker returns.
+                url = await asyncio.to_thread(
+                    container_manager.start_agent,
                     agent_id=agent_name,
                     role=acfg.get("role", agent_name),
                     tools_dir=tools_dir,
@@ -5659,7 +5661,8 @@ def create_mesh_app(
             agent_env["INITIAL_SOUL"] = soul
 
         try:
-            url = container_manager.start_agent(
+            url = await asyncio.to_thread(
+                container_manager.start_agent,
                 agent_id=name,
                 role=role or name,
                 tools_dir=str(tools_dir),
@@ -5712,7 +5715,7 @@ def create_mesh_app(
         except Exception as e:
             # Roll back: stop container, remove config so the name isn't blocked
             try:
-                container_manager.stop_agent(name)
+                await asyncio.to_thread(container_manager.stop_agent, name)
             except Exception:
                 pass
             from src.cli.config import _remove_agent
@@ -11412,7 +11415,7 @@ def create_mesh_app(
         # Best-effort container stop. Failures here don't break archive.
         if container_manager is not None:
             try:
-                container_manager.stop_agent(agent_id)
+                await asyncio.to_thread(container_manager.stop_agent, agent_id)
             except Exception as e:
                 logger.warning("archive_agent: container stop for %s failed: %s", agent_id, e)
         if event_bus is not None:
@@ -11588,7 +11591,7 @@ def create_mesh_app(
         if health_monitor is not None:
             health_monitor.register(agent_id)
 
-        def _wake_teardown() -> None:
+        async def _wake_teardown() -> None:
             """Restore a CLEAN hibernated state after a failed wake (Phase-5
             review finding). ``start_agent`` already ran (container up) and
             transport/router/health are re-registered; a bare ``return False``
@@ -11606,21 +11609,23 @@ def create_mesh_app(
                     logger.warning("wake_teardown: health dereg for %s failed: %s", agent_id, e)
             if container_manager is not None:
                 try:
-                    container_manager.stop_agent(agent_id, remove_data=False)
+                    await asyncio.to_thread(
+                        container_manager.stop_agent, agent_id, remove_data=False,
+                    )
                 except Exception as e:
                     logger.warning("wake_teardown: container stop for %s failed: %s", agent_id, e)
 
         ready = await container_manager.wait_for_agent(agent_id, timeout=60)
         if not ready:
             logger.error("wake_agent: '%s' did not become ready after cold-wake", agent_id)
-            _wake_teardown()
+            await _wake_teardown()
             return False
 
         try:
             _wake_agent_status(agent_id)
         except ValueError as e:
             logger.error("wake_agent: status flip failed for '%s': %s", agent_id, e)
-            _wake_teardown()
+            await _wake_teardown()
             return False
         _status_overrides.pop(agent_id, None)
         if lane_manager is not None:
@@ -12323,7 +12328,9 @@ def create_mesh_app(
             # permissions removal and never re-runs a token/volume-blind stop.
             if container_manager is not None:
                 try:
-                    container_manager.stop_agent(target_id, remove_data=True)
+                    await asyncio.to_thread(
+                        container_manager.stop_agent, target_id, remove_data=True,
+                    )
                 except Exception as e:
                     logger.warning(
                         "stop_agent(%s, remove_data=True) failed during delete: %s",

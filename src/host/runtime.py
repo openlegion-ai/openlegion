@@ -582,6 +582,12 @@ class DockerBackend(RuntimeBackend):
         # its compare-and-delete inside that window pops THIS start's token
         # while matching the previous entry. See :meth:`_agent_locked`.
         with self._agent_locked(agent_id):
+            # What a failed start has to be rolled back to. A restart of a
+            # LIVE agent overwrites its token below; if the start then fails,
+            # dropping that token outright would strand the still-running
+            # previous container with no way to authenticate to the mesh.
+            prior_token = self.auth_tokens.get(agent_id)
+
             with self._port_lock:
                 port = self._allocate_port()
 
@@ -611,10 +617,17 @@ class DockerBackend(RuntimeBackend):
                     env_overrides=env_overrides,
                 )
             except Exception:
-                # Only pop OUR token. Under the lock no other start can have
-                # rotated it, so an identity check would be redundant here —
-                # but it stays cheap insurance if the lock is ever bypassed.
-                if self.auth_tokens.get(agent_id) == auth_token:
+                # Restore exactly the state we found, so a failed start is a
+                # no-op rather than a half-applied one. M16's rule — never
+                # leave a live token for an agent that did not come up — is
+                # about the token minted ABOVE, not about a pre-existing
+                # registration's. Keeping the old entry while dropping its
+                # token (what this used to do) left ``agents`` populated and
+                # ``auth_tokens`` empty: the exact drift this lock exists to
+                # prevent, reachable without any concurrency at all.
+                if prior_token is not None and self.agents.get(agent_id) is not None:
+                    self.auth_tokens[agent_id] = prior_token
+                elif self.auth_tokens.get(agent_id) == auth_token:
                     self.auth_tokens.pop(agent_id, None)
                 raise
 
@@ -1407,79 +1420,91 @@ class SandboxBackend(RuntimeBackend):
         with self._agent_locked(agent_id):
             sandbox_name = f"openlegion_{_docker_safe_name(agent_id)}"
             mcp_servers, mcp_generation = self._mcp_snapshot_for(agent_id)
-            ws = self._prepare_workspace(
-                agent_id,
-                role,
-                tools_dir,
-                system_prompt,
-                model,
-                mcp_servers=mcp_servers,
-                thinking=thinking,
-                env_overrides=env_overrides,
-            )
+            # Roll a failed start back to the state we found it in — see
+            # the DockerBackend counterpart. ``_prepare_workspace`` mints
+            # and publishes the auth token, and a failed ``sandbox create``
+            # below used to leave it behind with no matching entry.
+            prior_token = self.auth_tokens.get(agent_id)
+            try:
+                ws = self._prepare_workspace(
+                    agent_id,
+                    role,
+                    tools_dir,
+                    system_prompt,
+                    model,
+                    mcp_servers=mcp_servers,
+                    thinking=thinking,
+                    env_overrides=env_overrides,
+                )
 
-            # Create sandbox with the shell agent type and workspace
-            # First creation can be slow (microVM init), allow up to 120s
-            create_cmd = [
-                "docker",
-                "sandbox",
-                "create",
-                "--name",
-                sandbox_name,
-                "shell",
-                str(ws),
-            ]
-            result = subprocess.run(
-                create_cmd,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            if result.returncode != 0:
-                raise RuntimeError(f"Failed to create sandbox for '{agent_id}': {result.stderr.strip()}")
-            logger.info(f"Created sandbox '{sandbox_name}'")
+                # Create sandbox with the shell agent type and workspace
+                # First creation can be slow (microVM init), allow up to 120s
+                create_cmd = [
+                    "docker",
+                    "sandbox",
+                    "create",
+                    "--name",
+                    sandbox_name,
+                    "shell",
+                    str(ws),
+                ]
+                result = subprocess.run(
+                    create_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                if result.returncode != 0:
+                    raise RuntimeError(f"Failed to create sandbox for '{agent_id}': {result.stderr.strip()}")
+                logger.info(f"Created sandbox '{sandbox_name}'")
 
-            # Start the agent process inside the sandbox (detached)
-            env_file = ws / ".agent.env"
-            start_cmd = [
-                "docker",
-                "sandbox",
-                "exec",
-                "-d",
-                "--env-file",
-                str(env_file),
-                sandbox_name,
-                "--",
-                "python",
-                "-m",
-                "src.agent",
-            ]
-            result = subprocess.run(
-                start_cmd,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-            if result.returncode != 0:
-                logger.warning(f"Agent process start may have failed for '{agent_id}': {result.stderr.strip()}")
+                # Start the agent process inside the sandbox (detached)
+                env_file = ws / ".agent.env"
+                start_cmd = [
+                    "docker",
+                    "sandbox",
+                    "exec",
+                    "-d",
+                    "--env-file",
+                    str(env_file),
+                    sandbox_name,
+                    "--",
+                    "python",
+                    "-m",
+                    "src.agent",
+                ]
+                result = subprocess.run(
+                    start_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                )
+                if result.returncode != 0:
+                    logger.warning(f"Agent process start may have failed for '{agent_id}': {result.stderr.strip()}")
 
-            # No direct URL -- communication via sandbox exec transport
-            url = f"sandbox://{sandbox_name}"
-            self.agents[agent_id] = {
-                "sandbox_name": sandbox_name,
-                "workspace": str(ws),
-                "url": url,
-                "role": role,
-                "tools_dir": tools_dir,
-                "model": model,
-                "thinking": thinking,
-            }
-            # Stamp the catalog generation this sandbox's env was built
-            # from; pending-restart derives from it (race-free).
-            if self._connectors is not None:
-                self._connectors.record_agent_start(agent_id, mcp_generation)
-            logger.info(f"Started agent '{agent_id}' in sandbox '{sandbox_name}'")
-            return url
+                # No direct URL -- communication via sandbox exec transport
+                url = f"sandbox://{sandbox_name}"
+                self.agents[agent_id] = {
+                    "sandbox_name": sandbox_name,
+                    "workspace": str(ws),
+                    "url": url,
+                    "role": role,
+                    "tools_dir": tools_dir,
+                    "model": model,
+                    "thinking": thinking,
+                }
+                # Stamp the catalog generation this sandbox's env was built
+                # from; pending-restart derives from it (race-free).
+                if self._connectors is not None:
+                    self._connectors.record_agent_start(agent_id, mcp_generation)
+                logger.info(f"Started agent '{agent_id}' in sandbox '{sandbox_name}'")
+                return url
+            except Exception:
+                if prior_token is not None and self.agents.get(agent_id) is not None:
+                    self.auth_tokens[agent_id] = prior_token
+                else:
+                    self.auth_tokens.pop(agent_id, None)
+                raise
 
     def stop_agent(self, agent_id: str, *, remove_data: bool = False) -> None:
         # Same per-agent critical section as DockerBackend above — this runs

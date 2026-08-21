@@ -8,8 +8,11 @@ monitor restarts them from its own sweep, and the mesh's restart / archive /
 delete routes run on the mesh loop. Before ``_agent_locked`` the two
 registries could drift apart mid-flight.
 
-Every test here is written to FAIL if its guard is removed — see the
-docstrings for the exact interleaving each one pins down.
+Each test names the guard it pins down in its own docstring. Most fail with
+that guard removed; the ones that do not are labelled NEGATIVE CONTROL — they
+exist to catch the fix over-reaching (fleet-wide serialisation, self-deadlock)
+or to hold a #1298 behaviour in place, so passing without the lock is correct
+for them.
 """
 
 from __future__ import annotations
@@ -43,6 +46,21 @@ def _waiters(backend, agent_id: str) -> int:
     """
     entry = getattr(backend, "_agent_locks", {}).get(agent_id)
     return entry[1] if entry else 0
+
+
+def _make_sandbox_backend(tmp_path) -> SandboxBackend:
+    """A SandboxBackend with no Docker and no ``__init__`` — same ``__new__``
+    construction the rest of tests/test_runtime.py uses."""
+    backend = SandboxBackend.__new__(SandboxBackend)
+    backend.project_root = tmp_path / "project"
+    backend.project_root.mkdir(parents=True, exist_ok=True)
+    backend.mesh_host_port = 8420
+    backend.agents = {}
+    backend.auth_tokens = {}
+    backend.extra_env = {}
+    backend._workspace_root = tmp_path / ".openlegion" / "agents"
+    backend._workspace_root.mkdir(parents=True, exist_ok=True)
+    return backend
 
 
 def _docker_client(container=None) -> MagicMock:
@@ -100,6 +118,7 @@ class TestRegistriesStayCoherent:
         stop_parked = threading.Event()
         start_in_run = threading.Event()
         stop_done = threading.Event()
+        rendezvous: dict[str, bool] = {}
 
         def park_in_stop(*_a, **_k):
             stop_parked.set()
@@ -110,9 +129,9 @@ class TestRegistriesStayCoherent:
             # to wait for. Waiting on the token alone is NOT enough — the
             # start would race past the registration before this returns and
             # the compare-and-delete would then correctly decline to pop.
-            _wait_until(
+            rendezvous["met"] = _wait_until(
                 lambda: start_in_run.is_set() or _waiters(backend, "alpha") >= 2,
-                timeout=3.0,
+                timeout=10,
             )
 
         def park_in_run(*_a, **_k):
@@ -140,6 +159,10 @@ class TestRegistriesStayCoherent:
         stopper.join(10)
         starter.join(10)
         assert not stopper.is_alive() and not starter.is_alive()
+        assert rendezvous.get("met"), (
+            "the start neither reached its danger window nor queued on the lock — "
+            "the interleaving under test never happened"
+        )
         stopper.check()
         starter.check()
 
@@ -175,6 +198,13 @@ class TestRegistriesStayCoherent:
 
         stopper = _Thread(lambda: backend.stop_agent("beta"))
         stopper.start()
+        # Prove the contender REACHED the lock and queued on it. A bare
+        # ``join(0.5); assert is_alive()`` would also pass for a thread the
+        # scheduler simply never ran — which is exactly what an overloaded
+        # xdist worker looks like.
+        assert _wait_until(lambda: _waiters(backend, "beta") >= 2, timeout=10), (
+            "stop_agent never queued on the agent lock"
+        )
         stopper.join(0.5)
         assert stopper.is_alive(), "stop_agent ran while a start held the agent lock"
 
@@ -196,12 +226,21 @@ class TestRegistriesStayCoherent:
         backend = _make_docker_backend()
         registered = threading.Event()
         stop_returned = threading.Event()
+        rendezvous: dict[str, bool] = {}
 
         def fake_start(agent_id, role, tools_dir, **_kw):
             backend.agents[agent_id] = {"container": MagicMock(), "url": "u", "role": role}
             backend.auth_tokens[agent_id] = "tok"
             registered.set()
-            stop_returned.wait(2.0)
+            # Hand the stop its chance to land in the gap. Without the lock it
+            # runs to completion (``stop_returned``); with it, it queues on the
+            # lock spawn is holding (refcount 2). Either way the outcome is
+            # RECORDED, so a rendezvous that merely timed out cannot pass as a
+            # successful exclusion.
+            rendezvous["met"] = _wait_until(
+                lambda: stop_returned.is_set() or _waiters(backend, agent_id) >= 2,
+                timeout=10,
+            )
             return "u"
 
         backend.start_agent = fake_start
@@ -220,11 +259,12 @@ class TestRegistriesStayCoherent:
         spawner.join(10)
         stopper.join(10)
         assert not spawner.is_alive() and not stopper.is_alive()
+        assert rendezvous.get("met"), "the stop never got its chance to land in the gap"
         stopper.check()
         spawner.check()  # KeyError from the stamps lands here without the lock
 
     def test_spawn_agent_does_not_self_deadlock(self):
-        """``spawn_agent`` brackets ``start_agent``, which takes the same lock —
+        """NEGATIVE CONTROL. ``spawn_agent`` brackets ``start_agent``, which takes the same lock —
         it must be re-entrant."""
         backend = _make_docker_backend()
         backend.client = _docker_client()
@@ -236,6 +276,11 @@ class TestRegistriesStayCoherent:
         spawner.check()
         assert backend.agents["spawn-2"]["ephemeral"] is True
         assert backend.agents["spawn-2"]["ttl"] == 90
+        assert backend.agents["spawn-2"]["spawned_at"] > 0
+        # The mesh spawn endpoint used to re-stamp all of this (plus ``role``)
+        # onto the unlocked registry afterwards. It no longer does, so the
+        # backend has to be the single writer.
+        assert backend.agents["spawn-2"]["role"] == "r"
 
 
 # ── The lock is per agent, and it is not a leak ───────────────
@@ -243,7 +288,7 @@ class TestRegistriesStayCoherent:
 
 class TestLockScopeAndLifetime:
     def test_one_agents_start_does_not_block_another_agent(self):
-        """Serialising the whole fleet behind one lock would put every start
+        """NEGATIVE CONTROL. Serialising the whole fleet behind one lock would put every start
         in line behind the slowest container build."""
         backend = _make_docker_backend()
         in_run = threading.Event()
@@ -368,22 +413,10 @@ class TestListAgentsIsSnapshotted:
 
 
 class TestSandboxBackendLocking:
-    def _make_backend(self, tmp_path) -> SandboxBackend:
-        backend = SandboxBackend.__new__(SandboxBackend)
-        backend.project_root = tmp_path / "project"
-        backend.project_root.mkdir(parents=True, exist_ok=True)
-        backend.mesh_host_port = 8420
-        backend.agents = {}
-        backend.auth_tokens = {}
-        backend.extra_env = {}
-        backend._workspace_root = tmp_path / ".openlegion" / "agents"
-        backend._workspace_root.mkdir(parents=True, exist_ok=True)
-        return backend
-
     def test_start_excludes_a_concurrent_stop(self, tmp_path, monkeypatch):
         """``_prepare_workspace`` mints the auth token and sandbox creation can
         take 120s, so the same window exists here as in DockerBackend."""
-        backend = self._make_backend(tmp_path)
+        backend = _make_sandbox_backend(tmp_path)
         in_create = threading.Event()
         release = threading.Event()
 
@@ -403,6 +436,9 @@ class TestSandboxBackendLocking:
 
         stopper = _Thread(lambda: backend.stop_agent("s1"))
         stopper.start()
+        assert _wait_until(lambda: _waiters(backend, "s1") >= 2, timeout=10), (
+            "stop_agent never queued on the agent lock"
+        )
         stopper.join(0.5)
         assert stopper.is_alive(), "stop_agent ran while a start held the agent lock"
 
@@ -416,7 +452,7 @@ class TestSandboxBackendLocking:
         assert "s1" not in backend.auth_tokens
 
     def test_stop_excludes_a_concurrent_start(self, tmp_path, monkeypatch):
-        backend = self._make_backend(tmp_path)
+        backend = _make_sandbox_backend(tmp_path)
         backend.agents["s2"] = {"sandbox_name": "openlegion_s2", "workspace": None, "url": "u", "role": "r"}
         backend.auth_tokens["s2"] = "OLD-TOKEN"
         in_rm = threading.Event()
@@ -436,6 +472,9 @@ class TestSandboxBackendLocking:
 
         starter = _Thread(lambda: backend.start_agent(agent_id="s2", role="r", tools_dir=""))
         starter.start()
+        assert _wait_until(lambda: _waiters(backend, "s2") >= 2, timeout=10), (
+            "start_agent never queued on the agent lock"
+        )
         starter.join(0.5)
         assert starter.is_alive(), "start_agent ran while a stop held the agent lock"
 
@@ -447,6 +486,76 @@ class TestSandboxBackendLocking:
         starter.check()
         assert ("s2" in backend.agents) == ("s2" in backend.auth_tokens)
         assert backend.auth_tokens["s2"] != "OLD-TOKEN"
+
+
+# ── A failed start must leave the registries as it found them ─
+
+
+class TestFailedStartRollsBack:
+    """The lock serialises concurrent access, but it cannot fix an ordering
+    that is incoherent on its own. ``start_agent`` overwrites the auth token
+    BEFORE the container call; a restart of a LIVE agent that then fails used
+    to drop that token and keep the old entry — ``agents`` populated,
+    ``auth_tokens`` empty, with no concurrency involved at all."""
+
+    def test_failed_restart_keeps_the_live_agents_token(self):
+        backend = _make_docker_backend()
+        backend.agents["live"] = {"container": MagicMock(), "url": "http://live", "role": "r"}
+        backend.auth_tokens["live"] = "LIVE-TOKEN"
+        backend.client = _docker_client()
+        backend.client.containers.run.side_effect = RuntimeError("docker daemon said no")
+
+        with pytest.raises(RuntimeError):
+            backend.start_agent(agent_id="live", role="r", tools_dir="")
+
+        assert backend.agents["live"]["url"] == "http://live"
+        assert backend.auth_tokens["live"] == "LIVE-TOKEN", (
+            "the still-running previous container was stranded without a token"
+        )
+
+    def test_failed_first_start_still_leaves_no_token(self):
+        """M16: a start that never came up must not leave a live token behind.
+        The rollback above must not weaken that."""
+        backend = _make_docker_backend()
+        backend.client = _docker_client()
+        backend.client.containers.run.side_effect = RuntimeError("boom")
+
+        with pytest.raises(RuntimeError):
+            backend.start_agent(agent_id="never", role="r", tools_dir="")
+
+        assert "never" not in backend.auth_tokens
+        assert "never" not in backend.agents
+
+    def test_sandbox_failed_create_leaves_no_orphan_token(self, tmp_path, monkeypatch):
+        backend = _make_sandbox_backend(tmp_path)
+
+        def fake_run(cmd, *_a, **_k):
+            if "create" in cmd:
+                return MagicMock(returncode=1, stdout="", stderr="no sandbox support")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr("src.host.runtime.subprocess.run", fake_run)
+
+        with pytest.raises(RuntimeError):
+            backend.start_agent(agent_id="s3", role="r", tools_dir="")
+
+        assert "s3" not in backend.auth_tokens
+        assert "s3" not in backend.agents
+
+    def test_lock_is_released_after_a_failed_start(self):
+        """A raise must not leave the agent permanently locked."""
+        backend = _make_docker_backend()
+        backend.client = _docker_client()
+        backend.client.containers.run.side_effect = RuntimeError("boom")
+
+        with pytest.raises(RuntimeError):
+            backend.start_agent(agent_id="brief", role="r", tools_dir="")
+
+        assert backend._agent_locks == {}
+        # And the agent is still usable.
+        backend.client.containers.run.side_effect = None
+        backend.start_agent(agent_id="brief", role="r", tools_dir="")
+        assert "brief" in backend.agents
 
 
 # ── Regressions the lock must not undo (from the 1a work) ─────
