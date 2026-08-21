@@ -136,6 +136,17 @@ Rules:
 - **Never block a loop waiting on a lane turn.** `LaneManager.enqueue` returns `await task.future` — the completed turn, not the queue put. To hand work to an agent without waiting, pre-flight `lane_full(agent)` and fire-and-forget with `run_coroutine_threadsafe`, closing the coroutine if the submit raises.
 - **A cancelled caller must not wedge a lane.** Cancellation propagates into the per-item future the worker resolves; `set_result` on it raises `InvalidStateError` and `Future.exception()` *raises* `CancelledError` rather than returning it. Both escape `_worker` and kill the lane while it is still registered, so every later enqueue is accepted and never drained. Guard with `if not fut.done()` and read errors through `_future_error`.
 
+### The container registry is shared mutable state
+
+`RuntimeBackend` keeps two registries — `agents` and `auth_tokens` — and they are read and written from at least four places at once: hibernation stops agents on a worker thread (`asyncio.to_thread`), cold wake starts them in an executor, the health monitor restarts them from its sweep, and the mesh's restart / archive / delete routes run on the mesh loop.
+
+- **Every `start_agent` / `stop_agent` body runs under `self._agent_locked(agent_id)`.** It is per agent (unrelated agents never queue behind a slow container build), re-entrant (`spawn_agent` brackets `start_agent`), and refcounted so ephemeral ids don't leak a lock each. Lock order is `_agent_locked` → `_port_lock`; never the reverse.
+- **The two registries are published out of order and that is load-bearing.** `start_agent` mints the auth token *before* the container call and registers the entry *after* it — M16, so a failed start cannot leave a live token. That ordering is exactly why a stop must not interleave: a stop resuming in that window matches the *previous* entry in its compare-and-delete and pops the *new* start's token. The result is a container that looks healthy and 401s on every mesh call.
+- **Don't mirror the token into `self.agents` to compare against.** Those dicts get inspected in a lot of places; the lock is the mechanism, not an identity check on a secret.
+- **Anything that touches a second field after `start_agent` returns belongs inside the lock too** — `spawn_agent`'s `ephemeral`/`ttl`/`spawned_at` stamps raised `KeyError` from a concurrent stop before they were.
+- **Iterate the registry from a snapshot.** `list(self.agents.items())` — comprehending over the live dict raises "dictionary changed size during iteration" out of whichever mesh route asked for the roster.
+- Reads that only need one entry (`get_agent_url`, `health_check`, `get_logs`) take no lock by design: a health poll must not queue behind a 120s sandbox create. They one-read via `.get()` instead.
+
 ### Config & Environment
 
 - `.env` loaded via python-dotenv at CLI startup.

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import contextlib
 import json
 import os
 import platform
@@ -81,6 +82,75 @@ class RuntimeBackend(abc.ABC):
         self.agents: dict[str, dict] = {}
         self.auth_tokens: dict[str, str] = {}
         self.extra_env: dict[str, str] = {}
+        # Per-agent start/stop serialisation. See :meth:`_agent_locked`.
+        # ``[RLock, refcount]`` per agent id, guarded by ``_agent_locks_guard``.
+        self._agent_locks: dict[str, list] = {}
+        self._agent_locks_guard = threading.Lock()
+
+    @contextlib.contextmanager
+    def _agent_locked(self, agent_id: str):
+        """Serialise start/stop of ONE agent across threads.
+
+        ``start_agent`` and ``stop_agent`` both mutate two registries
+        (``agents`` and ``auth_tokens``) around a slow container call, and
+        they genuinely run concurrently: hibernation stops agents on a worker
+        thread (``asyncio.to_thread``), cold wake starts them in an executor,
+        the health monitor restarts them from its own sweep, and the mesh
+        routes for restart/archive/delete run on the mesh loop. Without a
+        shared lock the two registries drift apart:
+
+        * ``start_agent`` publishes the auth token BEFORE the container is
+          built and the entry registered. A stop landing in that window sees
+          the *old* entry, matches it in its compare-and-delete, and pops the
+          *new* agent's token — the new container comes up unable to
+          authenticate to the mesh while looking perfectly healthy.
+        * compare-and-delete is not atomic on its own: another thread can
+          register between the ``get()`` that matches and the ``pop()`` that
+          follows, so a fresh registration is dropped.
+
+        The lock is per agent id, so unrelated agents never wait on each
+        other, and re-entrant so a start that internally stops (or
+        :meth:`spawn_agent`, which brackets ``start_agent``) does not
+        self-deadlock. Held across the container call by design — the point is
+        that a stop cannot interleave with a start of the same agent.
+
+        Lock order: this lock is always taken BEFORE ``_port_lock``; nothing
+        acquires them the other way round.
+
+        The entry is reference-counted and dropped once nobody holds or waits
+        on it, so ephemeral agents (``spawn_agent`` mints a fresh id per call)
+        do not leak a lock object each.
+        """
+        guard = getattr(self, "_agent_locks_guard", None)
+        if guard is None:
+            # ``__init__`` was bypassed — many tests build backends via
+            # ``__new__`` (see the class-level ``_vault`` defaults above).
+            # ``setdefault`` on ``__dict__`` is a single C-level dict
+            # operation, so racing threads still agree on one guard.
+            guard = self.__dict__.setdefault("_agent_locks_guard", threading.Lock())
+        with guard:
+            locks = self.__dict__.setdefault("_agent_locks", {})
+            entry = locks.get(agent_id)
+            if entry is None:
+                entry = [threading.RLock(), 0]
+                locks[agent_id] = entry
+            entry[1] += 1
+            lock = entry[0]
+        acquired = False
+        try:
+            lock.acquire()
+            acquired = True
+            yield
+        finally:
+            # Decrement even if ``acquire`` itself was interrupted, or the
+            # entry would be pinned at a non-zero refcount forever and never
+            # reclaimed.
+            if acquired:
+                lock.release()
+            with guard:
+                entry[1] -= 1
+                if entry[1] <= 0 and locks.get(agent_id) is entry:
+                    locks.pop(agent_id, None)
 
     def set_credential_resolver(
         self,
@@ -331,18 +401,24 @@ class RuntimeBackend(abc.ABC):
         env_overrides: dict[str, str] | None = None,
     ) -> str:
         """Spawn an ephemeral agent with a TTL for auto-cleanup."""
-        url = self.start_agent(
-            agent_id=agent_id,
-            role=role,
-            tools_dir="",
-            system_prompt=system_prompt,
-            model=model,
-            thinking=thinking,
-            env_overrides=env_overrides,
-        )
-        self.agents[agent_id]["ephemeral"] = True
-        self.agents[agent_id]["ttl"] = ttl
-        self.agents[agent_id]["spawned_at"] = time.time()
+        # The TTL stamps are a second mutation of the registration, so they
+        # need the same lock the start took: a stop landing between the start
+        # and the stamps deregisters the agent and the ``self.agents[agent_id]``
+        # below raises KeyError out of spawn — leaving a running container that
+        # nothing owns. Re-entrant, so the nested ``start_agent`` is fine.
+        with self._agent_locked(agent_id):
+            url = self.start_agent(
+                agent_id=agent_id,
+                role=role,
+                tools_dir="",
+                system_prompt=system_prompt,
+                model=model,
+                thinking=thinking,
+                env_overrides=env_overrides,
+            )
+            self.agents[agent_id]["ephemeral"] = True
+            self.agents[agent_id]["ttl"] = ttl
+            self.agents[agent_id]["spawned_at"] = time.time()
         return url
 
     def get_agent_url(self, agent_id: str) -> str | None:
@@ -350,7 +426,12 @@ class RuntimeBackend(abc.ABC):
         return info["url"] if info else None
 
     def list_agents(self) -> dict:
-        return {aid: {"url": info["url"], "role": info["role"]} for aid, info in self.agents.items()}
+        # Snapshot before comprehending: ``stop_agent`` now runs on worker
+        # threads (hibernation's ``asyncio.to_thread``), and a pop landing
+        # mid-iteration raises "dictionary changed size during iteration" out
+        # of whatever mesh route asked for the roster. ``list()`` over a dict
+        # is a single C-level copy, so it cannot itself be interleaved.
+        return {aid: {"url": info["url"], "role": info["role"]} for aid, info in list(self.agents.items())}
 
     def stop_all(self) -> None:
         for agent_id in list(self.agents.keys()):
@@ -495,37 +576,47 @@ class DockerBackend(RuntimeBackend):
         thinking: str = "",
         env_overrides: dict[str, str] | None = None,
     ) -> str:
-        with self._port_lock:
-            port = self._allocate_port()
+        # Whole start is one critical section per agent: the token below is
+        # published well before the registration at the end of
+        # ``_start_agent_container``, and a concurrent ``stop_agent`` reaching
+        # its compare-and-delete inside that window pops THIS start's token
+        # while matching the previous entry. See :meth:`_agent_locked`.
+        with self._agent_locked(agent_id):
+            with self._port_lock:
+                port = self._allocate_port()
 
-        # Generate per-agent auth token for mesh request verification.
-        # Task 4 invariant: every agent (including the operator) gets a
-        # distinct token keyed by ``agent_id``; no fleet-shared token
-        # exists. The operator's token is what ``/mesh/register`` checks
-        # to allow the cryptographic ``agent_id="operator"`` claim.
-        auth_token = secrets.token_urlsafe(32)
-        self.auth_tokens[agent_id] = auth_token
+            # Generate per-agent auth token for mesh request verification.
+            # Task 4 invariant: every agent (including the operator) gets a
+            # distinct token keyed by ``agent_id``; no fleet-shared token
+            # exists. The operator's token is what ``/mesh/register`` checks
+            # to allow the cryptographic ``agent_id="operator"`` claim.
+            auth_token = secrets.token_urlsafe(32)
+            self.auth_tokens[agent_id] = auth_token
 
-        # M16: the token is registered BEFORE ``containers.run``. If start
-        # fails anywhere below, a still-valid mesh auth token would leak for
-        # an agent that never came up. Pop it on any failure and re-raise so
-        # the caller's error handling is unchanged. Only registry insertion
-        # on the success path keeps the token.
-        try:
-            return self._start_agent_container(
-                agent_id=agent_id,
-                role=role,
-                tools_dir=tools_dir,
-                port=port,
-                auth_token=auth_token,
-                system_prompt=system_prompt,
-                model=model,
-                thinking=thinking,
-                env_overrides=env_overrides,
-            )
-        except Exception:
-            self.auth_tokens.pop(agent_id, None)
-            raise
+            # M16: the token is registered BEFORE ``containers.run``. If start
+            # fails anywhere below, a still-valid mesh auth token would leak for
+            # an agent that never came up. Pop it on any failure and re-raise so
+            # the caller's error handling is unchanged. Only registry insertion
+            # on the success path keeps the token.
+            try:
+                return self._start_agent_container(
+                    agent_id=agent_id,
+                    role=role,
+                    tools_dir=tools_dir,
+                    port=port,
+                    auth_token=auth_token,
+                    system_prompt=system_prompt,
+                    model=model,
+                    thinking=thinking,
+                    env_overrides=env_overrides,
+                )
+            except Exception:
+                # Only pop OUR token. Under the lock no other start can have
+                # rotated it, so an identity check would be redundant here —
+                # but it stays cheap insurance if the lock is ever bypassed.
+                if self.auth_tokens.get(agent_id) == auth_token:
+                    self.auth_tokens.pop(agent_id, None)
+                raise
 
     def _start_agent_container(
         self,
@@ -1001,54 +1092,67 @@ class DockerBackend(RuntimeBackend):
 
     def stop_agent(self, agent_id: str, *, remove_data: bool = False) -> None:
         safe_name = _docker_safe_name(agent_id)
-        # Read the registration ONCE and hold the reference. This runs off
-        # the event loop (hibernation stops agents via ``asyncio.to_thread``)
-        # and concurrently with cold wake, health restarts, dashboard
-        # restart/archive/delete and shutdown's ``stop_all`` — none of which
-        # share a per-agent lock. Re-reading ``self.agents[agent_id]`` between
-        # the stop and the remove let a wake that recreated the agent in that
-        # window have its BRAND NEW container removed instead.
-        entry = self.agents.get(agent_id)
-        if entry is not None:
-            container = entry.get("container")
-            try:
-                if container is not None:
-                    container.stop(timeout=10)
-                    container.remove()
-                logger.info(f"Stopped agent '{agent_id}'")
-            except Exception as e:
-                logger.warning(f"Error stopping agent '{agent_id}': {e}")
-            # Compare-and-delete, for the same reason: only drop the
-            # registration if it is still the one we just stopped, so a
-            # concurrent wake's registration and auth token survive. ``pop``
-            # rather than ``del`` also makes a double stop idempotent — the
-            # bare ``del`` sat OUTSIDE the try above, so a second stop raised
-            # KeyError out of this method and aborted ``stop_all`` mid-way
-            # through shutdown.
-            if self.agents.get(agent_id) is entry:
-                self.agents.pop(agent_id, None)
-                if hasattr(self, "auth_tokens"):
-                    self.auth_tokens.pop(agent_id, None)
-        # Volume removal must be INDEPENDENT of live registration: the only
-        # supported delete path is archive→delete, and archive already
-        # deregistered the agent (removed it from self.agents), so gating the
-        # wipe on ``agent_id in self.agents`` would silently leave the /data
-        # volume behind on every real delete (H12). The container — if any —
-        # was already stopped/removed above (or during archive), so the volume
-        # is free to remove by name.
-        if remove_data:
-            try:
-                vol = self.client.volumes.get(f"openlegion_data_{safe_name}")
-                vol.remove(force=True)
-                logger.info(f"Removed data volume for agent '{agent_id}'")
-            except Exception as e:
-                logger.debug(f"Volume cleanup for '{agent_id}': {e}")
+        # One critical section per agent. This runs off the event loop
+        # (hibernation stops agents via ``asyncio.to_thread``) and
+        # concurrently with cold wake, health restarts, dashboard
+        # restart/archive/delete and shutdown's ``stop_all``. The lock is what
+        # makes the read/stop/deregister below one indivisible step against a
+        # concurrent start of the SAME agent; the one-read and
+        # compare-and-delete below remain as the second line of defence for
+        # any path that reaches here without it.
+        with self._agent_locked(agent_id):
+            entry = self.agents.get(agent_id)
+            if entry is not None:
+                container = entry.get("container")
+                try:
+                    if container is not None:
+                        container.stop(timeout=10)
+                        container.remove()
+                    logger.info(f"Stopped agent '{agent_id}'")
+                except Exception as e:
+                    logger.warning(f"Error stopping agent '{agent_id}': {e}")
+                # Only drop the registration if it is still the one we just
+                # stopped, so a concurrent wake's registration survives.
+                # ``pop`` rather than ``del`` also makes a double stop
+                # idempotent — the bare ``del`` used to sit OUTSIDE the try
+                # above, so a second stop raised KeyError out of this method
+                # and aborted ``stop_all`` mid-way through shutdown.
+                if self.agents.get(agent_id) is entry:
+                    self.agents.pop(agent_id, None)
+                    if hasattr(self, "auth_tokens"):
+                        # Safe to pop unconditionally ONLY because of the lock.
+                        # ``start_agent`` publishes the token before the entry,
+                        # so without it a stop could match the previous entry
+                        # here and revoke a newer start's token — leaving a
+                        # healthy-looking container that cannot authenticate.
+                        # The token is deliberately not mirrored into ``entry``
+                        # to compare against: a secret in ``self.agents`` would
+                        # ride along wherever those dicts are inspected.
+                        self.auth_tokens.pop(agent_id, None)
+            # Volume removal must be INDEPENDENT of live registration: the only
+            # supported delete path is archive→delete, and archive already
+            # deregistered the agent (removed it from self.agents), so gating the
+            # wipe on ``agent_id in self.agents`` would silently leave the /data
+            # volume behind on every real delete (H12). The container — if any —
+            # was already stopped/removed above (or during archive), so the volume
+            # is free to remove by name.
+            if remove_data:
+                try:
+                    vol = self.client.volumes.get(f"openlegion_data_{safe_name}")
+                    vol.remove(force=True)
+                    logger.info(f"Removed data volume for agent '{agent_id}'")
+                except Exception as e:
+                    logger.debug(f"Volume cleanup for '{agent_id}': {e}")
 
     def health_check(self, agent_id: str) -> bool:
-        if agent_id not in self.agents:
+        # One read, no lock: a health poll must never queue behind a start.
+        # The membership test and the lookup used to be separate reads, so a
+        # concurrent deregistration landed between them.
+        entry = self.agents.get(agent_id)
+        if entry is None:
             return False
         try:
-            container = self.agents[agent_id]["container"]
+            container = entry["container"]
             container.reload()
             return container.status == "running"
         except Exception as e:
@@ -1056,10 +1160,11 @@ class DockerBackend(RuntimeBackend):
             return False
 
     def get_logs(self, agent_id: str, tail: int = 40) -> str:
-        if agent_id not in self.agents:
+        entry = self.agents.get(agent_id)
+        if entry is None:
             return ""
         try:
-            container = self.agents[agent_id]["container"]
+            container = entry["container"]
             container.reload()
             return container.logs(tail=tail).decode("utf-8", errors="replace")
         except Exception as e:
@@ -1295,116 +1400,126 @@ class SandboxBackend(RuntimeBackend):
         thinking: str = "",
         env_overrides: dict[str, str] | None = None,
     ) -> str:
-        sandbox_name = f"openlegion_{_docker_safe_name(agent_id)}"
-        mcp_servers, mcp_generation = self._mcp_snapshot_for(agent_id)
-        ws = self._prepare_workspace(
-            agent_id,
-            role,
-            tools_dir,
-            system_prompt,
-            model,
-            mcp_servers=mcp_servers,
-            thinking=thinking,
-            env_overrides=env_overrides,
-        )
+        # One critical section per agent, same as DockerBackend: the auth
+        # token is minted inside ``_prepare_workspace``, long before the
+        # registration at the bottom, and sandbox creation in between can
+        # take up to 120s. See :meth:`_agent_locked`.
+        with self._agent_locked(agent_id):
+            sandbox_name = f"openlegion_{_docker_safe_name(agent_id)}"
+            mcp_servers, mcp_generation = self._mcp_snapshot_for(agent_id)
+            ws = self._prepare_workspace(
+                agent_id,
+                role,
+                tools_dir,
+                system_prompt,
+                model,
+                mcp_servers=mcp_servers,
+                thinking=thinking,
+                env_overrides=env_overrides,
+            )
 
-        # Create sandbox with the shell agent type and workspace
-        # First creation can be slow (microVM init), allow up to 120s
-        create_cmd = [
-            "docker",
-            "sandbox",
-            "create",
-            "--name",
-            sandbox_name,
-            "shell",
-            str(ws),
-        ]
-        result = subprocess.run(
-            create_cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"Failed to create sandbox for '{agent_id}': {result.stderr.strip()}")
-        logger.info(f"Created sandbox '{sandbox_name}'")
+            # Create sandbox with the shell agent type and workspace
+            # First creation can be slow (microVM init), allow up to 120s
+            create_cmd = [
+                "docker",
+                "sandbox",
+                "create",
+                "--name",
+                sandbox_name,
+                "shell",
+                str(ws),
+            ]
+            result = subprocess.run(
+                create_cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Failed to create sandbox for '{agent_id}': {result.stderr.strip()}")
+            logger.info(f"Created sandbox '{sandbox_name}'")
 
-        # Start the agent process inside the sandbox (detached)
-        env_file = ws / ".agent.env"
-        start_cmd = [
-            "docker",
-            "sandbox",
-            "exec",
-            "-d",
-            "--env-file",
-            str(env_file),
-            sandbox_name,
-            "--",
-            "python",
-            "-m",
-            "src.agent",
-        ]
-        result = subprocess.run(
-            start_cmd,
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        if result.returncode != 0:
-            logger.warning(f"Agent process start may have failed for '{agent_id}': {result.stderr.strip()}")
+            # Start the agent process inside the sandbox (detached)
+            env_file = ws / ".agent.env"
+            start_cmd = [
+                "docker",
+                "sandbox",
+                "exec",
+                "-d",
+                "--env-file",
+                str(env_file),
+                sandbox_name,
+                "--",
+                "python",
+                "-m",
+                "src.agent",
+            ]
+            result = subprocess.run(
+                start_cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            if result.returncode != 0:
+                logger.warning(f"Agent process start may have failed for '{agent_id}': {result.stderr.strip()}")
 
-        # No direct URL -- communication via sandbox exec transport
-        url = f"sandbox://{sandbox_name}"
-        self.agents[agent_id] = {
-            "sandbox_name": sandbox_name,
-            "workspace": str(ws),
-            "url": url,
-            "role": role,
-            "tools_dir": tools_dir,
-            "model": model,
-            "thinking": thinking,
-        }
-        # Stamp the catalog generation this sandbox's env was built
-        # from; pending-restart derives from it (race-free).
-        if self._connectors is not None:
-            self._connectors.record_agent_start(agent_id, mcp_generation)
-        logger.info(f"Started agent '{agent_id}' in sandbox '{sandbox_name}'")
-        return url
+            # No direct URL -- communication via sandbox exec transport
+            url = f"sandbox://{sandbox_name}"
+            self.agents[agent_id] = {
+                "sandbox_name": sandbox_name,
+                "workspace": str(ws),
+                "url": url,
+                "role": role,
+                "tools_dir": tools_dir,
+                "model": model,
+                "thinking": thinking,
+            }
+            # Stamp the catalog generation this sandbox's env was built
+            # from; pending-restart derives from it (race-free).
+            if self._connectors is not None:
+                self._connectors.record_agent_start(agent_id, mcp_generation)
+            logger.info(f"Started agent '{agent_id}' in sandbox '{sandbox_name}'")
+            return url
 
     def stop_agent(self, agent_id: str, *, remove_data: bool = False) -> None:
-        # Same one-read/compare-and-delete shape as DockerBackend below —
-        # this runs off the event loop too, and a bare ``del`` on a
-        # concurrently-removed entry raised KeyError out of this method and
-        # aborted ``stop_all`` partway through shutdown.
-        entry = self.agents.get(agent_id)
-        if entry is None:
-            return
-        sandbox_name = entry["sandbox_name"]
-        workspace = entry.get("workspace")
-        try:
-            subprocess.run(
-                ["docker", "sandbox", "rm", "-f", sandbox_name],
-                capture_output=True,
-                timeout=15,
-            )
-            logger.info(f"Removed sandbox '{sandbox_name}'")
-        except Exception as e:
-            logger.warning(f"Error removing sandbox '{sandbox_name}': {e}")
-        if remove_data and workspace:
+        # Same per-agent critical section as DockerBackend above — this runs
+        # off the event loop too, and the registries it mutates are shared
+        # with a concurrent start. The one-read and compare-and-delete inside
+        # stay as the second line of defence.
+        with self._agent_locked(agent_id):
+            entry = self.agents.get(agent_id)
+            if entry is None:
+                return
+            sandbox_name = entry["sandbox_name"]
+            workspace = entry.get("workspace")
             try:
-                shutil.rmtree(workspace)
-                logger.info(f"Removed workspace for agent '{agent_id}'")
+                subprocess.run(
+                    ["docker", "sandbox", "rm", "-f", sandbox_name],
+                    capture_output=True,
+                    timeout=15,
+                )
+                logger.info(f"Removed sandbox '{sandbox_name}'")
             except Exception as e:
-                logger.debug(f"Workspace cleanup for '{agent_id}': {e}")
-        if self.agents.get(agent_id) is entry:
-            self.agents.pop(agent_id, None)
-            if hasattr(self, "auth_tokens"):
-                self.auth_tokens.pop(agent_id, None)
+                logger.warning(f"Error removing sandbox '{sandbox_name}': {e}")
+            if remove_data and workspace:
+                try:
+                    shutil.rmtree(workspace)
+                    logger.info(f"Removed workspace for agent '{agent_id}'")
+                except Exception as e:
+                    logger.debug(f"Workspace cleanup for '{agent_id}': {e}")
+            if self.agents.get(agent_id) is entry:
+                self.agents.pop(agent_id, None)
+                if hasattr(self, "auth_tokens"):
+                    # Unconditional, and safe only under the lock — see the
+                    # DockerBackend counterpart. ``_prepare_workspace``
+                    # publishes the token long before the registration below.
+                    self.auth_tokens.pop(agent_id, None)
 
     def health_check(self, agent_id: str) -> bool:
-        if agent_id not in self.agents:
+        entry = self.agents.get(agent_id)
+        if entry is None:
             return False
-        sandbox_name = self.agents[agent_id]["sandbox_name"]
+        sandbox_name = entry["sandbox_name"]
         try:
             result = subprocess.run(
                 ["docker", "sandbox", "inspect", sandbox_name],
@@ -1422,9 +1537,10 @@ class SandboxBackend(RuntimeBackend):
             return False
 
     def get_logs(self, agent_id: str, tail: int = 40) -> str:
-        if agent_id not in self.agents:
+        entry = self.agents.get(agent_id)
+        if entry is None:
             return ""
-        sandbox_name = self.agents[agent_id]["sandbox_name"]
+        sandbox_name = entry["sandbox_name"]
         try:
             result = subprocess.run(
                 [
