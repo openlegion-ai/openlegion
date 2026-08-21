@@ -117,6 +117,22 @@ Engine is standalone — NO imports, calls, or shared code with app/ or provisio
 - Async by default (FastAPI + asyncio); wrap blocking calls in `run_in_executor`.
 - All state is SQLite with WAL mode — blackboard, memory, costs, cron, traces. No Redis, no external databases.
 
+### Event-loop discipline — two loops, and only two
+
+The host runs exactly two event loops. Creating a third is a bug.
+
+| Loop | Thread | Owns |
+|---|---|---|
+| **mesh** | uvicorn (`_start_mesh_server`) | every HTTP route, and every periodic sweep — cron, health, hibernation, chain watcher, browser-metrics poll, upload GC |
+| **dispatch** | `_setup_dispatch` | the lane manager, and nothing else: its queues, locks and per-agent worker tasks |
+
+Rules:
+
+- **Never call `asyncio.new_event_loop()` in the host runtime** outside `_setup_dispatch`. A sweep that needs a loop runs on the mesh loop via `RuntimeContext._start_sweep`. `tests/test_loop_affinity.py` parses `cli/runtime.py` and fails the build if a third loop appears. (Two loops outside the host are fine and not covered by this rule: each async channel SDK gets its own in `cli/channels.py`, and one-shot CLI commands like `openlegion wallet` run a transient loop in their own process.)
+- **Cross-loop contact goes through `run_coroutine_threadsafe`** — never a bare `await` on an object that belongs to the other loop. `LaneManager` enforces this for you: `bind_loop()` names its owner at bootstrap and every public coroutine hops there automatically, so mesh and dashboard routes can `await lane_manager.enqueue(...)` directly and it still lands on the dispatch loop.
+- **Never make a lock or queue loop-aware to work around this.** `asyncio.Lock`/`Queue`/`Event` bind to the first loop that awaits them, and the failure is silent: a cross-loop `put` is accepted, the worker parked on the owning loop is never woken, and the caller's future never resolves — no exception on either side. A lock that re-creates itself per loop doesn't fix that, it just hands each loop its own lock so both enter the critical section (`health.py` did exactly this).
+- Channel loops live on the channel object as `ch._channel_loop`, and every use hops to it — including teardown. WhatsApp is webhook-driven and legitimately has none, so it is the one channel that may be awaited directly.
+
 ### Config & Environment
 
 - `.env` loaded via python-dotenv at CLI startup.

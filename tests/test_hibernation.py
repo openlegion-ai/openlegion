@@ -1188,6 +1188,11 @@ def _capture_dispatch_fn(monkeypatch, *, event_bus=None):
     captured: dict = {}
 
     class _FakeLaneManager:
+        def bind_loop(self, loop):
+            # The real LaneManager records its owning loop here; the
+            # production bootstrap calls it, so the double must too.
+            self._owner_loop = loop
+
         def __init__(self, *args, dispatch_fn=None, **kwargs):
             captured["dispatch_fn"] = dispatch_fn
             self._per_agent_timeouts: dict[str, int] = {}

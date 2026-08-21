@@ -342,7 +342,18 @@ class RuntimeContext:
         # clears the SAME per-agent stores the mesh + dashboard delete paths do.
         self.cleanup_agent = None
         self.agent_urls: dict[str, str] = {}
+        # The two host loops (see CLAUDE.md "Event-loop discipline").
+        # ``_dispatch_loop`` owns the lane manager — its queues, locks and
+        # per-agent worker tasks — and nothing else. ``_mesh_loop`` is
+        # uvicorn's loop: it serves every HTTP route AND runs every periodic
+        # sweep (cron, health, hibernation, chain watcher), because those
+        # sweeps drive mesh-app closures and read mesh-app stores. Anything
+        # crossing between them goes through ``run_coroutine_threadsafe``.
         self._dispatch_loop = None
+        self._mesh_loop: "asyncio.AbstractEventLoop | None" = None
+        # Strong refs to the sweeps scheduled onto the mesh loop, so the
+        # concurrent futures aren't garbage-collected mid-flight.
+        self._mesh_sweeps: list = []
         # Post-completion verification wakes (success path) — sliding
         # window so a burst of completing chains can't turn the operator
         # interrupt-driven. Suppressed chains are still rated on the
@@ -548,12 +559,18 @@ class RuntimeContext:
             self._dispatch_loop,
         )
         try:
-            running_loop = asyncio.get_running_loop()
+            asyncio.get_running_loop()
         except RuntimeError:
-            running_loop = None
-        if running_loop is not None:
-            return await running_loop.run_in_executor(None, future.result)
-        return future.result()
+            # No loop under us (a plain thread) — blocking here is the point.
+            return future.result()
+        # On a loop: bridge the concurrent future without occupying a thread.
+        # This used to be ``run_in_executor(None, future.result)``, which
+        # parks a default-executor thread for the ENTIRE agent turn (up to
+        # the lane timeout). That pool is per-loop and shared with every
+        # other ``run_in_executor`` caller on it — and the cron sweep, the
+        # heaviest user of this path, now runs on the mesh loop alongside
+        # every HTTP route. ``wrap_future`` costs a callback, not a thread.
+        return await asyncio.wrap_future(future)
 
     @property
     def agents(self) -> dict[str, str]:
@@ -1462,6 +1479,17 @@ class RuntimeContext:
 
         _dispatch_thread = threading.Thread(target=_run_dispatch_loop, daemon=True)
         _dispatch_thread.start()
+        # Declare the lane's owning loop BEFORE any lane can be created.
+        # Without this, whichever loop reaches an agent first creates that
+        # agent's queue/lock/worker, and every later call from the other
+        # loop hands the item to a queue whose worker is parked on a loop
+        # that never gets woken — the enqueue hangs forever with no
+        # exception raised anywhere. Mesh and dashboard routes reach the
+        # lane directly (they run on the mesh loop); binding here makes
+        # those calls hop instead of corrupting the lane.
+        bind_loop = getattr(self.lane_manager, "bind_loop", None)
+        if callable(bind_loop):
+            bind_loop(self._dispatch_loop)
 
     async def _handle_notify(self, agent_name: str, message: str) -> None:
         """Push an agent notification to REPL and all active channels."""
@@ -1524,6 +1552,19 @@ class RuntimeContext:
                 )
                 await asyncio.wrap_future(concurrent_fut)
             else:
+                # WhatsApp is webhook-driven and legitimately has no loop of
+                # its own. Any OTHER channel reaching here has lost the loop
+                # its SDK client was built on (thread never started, or it
+                # died), and sending on this loop reuses that client
+                # cross-loop. Still attempt it — a best-effort delivery beats
+                # a silent drop — but say so, because it used to be silent.
+                if channel_type != "whatsapp":
+                    logger.warning(
+                        "channel %s has no running loop — sending %s's "
+                        "notification on the caller's loop (cross-loop "
+                        "client reuse); the channel thread may have died",
+                        channel_type, user,
+                    )
                 await ch.send_to_user(user, labelled)
             return True
         except Exception as e:
@@ -2161,6 +2202,15 @@ class RuntimeContext:
         # clears the agent's vault/blackboard/costs/traces/wallet + reloads
         # permissions instead of leaking them for a same-name recreate.
         self.cleanup_agent = getattr(app, "cleanup_agent", None)
+
+        # Capture uvicorn's loop so ``_start_background`` can schedule the
+        # periodic sweeps ONTO it instead of standing up a private loop per
+        # sweep. ``_wait_for_readiness`` polls an HTTP route before
+        # ``_start_background`` runs, and a route only answers after startup
+        # handlers complete — so ``_mesh_loop`` is always set by then.
+        @app.on_event("startup")
+        async def _capture_mesh_loop() -> None:
+            self._mesh_loop = asyncio.get_running_loop()
 
         server_config = uvicorn.Config(app, host="0.0.0.0", port=mesh_port, log_level="warning")
         self._server = uvicorn.Server(server_config)
@@ -2856,42 +2906,62 @@ class RuntimeContext:
             except Exception as e:
                 logger.warning("team-lead backfill for team %s failed: %s", name, e)
 
+    def _start_sweep(self, name: str, coro_fn) -> None:
+        """Run one periodic sweep on the mesh loop.
+
+        Replaces the private ``new_event_loop()`` + daemon thread each sweep
+        used to get. Those extra loops were the root of the host's loop-
+        affinity bugs: a sweep constructed with the mesh's objects but run
+        on its own loop touches ``asyncio`` primitives bound elsewhere, and
+        the coping hacks that grew around it (a lock that silently rebound
+        per loop, first-toucher-wins lane creation) hid the breakage rather
+        than fixing it.
+
+        Failures are loud: a sweep that dies takes its subsystem with it, so
+        the exception is logged rather than swallowed into a dead thread.
+        """
+        if coro_fn is None:
+            logger.error("%s sweep has no scheduler wired — not started", name)
+            return
+        if self._mesh_loop is None or not self._mesh_loop.is_running():
+            logger.error(
+                "mesh loop unavailable — %s sweep not started; "
+                "its subsystem will not run this session", name,
+            )
+            return
+
+        async def _run() -> None:
+            try:
+                await coro_fn()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("%s sweep exited on an unhandled error", name)
+
+        fut = asyncio.run_coroutine_threadsafe(_run(), self._mesh_loop)
+        self._mesh_sweeps.append(fut)
+
     def _start_background(self) -> None:
         self._reconcile_heartbeats()
         self._reconcile_work_summary_jobs()
         self._backfill_team_leads()
         self._reconcile_standup_jobs()
 
-        # Start cron
-        def run_cron():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(self.cron_scheduler.start())
-
-        cron_thread = threading.Thread(target=run_cron, daemon=True)
-        cron_thread.start()
-
-        # Start health monitor
-        def run_health():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(self.health_monitor.start())
-
-        health_thread = threading.Thread(target=run_health, daemon=True)
-        health_thread.start()
-
-        # Start the idle-agent hibernation sweep (plan §8 #24) — a no-op
-        # loop when ``limits.hibernate_idle_minutes`` is unset/0 (the
-        # default), so this thread runs harmlessly even when hibernation
-        # is disabled fleet-wide.
+        # Every periodic sweep runs on the MESH loop — never on a private
+        # loop of its own. Each of these drives mesh-app closures and reads
+        # mesh-app stores (the hibernation sweeper is built inside
+        # ``create_mesh_app`` and handed the mesh's own lane_manager /
+        # tasks_store / ask_broker), so a private loop put the object and
+        # its callers on different loops. Anything they push at an agent
+        # still hops to the dispatch loop, same as every other caller.
+        self._start_sweep("cron", getattr(self.cron_scheduler, "start", None))
+        self._start_sweep("health", getattr(self.health_monitor, "start", None))
+        # The idle-agent hibernation sweep (plan §8 #24) is a no-op loop
+        # when ``limits.hibernate_idle_minutes`` is unset/0 (the default),
+        # so this runs harmlessly even when hibernation is disabled
+        # fleet-wide.
         if self.hibernation_sweeper is not None:
-
-            def run_hibernation_sweep():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(self.hibernation_sweeper.start())
-
-            threading.Thread(target=run_hibernation_sweep, daemon=True).start()
+            self._start_sweep("hibernation", self.hibernation_sweeper.start)
 
         # Start chain watcher — delivers a guaranteed terminal outcome for
         # user-originated task chains so the operator can hand off and
@@ -2979,12 +3049,7 @@ class RuntimeContext:
                 ladder=ladder,
             )
 
-            def run_chain_watcher():
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(self.chain_watcher.start())
-
-            threading.Thread(target=run_chain_watcher, daemon=True).start()
+            self._start_sweep("chain_watcher", self.chain_watcher.start)
 
     def _init_channel_manager(self) -> None:
         """Create the ChannelManager with callbacks (but don't start channels yet)."""
