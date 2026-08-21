@@ -66,8 +66,8 @@ from src.shared.paths import resolve_under_root
 from src.shared.redaction import redact_text_with_urls, redact_url
 from src.shared.types import (
     AGENT_ID_RE_PATTERN,
+    ALL_RESERVED_AGENT_IDS,
     HARD_EDIT_FIELDS,
-    RESERVED_AGENT_IDS,
     SOFT_EDIT_FIELDS,
     AgentMessage,
     APIProxyRequest,
@@ -1308,7 +1308,7 @@ def create_mesh_app(
     def _validate_agent_id(agent_id: str) -> str:
         if not agent_id or not _AGENT_ID_RE.match(agent_id):
             raise HTTPException(400, "Invalid agent_id: must be 1-64 alphanumeric/hyphen/underscore chars")
-        if agent_id in RESERVED_AGENT_IDS:
+        if agent_id in ALL_RESERVED_AGENT_IDS:
             raise HTTPException(400, f"Agent ID '{agent_id}' is reserved for internal use")
         return agent_id
 

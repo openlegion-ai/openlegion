@@ -690,24 +690,40 @@ class TestFailedStartRollsBack:
 
 
 class TestBrowserNameCollision:
-    def test_browser_is_a_reserved_agent_id(self):
-        """Agent containers and the shared browser service share one Docker
-        name namespace. An agent with id ``browser`` is named
-        ``openlegion_browser`` — exactly the browser service's container — so
-        the stale reap on every start of that agent would force-remove the
-        browser service, and the failed-start cleanup would too."""
-        from src.cli.config import _validate_agent_name
-        from src.shared.types import RESERVED_AGENT_IDS
+    def test_agent_and_browser_service_container_names_collide(self):
+        """Pins WHY ``browser`` is reserved, against the production constant,
+        so a rename of the browser service surfaces here rather than leaving
+        the reservation as folklore."""
+        assert f"openlegion_{_docker_safe_name('browser')}" == DockerBackend.BROWSER_CONTAINER_NAME
 
-        assert "browser" in RESERVED_AGENT_IDS
+    def test_browser_cannot_be_created_as_an_agent(self):
+        from src.cli.config import _validate_agent_name
+
         with pytest.raises(ValueError, match="reserved"):
             _validate_agent_name("browser")
 
-    def test_agent_and_browser_service_container_names_would_collide(self):
-        """Pins WHY it is reserved, so the reservation is not dropped as
-        arbitrary. If the browser service is ever renamed, this fails and the
-        reservation can be revisited."""
-        assert f"openlegion_{_docker_safe_name('browser')}" == "openlegion_browser"
+    def test_browser_is_still_allowed_as_a_TEAM_name(self):
+        """Teams create no containers, so the collision does not apply to
+        them. Folding this into the shared RESERVED_AGENT_IDS would reject
+        legitimate existing teams — and ``delete_team`` validates AFTER it
+        commits, so it would break their deletion too."""
+        from src.host.teams import validate_team_id
+
+        assert validate_team_id("browser") == "browser"
+
+    def test_a_legacy_browser_agent_cannot_reach_the_reap(self):
+        """Reservation is creation-time only. An agent created before it
+        still cold-wakes and health-restarts, so the backend refuses the id
+        outright rather than letting the stale reap remove the shared browser
+        service."""
+        backend = _make_docker_backend()
+        backend.client = _docker_client()
+
+        with pytest.raises(ValueError, match="browser service"):
+            backend.start_agent(agent_id="browser", role="r", tools_dir="")
+
+        backend.client.containers.get.assert_not_called()
+        backend.client.containers.run.assert_not_called()
 
 
 # ── Regressions the lock must not undo (from the 1a work) ─────

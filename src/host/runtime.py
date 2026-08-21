@@ -499,6 +499,7 @@ class DockerBackend(RuntimeBackend):
 
     BASE_IMAGE = "openlegion-agent:latest"
     BROWSER_IMAGE = "openlegion-browser:latest"
+    BROWSER_CONTAINER_NAME = "openlegion_browser"
 
     def __init__(
         self,
@@ -625,6 +626,17 @@ class DockerBackend(RuntimeBackend):
         thinking: str = "",
         env_overrides: dict[str, str] | None = None,
     ) -> str:
+        # A last-resort backstop, not the primary guard. ``browser`` is a
+        # reserved agent id, but validation only runs at CREATION: a
+        # deployment that already has an agent under that name from before the
+        # reservation still reaches here through cold wake or a health
+        # restart, and the stale reap below would force-remove the shared
+        # browser service — killing every agent's browsing to start one.
+        if _docker_safe_name(agent_id) == self.BROWSER_CONTAINER_NAME.removeprefix("openlegion_"):
+            raise ValueError(
+                f"agent id {agent_id!r} maps to the browser service's container "
+                f"({self.BROWSER_CONTAINER_NAME}); starting it would destroy the shared browser",
+            )
         # Whole start is one critical section per agent: the token below is
         # published well before the registration at the end of
         # ``_start_agent_container``, and a concurrent ``stop_agent`` reaching
@@ -1038,7 +1050,7 @@ class DockerBackend(RuntimeBackend):
         uploads_path = str(self.uploads_dir.as_posix() if platform.system() == "Windows" else self.uploads_dir)
         run_kwargs: dict[str, Any] = {
             "detach": True,
-            "name": "openlegion_browser",
+            "name": self.BROWSER_CONTAINER_NAME,
             "environment": environment,
             "volumes": {
                 "openlegion_browser_data": {"bind": "/data", "mode": "rw"},
@@ -1088,7 +1100,7 @@ class DockerBackend(RuntimeBackend):
 
         # Remove stale browser container
         try:
-            stale = self.client.containers.get("openlegion_browser")
+            stale = self.client.containers.get(self.BROWSER_CONTAINER_NAME)
             stale.remove(force=True)
         except _docker.errors.NotFound:
             pass
@@ -1186,8 +1198,8 @@ class DockerBackend(RuntimeBackend):
         was created by the start that just failed, and the per-agent lock is
         held throughout — no concurrent start of this agent can own it. The
         one name an agent could otherwise collide with is the shared browser
-        service's ``openlegion_browser``; ``browser`` is a reserved agent id
-        for exactly that reason (the reap above has the same collision).
+        service's; ``start_agent`` refuses that id outright, so it cannot
+        reach here (the reap above has the same collision).
         """
         import docker as _docker
 

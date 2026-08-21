@@ -28,7 +28,7 @@ from src.cli.config import (
 )
 from src.cli.formatting import echo_fail, echo_header, echo_ok
 from src.cli.proxy import build_proxy_env_vars, resolve_agent_proxy
-from src.shared.types import RESERVED_AGENT_IDS
+from src.shared.types import ALL_RESERVED_AGENT_IDS
 from src.shared.utils import set_llm_max_tokens_env
 
 if TYPE_CHECKING:
@@ -926,7 +926,7 @@ class RuntimeContext:
                     _boot_status, agent_id,
                 )
                 continue
-            if agent_id in RESERVED_AGENT_IDS and agent_id != _OPERATOR_AGENT_ID:
+            if agent_id in ALL_RESERVED_AGENT_IDS and agent_id != _OPERATOR_AGENT_ID:
                 raise click.ClickException(f"Agent ID '{agent_id}' is reserved for internal use")
             budget = agent_cfg.get("budget", {})
             if budget:
