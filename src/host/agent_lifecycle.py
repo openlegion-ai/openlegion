@@ -61,6 +61,7 @@ import asyncio
 import contextlib
 import threading
 import time
+import uuid
 from collections.abc import AsyncIterator, Iterator
 
 from src.shared.utils import setup_logging
@@ -101,6 +102,12 @@ _incarnation_seq = 0
 # so an unbounded table would grow for the life of the process.
 _incarnation_floor = 0
 _MAX_INCARNATIONS = 4096
+
+# Identifies THIS process. The sequence above is in-memory and restarts at
+# zero, so a value written somewhere durable — a pending-action row that
+# outlives a mesh restart — has to carry the process it came from or it
+# will compare equal to a fresh process's zero for a different agent.
+_BOOT_ID = uuid.uuid4().hex
 
 
 class AgentLifecycleBusy(Exception):
@@ -285,6 +292,35 @@ def retire_agent(agent_id: str) -> int:
                     continue
                 _incarnation_floor = max(_incarnation_floor, _incarnations.pop(stale, 0))
         return _incarnation_seq
+
+
+def agent_incarnation_token(agent_id: str) -> str:
+    """An incarnation stamp safe to store somewhere durable.
+
+    :func:`agent_incarnation` alone is not: it counts within one process
+    and restarts at zero, so a stamp of ``0`` written before a restart
+    matches a fresh process's ``0`` — for whichever agent holds the name
+    afterwards. Pairing it with the process id makes a stamp from any
+    earlier process compare unequal, which is the honest answer: that
+    process's counter is gone and the claim cannot be verified.
+
+    The agent id is part of the token so a stamp can only ever be matched
+    against the agent it was minted for — two never-retired agents would
+    otherwise share the same counter value and the same token.
+    """
+    return f"{_BOOT_ID}:{agent_id}:{agent_incarnation(agent_id)}"
+
+
+def incarnation_token_matches(agent_id: str, token: str | None) -> bool:
+    """True only if ``token`` was minted by THIS process for THIS agent.
+
+    False for a missing token, a malformed one, and one from a previous
+    process — all cases where the answer is "cannot be verified", which for
+    an irreversible action means refuse.
+    """
+    if not token:
+        return False
+    return token == agent_incarnation_token(agent_id)
 
 
 def lifecycle_refcount(agent_id: str) -> int:

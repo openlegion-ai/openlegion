@@ -26,8 +26,10 @@ from src.host import agent_lifecycle as lifecycle
 from src.host.agent_lifecycle import (
     AgentLifecycleBusy,
     agent_incarnation,
+    agent_incarnation_token,
     agent_lifecycle_locked,
     agent_lifecycle_locked_async,
+    incarnation_token_matches,
     lifecycle_refcount,
     retire_agent,
 )
@@ -1383,7 +1385,12 @@ class TestIncarnation:
 
         from tests.test_hibernation import _build_app
 
-        app, bb, cm, _tr, _hm, _eb, cfg = _build_app(tmp_path, monkeypatch)
+        # Archived: that is propose-delete's precondition, and the apply
+        # side re-checks it — so this test exercises the incarnation guard
+        # rather than tripping over the status one.
+        app, bb, cm, _tr, _hm, _eb, cfg = _build_app(
+            tmp_path, monkeypatch, agent_status="archived",
+        )
         try:
             delete = app.pending_executors["delete"]
 
@@ -1403,7 +1410,7 @@ class TestIncarnation:
                     "nonce": "n1",
                     # Stamped at propose time, when the name still belonged
                     # to the agent this confirmation was raised against.
-                    "payload": {"incarnation": agent_incarnation("scout")},
+                    "payload": {"incarnation": agent_incarnation_token("scout")},
                 }),
             )
             await asyncio.wait_for(holder, 3)
@@ -1670,10 +1677,12 @@ class TestRoundFiveGuards:
 
         from tests.test_hibernation import _build_app
 
-        app, bb, cm, _tr, _hm, _eb, _cfg = _build_app(tmp_path, monkeypatch)
+        app, bb, cm, _tr, _hm, _eb, _cfg = _build_app(
+            tmp_path, monkeypatch, agent_status="archived",
+        )
         try:
             delete = app.pending_executors["delete"]
-            proposed_at = agent_incarnation("scout")
+            proposed_at = agent_incarnation_token("scout")
             retire_agent("scout")  # deleted and recreated before confirmation
 
             with pytest.raises(HTTPException) as exc:
@@ -1687,7 +1696,7 @@ class TestRoundFiveGuards:
                     5,
                 )
             assert exc.value.status_code == 409
-            assert "since this delete was proposed" in str(exc.value.detail)
+            assert "cannot be matched" in str(exc.value.detail)
             assert cm.stopped == []
         finally:
             bb.close()
@@ -1712,7 +1721,7 @@ class TestRoundFiveGuards:
                     5,
                 )
             assert exc.value.status_code == 409
-            assert "predates identity stamping" in str(exc.value.detail)
+            assert "cannot be matched" in str(exc.value.detail)
             assert cm.stopped == []
         finally:
             bb.close()
@@ -1733,3 +1742,34 @@ class TestRoundFiveGuards:
         assert result["restarted"]["spawn-abc"] == "skipped: no config for this agent"
         assert ("start", "spawn-abc") not in runtime.calls
         assert result["restarted"]["worker"] == "ready"
+
+
+class TestDurableStamps:
+    def test_a_token_from_another_process_never_matches(self):
+        """The counter is in-memory; a pending-action row is not.
+
+        A bare counter stamped ``0`` before a restart compares equal to a
+        fresh process's ``0`` — for whichever agent holds the name
+        afterwards. That is a false pass on an irreversible action.
+        """
+        from src.host import agent_lifecycle as al
+
+        mine = agent_incarnation_token("scout")
+        assert incarnation_token_matches("scout", mine)
+
+        previous_process = f"{'0' * 32}:scout:{agent_incarnation('scout')}"
+        assert previous_process != mine
+        assert not incarnation_token_matches("scout", previous_process), (
+            "a stamp from a process whose counter is gone cannot be verified"
+        )
+        # And the bare counter it embeds WOULD have matched.
+        assert previous_process.rsplit(":", 1)[1] == mine.rsplit(":", 1)[1]
+        assert al._BOOT_ID in mine
+
+    def test_a_token_is_agent_specific_and_moves_with_the_incarnation(self):
+        scout = agent_incarnation_token("scout")
+        assert not incarnation_token_matches("other", scout)
+        assert not incarnation_token_matches("scout", None)
+        assert not incarnation_token_matches("scout", "not-a-token")
+        retire_agent("scout")
+        assert not incarnation_token_matches("scout", scout)

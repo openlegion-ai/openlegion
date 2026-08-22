@@ -36,7 +36,9 @@ from src.host import drive as team_drive
 from src.host.agent_lifecycle import (
     AgentLifecycleBusy,
     agent_incarnation,
+    agent_incarnation_token,
     agent_lifecycle_locked_async,
+    incarnation_token_matches,
     retire_agent,
 )
 from src.host.asks import AskBroker, AskDeliveryFailed, AskLimitExceeded
@@ -12460,10 +12462,12 @@ def create_mesh_app(
             "agent_id": agent_id,
             "summary": summary,
             # The delete this raises is irreversible and the confirmation is
-            # a HUMAN one — the row can sit here for its whole TTL. Stamping
-            # the incarnation is what lets the apply side tell that the name
-            # changed hands in the meantime; nothing else in the row can.
-            "incarnation": agent_incarnation(agent_id),
+            # a HUMAN one — the row can sit here for its whole TTL, and the
+            # row is durable, so it can outlive the process. The token pairs
+            # the incarnation with this process's id: nothing else in the
+            # row can tell the apply side that the name changed hands, and a
+            # bare counter would compare equal to a restarted process's zero.
+            "incarnation": agent_incarnation_token(agent_id),
         }
         record = pending_actions.store(
             nonce=nonce,
@@ -12581,22 +12585,37 @@ def create_mesh_app(
             # had a delete raised against it. A row with no stamp predates
             # this field and cannot be checked — refuse it rather than run an
             # irreversible action blind; re-proposing costs one click.
-            _proposed = (record.get("payload") or {}).get("incarnation")
-            if _proposed is None:
+            if not incarnation_token_matches(
+                target_id, (record.get("payload") or {}).get("incarnation"),
+            ):
+                # Mismatch, missing, or minted by an earlier process — all of
+                # them mean "cannot be verified", and this action cannot be
+                # undone. Re-proposing costs one click; the row's TTL is
+                # minutes.
                 raise HTTPException(
                     409,
-                    f"This delete confirmation for '{target_id}' predates "
-                    "identity stamping — propose the delete again",
+                    f"This delete for '{target_id}' cannot be matched to the agent "
+                    "it was proposed against — propose the delete again",
                 )
-            if agent_incarnation(target_id) != _proposed:
+            # Independently of the stamp: propose-delete requires an ARCHIVED
+            # agent, and a recreated one is active. Re-checking the
+            # precondition at apply time catches the same substitution
+            # without relying on any in-memory state surviving a restart.
+            from src.cli.config import _agent_status as _status_at_apply
+
+            try:
+                _status_now = _status_at_apply(target_id)
+            except ValueError as e:
+                raise HTTPException(404, str(e))
+            if _status_now != "archived":
                 raise HTTPException(
                     409,
-                    f"Agent '{target_id}' was deleted and recreated since this "
-                    "delete was proposed — refusing to destroy the replacement",
+                    f"Agent '{target_id}' is {_status_now}, not archived — it is not "
+                    "the agent this delete was proposed against",
                 )
             # Re-checked under the lock below as well: the handover turn that
             # follows can itself take minutes.
-            _target_incarnation = _proposed
+            _target_incarnation = agent_incarnation(target_id)
             offboard_manifest = await _offboard_agent(target_id, reason="delete")
             # Volume-destroying stop through config + registry removal is
             # ONE lifecycle operation: a wake or a restart interleaving in it
