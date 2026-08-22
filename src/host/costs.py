@@ -54,8 +54,22 @@ class CostTracker:
         budgets_path: str | None = None,
     ):
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+        # One connection, shared by every caller — and the callers are on
+        # different threads: the mesh loop runs the LLM proxy's preflight and
+        # cost write (now via ``asyncio.to_thread``), the CLI REPL reads spend
+        # from the main thread, and the runtime's sweeps read it from theirs.
+        # ``open_db`` passes ``check_same_thread=False``, which permits that
+        # but does not make it safe: sqlite3 only implicitly BEGINs on DML, so
+        # two threads interleaving an INSERT with a commit share one implicit
+        # transaction and the loser raises "cannot start a transaction within
+        # a transaction" — on the billing path. Every statement, and every
+        # statement-plus-commit SEQUENCE, is serialized on this lock.
+        # Re-entrant because the write helpers call the read helpers
+        # (``track`` -> ``_check_budget_post_hoc`` -> ``get_spend``).
+        self._db_lock = threading.RLock()
         self.db = open_db(db_path)
-        self.db.execute("PRAGMA journal_mode=WAL")
+        with self._db_lock:
+            self.db.execute("PRAGMA journal_mode=WAL")
         self._init_schema()
         # Per-agent budget overrides. Persisted to ``budgets_path`` so caps
         # raised/lowered by the operator survive a mesh restart (otherwise
@@ -155,6 +169,10 @@ class CostTracker:
             )
 
     def _init_schema(self) -> None:
+        with self._db_lock:
+            self._init_schema_locked()
+
+    def _init_schema_locked(self) -> None:
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS usage (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -191,16 +209,19 @@ class CostTracker:
         self.db.commit()
 
     def close(self) -> None:
-        self.db.close()
+        with self._db_lock:
+            self.db.close()
 
     def cleanup_agent(self, agent_id: str) -> int:
         """Delete all cost records for an agent. Returns rows deleted."""
-        cursor = self.db.execute("DELETE FROM usage WHERE agent = ?", (agent_id,))
-        self.db.commit()
+        with self._db_lock:
+            cursor = self.db.execute("DELETE FROM usage WHERE agent = ?", (agent_id,))
+            self.db.commit()
+            deleted = cursor.rowcount
         with self._budget_lock:
             if self.budgets.pop(agent_id, None) is not None:
                 self._save_budgets()
-        return cursor.rowcount
+        return deleted
 
     def set_budget(self, agent: str, daily_usd: float | None = None, monthly_usd: float | None = None) -> None:
         if daily_usd is None or monthly_usd is None:
@@ -264,12 +285,13 @@ class CostTracker:
         # trace is active.
         from src.shared.trace import current_trace_id
         trace_id = current_trace_id.get()
-        self.db.execute(
-            "INSERT INTO usage (agent, model, prompt_tokens, completion_tokens, "
-            "total_tokens, cost_usd, trace_id, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (agent, model, prompt_tokens, completion_tokens, total, cost, trace_id, kind),
-        )
-        self.db.commit()
+        with self._db_lock:
+            self.db.execute(
+                "INSERT INTO usage (agent, model, prompt_tokens, completion_tokens, "
+                "total_tokens, cost_usd, trace_id, kind) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (agent, model, prompt_tokens, completion_tokens, total, cost, trace_id, kind),
+            )
+            self.db.commit()
 
         # A non-billed (OAuth) row adds $0, so it can never push the agent
         # over budget — short-circuit the post-hoc check to keep that
@@ -286,12 +308,13 @@ class CostTracker:
         """
         from src.shared.trace import current_trace_id
         trace_id = current_trace_id.get()
-        self.db.execute(
-            "INSERT INTO usage (agent, model, prompt_tokens, completion_tokens, total_tokens, cost_usd, trace_id) "
-            "VALUES (?, ?, 0, 0, 0, ?, ?)",
-            (agent, model, cost_usd, trace_id),
-        )
-        self.db.commit()
+        with self._db_lock:
+            self.db.execute(
+                "INSERT INTO usage (agent, model, prompt_tokens, completion_tokens, total_tokens, cost_usd, trace_id) "
+                "VALUES (?, ?, 0, 0, 0, ?, ?)",
+                (agent, model, cost_usd, trace_id),
+            )
+            self.db.commit()
 
         return {"cost": cost_usd, "over_budget": self._check_budget_post_hoc(agent)}
 
@@ -418,7 +441,8 @@ class CostTracker:
             params.append(kind)
         query += " GROUP BY model"
 
-        rows = self.db.execute(query, params).fetchall()
+        with self._db_lock:
+            rows = self.db.execute(query, params).fetchall()
 
         total_cost = sum(r[4] or 0 for r in rows)
         total_tokens = sum(r[3] or 0 for r in rows)
@@ -460,11 +484,12 @@ class CostTracker:
         if not members:
             return 0.0, 0
         placeholders = ",".join("?" for _ in members)
-        row = self.db.execute(
-            "SELECT SUM(cost_usd), SUM(total_tokens) FROM usage "
-            f"WHERE timestamp >= ? AND kind = 'work' AND agent IN ({placeholders})",
-            [since, *members],
-        ).fetchone()
+        with self._db_lock:
+            row = self.db.execute(
+                "SELECT SUM(cost_usd), SUM(total_tokens) FROM usage "
+                f"WHERE timestamp >= ? AND kind = 'work' AND agent IN ({placeholders})",
+                [since, *members],
+            ).fetchone()
         return float(row[0] or 0.0), int(row[1] or 0)
 
     def team_envelope_check(self, agent: str, model: str, estimated_tokens: int = 4096) -> dict:
@@ -605,11 +630,12 @@ class CostTracker:
 
     def get_all_agents_spend(self, period: str = "today") -> list[dict]:
         since = _period_to_since(period)
-        rows = self.db.execute(
-            "SELECT agent, SUM(total_tokens), SUM(cost_usd) FROM usage "
-            "WHERE timestamp >= ? GROUP BY agent ORDER BY SUM(cost_usd) DESC",
-            (since,),
-        ).fetchall()
+        with self._db_lock:
+            rows = self.db.execute(
+                "SELECT agent, SUM(total_tokens), SUM(cost_usd) FROM usage "
+                "WHERE timestamp >= ? GROUP BY agent ORDER BY SUM(cost_usd) DESC",
+                (since,),
+            ).fetchall()
         return [
             {"agent": r[0], "tokens": r[1] or 0, "cost": round(r[2] or 0, 4)}
             for r in rows
@@ -624,9 +650,10 @@ class CostTracker:
         monitor's "last seen", which is just a container liveness probe.
         Returns an empty dict if nothing is recorded yet.
         """
-        rows = self.db.execute(
-            "SELECT agent, MAX(timestamp) FROM usage GROUP BY agent"
-        ).fetchall()
+        with self._db_lock:
+            rows = self.db.execute(
+                "SELECT agent, MAX(timestamp) FROM usage GROUP BY agent"
+            ).fetchall()
         out: dict[str, float] = {}
         for agent, ts in rows:
             if not agent or not ts:
@@ -645,12 +672,13 @@ class CostTracker:
     def get_spend_by_model(self, period: str = "today") -> list[dict]:
         """Get cost breakdown by model across all agents."""
         since = _period_to_since(period)
-        rows = self.db.execute(
-            "SELECT model, SUM(prompt_tokens), SUM(completion_tokens), "
-            "SUM(total_tokens), SUM(cost_usd) FROM usage WHERE timestamp >= ? "
-            "GROUP BY model ORDER BY SUM(cost_usd) DESC",
-            (since,),
-        ).fetchall()
+        with self._db_lock:
+            rows = self.db.execute(
+                "SELECT model, SUM(prompt_tokens), SUM(completion_tokens), "
+                "SUM(total_tokens), SUM(cost_usd) FROM usage WHERE timestamp >= ? "
+                "GROUP BY model ORDER BY SUM(cost_usd) DESC",
+                (since,),
+            ).fetchall()
         return [
             {
                 "model": r[0],

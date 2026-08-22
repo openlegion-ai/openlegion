@@ -2884,7 +2884,8 @@ def create_mesh_app(
                     elif not result.success:
                         trace_status = "error"
                         trace_error = result.error or "Unknown error"
-                    trace_store.record(
+                    await asyncio.to_thread(
+                        trace_store.record,
                         trace_id=req_trace_id,
                         source="mesh.api_proxy",
                         agent=agent_id,
@@ -3039,7 +3040,8 @@ def create_mesh_app(
                 }
                 if prompt_preview:
                     stream_meta["prompt_preview"] = prompt_preview
-                trace_store.record(
+                await asyncio.to_thread(
+                    trace_store.record,
                     trace_id=req_trace_id,
                     source="mesh.api_proxy",
                     agent=agent_id,
@@ -3118,7 +3120,8 @@ def create_mesh_app(
                 )
             try:
                 if req_trace_id and trace_store and done_data:
-                    trace_store.record(
+                    await asyncio.to_thread(
+                        trace_store.record,
                         trace_id=req_trace_id,
                         source="mesh.api_proxy",
                         agent=agent_id,
