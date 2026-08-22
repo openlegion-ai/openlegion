@@ -20,6 +20,11 @@ from typing import TYPE_CHECKING
 
 from src.cli.config import _load_config
 from src.cli.proxy import build_proxy_env_vars, resolve_agent_proxy
+from src.host.agent_lifecycle import (
+    AgentLifecycleBusy,
+    agent_lifecycle_locked_async,
+    retire_agent,
+)
 from src.shared.utils import set_llm_max_tokens_env, setup_logging
 
 if TYPE_CHECKING:
@@ -300,15 +305,44 @@ class HealthMonitor:
                 if now - spawned_at < ttl:
                     continue
                 logger.info("Ephemeral agent '%s' exceeded TTL (%ss), removing", agent_id, ttl)
+                # Stop + deregister is a lifecycle operation like any
+                # other: an ephemeral agent is health-registered, so
+                # ``_try_restart`` can be rebuilding this very container
+                # while the TTL expires.
                 try:
-                    loop = asyncio.get_running_loop()
-                    await loop.run_in_executor(None, self.runtime.stop_agent, agent_id)
-                except Exception as e:
-                    logger.warning("Error stopping ephemeral agent '%s': %s", agent_id, e)
-                self.router.unregister_agent(agent_id)
-                if self._cleanup_agent:
-                    self._cleanup_agent(agent_id)
-                del self.agents[agent_id]
+                    async with agent_lifecycle_locked_async(agent_id):
+                        # Re-read under the lock. The expiry decision above was
+                        # made before queueing here: a delete may have removed
+                        # the agent (``del`` would raise KeyError and abort the
+                        # whole sweep), or a spawn under the same id may have
+                        # re-stamped the TTL, in which case tearing it down now
+                        # would destroy the replacement.
+                        fresh = self.runtime.agents.get(agent_id) or {}
+                        if not fresh.get("ephemeral"):
+                            continue
+                        if (now - fresh.get("spawned_at", 0)) < fresh.get("ttl", 3600):
+                            continue
+                        try:
+                            loop = asyncio.get_running_loop()
+                            await loop.run_in_executor(None, self.runtime.stop_agent, agent_id)
+                        except Exception as e:
+                            logger.warning("Error stopping ephemeral agent '%s': %s", agent_id, e)
+                        self.router.unregister_agent(agent_id)
+                        if self._cleanup_agent:
+                            self._cleanup_agent(agent_id)
+                        self.agents.pop(agent_id, None)
+                        # Reaping a spawn IS a delete. ``_cleanup_agent``
+                        # retires the id too, but it is an optional seam —
+                        # this path always runs. Bumping twice is harmless:
+                        # callers only ever compare for equality against a
+                        # value captured before this lock was taken.
+                        retire_agent(agent_id)
+                except AgentLifecycleBusy as e:
+                    # Another lifecycle operation still holds this agent —
+                    # leave it for the next sweep rather than stalling the
+                    # rest of the cleanup pass.
+                    logger.warning("Ephemeral cleanup for '%s' deferred: %s", agent_id, e)
+                    continue
                 if self._event_bus:
                     self._event_bus.emit("agent_state", agent=agent_id, data={
                         "state": "removed", "reason": "ttl_expired",
@@ -531,91 +565,117 @@ class HealthMonitor:
                 return
 
         logger.info(f"Restarting agent '{agent_id}'...")
-        info = self.runtime.agents.get(agent_id)
-        if not info:
-            # The runtime lost its in-memory registry entry (e.g. the
-            # container died and was deregistered during a redeploy), but the
-            # agent may still be fully defined on disk. Rather than stranding
-            # it permanently, rebuild the start parameters from agents.yaml —
-            # the same fallback the CLI manual restart uses
-            # (cli/repl.py:_restart_agent). Only if the agent is ALSO absent
-            # from yaml is it truly unknown and unrecoverable.
-            info = self._info_from_yaml(agent_id)
-            if not info:
-                logger.error(
-                    "Cannot restart agent '%s': no stored config and not "
-                    "defined in agents.yaml. Manual restart required.",
+        # Stop -> start -> re-register is ONE lifecycle operation, and this
+        # sweep runs concurrently with every other one. An archive or delete
+        # landing between the stop and the start is undone by the start —
+        # a container back up for an agent deliberately taken out of
+        # service, and health-registered again on top of it.
+        async with agent_lifecycle_locked_async(agent_id):
+            # Re-check under the lock, by IDENTITY not by name: the sweep
+            # decided to restart before queueing here, and an archive/delete
+            # may have won the race. A delete followed by a same-name create
+            # would even repopulate ``self.agents[agent_id]`` — but with a new
+            # ``AgentHealth``, so ``health`` (and the registry ``info`` read
+            # below) would describe the previous incarnation.
+            if self.agents.get(agent_id) is not health:
+                logger.info(
+                    "Agent '%s' was deregistered or replaced before its restart "
+                    "began (archived/deleted) — not restarting it.",
                     agent_id,
                 )
-                health.status = "failed"
                 return
-            logger.info(
-                "Agent '%s' missing from runtime registry; rebuilding "
-                "container from agents.yaml config.", agent_id,
-            )
-        try:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, self.runtime.stop_agent, agent_id)
-        except Exception as e:
-            logger.warning(f"Error stopping agent '{agent_id}' during restart: {e}")
-
-        try:
-            # Preserve operator's ALLOWED_TOOLS on restart
-            from src.cli.config import (
-                _OPERATOR_AGENT_ID,
-                _OPERATOR_ALLOWED_TOOLS,
-                _load_permissions,
-            )
-            restart_env: dict[str, str] = {}
-            if agent_id == _OPERATOR_AGENT_ID:
-                restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
-                # Re-seed the internet/browser access flags so a
-                # health-restart doesn't undo the user's toggle. Same
-                # logic as cli/runtime.py.
-                try:
-                    _op_perms = _load_permissions().get(
-                        "permissions", {},
-                    ).get(_OPERATOR_AGENT_ID, {})
-                    restart_env["OL_INTERNET_ACCESS_ENABLED"] = (
-                        "true" if _op_perms.get("can_use_internet", True) else "false"
+            # Read the start parameters under the lock too, for the same
+            # reason: outside it they can describe a container that no
+            # longer exists.
+            info = self.runtime.agents.get(agent_id)
+            if not info:
+                # The runtime lost its in-memory registry entry (e.g. the
+                # container died and was deregistered during a redeploy), but
+                # the agent may still be fully defined on disk. Rather than
+                # stranding it permanently, rebuild the start parameters from
+                # agents.yaml — the same fallback the CLI manual restart uses
+                # (cli/repl.py:_restart_agent). Only if the agent is ALSO
+                # absent from yaml is it truly unknown and unrecoverable.
+                info = self._info_from_yaml(agent_id)
+                if not info:
+                    logger.error(
+                        "Cannot restart agent '%s': no stored config and not "
+                        "defined in agents.yaml. Manual restart required.",
+                        agent_id,
                     )
-                    restart_env["OL_BROWSER_ACCESS_ENABLED"] = (
-                        "true" if _op_perms.get("can_use_browser", True) else "false"
-                    )
-                except Exception:
-                    restart_env["OL_INTERNET_ACCESS_ENABLED"] = "true"
-                    restart_env["OL_BROWSER_ACCESS_ENABLED"] = "true"
-
-            loop = asyncio.get_running_loop()
-            # Load fresh config for proxy resolution
-            fresh_cfg = _load_config()
-            _agents_cfg = fresh_cfg.get("agents", {})
-            _network_cfg = fresh_cfg.get("network", {})
-            _proxy_url = resolve_agent_proxy(agent_id, _agents_cfg, _network_cfg)
-            _proxy_env = build_proxy_env_vars(
-                _proxy_url, _network_cfg.get("no_proxy", ""),
-            )
-            self.runtime.extra_env.update(_proxy_env)
-            # Per-agent output-token cap → LLM_MAX_TOKENS so an operator's
-            # max_output_tokens edit survives an automatic crash-recovery
-            # restart. Read from fresh YAML (the registry ``info`` dict
-            # doesn't carry it); no-op when unset → LLMClient default 16384.
-            _hcfg = _agents_cfg.get(agent_id, {})
-            # Prefer the CURRENT role from fresh config (agents.yaml) over the
-            # registry ``info`` dict, whose role was frozen at the last
-            # start_agent call — otherwise an ``edit_agent`` role change is
-            # silently reverted by every crash-triggered auto-restart. Fall
-            # back to the registry role only when the agent is absent from the
-            # fresh config. Scope is role ONLY — model/tools_dir/thinking stay
-            # on the registry snapshot (recorded residual, out of scope here).
-            fresh_role = (
-                _hcfg.get("role", "") if agent_id in _agents_cfg
-                else info.get("role", "")
-            )
-            set_llm_max_tokens_env(restart_env, _hcfg)
-            from src.shared.limits import set_llm_limits_env
-            set_llm_limits_env(restart_env, _hcfg)
+                    health.status = "failed"
+                    return
+                logger.info(
+                    "Agent '%s' missing from runtime registry; rebuilding "
+                    "container from agents.yaml config.", agent_id,
+                )
             try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self.runtime.stop_agent, agent_id)
+            except Exception as e:
+                logger.warning(f"Error stopping agent '{agent_id}' during restart: {e}")
+
+            try:
+                # Preserve operator's ALLOWED_TOOLS on restart
+                from src.cli.config import (
+                    _OPERATOR_AGENT_ID,
+                    _OPERATOR_ALLOWED_TOOLS,
+                    _load_permissions,
+                )
+                restart_env: dict[str, str] = {}
+                if agent_id == _OPERATOR_AGENT_ID:
+                    restart_env["ALLOWED_TOOLS"] = ",".join(_OPERATOR_ALLOWED_TOOLS)
+                    # Re-seed the internet/browser access flags so a
+                    # health-restart doesn't undo the user's toggle. Same
+                    # logic as cli/runtime.py.
+                    try:
+                        _op_perms = _load_permissions().get(
+                            "permissions", {},
+                        ).get(_OPERATOR_AGENT_ID, {})
+                        restart_env["OL_INTERNET_ACCESS_ENABLED"] = (
+                            "true" if _op_perms.get("can_use_internet", True) else "false"
+                        )
+                        restart_env["OL_BROWSER_ACCESS_ENABLED"] = (
+                            "true" if _op_perms.get("can_use_browser", True) else "false"
+                        )
+                    except Exception:
+                        restart_env["OL_INTERNET_ACCESS_ENABLED"] = "true"
+                        restart_env["OL_BROWSER_ACCESS_ENABLED"] = "true"
+
+                loop = asyncio.get_running_loop()
+                # Load fresh config for proxy resolution
+                fresh_cfg = _load_config()
+                _agents_cfg = fresh_cfg.get("agents", {})
+                _network_cfg = fresh_cfg.get("network", {})
+                _proxy_url = resolve_agent_proxy(agent_id, _agents_cfg, _network_cfg)
+                _proxy_env = build_proxy_env_vars(
+                    _proxy_url, _network_cfg.get("no_proxy", ""),
+                )
+                # Per-agent env, NOT the shared ``extra_env`` dict. That dict is
+                # read by every ``start_agent`` call, so a global mutation here
+                # rides along on some other agent's concurrent start — and the
+                # pop that used to undo it couldn't restore a value it clobbered.
+                # The dashboard restart paths already pass proxy this way.
+                restart_env.update(_proxy_env)
+                # Per-agent output-token cap → LLM_MAX_TOKENS so an operator's
+                # max_output_tokens edit survives an automatic crash-recovery
+                # restart. Read from fresh YAML (the registry ``info`` dict
+                # doesn't carry it); no-op when unset → LLMClient default 16384.
+                _hcfg = _agents_cfg.get(agent_id, {})
+                # Prefer the CURRENT role from fresh config (agents.yaml) over the
+                # registry ``info`` dict, whose role was frozen at the last
+                # start_agent call — otherwise an ``edit_agent`` role change is
+                # silently reverted by every crash-triggered auto-restart. Fall
+                # back to the registry role only when the agent is absent from the
+                # fresh config. Scope is role ONLY — model/tools_dir/thinking stay
+                # on the registry snapshot (recorded residual, out of scope here).
+                fresh_role = (
+                    _hcfg.get("role", "") if agent_id in _agents_cfg
+                    else info.get("role", "")
+                )
+                set_llm_max_tokens_env(restart_env, _hcfg)
+                from src.shared.limits import set_llm_limits_env
+                set_llm_limits_env(restart_env, _hcfg)
                 url = await loop.run_in_executor(
                     None,
                     lambda: self.runtime.start_agent(
@@ -627,76 +687,72 @@ class HealthMonitor:
                         env_overrides=restart_env,
                     ),
                 )
-            finally:
-                self.runtime.extra_env.pop("HTTP_PROXY", None)
-                self.runtime.extra_env.pop("HTTPS_PROXY", None)
-                self.runtime.extra_env.pop("NO_PROXY", None)
 
-            # An archive/delete may have deregistered this agent while
-            # ``start_agent`` was running in the executor (its
-            # ``unregister`` can't reach this in-flight coroutine). Don't
-            # resurrect an intentionally-stopped agent: undo the start
-            # and bail before re-registering it with the router.
-            if agent_id not in self.agents:
+                # Backstop. The lifecycle lock above means an archive/delete can
+                # no longer deregister this agent mid-start — it has to wait for
+                # the lock, and the pre-check inside it turns this restart away
+                # first. Kept so a deregistration path that ever skips the lock
+                # still can't leave a resurrected container behind.
+                if self.agents.get(agent_id) is not health:
+                    logger.info(
+                        "Agent '%s' was deregistered during restart "
+                        "(archived/deleted) — stopping the restarted container.",
+                        agent_id,
+                    )
+                    await loop.run_in_executor(None, self.runtime.stop_agent, agent_id)
+                    return
+                # Pass the fresh role through — the container above already
+                # started with ``role=fresh_role``, but re-registering without it
+                # left the mesh roster cache (``router.agent_roles``) stale after
+                # an auto-rebuild: register_agent only overwrites agent_roles when
+                # ``role`` is truthy, so an omitted role here silently kept
+                # whatever (possibly outdated, or absent) role was cached before
+                # the restart.
+                self.router.register_agent(agent_id, url, role=fresh_role)
+                health.consecutive_failures = 0
+                health.restart_count += 1
+                health.restart_timestamps.append(now)
+                health.status = "restarting"
+                if self._event_bus:
+                    self._event_bus.emit("health_change", agent=agent_id, data={
+                        "previous": "unhealthy", "current": "restarting",
+                        "failures": 0, "restart_count": health.restart_count,
+                    })
+
+                ready = await self.runtime.wait_for_agent(agent_id, timeout=60)
+                prev = health.status
+                # Codex P2 follow-up: restart restores the runtime but does NOT
+                # rotate a broken credential. If the agent is still quarantined,
+                # snap the status string back to "quarantined" — symmetric with
+                # the ``_check_agent`` guards at lines 393 and 414 — so the
+                # dashboard and the lane stay in sync. ``unhealthy`` still wins
+                # when the runtime didn't come up, because the lane gate (bool
+                # flag) is unchanged either way and the operator needs to see
+                # the more urgent "still broken" signal.
+                if health.quarantined and ready:
+                    health.status = "quarantined"
+                else:
+                    health.status = "healthy" if ready else "unhealthy"
+                if self._event_bus:
+                    self._event_bus.emit("health_change", agent=agent_id, data={
+                        "previous": prev, "current": health.status,
+                        "failures": health.consecutive_failures,
+                        "restart_count": health.restart_count,
+                    })
+
                 logger.info(
-                    "Agent '%s' was deregistered during restart "
-                    "(archived/deleted) — stopping the restarted container.",
-                    agent_id,
+                    f"Agent '{agent_id}' restarted "
+                    f"(attempt {health.restart_count}, {'ready' if ready else 'not ready'})"
                 )
-                await loop.run_in_executor(None, self.runtime.stop_agent, agent_id)
-                return
-            # Pass the fresh role through — the container above already
-            # started with ``role=fresh_role``, but re-registering without it
-            # left the mesh roster cache (``router.agent_roles``) stale after
-            # an auto-rebuild: register_agent only overwrites agent_roles when
-            # ``role`` is truthy, so an omitted role here silently kept
-            # whatever (possibly outdated, or absent) role was cached before
-            # the restart.
-            self.router.register_agent(agent_id, url, role=fresh_role)
-            health.consecutive_failures = 0
-            health.restart_count += 1
-            health.restart_timestamps.append(now)
-            health.status = "restarting"
-            if self._event_bus:
-                self._event_bus.emit("health_change", agent=agent_id, data={
-                    "previous": "unhealthy", "current": "restarting",
-                    "failures": 0, "restart_count": health.restart_count,
-                })
-
-            ready = await self.runtime.wait_for_agent(agent_id, timeout=60)
-            prev = health.status
-            # Codex P2 follow-up: restart restores the runtime but does NOT
-            # rotate a broken credential. If the agent is still quarantined,
-            # snap the status string back to "quarantined" — symmetric with
-            # the ``_check_agent`` guards at lines 393 and 414 — so the
-            # dashboard and the lane stay in sync. ``unhealthy`` still wins
-            # when the runtime didn't come up, because the lane gate (bool
-            # flag) is unchanged either way and the operator needs to see
-            # the more urgent "still broken" signal.
-            if health.quarantined and ready:
-                health.status = "quarantined"
-            else:
-                health.status = "healthy" if ready else "unhealthy"
-            if self._event_bus:
-                self._event_bus.emit("health_change", agent=agent_id, data={
-                    "previous": prev, "current": health.status,
-                    "failures": health.consecutive_failures,
-                    "restart_count": health.restart_count,
-                })
-
-            logger.info(
-                f"Agent '{agent_id}' restarted "
-                f"(attempt {health.restart_count}, {'ready' if ready else 'not ready'})"
-            )
-        except Exception as e:
-            health.status = "unhealthy"
-            if self._event_bus:
-                self._event_bus.emit("health_change", agent=agent_id, data={
-                    "previous": "restarting", "current": "unhealthy",
-                    "failures": health.consecutive_failures,
-                    "error": str(e),
-                })
-            logger.error(f"Failed to restart agent '{agent_id}': {e}")
+            except Exception as e:
+                health.status = "unhealthy"
+                if self._event_bus:
+                    self._event_bus.emit("health_change", agent=agent_id, data={
+                        "previous": "restarting", "current": "unhealthy",
+                        "failures": health.consecutive_failures,
+                        "error": str(e),
+                    })
+                logger.error(f"Failed to restart agent '{agent_id}': {e}")
 
     def get_status(self) -> list[dict]:
         """Return health status for all monitored agents."""

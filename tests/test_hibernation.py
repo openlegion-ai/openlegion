@@ -824,7 +824,10 @@ def _sweeper(tmp_path, *, agents_cfg, lane_manager=None, tasks_store=None,
              ask_broker=None, wake_available_fn=None):
     hibernate_calls: list[tuple[str, str]] = []
 
-    async def hibernate_fn(agent_id, *, caller="sweep"):
+    async def hibernate_fn(agent_id, *, caller="sweep", expect_incarnation=None):
+        # ``expect_incarnation`` is the sweep's ABA guard: the real core
+        # refuses to hibernate an agent that was deleted and recreated under
+        # the same name while the sweep worked through its candidates.
         hibernate_calls.append((agent_id, caller))
         return {"hibernated": True, "agent_id": agent_id}
 
