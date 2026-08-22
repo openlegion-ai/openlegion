@@ -486,6 +486,204 @@ class TestProxyWorkRunsOffTheLoop:
         )
 
 
+class TestTraceStampSurvivesTheThreadHop:
+    """``track`` stamps the usage row from the ``current_trace_id``
+    contextvar the endpoint seeded from ``X-Trace-Id``. ``asyncio.to_thread``
+    copies the calling context; ``loop.run_in_executor`` does not. Swapping
+    one for the other would leave every usage row with a NULL trace_id and
+    break spend-per-task attribution silently, so pin it against the REAL
+    ``execute_api_call`` — the existing coverage in ``test_mesh.py`` stubs
+    that method out and never crosses the hop.
+    """
+
+    @pytest.mark.asyncio
+    async def test_usage_row_keeps_the_trace_id_across_to_thread(self, tmp_path):
+        from src.shared.trace import current_trace_id
+
+        tracker = CostTracker(
+            db_path=str(tmp_path / "costs.db"),
+            budgets_path=str(tmp_path / "budgets.json"),
+        )
+        vault = _vault_with(tracker)
+
+        token = current_trace_id.set("trace-abc")
+        try:
+            result = await vault.execute_api_call(_llm_request(), agent_id="writer")
+        finally:
+            current_trace_id.reset(token)
+
+        assert result.success
+        with tracker._db_lock:
+            rows = tracker.db.execute(
+                "SELECT agent, trace_id FROM usage ORDER BY id",
+            ).fetchall()
+        assert rows == [("writer", "trace-abc")], rows
+        tracker.close()
+
+    @pytest.mark.asyncio
+    async def test_no_trace_header_stamps_null_not_a_stale_id(self, tmp_path):
+        from src.shared.trace import current_trace_id
+
+        tracker = CostTracker(
+            db_path=str(tmp_path / "costs.db"),
+            budgets_path=str(tmp_path / "budgets.json"),
+        )
+        vault = _vault_with(tracker)
+
+        token = current_trace_id.set(None)
+        try:
+            await vault.execute_api_call(_llm_request(), agent_id="writer")
+        finally:
+            current_trace_id.reset(token)
+
+        with tracker._db_lock:
+            rows = tracker.db.execute("SELECT trace_id FROM usage").fetchall()
+        assert rows == [(None,)], rows
+        tracker.close()
+
+
+class _ThreadRecordingTraceStore:
+    """A trace store that records which thread each ``record`` ran on."""
+
+    def __init__(self):
+        self.threads: list[int] = []
+        self.events: list[str] = []
+
+    def record(self, *, trace_id, source, agent, event_type, detail="",
+               duration_ms=0, status="", error="", meta=None):
+        self.threads.append(threading.get_ident())
+        self.events.append(event_type)
+
+
+class _EchoVault:
+    """Just enough vault for the mesh proxy routes."""
+
+    def __init__(self):
+        self.stream_chunks = [
+            'data: {"type": "content", "content": "hi"}\n\n',
+            'data: {"type": "done", "content": "hi", "tokens_used": 12, '
+            '"model": "openai/gpt-4o-mini"}\n\n',
+        ]
+
+    async def execute_api_call(self, request, agent_id=""):
+        return APIProxyResponse(
+            success=True,
+            data={"content": "ok", "tokens_used": 12, "input_tokens": 8,
+                  "output_tokens": 4, "model": request.params.get("model", "")},
+        )
+
+    async def stream_llm(self, request, agent_id=""):
+        for chunk in self.stream_chunks:
+            yield chunk
+
+    def is_model_compatible(self, model):
+        return (True, None)
+
+
+@pytest.fixture
+def proxy_app(tmp_path, monkeypatch):
+    """A mesh app whose only wired stores record the thread they run on."""
+    import src.host.server as server_module
+    from src.host.mesh import Blackboard, MessageRouter, PubSub
+    from src.host.permissions import AgentPermissions, PermissionMatrix
+
+    monkeypatch.setenv("OPENLEGION_TEAM_SCOPE_MODE", "warn")
+    server = importlib.reload(server_module)
+
+    bb = Blackboard(db_path=str(tmp_path / "bb.db"))
+    perms = PermissionMatrix.__new__(PermissionMatrix)
+    perms.permissions = {
+        "operator": AgentPermissions(agent_id="operator"),
+        "writer": AgentPermissions(agent_id="writer", allowed_apis=["llm"]),
+    }
+    perms._config_path = str(tmp_path / "perms.json")
+
+    router = MessageRouter(permissions=perms, agent_registry={})
+    router.register_agent("writer", "http://writer:8400", [])
+
+    trace_store = _ThreadRecordingTraceStore()
+    monkeypatch.setattr(
+        "src.cli.config._load_config",
+        lambda *a, **k: {"llm": {}, "agents": {"writer": {}}},
+    )
+
+    app = server.create_mesh_app(
+        blackboard=bb,
+        pubsub=PubSub(),
+        router=router,
+        permissions=perms,
+        credential_vault=_EchoVault(),
+        auth_tokens={"writer": "writer-secret"},
+        trace_store=trace_store,
+    )
+    yield {"app": app, "trace_store": trace_store}
+    bb.close()
+    monkeypatch.delenv("OPENLEGION_TEAM_SCOPE_MODE", raising=False)
+    importlib.reload(server_module)
+
+
+def _proxy_body(model="openai/gpt-4o-mini"):
+    return {
+        "service": "llm",
+        "action": "chat",
+        "params": {"model": model, "messages": [{"role": "user", "content": "hi"}],
+                   "max_tokens": 16},
+        "timeout": 30,
+    }
+
+
+class TestTraceWritesRunOffTheLoop:
+    """``record`` redacts, INSERTs and commits — and every five minutes also
+    sweeps the whole table. All of that used to land on the mesh loop, once
+    per LLM call on the sync path and twice on the streaming one.
+    """
+
+    @pytest.mark.asyncio
+    async def test_sync_proxy_trace_write_is_off_the_loop(self, proxy_app):
+        from httpx import ASGITransport, AsyncClient
+
+        store = proxy_app["trace_store"]
+        loop_thread = threading.get_ident()
+
+        transport = ASGITransport(app=proxy_app["app"])
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/mesh/api", json=_proxy_body(), params={"agent_id": "writer"},
+                headers={"authorization": "Bearer writer-secret",
+                         "x-trace-id": "trace-1"},
+            )
+        assert resp.status_code == 200, resp.text
+        assert store.threads, "the trace write never happened"
+        assert all(t != loop_thread for t in store.threads), (
+            "a trace write ran on the event loop thread"
+        )
+
+    @pytest.mark.asyncio
+    async def test_streaming_proxy_trace_writes_are_off_the_loop(self, proxy_app):
+        from httpx import ASGITransport, AsyncClient
+
+        store = proxy_app["trace_store"]
+        loop_thread = threading.get_ident()
+
+        transport = ASGITransport(app=proxy_app["app"])
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            async with client.stream(
+                "POST", "/mesh/api/stream", json=_proxy_body(),
+                params={"agent_id": "writer"},
+                headers={"authorization": "Bearer writer-secret",
+                         "x-trace-id": "trace-2"},
+            ) as resp:
+                assert resp.status_code == 200
+                async for _ in resp.aiter_bytes():
+                    pass
+
+        # Both the stream-open marker and the post-stream completion row.
+        assert set(store.events) >= {"llm_stream", "llm_call"}, store.events
+        assert all(t != loop_thread for t in store.threads), (
+            "a trace write ran on the event loop thread"
+        )
+
+
 # ── structural guards ─────────────────────────────────────────────────
 
 
