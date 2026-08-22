@@ -250,6 +250,71 @@ class TestCommands:
         assert "Unknown command" in result
 
 
+# ── deterministic bot-command routing ─────────────────────────
+
+class TestBotCommandRoutes:
+    @pytest.mark.asyncio
+    async def test_route_dispatches_to_target_agent(self):
+        ch = _make_channel(agents=["alpha", "beta"])
+        ch._BOT_COMMAND_ROUTES = {"/brief": ("beta", "Summarize the latest activity.")}
+        result = await ch.handle_message("u1", "/brief")
+        assert "[beta]" in result
+        assert "reply from beta" in result
+
+    @pytest.mark.asyncio
+    async def test_route_with_args_substitutes_placeholder(self):
+        dispatched: list[tuple[str, str]] = []
+
+        async def dispatch_fn(agent: str, message: str, **_kwargs) -> str:
+            dispatched.append((agent, message))
+            return "ok"
+
+        ch = _make_channel(agents=["alpha", "researcher"], dispatch_fn=dispatch_fn)
+        ch._BOT_COMMAND_ROUTES = {"/research": ("researcher", "Research: {args}")}
+        result = await ch.handle_message("u1", "/research quantum computing")
+        assert "[researcher]" in result
+        assert dispatched == [("researcher", "Research: quantum computing")]
+
+    @pytest.mark.asyncio
+    async def test_route_without_args_strips_placeholder(self):
+        dispatched: list[tuple[str, str]] = []
+
+        async def dispatch_fn(agent: str, message: str, **_kwargs) -> str:
+            dispatched.append((agent, message))
+            return "ok"
+
+        ch = _make_channel(agents=["alpha", "monitor"], dispatch_fn=dispatch_fn)
+        ch._BOT_COMMAND_ROUTES = {"/brief": ("monitor", "Prepare the morning briefing.")}
+        result = await ch.handle_message("u1", "/brief")
+        assert "[monitor]" in result
+        assert dispatched == [("monitor", "Prepare the morning briefing.")]
+
+    @pytest.mark.asyncio
+    async def test_route_skipped_when_target_agent_not_running(self):
+        ch = _make_channel(agents=["alpha"])
+        ch._BOT_COMMAND_ROUTES = {"/brief": ("monitor", "Prepare the briefing.")}
+        result = await ch.handle_message("u1", "/brief")
+        # Target agent not in agents list → falls through to normal command handling
+        assert "Unknown command" in result
+
+    @pytest.mark.asyncio
+    async def test_empty_routes_dict_does_nothing(self):
+        ch = _make_channel()
+        assert ch._BOT_COMMAND_ROUTES == {}
+        result = await ch.handle_message("u1", "/use beta")
+        assert "Now chatting with" in result
+
+    @pytest.mark.asyncio
+    async def test_route_silent_on_empty_response(self):
+        async def dispatch_fn(agent: str, message: str, **_kwargs) -> str:
+            return ""
+
+        ch = _make_channel(agents=["alpha", "beta"], dispatch_fn=dispatch_fn)
+        ch._BOT_COMMAND_ROUTES = {"/brief": ("beta", "Briefing.")}
+        result = await ch.handle_message("u1", "/brief")
+        assert result == ""
+
+
 # ── per-user active agent ─────────────────────────────────────
 
 class TestPerUserAgent:
