@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import threading
 import time
 import uuid
@@ -107,6 +108,11 @@ _MAX_INCARNATIONS = 4096
 # zero, so a value written somewhere durable — a pending-action row that
 # outlives a mesh restart — has to carry the process it came from or it
 # will compare equal to a fresh process's zero for a different agent.
+#
+# The uuid alone is not enough: ``fork()`` copies it along with the counter,
+# so a pre-fork worker would accept a sibling's stamp. The pid is read at
+# call time to catch that; the uuid still covers pid reuse across ordinary
+# restarts, which the pid alone would not.
 _BOOT_ID = uuid.uuid4().hex
 
 
@@ -308,7 +314,7 @@ def agent_incarnation_token(agent_id: str) -> str:
     against the agent it was minted for — two never-retired agents would
     otherwise share the same counter value and the same token.
     """
-    return f"{_BOOT_ID}:{agent_id}:{agent_incarnation(agent_id)}"
+    return f"{_BOOT_ID}:{os.getpid()}:{agent_id}:{agent_incarnation(agent_id)}"
 
 
 def incarnation_token_matches(agent_id: str, token: str | None) -> bool:

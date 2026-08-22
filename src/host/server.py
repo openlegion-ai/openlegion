@@ -12624,6 +12624,21 @@ def create_mesh_app(
             # the lock — it dispatches a turn to the agent, and the cold-wake
             # seam would take this same lock to deliver it.
             async with agent_lifecycle_locked_async(target_id):
+                # Re-read the status under the lock, not just before the
+                # handover turn above: an unarchive can complete while that
+                # runs, and unarchive deliberately does NOT bump the
+                # incarnation (it is not a delete), so nothing else here
+                # would notice that the target is back in service.
+                try:
+                    _status_locked = _status_at_apply(target_id)
+                except ValueError as e:
+                    raise HTTPException(404, str(e))
+                if _status_locked != "archived":
+                    raise HTTPException(
+                        409,
+                        f"Agent '{target_id}' is {_status_locked}, not archived — it was "
+                        "returned to service while this delete waited",
+                    )
                 if agent_incarnation(target_id) != _target_incarnation:
                     raise HTTPException(
                         409,

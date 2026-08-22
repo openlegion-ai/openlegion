@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import os
 import pathlib
 import threading
 import time
@@ -1757,7 +1758,7 @@ class TestDurableStamps:
         mine = agent_incarnation_token("scout")
         assert incarnation_token_matches("scout", mine)
 
-        previous_process = f"{'0' * 32}:scout:{agent_incarnation('scout')}"
+        previous_process = f"{'0' * 32}:{os.getpid()}:scout:{agent_incarnation('scout')}"
         assert previous_process != mine
         assert not incarnation_token_matches("scout", previous_process), (
             "a stamp from a process whose counter is gone cannot be verified"
@@ -1773,3 +1774,83 @@ class TestDurableStamps:
         assert not incarnation_token_matches("scout", "not-a-token")
         retire_agent("scout")
         assert not incarnation_token_matches("scout", scout)
+
+    @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs fork()")
+    def test_a_forked_child_does_not_inherit_a_usable_token(self):
+        """``fork()`` copies the boot id AND the counter.
+
+        A pre-fork worker would otherwise accept a sibling's stamp: same
+        uuid, same counter, different process — exactly the case the boot id
+        exists to reject. The pid is read at call time for that; the uuid
+        still covers pid reuse across ordinary restarts, which the pid alone
+        would not.
+        """
+        token = agent_incarnation_token("scout")
+        read_fd, write_fd = os.pipe()
+        pid = os.fork()
+        if pid == 0:  # pragma: no cover - runs in the forked child
+            try:
+                os.close(read_fd)
+                matched = incarnation_token_matches("scout", token)
+                os.write(write_fd, b"1" if matched else b"0")
+                os.close(write_fd)
+            finally:
+                os._exit(0)
+        os.close(write_fd)
+        try:
+            child_saw = os.read(read_fd, 1)
+        finally:
+            os.close(read_fd)
+            os.waitpid(pid, 0)
+        assert child_saw == b"0", (
+            "a forked child accepted the parent's token — the boot id alone "
+            "is copied by fork"
+        )
+        # The parent's own token still matches, so the pid did not break it.
+        assert incarnation_token_matches("scout", token)
+
+
+class TestUnarchiveDuringADelete:
+    @pytest.mark.asyncio
+    async def test_a_delete_refuses_an_agent_returned_to_service(self, tmp_path, monkeypatch):
+        """Unarchive deliberately does NOT bump the incarnation.
+
+        It is not a delete — the agent is the same one. So an unarchive
+        completing while a delete's handover turn runs is invisible to the
+        identity check, and only re-reading the status under the lock
+        catches it. Propose-delete requires an archived agent precisely so
+        the container is already stopped; destroying one that is back in
+        service is the failure this prevents.
+        """
+        from fastapi import HTTPException
+
+        from tests.test_hibernation import _build_app
+
+        app, bb, cm, _tr, _hm, _eb, cfg = _build_app(
+            tmp_path, monkeypatch, agent_status="archived",
+        )
+        try:
+            delete = app.pending_executors["delete"]
+            record = {
+                "target_kind": "agent",
+                "target_id": "scout",
+                "nonce": "n1",
+                "payload": {"incarnation": agent_incarnation_token("scout")},
+            }
+
+            async def unarchive_while_the_delete_queues():
+                async with agent_lifecycle_locked_async("scout"):
+                    await asyncio.sleep(0.05)
+                    cfg["agents"]["scout"]["status"] = "active"
+
+            holder = asyncio.create_task(unarchive_while_the_delete_queues())
+            await asyncio.sleep(0)
+            queued = asyncio.create_task(delete(record))
+            await asyncio.wait_for(holder, 3)
+            with pytest.raises(HTTPException) as exc:
+                await asyncio.wait_for(queued, 5)
+            assert exc.value.status_code == 409
+            assert "returned to service" in str(exc.value.detail)
+            assert cm.stopped == [], "the delete destroyed an agent back in service"
+        finally:
+            bb.close()
