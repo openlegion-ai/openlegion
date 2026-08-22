@@ -18,6 +18,8 @@ import ast
 import asyncio
 import os
 import pathlib
+import select
+import signal
 import threading
 import time
 
@@ -1798,9 +1800,15 @@ class TestDurableStamps:
                 os._exit(0)
         os.close(write_fd)
         try:
-            child_saw = os.read(read_fd, 1)
+            # Bounded: a child that forked while some unrelated thread held
+            # the module guard would inherit it locked and never write. A
+            # failing test beats a hung CI job.
+            ready, _, _ = select.select([read_fd], [], [], 10)
+            child_saw = os.read(read_fd, 1) if ready else b""
         finally:
             os.close(read_fd)
+            if not ready:
+                os.kill(pid, signal.SIGKILL)
             os.waitpid(pid, 0)
         assert child_saw == b"0", (
             "a forked child accepted the parent's token — the boot id alone "
