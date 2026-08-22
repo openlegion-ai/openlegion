@@ -2,6 +2,8 @@
 
 import time
 
+import pytest
+
 from src.host.failover import FailoverChain, ModelHealthTracker
 
 # ── ModelHealthTracker ────────────────────────────────────────
@@ -93,6 +95,22 @@ class TestModelHealthTracker:
         tracker.record_failure("m1", "ConnectionError", 0)
         cooldown = tracker._get("m1").cooldown_until - time.time()
         # Should use transient exponential (60s for first failure)
+        assert 55 < cooldown < 65
+
+    @pytest.mark.parametrize("msg", [
+        "RemoteProtocolError: peer closed",
+        "httpx.ReadTimeout: read timed out",
+        "incomplete chunked read",
+        "broken pipe",
+        "unexpected EOF in body",
+        "RemoteError: upstream connect error",
+    ])
+    def test_transient_keyword_expansion(self, msg):
+        """Stream-disruption patterns should be classified as transient."""
+        tracker = ModelHealthTracker()
+        tracker.record_failure("m1", msg, 0)
+        cooldown = tracker._get("m1").cooldown_until - time.time()
+        # Transient exponential (60s for first failure), not default flat
         assert 55 < cooldown < 65
 
     def test_default_cooldown(self):
