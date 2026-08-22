@@ -29,6 +29,7 @@ import httpx
 
 from src.agent.attachments import convert_openai_image_blocks
 from src.host.oauth_providers import get_provider
+from src.host.store_thread import run_in_store_thread
 from src.host.transcript import sanitize_for_provider
 from src.shared.errors import (
     LLMAuthError,
@@ -1474,7 +1475,7 @@ class CredentialVault:
         async def _execute() -> APIProxyResponse:
             if self.cost_tracker and agent_id and _needs_budget:
                 if request.service == "image_gen":
-                    budget_check = await asyncio.to_thread(
+                    budget_check = await run_in_store_thread(
                         self.cost_tracker.check_budget, bill_agent,
                     )
                     if not budget_check["allowed"]:
@@ -1494,7 +1495,7 @@ class CredentialVault:
                     # through image generation. Fixed-cost service → no
                     # meaningful per-call estimate; this gates on
                     # already-consumed headroom.
-                    envelope = await asyncio.to_thread(
+                    envelope = await run_in_store_thread(
                         self.cost_tracker.team_envelope_check,
                         bill_agent, request.params.get("model", "unknown"),
                     )
@@ -1514,7 +1515,7 @@ class CredentialVault:
                     # real work. Same error SHAPE as the work path with a
                     # DISTINCT message prefix the agent loop can surface.
                     model = request.params.get("model", "unknown")
-                    c_pre = await asyncio.to_thread(
+                    c_pre = await run_in_store_thread(
                         self.cost_tracker.coordination_preflight_check, bill_agent, model,
                     )
                     if not c_pre["allowed"]:
@@ -1530,7 +1531,7 @@ class CredentialVault:
                         )
                 else:
                     model = request.params.get("model", "unknown")
-                    preflight = await asyncio.to_thread(
+                    preflight = await run_in_store_thread(
                         self.cost_tracker.preflight_check, bill_agent, model,
                     )
                     if not preflight["allowed"]:
@@ -1555,7 +1556,7 @@ class CredentialVault:
                     # in-flight calls can overshoot before their costs land;
                     # steady-state spend is still bounded. A team-scoped
                     # reservation to close that race is a tracked follow-up.
-                    envelope = await asyncio.to_thread(
+                    envelope = await run_in_store_thread(
                         self.cost_tracker.team_envelope_check, bill_agent, model,
                     )
                     if not envelope["allowed"]:
@@ -1612,7 +1613,7 @@ class CredentialVault:
                         prompt_tokens = raw_pt if raw_pt else int(tokens_used * 0.7)
                         raw_ct = response.data.get("output_tokens")
                         completion_tokens = raw_ct if raw_ct else (tokens_used - prompt_tokens)
-                        tracked = await asyncio.to_thread(
+                        tracked = await run_in_store_thread(
                             self.cost_tracker.track,
                             bill_agent, model, prompt_tokens, completion_tokens,
                             bill=not _is_oauth,
@@ -1641,7 +1642,7 @@ class CredentialVault:
                     fixed_cost = response.data.get("fixed_cost_usd")
                     if fixed_cost and fixed_cost > 0:
                         fc_model = response.data.get("model", request.service)
-                        await asyncio.to_thread(
+                        await run_in_store_thread(
                             self.cost_tracker.track_fixed_cost,
                             bill_agent, fc_model, fixed_cost,
                         )
@@ -4137,7 +4138,7 @@ class CredentialVault:
 
         if self.cost_tracker and agent_id and request.service == "llm":
             if _is_coordination:
-                c_pre = await asyncio.to_thread(
+                c_pre = await run_in_store_thread(
                     self.cost_tracker.coordination_preflight_check,
                     bill_agent, requested_model,
                 )
@@ -4145,7 +4146,7 @@ class CredentialVault:
                     yield f"data: {json.dumps({'error': 'Coordination budget exceeded'})}\n\n"
                     return
             else:
-                preflight = await asyncio.to_thread(
+                preflight = await run_in_store_thread(
                     self.cost_tracker.preflight_check, bill_agent, requested_model,
                 )
                 if not preflight["allowed"]:
@@ -4156,7 +4157,7 @@ class CredentialVault:
                 # here too (M1), not only on the sync ``execute_api_call``
                 # fork. Unset/0 envelope = unlimited (B4). Same message
                 # shape the sync fork yields at 1546-1562.
-                envelope = await asyncio.to_thread(
+                envelope = await run_in_store_thread(
                     self.cost_tracker.team_envelope_check, bill_agent, requested_model,
                 )
                 if not envelope["allowed"]:
@@ -4495,7 +4496,7 @@ class CredentialVault:
             if self.cost_tracker and agent_id and tokens_used:
                 pt = prompt_tokens or int(tokens_used * 0.7)
                 ct = completion_tokens or (tokens_used - pt)
-                tracked = await asyncio.to_thread(
+                tracked = await run_in_store_thread(
                     self.cost_tracker.track,
                     bill_agent, used_model, pt, ct,
                     kind="coordination" if _is_coordination else "work",

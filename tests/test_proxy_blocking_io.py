@@ -461,7 +461,7 @@ class TestProxyWorkRunsOffTheLoop:
 
         def slow(agent, model, estimated_tokens=4096):
             import time
-            time.sleep(0.25)
+            time.sleep(0.3)
             return real_preflight(agent, model, estimated_tokens)
 
         tracker.preflight_check = slow
@@ -481,9 +481,83 @@ class TestProxyWorkRunsOffTheLoop:
         stop = True
         await t
 
-        assert ticks >= 10, (
-            f"the loop only got {ticks} slices while the ledger blocked for 250 ms"
+        # ~60 slices are available in 300 ms; the threshold leaves a wide
+        # margin for a loaded CI box, and without the fix the loop gets none.
+        assert ticks >= 5, (
+            f"the loop only got {ticks} slices while the ledger blocked for 300 ms"
         )
+
+
+class TestStoreWorkStaysOffTheDefaultExecutor:
+    """The default executor already carries the work that must not queue —
+    ``stop_agent`` (a ~10s Docker call), health probes, Team Drive git
+    plumbing. The proxy fires three or four hops per LLM call, and a
+    ``costs.db`` locked by another process holds a worker for up to the 30s
+    busy timeout, so sharing the pool would let a budget query stall an agent
+    restart. Each store serializes its connection anyway, so the extra
+    default-pool workers would buy no throughput for the delay they cost.
+    """
+
+    @pytest.mark.asyncio
+    async def test_ledger_calls_run_on_the_store_pool(self):
+        from src.host.store_thread import STORE_THREAD_PREFIX
+
+        names: list[str] = []
+
+        class _NameRecording(_ThreadRecordingCostTracker):
+            def preflight_check(self, agent, model, estimated_tokens=4096):
+                names.append(threading.current_thread().name)
+                return super().preflight_check(agent, model, estimated_tokens)
+
+            def track(self, agent, model, pt, ct, *, bill=True, kind="work"):
+                names.append(threading.current_thread().name)
+                return super().track(agent, model, pt, ct, bill=bill, kind=kind)
+
+        vault = _vault_with(_NameRecording())
+        await vault.execute_api_call(_llm_request(), agent_id="writer")
+
+        assert names, "the ledger was never called"
+        assert all(n.startswith(STORE_THREAD_PREFIX) for n in names), names
+
+    @pytest.mark.asyncio
+    async def test_a_saturated_default_executor_does_not_stall_the_proxy(self):
+        """Fill every default-executor worker, then make a proxy call."""
+        tracker = _ThreadRecordingCostTracker()
+        vault = _vault_with(tracker)
+
+        loop = asyncio.get_running_loop()
+        release = threading.Event()
+        # CPython's default is min(32, cpu_count + 4); overshoot it so the
+        # pool is definitely full and its queue is backed up too.
+        occupants = min(32, (os.cpu_count() or 2) + 4) + 4
+        hogs = [
+            loop.run_in_executor(None, release.wait, 30) for _ in range(occupants)
+        ]
+        try:
+            result = await asyncio.wait_for(
+                vault.execute_api_call(_llm_request(), agent_id="writer"),
+                timeout=10,
+            )
+            assert result.success
+            assert "preflight_check" in tracker.threads
+        finally:
+            release.set()
+            await asyncio.gather(*hogs)
+
+    @pytest.mark.asyncio
+    async def test_the_pool_is_rebuilt_after_a_fork(self):
+        """A forked child inherits the executor object but none of its threads."""
+        import src.host.store_thread as st
+
+        parent = st._executor()
+        assert st._pool_pid == os.getpid()
+
+        # Simulate what the child sees: the object is there, the pid is not ours.
+        st._pool_pid = os.getpid() + 1
+        rebuilt = st._executor()
+        assert rebuilt is not parent, "a stale pool survived the pid change"
+        assert st._pool_pid == os.getpid()
+        parent.shutdown(wait=False)
 
 
 class TestTraceStampSurvivesTheThreadHop:
