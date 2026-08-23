@@ -29,8 +29,22 @@ class TraceStore:
         self.max_age_hours = max_age_hours
         self._last_age_gc: float = -300.0  # ensure first GC runs regardless of monotonic() epoch
         self._gc_lock = threading.Lock()
+        # One connection, several threads. ``record`` now runs on a worker
+        # thread (the mesh proxy hands it to ``asyncio.to_thread`` rather than
+        # paying redaction + INSERT + commit on the event loop) while the
+        # dashboard's trace views still read from the mesh loop. sqlite3 only
+        # implicitly BEGINs on DML, so an INSERT and a commit racing across
+        # threads share one implicit transaction and the loser raises "cannot
+        # start a transaction within a transaction". Every statement, and every
+        # statement-plus-commit SEQUENCE, is serialized here. Distinct from
+        # ``_gc_lock``, which only throttles how OFTEN the age GC runs.
+        self._db_lock = threading.RLock()
         Path(db_path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = open_db(db_path, busy_timeout_ms=5000)
+        with self._db_lock:
+            self._init_schema_locked()
+
+    def _init_schema_locked(self) -> None:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS traces (
@@ -90,13 +104,14 @@ class TraceStore:
         detail = redact_text_with_urls(detail)
         error = redact_text_with_urls(error)
         meta_json = dumps_safe(deep_redact(meta)) if meta else ""
-        self._conn.execute(
-            "INSERT INTO traces "
-            "(trace_id, timestamp, source, agent, event_type, detail, duration_ms, status, error, meta_json) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (trace_id, time.time(), source, agent, event_type, detail, duration_ms, status, error, meta_json),
-        )
-        self._conn.commit()
+        with self._db_lock:
+            self._conn.execute(
+                "INSERT INTO traces "
+                "(trace_id, timestamp, source, agent, event_type, detail, duration_ms, status, error, meta_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (trace_id, time.time(), source, agent, event_type, detail, duration_ms, status, error, meta_json),
+            )
+            self._conn.commit()
         self._maybe_gc_old()
 
     def _maybe_gc_old(self) -> None:
@@ -109,8 +124,9 @@ class TraceStore:
                 return
             self._last_age_gc = now
             cutoff = time.time() - (self.max_age_hours * 3600)
-            self._conn.execute("DELETE FROM traces WHERE timestamp < ?", (cutoff,))
-            self._conn.commit()
+            with self._db_lock:
+                self._conn.execute("DELETE FROM traces WHERE timestamp < ?", (cutoff,))
+                self._conn.commit()
 
     def _row_to_dict(self, row: tuple) -> dict:
         """Convert a query row to a trace event dict."""
@@ -136,24 +152,27 @@ class TraceStore:
 
     def get_trace(self, trace_id: str) -> list[dict]:
         """Return all events for a given trace_id, ordered by time."""
-        cur = self._conn.execute(
-            f"SELECT {self._TRACE_COLS} FROM traces WHERE trace_id = ? ORDER BY id",
-            (trace_id,),
-        )
-        return [self._row_to_dict(row) for row in cur.fetchall()]
+        with self._db_lock:
+            rows = self._conn.execute(
+                f"SELECT {self._TRACE_COLS} FROM traces WHERE trace_id = ? ORDER BY id",
+                (trace_id,),
+            ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
 
     def list_recent(self, limit: int = 50) -> list[dict]:
         """Return the most recent trace events (newest first)."""
-        cur = self._conn.execute(
-            f"SELECT {self._TRACE_COLS} FROM traces ORDER BY id DESC LIMIT ?",
-            (limit,),
-        )
-        return [self._row_to_dict(row) for row in cur.fetchall()]
+        with self._db_lock:
+            rows = self._conn.execute(
+                f"SELECT {self._TRACE_COLS} FROM traces ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
 
     def list_trace_summaries(self, limit: int = 50) -> list[dict]:
         """Return one summary row per trace_id, newest first."""
-        cur = self._conn.execute(
-            """
+        with self._db_lock:
+            cur_rows = self._conn.execute(
+                """
             SELECT s.trace_id,
                    s.started,
                    s.ended,
@@ -180,10 +199,10 @@ class TraceStore:
             ) s
             LEFT JOIN traces f ON f.id = s.first_id
             """,
-            (limit,),
-        )
+                (limit,),
+            ).fetchall()
         results = []
-        for row in cur.fetchall():
+        for row in cur_rows:
             agents = [a for a in (row[4] or "").split(",") if a]
             trigger_detail = row[7] or ""
             first_event_type = row[8] or ""
@@ -246,18 +265,21 @@ class TraceStore:
         where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
         params.append(max(1, min(limit, 1000)))
 
-        cur = self._conn.execute(
-            f"SELECT {self._TRACE_COLS} FROM traces{where} ORDER BY id DESC LIMIT ?",
-            params,
-        )
-        return [self._row_to_dict(row) for row in cur.fetchall()]
+        with self._db_lock:
+            rows = self._conn.execute(
+                f"SELECT {self._TRACE_COLS} FROM traces{where} ORDER BY id DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
 
     def cleanup_agent(self, agent_id: str) -> int:
         """Delete all trace records for an agent. Returns rows deleted."""
-        cursor = self._conn.execute("DELETE FROM traces WHERE agent = ?", (agent_id,))
-        self._conn.commit()
-        return cursor.rowcount
+        with self._db_lock:
+            cursor = self._conn.execute("DELETE FROM traces WHERE agent = ?", (agent_id,))
+            self._conn.commit()
+            return cursor.rowcount
 
     def close(self) -> None:
         """Close the database connection."""
-        self._conn.close()
+        with self._db_lock:
+            self._conn.close()
