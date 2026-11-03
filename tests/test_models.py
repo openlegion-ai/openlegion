@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 from src.shared.models import (
     _DEFAULT_CONTEXT_WINDOW,
     _DEFAULT_COST,
@@ -17,8 +19,22 @@ from src.shared.models import (
     get_provider_models,
 )
 
+# A fixed stand-in for litellm.model_cost. litellm downloads its model map at
+# import time, so these resolver tests would otherwise depend on which models
+# upstream still lists (xai/grok-3 was dropped from it, which broke CI).
+_FIXED_MODEL_COST = {
+    "xai/grok-3": {"input_cost_per_token": 3e-6, "output_cost_per_token": 15e-6},
+    "gpt-4.1": {"input_cost_per_token": 2e-6, "output_cost_per_token": 8e-6},
+    "claude-sonnet-4-6": {"input_cost_per_token": 3e-6, "output_cost_per_token": 15e-6},
+}
+
 
 class TestResolveLitellmKey:
+    @pytest.fixture(autouse=True)
+    def _fixed_model_cost(self):
+        with patch("litellm.model_cost", _FIXED_MODEL_COST):
+            yield
+
     def test_exact_match_prefixed(self):
         """Prefixed keys like xai/grok-3 match directly."""
         key = _resolve_litellm_key("xai/grok-3")
