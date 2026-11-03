@@ -1,3 +1,7 @@
+> This repository is OpenLegion v1, the self-hosted, source-available runtime.
+> OpenLegion has since been rebuilt as a hosted platform (private beta): https://www.openlegion.ai.
+> v1 docs: https://docs.openlegion.ai.
+
 <p align="center">
   <img width="450" alt="openlegion-logo-new" src="https://github.com/user-attachments/assets/08912b04-8df1-4473-b679-6bbac0c3ae2f" />
 </p>
